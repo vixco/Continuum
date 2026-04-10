@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         context_size: 2048, // Triage prompts are short, save memory
         n_threads,
         gpu_layers: 0,
-        max_tokens: 512, // Must accommodate Qwen 3 thinking tokens + JSON output
+        max_tokens: 256, // Qwen 3 thinking tokens (~100-150) + JSON (~50)
         temperature: 0.0,
         latency_warn_ms: 2000,
     };
