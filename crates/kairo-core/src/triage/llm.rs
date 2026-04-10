@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use kairo_llm::{GenerateOpts, LlmConfig, LocalLlm};
 
 use crate::senses::types::PerceptionFrame;
-use crate::triage::prompts::{build_triage_prompt, TRIAGE_GRAMMAR};
+use crate::triage::prompts::{build_triage_grammar, build_triage_prompt};
 use crate::triage::TriageDecision;
 
 /// Configuration for the triage layer.
@@ -60,6 +60,8 @@ impl Default for TriageConfig {
 pub struct TriageLayer {
     llm: LocalLlm,
     config: TriageConfig,
+    /// Pre-compiled GBNF grammar string for triage decisions.
+    grammar: String,
     /// Counter of consecutive total failures (3 retries all failed).
     consecutive_failures: std::sync::Arc<AtomicU32>,
 }
@@ -86,10 +88,12 @@ impl TriageLayer {
         };
 
         let llm = LocalLlm::new(llm_config)?;
+        let grammar = build_triage_grammar();
 
         Ok(Self {
             llm,
             config,
+            grammar,
             consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
         })
     }
@@ -113,39 +117,24 @@ impl TriageLayer {
         let prompt = build_triage_prompt(frame, memory_summary);
 
         let opts = GenerateOpts {
-            temperature: self.config.temperature,
-            top_k: 40,
-            top_p: 0.95,
+            temperature: 0.0, // Greedy for classification — deterministic, no randomness
+            top_k: 1,
+            top_p: 1.0,
             max_tokens: Some(self.config.max_tokens),
             seed: 0,
         };
 
-        // Attempt 1: Grammar-constrained generation.
-        match self.llm.generate_json::<TriageDecision>(&prompt, TRIAGE_GRAMMAR, &opts).await {
-            Ok(decision) => {
-                let elapsed = start.elapsed();
-                self.consecutive_failures.store(0, Ordering::Relaxed);
-                self.log_evaluation(frame, &decision, elapsed.as_millis() as u64);
-                return decision.truncated();
-            }
-            Err(e) => {
-                warn!(
-                    layer = "triage",
-                    component = "llm",
-                    error = %e,
-                    attempt = 1,
-                    "Grammar-constrained generation failed, retrying without grammar"
-                );
-            }
-        }
-
-        // Attempts 2-3: Prompt-only with "JSON only" suffix.
-        let retry_prompt = format!(
+        // All attempts use prompt-only generation with strict JSON parsing.
+        // Grammar-constrained sampling is disabled: llama.cpp's GBNF runtime
+        // can abort() on assertion failures (stacks.empty()) which cannot be
+        // caught from Rust. Prompt engineering with low temperature + strict
+        // parsing is reliable enough for the 5-variant triage schema.
+        let json_prompt = format!(
             "{prompt}\n\nIMPORTANT: Output ONLY a valid JSON object. No explanation, no markdown code fences, no prose. Just the JSON."
         );
 
-        for attempt in 2..=3 {
-            match self.llm.generate(&retry_prompt, &opts).await {
+        for attempt in 1..=3 {
+            match self.llm.generate(&json_prompt, &opts).await {
                 Ok(raw) => {
                     let trimmed = raw.trim();
                     warn!(

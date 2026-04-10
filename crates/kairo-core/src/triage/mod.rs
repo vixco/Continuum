@@ -102,9 +102,12 @@ impl TriageDecision {
 
     /// Parse a JSON string into a TriageDecision.
     ///
+    /// Strips markdown code fences and any text before the first `{` to
+    /// handle models that wrap JSON in prose or thinking tokens.
     /// Returns `None` if the JSON is malformed or doesn't match any variant.
-    pub fn from_json(json: &str) -> Option<Self> {
-        serde_json::from_str(json).ok()
+    pub fn from_json(raw: &str) -> Option<Self> {
+        let cleaned = extract_json_object(raw);
+        serde_json::from_str(cleaned).ok()
     }
 }
 
@@ -120,6 +123,64 @@ impl std::fmt::Display for TriageDecision {
     }
 }
 
+/// Extract the last complete JSON object from raw model output.
+///
+/// Handles common model output patterns:
+/// - Markdown code fences: `` ```json\n{...}\n``` ``
+/// - `<think>...</think>` blocks before the JSON (Qwen 3 thinking mode)
+/// - Trailing prose after the JSON
+///
+/// Strategy: find the LAST `{` that starts a valid brace-balanced object.
+/// This skips any JSON-like content inside thinking blocks.
+fn extract_json_object(raw: &str) -> &str {
+    let s = raw.trim();
+
+    // If there's a </think> tag, only look at text after it.
+    let search_area = if let Some(pos) = s.rfind("</think>") {
+        &s[pos + 8..]
+    } else {
+        s
+    };
+    let search_area = search_area.trim();
+
+    // Find the last '{' ... '}' pair that is brace-balanced.
+    let start = match search_area.rfind('{') {
+        Some(i) => i,
+        None => return search_area,
+    };
+
+    // From that '{', find its matching '}' by counting braces.
+    let mut depth = 0i32;
+    let mut end = start;
+    let mut in_string = false;
+    let mut escape_next = false;
+    for (i, ch) in search_area[start..].char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if depth == 0 && end > start {
+        &search_area[start..=end]
+    } else {
+        search_area
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -127,6 +188,39 @@ impl std::fmt::Display for TriageDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_json_from_code_fence() {
+        let raw = "```json\n{\"decision\":\"ignore\"}\n```";
+        assert_eq!(extract_json_object(raw), r#"{"decision":"ignore"}"#);
+    }
+
+    #[test]
+    fn test_extract_json_with_thinking_prefix() {
+        let raw = "Let me analyze this frame.\n{\"decision\":\"ignore\"}";
+        assert_eq!(extract_json_object(raw), r#"{"decision":"ignore"}"#);
+    }
+
+    #[test]
+    fn test_extract_json_after_think_tags() {
+        let raw = "<think>\nThis is idle.\n</think>\n\n{\"decision\":\"ignore\"}";
+        assert_eq!(extract_json_object(raw), r#"{"decision":"ignore"}"#);
+    }
+
+    #[test]
+    fn test_extract_json_think_with_json_inside() {
+        let raw = "<think>\n{\"inner\":true}\n</think>\n{\"decision\":\"remember\",\"summary\":\"test\"}";
+        assert_eq!(
+            extract_json_object(raw),
+            r#"{"decision":"remember","summary":"test"}"#
+        );
+    }
+
+    #[test]
+    fn test_extract_json_clean() {
+        let raw = r#"{"decision":"remember","summary":"test"}"#;
+        assert_eq!(extract_json_object(raw), raw);
+    }
 
     #[test]
     fn test_parse_ignore() {

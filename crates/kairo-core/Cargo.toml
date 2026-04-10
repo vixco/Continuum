@@ -22,6 +22,7 @@ image = { workspace = true }
 kairo-vision = { path = "../kairo-vision" }
 # Phase 2: Triage layer
 kairo-llm = { path = "../kairo-llm" }
+llama-cpp-2 = { workspace = true }
 xcap = "0.8"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 dirs = "6"

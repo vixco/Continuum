@@ -6,10 +6,87 @@
 
 use crate::senses::types::PerceptionFrame;
 
-/// The GBNF grammar for triage decisions, loaded from the grammar file.
+/// JSON Schema for the triage decision.
 ///
-/// This is compiled into the binary to avoid runtime file reads.
-pub const TRIAGE_GRAMMAR: &str = include_str!("../../../../prompts/triage-grammar.gbnf");
+/// Used with `llama_cpp_2::json_schema_to_grammar()` at init time to produce
+/// a GBNF grammar that is guaranteed compatible with the linked llama.cpp
+/// version. This replaces a hand-written GBNF that triggered assertion
+/// failures in llama-grammar.cpp.
+const TRIAGE_JSON_SCHEMA: &str = r#"{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "decision": { "const": "ignore" }
+      },
+      "required": ["decision"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "decision": { "const": "remember" },
+        "summary": { "type": "string" }
+      },
+      "required": ["decision", "summary"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "decision": { "const": "whisper" },
+        "text": { "type": "string" }
+      },
+      "required": ["decision", "text"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "decision": { "const": "execute_simple" },
+        "action": { "type": "string" }
+      },
+      "required": ["decision", "action"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "decision": { "const": "wake_orchestrator" },
+        "reason": { "type": "string" }
+      },
+      "required": ["decision", "reason"],
+      "additionalProperties": false
+    }
+  ]
+}"#;
+
+/// Build the GBNF grammar string from the JSON schema at runtime.
+///
+/// This is called once at `TriageLayer::new()` time, not per-evaluation.
+/// Falls back to the hand-written grammar file if schema conversion fails.
+pub fn build_triage_grammar() -> String {
+    match llama_cpp_2::json_schema_to_grammar(TRIAGE_JSON_SCHEMA) {
+        Ok(grammar) => {
+            tracing::debug!(
+                layer = "triage",
+                component = "grammar",
+                grammar_len = grammar.len(),
+                "Generated GBNF from JSON schema"
+            );
+            grammar
+        }
+        Err(e) => {
+            tracing::warn!(
+                layer = "triage",
+                component = "grammar",
+                error = %e,
+                "json_schema_to_grammar failed, falling back to hand-written GBNF"
+            );
+            include_str!("../../../../prompts/triage-grammar.gbnf").to_string()
+        }
+    }
+}
 
 /// The triage system prompt template.
 ///
@@ -68,9 +145,10 @@ mod tests {
     }
 
     #[test]
-    fn test_grammar_is_nonempty() {
-        assert!(TRIAGE_GRAMMAR.contains("root"));
-        assert!(TRIAGE_GRAMMAR.contains("decision-body"));
+    fn test_grammar_builds_successfully() {
+        let grammar = build_triage_grammar();
+        assert!(!grammar.is_empty());
+        assert!(grammar.contains("root"));
     }
 
     #[test]

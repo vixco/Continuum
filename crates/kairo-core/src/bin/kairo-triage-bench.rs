@@ -87,14 +87,29 @@ async fn main() -> Result<()> {
     println!("Loaded {} benchmark frames", entries.len());
     println!("Model: {}\n", model_path.display());
 
+    // Debug: dump generated grammar
+    let grammar = kairo_core::triage::prompts::build_triage_grammar();
+    println!("--- Generated GBNF grammar ({} bytes) ---", grammar.len());
+    println!("{}", &grammar[..grammar.len().min(2000)]);
+    println!("--- End grammar ---\n");
+
     // Initialize triage layer.
+    // Use most CPU threads for prompt processing speed.
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
+        .max(4)
+        .min(14); // Leave 2 cores for the OS
+
+    println!("Threads: {}", n_threads);
+
     let config = TriageConfig {
         model_path: model_path.to_string_lossy().into_owned(),
-        context_size: 4096,
-        n_threads: 4,
+        context_size: 2048, // Triage prompts are short, save memory
+        n_threads,
         gpu_layers: 0,
-        max_tokens: 128,
-        temperature: 0.1,
+        max_tokens: 512, // Must accommodate Qwen 3 thinking tokens + JSON output
+        temperature: 0.0,
         latency_warn_ms: 2000,
     };
 
