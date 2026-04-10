@@ -103,6 +103,21 @@ These are non-negotiable:
 5. **Self-healing.** When Kairo breaks (and it will, because this is pre-alpha software), a built-in Repair Agent can read its own logs and fix itself using Claude Code. No terminal archaeology required.
 6. **Human, not helpful.** Kairo has a personality defined in [SOUL.md](./SOUL.md). It speaks like a calm colleague, not a cheerful chatbot. It knows when to stay quiet.
 
+## Try it now (Phase 0)
+
+You can run the Phase 0 "hello world" example to verify Claude Code integration works on your machine:
+
+```powershell
+# Prerequisites: Rust toolchain and Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+claude login
+
+# Run the hello world example
+cargo run --example hello_world -p kairo-core
+```
+
+This spawns Claude Code in headless mode, sends "What is 2+2?", and prints the streamed response in real time with cost and timing info at the end.
+
 ## Install (not yet — pre-alpha)
 
 Kairo is in pre-alpha. There is no installer. The repo currently contains the architecture, the roadmap, and the scaffolding that Claude Code will use to build the first working version. If you want to follow along or contribute, star the repo and check back soon.
@@ -143,7 +158,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the reasoning behind every choice.
 |---|---|
 | Architecture + docs | ✅ done |
 | Project scaffolding | ✅ done |
-| Phase 0 — hello world via Claude Code | ⏳ next |
+| Phase 0 — hello world via Claude Code | ✅ done |
 | Phase 1 — perception loop | ⏳ planned |
 | Phase 2 — orchestrator integration | ⏳ planned |
 | Phase 3 — MCP tool suite | ⏳ planned |

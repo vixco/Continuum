@@ -5,6 +5,10 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- Phase 0 Hello World: example binary that spawns Claude Code CLI, streams JSON events, and prints live text output (`crates/kairo-core/examples/hello_world.rs`)
+- Strongly-typed Claude Code event parser in `crates/kairo-core/src/orchestrator/events.rs` with full coverage of system, stream_event, assistant, user, rate_limit_event, and result event types
+- Unit tests for event parser using real JSON captured from Claude Code CLI v2.1.100
+- Updated CLAUDE.md event type documentation to match actual CLI behavior (discovered `rate_limit_event`, `total_cost_usd` field name, detailed `system` init fields)
 - Initial repository scaffolding
 - Architecture, soul, roadmap, and Claude Code instructions
 - Cargo workspace with kairo-core, kairo-mcp, kairo-llm, kairo-vision crates

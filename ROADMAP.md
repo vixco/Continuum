@@ -31,12 +31,12 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Done when:**
 
-- [ ] Cargo workspace is initialized with `crates/kairo-core` as a library crate
-- [ ] `crates/kairo-core/examples/hello_world.rs` spawns `claude --print --output-format stream-json --input-format stream-json --verbose --include-partial-messages`
-- [ ] It writes a JSON user message to stdin: `{"type":"user","message":{"role":"user","content":"What is 2+2?"}}`
-- [ ] It reads stdout line-by-line, parses each line as JSON, and prints any `text_delta` events
-- [ ] It exits cleanly when the `result` event arrives
-- [ ] README has a one-paragraph note about how to run it locally
+- [x] Cargo workspace is initialized with `crates/kairo-core` as a library crate
+- [x] `crates/kairo-core/examples/hello_world.rs` spawns `claude --print --output-format stream-json --input-format stream-json --verbose --include-partial-messages`
+- [x] It writes a JSON user message to stdin: `{"type":"user","message":{"role":"user","content":"What is 2+2?"}}`
+- [x] It reads stdout line-by-line, parses each line as JSON, and prints any `text_delta` events
+- [x] It exits cleanly when the `result` event arrives
+- [x] README has a one-paragraph note about how to run it locally
 
 **Why this matters:** Everything else depends on this working reliably. If Claude Code's CLI surface changes, we find out now, not in week 10.
 

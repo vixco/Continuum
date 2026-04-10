@@ -105,13 +105,14 @@ Then write a JSON user message to stdin:
 {"type":"user","message":{"role":"user","content":"<the wake context>"}}
 ```
 
-And read newline-delimited JSON events from stdout, parsing each one into a strongly-typed event enum in `kairo-core/src/orchestrator/events.rs`. The key event types you will see are:
+And read newline-delimited JSON events from stdout, parsing each one into a strongly-typed event enum in `kairo-core/src/orchestrator/events.rs`. The key event types you will see are (verified against CLI v2.1.100):
 
-- `system` init events — session id, tools, model
-- `assistant` messages with content blocks (text, tool_use)
-- `user` messages containing tool_result blocks
-- `stream_event` events with content_block_delta for live streaming text
-- `result` — the final event with cost and session metadata
+- `system` init events — subtype `"init"`, session_id, tools array, model, cwd, claude_code_version, permissionMode, apiKeySource, agents, skills, plugins, uuid, fast_mode_state
+- `stream_event` events wrapping raw Anthropic API events in an `event` field: `message_start`, `content_block_start`, `content_block_delta` (with `text_delta`), `content_block_stop`, `message_delta`, `message_stop`. Each also has session_id, parent_tool_use_id, uuid
+- `assistant` messages with content blocks (text, tool_use) — emitted as partial snapshots when using `--include-partial-messages`
+- `user` messages containing tool_result blocks (in multi-turn interactions)
+- `rate_limit_event` — rate limit status with resetsAt, rateLimitType, overageStatus (undocumented as of 2026-04)
+- `result` — the final event with subtype, is_error, total_cost_usd, duration_ms, duration_api_ms, num_turns, result text, session_id, usage, modelUsage, stop_reason, terminal_reason, uuid
 
 When streaming text from the orchestrator, pipe `text_delta` events directly into the TTS queue as they arrive. Do not wait for the full response. Low latency is the whole point of using stream-json.
 
