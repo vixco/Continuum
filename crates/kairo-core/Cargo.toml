@@ -44,6 +44,10 @@ windows = { version = "0.59", features = [
     "Win32_System_SystemInformation",
 ] }
 
+[[bin]]
+name = "kairo-perception"
+path = "src/bin/kairo-perception.rs"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
