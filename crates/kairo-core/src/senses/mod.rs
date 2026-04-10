@@ -15,4 +15,5 @@
 pub mod audio;
 pub mod context;
 pub mod frame;
+pub mod types;
 pub mod vision;

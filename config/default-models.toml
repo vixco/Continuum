@@ -2,12 +2,13 @@
 # Override in ~/.kairo/config.toml under [models]
 
 [vision]
-name = "Moondream 2"
-variant = "moondream-2b-fp16"
-path = "~/.kairo/models/vision/moondream-2b-fp16.onnx"
-size_mb = 300
+name = "SmolVLM-256M"
+variant = "smolvlm-256m"
+path = "~/.kairo-dev/models/vision/smolvlm-256m"
+size_mb = 500
 runtime = "onnx"
-# Alternatives: florence-2-base, florence-2-large, minicpm-v-2.6
+gpu_enabled = false  # Phase 1: CPU only. Set true for CUDA acceleration.
+# Alternatives: moondream-2b (recommended for GPU users), florence-2-base, florence-2-large, minicpm-v-2.6
 
 [triage]
 name = "Qwen 2.5 3B Instruct"

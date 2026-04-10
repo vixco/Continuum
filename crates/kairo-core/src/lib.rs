@@ -5,8 +5,8 @@
 //!
 //! This crate implements the four-layer cognitive architecture:
 //!
-//! - **Layer 1 — Senses**: Local vision (Moondream), audio (whisper.cpp), and
-//!   context polling. Produces a continuous stream of [`PerceptionFrame`] objects.
+//! - **Layer 1 — Senses**: Local vision (SmolVLM-256M), audio (whisper.cpp), and
+//!   context polling. Produces a continuous stream of [`senses::types::PerceptionFrame`] objects.
 //! - **Layer 2 — Triage**: A small local LLM (Qwen 2.5 3B default) that
 //!   evaluates perception frames and decides what deserves attention.
 //! - **Layer 3 — Orchestrator**: Claude Opus 4.6 via the official `claude` CLI

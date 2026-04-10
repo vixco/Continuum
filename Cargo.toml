@@ -25,3 +25,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "load-dynamic"] }
+image = "0.25"
+ndarray = "0.16"

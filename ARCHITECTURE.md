@@ -123,11 +123,13 @@ The senses layer runs as a dedicated subprocess inside Kairo Core. It has one jo
 
 ### Vision watcher
 
-Takes a screenshot every *N* seconds (default 3, configurable 1–10) using the Windows Graphics Capture API via the `windows` Rust crate. The screenshot is downscaled to 1280×720 and sent to a small local vision model.
+Takes a screenshot every *N* seconds (default 3, configurable 1–10) using GDI (BitBlt) via the `xcap` crate. GDI was chosen over the Windows Graphics Capture API because WGC shows a yellow border on Windows 10 (the `IsBorderRequired = false` flag is Windows 11 only), which is unacceptable for ambient 3-second polling. The screenshot is downscaled to 1280×720 and sent to a small local vision model.
 
-**Default model:** Moondream 2 (1.8B parameters, runs on CPU at ~1 second per image, ~300 MB RAM).
+**Default model:** SmolVLM-256M (256M parameters, ~2–3 seconds per image on CPU, ~500 MB RAM). SmolVLM was chosen over Moondream 2 because it has HuggingFace-maintained ONNX exports (Moondream's ONNX exports are fragile across revisions) and is 8× smaller, resulting in faster CPU inference. It runs via ONNX Runtime through the `ort` crate.
+
 **Alternatives user can select:**
-- Florence-2 base (0.23B) — even smaller, faster, slightly worse at text
+- Moondream 2 (1.8B) — better captioning quality, recommended for GPU users
+- Florence-2 base (0.23B) — even smaller, faster, better at structured extraction (OCR, object detection) than free-form description
 - Florence-2 large (0.77B)
 - MiniCPM-V 2.6 (8B) — much better but requires GPU
 
@@ -306,6 +308,12 @@ The orchestrator's system prompt is built by concatenating:
 3. A runtime header with current time, active user, and available workers
 
 The orchestrator is instructed to **never do long tasks itself**. Its job is to plan, decide, and delegate. If a task takes more than a few tool calls, it must spawn a worker.
+
+### Rate limiting
+
+The Claude Code CLI emits `rate_limit_event` objects in the stream-json output. These events contain `resetsAt` (ISO timestamp), `rateLimitType` (e.g. `"token"`, `"request"`), and `overageStatus` fields. As of CLI v2.1.100 (April 2026), this event type is undocumented but reliably emitted.
+
+Kairo Core's stream parser already recognizes and deserializes `rate_limit_event`. Consumer logic (backoff, queue pausing, user notification) is deferred to Phase 3 (orchestrator) and Phase 7 (self-healing). For now, the event is logged at `warn` level and stored in the session metadata.
 
 ### Resume vs fresh sessions
 
