@@ -18,7 +18,7 @@ The triage layer (Layer 2) needs a small local LLM to evaluate perception frames
 
 **Default model: Qwen 3 4B (Q4_K_M quantization)**
 
-Source: `bartowski/Qwen3-4B-GGUF` on HuggingFace
+Source: `Qwen/Qwen3-4B-GGUF` on HuggingFace (official, no auth required)
 File: `Qwen3-4B-Q4_K_M.gguf`
 Size: ~2.5 GB
 
