@@ -5,6 +5,22 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- **Phase 1 — Perception layer**: full senses subsystem producing continuous PerceptionFrame stream
+- `kairo-vision` crate: VisionModel trait with OnnxVisionModel — full autoregressive SmolVLM-256M decoder loop (vision encoder → token embedding → KV-cache decoder → tokenizer decode)
+- Screen capture via `xcap` (GDI/BitBlt, no yellow border): primary monitor capture, 1280x720 downscaling, JPEG screenshot saving
+- Audio pipeline (default-enabled): cpal mic capture, energy-based VAD, whisper-rs batch transcription, rubato resampling
+- `.cargo/config.toml` with build environment variables (LIBCLANG_PATH, CMAKE_GENERATOR, ORT_DYLIB_PATH)
+- End-to-end smoke test documentation (docs/phase-1-smoke-test.md)
+- Context poller: foreground window title/process via Windows APIs, idle time detection, call detection (Discord/Teams/Zoom/Meet/Slack)
+- PerceptionFrameBuilder: assembles frames from three senses channels, computes salience heuristic (5 rules)
+- SQLite raw log via sqlx: schema creation, write/query frames, nightly rotation with configurable retention
+- `kairo-perception` binary: standalone perception runner with Ctrl+C graceful shutdown
+- Shared observation types: ScreenObservation, AudioObservation, ContextObservation, PerceptionFrame
+- KairoConfig with TOML loading from `~/.kairo-dev/config.toml`, sensible defaults for all senses
+- Decision documents: 001-vision-model, 002-screen-capture, 003-audio-pipeline
+- Updated ARCHITECTURE.md: SmolVLM-256M as default vision model, rate_limit_event documentation
+- Updated download-models.ps1 with actual model download URLs
+- 79+ unit and integration tests across kairo-vision and kairo-core
 - Phase 0 Hello World: example binary that spawns Claude Code CLI, streams JSON events, and prints live text output (`crates/kairo-core/examples/hello_world.rs`)
 - Strongly-typed Claude Code event parser in `crates/kairo-core/src/orchestrator/events.rs` with full coverage of system, stream_event, assistant, user, rate_limit_event, and result event types
 - Unit tests for event parser using real JSON captured from Claude Code CLI v2.1.100
