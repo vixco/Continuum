@@ -55,9 +55,11 @@ mod win {
 
     use tracing::{trace, warn};
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
     use windows::Win32::System::SystemInformation::GetTickCount;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
@@ -135,27 +137,43 @@ mod win {
         };
 
         let mut name_buf = [0u16; 260]; // MAX_PATH
-        // SAFETY: GetModuleBaseNameW reads the base name of the first module
-        // (the exe) into `name_buf`. We pass the handle obtained from
-        // OpenProcess and a None module handle to get the exe name. The buffer
-        // is valid and large enough for any path component.
-        let name_len = unsafe { GetModuleBaseNameW(handle, None, &mut name_buf) };
+        let mut name_len = name_buf.len() as u32;
+        // SAFETY: QueryFullProcessImageNameW writes the full executable path
+        // into `name_buf` and updates `name_len` with the number of chars
+        // written (excluding the null terminator). Unlike GetModuleBaseNameW,
+        // this function works with PROCESS_QUERY_LIMITED_INFORMATION access
+        // rights, which is the low-privilege handle we opened above.
+        // We pass PWSTR wrapping the buffer pointer directly.
+        let result = unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(name_buf.as_mut_ptr()),
+                &mut name_len,
+            )
+        };
 
         // SAFETY: CloseHandle is safe to call on any valid handle. We obtained
         // this handle from OpenProcess above and have not closed it yet.
         let _ = unsafe { CloseHandle(handle) };
 
-        if name_len == 0 {
+        if result.is_err() || name_len == 0 {
             trace!(
                 layer = "senses",
                 component = "context",
                 pid = pid,
-                "GetModuleBaseNameW returned 0 chars"
+                "QueryFullProcessImageNameW failed or returned 0 chars"
             );
             return String::new();
         }
 
-        String::from_utf16_lossy(&name_buf[..name_len as usize])
+        let full_path = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        // Extract just the filename (e.g. "Code.exe") from the full path.
+        full_path
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&full_path)
+            .to_string()
     }
 
     /// Returns the number of seconds since the user last provided keyboard or
@@ -529,6 +547,30 @@ mod tests {
         // Both may be empty if we're running headless, but they should be valid strings.
         assert!(title.len() < 1024, "Title should be reasonable length");
         assert!(process.len() < 512, "Process name should be reasonable length");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_foreground_process_name_is_nonempty() {
+        // Regression test: QueryFullProcessImageNameW must return a non-empty
+        // process name for the foreground window. The previous implementation
+        // used GetModuleBaseNameW with PROCESS_QUERY_LIMITED_INFORMATION, which
+        // silently returned 0 on every call because that access right is
+        // insufficient for GetModuleBaseNameW.
+        let (_title, process) = win::get_foreground_window_info();
+        // In a desktop session there is always a foreground window.
+        // This test will be skipped in headless CI (no foreground window → empty
+        // is expected), but on a real desktop it must be non-empty.
+        if !_title.is_empty() {
+            assert!(
+                !process.is_empty(),
+                "foreground_process_name should not be empty when a window is focused"
+            );
+            assert!(
+                process.ends_with(".exe") || process.ends_with(".EXE"),
+                "process name should end with .exe, got: {process}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ Combines observations into `PerceptionFrame` objects. Holds the latest observati
 | New window focused | +0.2 |
 | Error disappeared | +0.1 |
 
-Only frames above `frame.salience_threshold` (default 0.15) are forwarded to the triage layer. All frames are written to the raw log regardless of salience.
+Only frames above `frame.salience_threshold` (default 0.10) are forwarded to the triage layer. All frames are written to the raw log regardless of salience.
 
 ## Configuration
 
@@ -101,7 +101,7 @@ poll_interval_secs = 1      # Windows API poll rate
 
 [frame]
 interval_secs = 3           # Frame assembly interval (2-10)
-salience_threshold = 0.15   # Minimum salience to reach triage (0.0-1.0)
+salience_threshold = 0.10   # Minimum salience to reach triage (0.0-1.0)
 
 [storage]
 db_path = "~/.kairo-dev/raw_log.sqlite"

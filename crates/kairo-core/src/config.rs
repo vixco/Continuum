@@ -180,7 +180,11 @@ impl Default for FrameConfig {
     fn default() -> Self {
         Self {
             interval_secs: 3,
-            salience_threshold: 0.15,
+            // Lowered from 0.15 to 0.10: most frames score 0.00 in steady state,
+            // and the triage layer (Phase 2) is cheap enough to run on
+            // window-change events (salience ~0.20). Tune up if triage call
+            // volume is too high.
+            salience_threshold: 0.10,
         }
     }
 }
@@ -230,7 +234,7 @@ mod tests {
     fn test_default_config_is_valid() {
         let config = KairoConfig::default();
         assert_eq!(config.screen.interval_secs, 3);
-        assert_eq!(config.frame.salience_threshold, 0.15);
+        assert_eq!(config.frame.salience_threshold, 0.10);
         assert_eq!(config.storage.retention_days, 30);
         assert_eq!(config.audio.max_segment_secs, 8);
         assert!(!config.vision.gpu_enabled);
@@ -251,6 +255,6 @@ interval_secs = 5
         let config: KairoConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.screen.interval_secs, 5);
         // Other fields should be defaults
-        assert_eq!(config.frame.salience_threshold, 0.15);
+        assert_eq!(config.frame.salience_threshold, 0.10);
     }
 }
