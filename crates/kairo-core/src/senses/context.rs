@@ -513,9 +513,9 @@ mod tests {
         // itself is providing input by running).
         let idle = win::get_idle_seconds();
         // Just verify it doesn't panic and returns something reasonable.
-        // During test runs the system is active, so idle should be low,
-        // but we allow up to 10 minutes to be safe in CI.
-        assert!(idle < 600, "Idle time should be under 10 minutes during test");
+        // Just verify it returns a plausible value. In automated environments
+        // the system may have been idle for a long time.
+        assert!(idle < 86_400, "Idle time should be under 24 hours");
     }
 
     #[cfg(windows)]

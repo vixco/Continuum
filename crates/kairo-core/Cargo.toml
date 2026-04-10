@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Main orchestration runtime for Kairo — the four-layer cognitive engine"
 
+[features]
+default = []
+audio = ["dep:cpal", "dep:whisper-rs", "dep:rubato"]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -24,6 +28,11 @@ xcap = "0.8"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 dirs = "6"
 toml = "0.8"
+
+# Audio pipeline (requires LLVM/libclang for whisper-rs bindgen)
+cpal = { version = "0.17", optional = true }
+whisper-rs = { version = "0.16", optional = true }
+rubato = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
