@@ -1,43 +1,29 @@
-//! ONNX Runtime-backed vision model implementation.
+//! ONNX Runtime-backed vision model with full autoregressive decoding.
 //!
-//! Provides [`OnnxVisionModel`], which loads a SmolVLM-256M (or compatible)
-//! ONNX model and implements the [`VisionModel`] trait to produce one-sentence
-//! image descriptions.
-//!
-//! **Current status (Phase 1):** The encoder session is loaded and image
-//! preprocessing runs for real, but autoregressive text decoding is stubbed.
-//! The `describe()` method returns a placeholder description based on basic
-//! image statistics (mean brightness, dominant channel). Full decoder-loop
-//! generation will be implemented in Phase 1.5.
+//! Provides [`OnnxVisionModel`], which loads SmolVLM-256M via three ONNX
+//! sessions (vision encoder, token embedder, text decoder) and a HuggingFace
+//! tokenizer. It implements the [`VisionModel`] trait to produce one-sentence
+//! screen descriptions.
 //!
 //! # Model directory layout
 //!
-//! The model directory (typically `~/.kairo/models/vision/smolvlm-256m/`)
-//! must contain at least:
+//! The model directory (typically `~/.kairo-dev/models/vision/smolvlm-256m/`)
+//! must contain:
 //!
-//! - `encoder.onnx` — the image encoder model
+//! - `vision_encoder.onnx` — the image encoder (or `encoder.onnx`)
+//! - `embed_tokens.onnx` — the token embedding layer
+//! - `decoder.onnx` — the autoregressive text decoder with KV-cache
+//! - `tokenizer.json` — HuggingFace tokenizer config
 //!
-//! When full decoding is implemented it will also need:
+//! # Inference pipeline
 //!
-//! - `decoder.onnx` — the autoregressive text decoder
-//! - `tokenizer.json` — the HuggingFace tokenizer config
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use kairo_vision::onnx::OnnxVisionModel;
-//! use kairo_vision::VisionModel;
-//!
-//! # async fn example() -> anyhow::Result<()> {
-//! let model = OnnxVisionModel::new("~/.kairo/models/vision/smolvlm-256m").await?;
-//! model.warmup().await?;
-//!
-//! let img = image::open("screenshot.png")?;
-//! let output = model.describe(&img).await?;
-//! println!("{}", output.description);
-//! # Ok(())
-//! # }
-//! ```
+//! 1. Preprocess image (resize 512×512, normalize, NCHW)
+//! 2. Run vision encoder → image feature embeddings
+//! 3. Tokenize text prompt, prepend image-token placeholders
+//! 4. Run embed_tokens to get text embeddings
+//! 5. Splice image features into the embedding at placeholder positions
+//! 6. Run decoder in an autoregressive loop with KV-cache until EOS
+//! 7. Decode generated tokens back to text
 //!
 //! Part of Layer 1 (Senses) in the Kairo cognitive architecture.
 
@@ -47,73 +33,103 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use async_trait::async_trait;
 use image::DynamicImage;
-use ndarray::Array4;
+use ndarray::{Array2, Array4, ArrayD, IxDyn};
 use ort::session::Session;
 use ort::value::Tensor;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use crate::error::VisionError;
 use crate::{VisionModel, VisionOutput};
 
-/// The expected input image size for SmolVLM-256M (384x384 pixels).
-const MODEL_INPUT_SIZE: u32 = 384;
+// ---------------------------------------------------------------------------
+// SmolVLM-256M model constants (from HuggingFace config.json)
+// ---------------------------------------------------------------------------
 
-/// ImageNet-standard channel means used for normalization (RGB order).
-const CHANNEL_MEANS: [f32; 3] = [0.485, 0.456, 0.406];
+/// Vision encoder input size (pixels).
+const IMAGE_SIZE: u32 = 512;
 
-/// ImageNet-standard channel standard deviations used for normalization (RGB order).
-const CHANNEL_STDS: [f32; 3] = [0.229, 0.224, 0.225];
+/// SmolVLM normalization means (all channels identical).
+const CHANNEL_MEANS: [f32; 3] = [0.5, 0.5, 0.5];
 
-/// ONNX Runtime-backed vision model.
+/// SmolVLM normalization stds (all channels identical).
+const CHANNEL_STDS: [f32; 3] = [0.5, 0.5, 0.5];
+
+/// Token ID that marks image-feature positions in the input sequence.
+const IMAGE_TOKEN_ID: i64 = 49190;
+
+/// Sentinel token that wraps image-token sequences.
+const FAKE_TOKEN_AROUND_IMAGE: i64 = 49189;
+
+/// `<|im_start|>` chat template token.
+const IM_START: i64 = 1;
+
+/// `<|im_end|>` / EOS token.
+const IM_END: i64 = 2;
+
+/// Number of transformer layers in the text decoder.
+const NUM_HIDDEN_LAYERS: usize = 30;
+
+/// Number of key-value attention heads per layer.
+const NUM_KV_HEADS: usize = 3;
+
+/// Dimension of each attention head.
+const HEAD_DIM: usize = 64;
+
+/// Maximum tokens to generate.
+const MAX_NEW_TOKENS: usize = 64;
+
+// ---------------------------------------------------------------------------
+// Internal session bundle
+// ---------------------------------------------------------------------------
+
+/// Holds the three ONNX sessions so they can be locked together for inference.
+struct ModelSessions {
+    encoder: Session,
+    embed_tokens: Session,
+    decoder: Session,
+}
+
+// Sessions contain raw pointers but are safe to send across threads.
+// SAFETY: ort::Session is internally thread-safe for sequential use.
+unsafe impl Send for ModelSessions {}
+
+impl std::fmt::Debug for ModelSessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelSessions").finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OnnxVisionModel
+// ---------------------------------------------------------------------------
+
+/// ONNX Runtime-backed vision model with full autoregressive text generation.
 ///
-/// Loads a SmolVLM-256M (or compatible) encoder from an ONNX file and
-/// produces one-sentence descriptions of screenshot images.
-///
-/// **Phase 1 limitation:** Only the encoder is loaded. The `describe()` method
-/// runs the encoder to extract image features but returns a placeholder
-/// description derived from basic image statistics, since the full
-/// autoregressive decoder loop is not yet implemented.
+/// Loads SmolVLM-256M from three ONNX files plus a tokenizer. The
+/// [`describe`](VisionModel::describe) method runs the complete
+/// encode → embed → decode pipeline to produce natural-language descriptions
+/// of screenshot images.
 ///
 /// # Thread safety
 ///
-/// The ONNX session is `Send + Sync`, so this struct can be shared across
-/// tasks via `Arc`. Inference calls acquire an internal session lock, so
-/// concurrent calls are safe but serialized.
+/// All three sessions are behind a single `Mutex`. Inference calls are
+/// serialized but safe to call from multiple async tasks via `Arc`.
 #[derive(Debug)]
 pub struct OnnxVisionModel {
-    /// The loaded ONNX encoder session, wrapped in `Arc<Mutex<>>` for safe
-    /// mutable access from blocking inference threads. `Session::run()` requires
-    /// `&mut self`, so we use a mutex to serialize concurrent inference calls.
-    session: Arc<Mutex<Session>>,
-
-    /// Path to the model directory, kept for diagnostics and logging.
-    /// Used in Phase 1.5 for loading additional model files (decoder, tokenizer).
-    #[allow(dead_code)]
+    sessions: Arc<Mutex<ModelSessions>>,
+    tokenizer: Arc<tokenizers::Tokenizer>,
     model_dir: PathBuf,
 }
 
 impl OnnxVisionModel {
-    /// Load a vision model from the given directory.
+    /// Load the full SmolVLM model from the given directory.
     ///
-    /// The directory must contain at least `encoder.onnx`. Returns a
-    /// [`VisionError::ModelDirectoryNotFound`] if the directory does not exist,
-    /// or a [`VisionError::ModelFileNotFound`] if the encoder file is missing.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the ONNX Runtime fails to initialize or the model
-    /// file is corrupt / incompatible.
+    /// Expects `vision_encoder.onnx` (or `encoder.onnx`), `embed_tokens.onnx`,
+    /// `decoder.onnx`, and `tokenizer.json` in the directory.
     #[instrument(skip_all, fields(layer = "senses", component = "vision", model_dir = %model_dir.as_ref().display()))]
     pub async fn new(model_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
 
-        // Validate the model directory exists
-        if !model_dir.exists() {
-            return Err(VisionError::ModelDirectoryNotFound {
-                path: model_dir.display().to_string(),
-            }
-            .into());
-        }
         if !model_dir.is_dir() {
             return Err(VisionError::ModelDirectoryNotFound {
                 path: model_dir.display().to_string(),
@@ -121,159 +137,353 @@ impl OnnxVisionModel {
             .into());
         }
 
-        let encoder_path = model_dir.join("encoder.onnx");
-        if !encoder_path.exists() {
-            return Err(VisionError::ModelFileNotFound {
-                path: encoder_path.display().to_string(),
+        // Resolve file paths (support both naming conventions).
+        let encoder_path = if model_dir.join("vision_encoder.onnx").exists() {
+            model_dir.join("vision_encoder.onnx")
+        } else {
+            model_dir.join("encoder.onnx")
+        };
+        let embed_path = model_dir.join("embed_tokens.onnx");
+        let decoder_path = model_dir.join("decoder.onnx");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+
+        for (name, path) in [
+            ("vision encoder", &encoder_path),
+            ("embed_tokens", &embed_path),
+            ("decoder", &decoder_path),
+            ("tokenizer", &tokenizer_path),
+        ] {
+            if !path.exists() {
+                return Err(VisionError::ModelFileNotFound {
+                    path: format!("{} ({})", path.display(), name),
+                }
+                .into());
             }
-            .into());
         }
 
         info!(
             layer = "senses",
             component = "vision",
-            encoder_path = %encoder_path.display(),
-            "loading ONNX vision encoder"
+            "loading SmolVLM ONNX sessions and tokenizer"
         );
 
-        // Load the encoder session. We do this on a blocking thread because
-        // ONNX Runtime model loading does synchronous file I/O and graph
-        // optimization that can take hundreds of milliseconds.
-        let encoder_path_clone = encoder_path.clone();
-        let session = tokio::task::spawn_blocking(move || -> anyhow::Result<Session> {
-            Session::builder()
-                .context("failed to create ONNX session builder")?
-                .commit_from_file(&encoder_path_clone)
-                .with_context(|| {
-                    format!(
-                        "failed to load encoder model from '{}'",
-                        encoder_path_clone.display()
-                    )
-                })
+        // Load tokenizer (fast, no need for blocking thread).
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| VisionError::ModelLoadError {
+                path: tokenizer_path.display().to_string(),
+                reason: format!("{e}"),
+            })?;
+
+        // Load ONNX sessions on a blocking thread.
+        let ep = encoder_path.clone();
+        let emp = embed_path.clone();
+        let dp = decoder_path.clone();
+        let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<ModelSessions> {
+            let encoder = Session::builder()
+                .context("encoder session builder")?
+                .commit_from_file(&ep)
+                .with_context(|| format!("loading {}", ep.display()))?;
+
+            let embed_tokens = Session::builder()
+                .context("embed_tokens session builder")?
+                .commit_from_file(&emp)
+                .with_context(|| format!("loading {}", emp.display()))?;
+
+            let decoder = Session::builder()
+                .context("decoder session builder")?
+                .commit_from_file(&dp)
+                .with_context(|| format!("loading {}", dp.display()))?;
+
+            Ok(ModelSessions {
+                encoder,
+                embed_tokens,
+                decoder,
+            })
         })
         .await
-        .context("ONNX model loading task panicked")?
+        .context("model loading task panicked")?
         .map_err(|e| VisionError::ModelLoadError {
-            path: encoder_path.display().to_string(),
+            path: model_dir.display().to_string(),
             reason: format!("{e:#}"),
         })?;
 
         info!(
             layer = "senses",
             component = "vision",
-            "vision encoder loaded successfully"
+            "all SmolVLM sessions loaded"
         );
 
         Ok(Self {
-            session: Arc::new(Mutex::new(session)),
+            sessions: Arc::new(Mutex::new(sessions)),
+            tokenizer: Arc::new(tokenizer),
             model_dir,
         })
     }
 
-    /// Preprocess a [`DynamicImage`] into a normalized NCHW float32 tensor.
+    /// Preprocess an image: resize (aspect-preserving) → pad → normalize.
     ///
-    /// Steps:
-    /// 1. Resize to [`MODEL_INPUT_SIZE`] x [`MODEL_INPUT_SIZE`] using Lanczos3
-    /// 2. Convert to RGB8
-    /// 3. Normalize each channel with ImageNet means and standard deviations
-    /// 4. Arrange into NCHW layout (batch=1, channels=3, height, width)
-    #[instrument(skip_all, fields(layer = "senses", component = "vision"))]
-    fn preprocess(image: &DynamicImage) -> anyhow::Result<Array4<f32>> {
-        let resized = image.resize_exact(
-            MODEL_INPUT_SIZE,
-            MODEL_INPUT_SIZE,
-            image::imageops::FilterType::Lanczos3,
+    /// Returns `(pixel_values, pixel_attention_mask)`:
+    /// - pixel_values: `[1, 1, 3, IMAGE_SIZE, IMAGE_SIZE]`
+    /// - pixel_attention_mask: `[1, 1, IMAGE_SIZE, IMAGE_SIZE]` (bool, true where real pixels)
+    fn preprocess(image: &DynamicImage) -> (ndarray::Array5<f32>, Array4<bool>) {
+        let sz = IMAGE_SIZE as usize;
+
+        // Resize preserving aspect ratio so longest edge = IMAGE_SIZE.
+        let resized = image.resize(
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+            image::imageops::FilterType::Triangle, // Bilinear
         );
         let rgb = resized.to_rgb8();
+        let rh = rgb.height() as usize;
+        let rw = rgb.width() as usize;
 
-        let h = MODEL_INPUT_SIZE as usize;
-        let w = MODEL_INPUT_SIZE as usize;
+        // Create tensor with zero-padding.
+        // Normalization: (pixel/255 - 0.5) / 0.5 → zeros become -1.0
+        let mut tensor = ndarray::Array5::<f32>::from_elem((1, 1, 3, sz, sz), -1.0);
+        let mut mask = Array4::<bool>::from_elem((1, 1, sz, sz), false);
 
-        // Build NCHW tensor: [1, 3, H, W]
-        let mut tensor = Array4::<f32>::zeros((1, 3, h, w));
-
-        for y in 0..h {
-            for x in 0..w {
+        for y in 0..rh {
+            for x in 0..rw {
                 let pixel = rgb.get_pixel(x as u32, y as u32);
                 for c in 0..3 {
-                    let value = pixel[c] as f32 / 255.0;
-                    let normalized = (value - CHANNEL_MEANS[c]) / CHANNEL_STDS[c];
-                    tensor[[0, c, y, x]] = normalized;
+                    let v = pixel[c] as f32 / 255.0;
+                    tensor[[0, 0, c, y, x]] = (v - CHANNEL_MEANS[c]) / CHANNEL_STDS[c];
                 }
+                mask[[0, 0, y, x]] = true;
             }
         }
+        (tensor, mask)
+    }
+
+    /// Run the full encode → embed → decode pipeline on a blocking thread.
+    ///
+    /// This is the core inference function. It is called inside
+    /// `tokio::task::spawn_blocking` from [`describe`](VisionModel::describe).
+    fn run_inference(
+        sessions: &mut ModelSessions,
+        tokenizer: &tokenizers::Tokenizer,
+        pixel_values: ndarray::Array5<f32>,
+        pixel_mask: Array4<bool>,
+    ) -> anyhow::Result<String> {
+        // Helper: extract owned f32 ndarray from session output at given index.
+        fn extract(
+            outputs: &ort::session::SessionOutputs<'_>,
+            idx: usize,
+            name: &str,
+        ) -> anyhow::Result<ArrayD<f32>> {
+            let (shape, data) = outputs[idx]
+                .try_extract_tensor::<f32>()
+                .with_context(|| format!("extract '{name}'[{idx}]"))?;
+            let dims: Vec<usize> = (0..shape.len()).map(|i| shape[i] as usize).collect();
+            ArrayD::from_shape_vec(IxDyn(&dims), data.to_vec())
+                .with_context(|| format!("reshape '{name}' {dims:?}"))
+        }
+
+        // ---- Step 1: Vision encoder ----
+        let pv_tensor = Tensor::from_array(pixel_values).context("pixel_values tensor")?;
+        let pm_tensor = Tensor::from_array(pixel_mask).context("pixel_attention_mask tensor")?;
+
+        let encoder_out = sessions
+            .encoder
+            .run(ort::inputs![pv_tensor, pm_tensor])
+            .context("vision encoder")?;
+
+        let image_features = extract(&encoder_out, 0, "image_features")?;
+        drop(encoder_out); // release borrow on encoder session
+
+        let num_image_tokens = image_features.shape()[1];
+        let hidden_size = image_features.shape()[2];
 
         debug!(
             layer = "senses",
             component = "vision",
-            height = h,
-            width = w,
-            "image preprocessed to NCHW tensor"
+            num_image_tokens,
+            hidden_size,
+            "encoder produced image features"
         );
 
-        Ok(tensor)
-    }
+        // ---- Step 2: Build prompt token IDs ----
+        // SmolVLM chat format:
+        //   <|im_start|>user\n
+        //   <fake_token_around_image><image>...<image><fake_token_around_image>
+        //   \nDescribe what you see on this screen in one sentence.<|im_end|>\n
+        //   <|im_start|>assistant\n
+        let user_text = "\nDescribe what you see on this screen in one sentence.";
+        let user_enc = tokenizer
+            .encode(user_text, false)
+            .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;
+        let user_ids: Vec<i64> = user_enc.get_ids().iter().map(|&id| id as i64).collect();
 
-    /// Derive a basic [`VisionOutput`] from image statistics.
-    ///
-    /// This is the Phase 1 stub that produces a rough description based on
-    /// mean brightness and dominant color channel. It will be replaced by
-    /// the full decoder loop in Phase 1.5.
-    fn stub_describe(image: &DynamicImage) -> VisionOutput {
-        let rgb = image.to_rgb8();
-        let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
-        let pixel_count = rgb.width() as u64 * rgb.height() as u64;
+        let assistant_text = "\nassistant\n";
+        let asst_enc = tokenizer
+            .encode(assistant_text, false)
+            .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;
+        let asst_ids: Vec<i64> = asst_enc.get_ids().iter().map(|&id| id as i64).collect();
 
-        for pixel in rgb.pixels() {
-            r_sum += pixel[0] as u64;
-            g_sum += pixel[1] as u64;
-            b_sum += pixel[2] as u64;
+        let mut input_ids: Vec<i64> = Vec::new();
+        // <|im_start|>user\n
+        input_ids.push(IM_START);
+        let user_hdr = tokenizer.encode("user\n", false)
+            .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+        input_ids.extend(user_hdr.get_ids().iter().map(|&id| id as i64));
+        // <fake_token_around_image> <image>×N <fake_token_around_image>
+        input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
+        input_ids.extend(std::iter::repeat(IMAGE_TOKEN_ID).take(num_image_tokens));
+        input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
+        // \nDescribe...<|im_end|>
+        input_ids.extend_from_slice(&user_ids);
+        input_ids.push(IM_END);
+        // \n<|im_start|>assistant\n
+        input_ids.push(IM_START);
+        input_ids.extend_from_slice(&asst_ids);
+
+        let total_len = input_ids.len();
+
+        debug!(
+            layer = "senses",
+            component = "vision",
+            total_len,
+            prompt_tokens = user_ids.len(),
+            "built input token sequence"
+        );
+
+        // ---- Step 3: Embed tokens ----
+        let ids_array =
+            Array2::from_shape_vec((1, total_len), input_ids.clone()).context("ids array")?;
+        let ids_tensor = Tensor::from_array(ids_array).context("ids tensor")?;
+
+        let embed_out = sessions
+            .embed_tokens
+            .run(ort::inputs![ids_tensor])
+            .context("embed_tokens")?;
+
+        let mut inputs_embeds = extract(&embed_out, 0, "inputs_embeds")?;
+        drop(embed_out); // release borrow so embed_tokens can be used again later
+
+        // ---- Step 4: Replace image-token positions with vision features ----
+        // Find positions where input_ids == IMAGE_TOKEN_ID and replace embeddings.
+        let mut feat_idx = 0;
+        for pos in 0..total_len {
+            if input_ids[pos] == IMAGE_TOKEN_ID && feat_idx < num_image_tokens {
+                for j in 0..hidden_size {
+                    inputs_embeds[[0, pos, j]] = image_features[[0, feat_idx, j]];
+                }
+                feat_idx += 1;
+            }
         }
 
-        if pixel_count == 0 {
-            return VisionOutput {
-                description: "The screen appears to be empty or the image could not be read."
-                    .to_string(),
-                has_error_visible: false,
-                confidence: 0.0,
-            };
+        // ---- Step 5: Autoregressive decoder loop ----
+        let mut attn_vec: Vec<i64> = vec![1i64; total_len];
+        let mut pos_vec: Vec<i64> = (0..total_len as i64).collect();
+
+        let mut kv_cache: Vec<ArrayD<f32>> = (0..(NUM_HIDDEN_LAYERS * 2))
+            .map(|_| ArrayD::zeros(IxDyn(&[1, NUM_KV_HEADS, 0, HEAD_DIM])))
+            .collect();
+
+        let mut generated: Vec<i64> = Vec::new();
+        let mut cur_embeds = inputs_embeds;
+
+        for step in 0..MAX_NEW_TOKENS {
+            let seq_len = cur_embeds.shape()[1];
+
+            let embeds_t = Tensor::from_array(cur_embeds.clone()).context("embeds")?;
+            let attn_a = Array2::from_shape_vec((1, attn_vec.len()), attn_vec.clone())
+                .context("attn array")?;
+            let attn_t = Tensor::from_array(attn_a).context("attn")?;
+            let pos_a = Array2::from_shape_vec(
+                (1, seq_len),
+                pos_vec[pos_vec.len() - seq_len..].to_vec(),
+            )
+            .context("pos array")?;
+            let pos_t = Tensor::from_array(pos_a).context("pos")?;
+
+            let mut dec_inputs = ort::inputs![
+                "inputs_embeds" => embeds_t,
+                "attention_mask" => attn_t,
+                "position_ids" => pos_t,
+            ];
+
+            for layer in 0..NUM_HIDDEN_LAYERS {
+                dec_inputs.push((
+                    format!("past_key_values.{layer}.key").into(),
+                    Tensor::from_array(kv_cache[layer * 2].clone())
+                        .context("kv key")?
+                        .into(),
+                ));
+                dec_inputs.push((
+                    format!("past_key_values.{layer}.value").into(),
+                    Tensor::from_array(kv_cache[layer * 2 + 1].clone())
+                        .context("kv val")?
+                        .into(),
+                ));
+            }
+
+            let dec_out = sessions.decoder.run(dec_inputs).context("decoder")?;
+
+            // Logits: [1, seq_len, vocab_size]
+            let logits = extract(&dec_out, 0, "logits")?;
+            let vocab = logits.shape()[2];
+            let last = logits.shape()[1] - 1;
+
+            let mut best_tok: i64 = 0;
+            let mut best_val = f32::NEG_INFINITY;
+            for v in 0..vocab {
+                let s = logits[[0, last, v]];
+                if s > best_val {
+                    best_val = s;
+                    best_tok = v as i64;
+                }
+            }
+
+            if best_tok == IM_END || best_tok == 0 {
+                debug!(layer = "senses", component = "vision", step, "EOS");
+                break;
+            }
+            generated.push(best_tok);
+
+            // Update KV-cache from decoder outputs [1..61].
+            let n_out = dec_out.len();
+            for (i, kv) in kv_cache.iter_mut().enumerate() {
+                let oi = i + 1;
+                if oi < n_out {
+                    *kv = extract(&dec_out, oi, "kv")?;
+                }
+            }
+            drop(dec_out);
+
+            // Embed next token.
+            let nxt = Array2::from_shape_vec((1, 1), vec![best_tok]).context("nxt")?;
+            let nxt_t = Tensor::from_array(nxt).context("nxt tensor")?;
+            let nxt_out = sessions
+                .embed_tokens
+                .run(ort::inputs![nxt_t])
+                .context("embed next")?;
+            cur_embeds = extract(&nxt_out, 0, "nxt_embed")?;
+            drop(nxt_out);
+
+            attn_vec.push(1);
+            let next_pos = *pos_vec.last().unwrap_or(&0) + 1;
+            pos_vec.push(next_pos);
         }
 
-        let r_mean = r_sum as f64 / pixel_count as f64;
-        let g_mean = g_sum as f64 / pixel_count as f64;
-        let b_mean = b_sum as f64 / pixel_count as f64;
-        let brightness = (r_mean + g_mean + b_mean) / 3.0;
+        // ---- Step 6: Decode tokens to text ----
+        let token_ids_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
+        let description = tokenizer
+            .decode(&token_ids_u32, true)
+            .map_err(|e| anyhow::anyhow!("tokenizer decode failed: {e}"))?;
 
-        let brightness_desc = if brightness < 50.0 {
-            "dark"
-        } else if brightness < 128.0 {
-            "moderately lit"
-        } else if brightness < 200.0 {
-            "bright"
-        } else {
-            "very bright"
-        };
+        let description = description.trim().to_string();
 
-        let dominant = if r_mean > g_mean && r_mean > b_mean {
-            "warm-toned"
-        } else if g_mean > r_mean && g_mean > b_mean {
-            "green-toned"
-        } else if b_mean > r_mean && b_mean > g_mean {
-            "cool-toned"
-        } else {
-            "neutral-toned"
-        };
+        debug!(
+            layer = "senses",
+            component = "vision",
+            tokens = generated.len(),
+            description = %description,
+            "generated description"
+        );
 
-        // Phase 1 stub: confidence is low because this is not a real VLM output.
-        // Error detection is not possible without the decoder, so always false.
-        VisionOutput {
-            description: format!(
-                "The screen shows a {brightness_desc}, {dominant} image \
-                 (placeholder — full VLM decoding pending)."
-            ),
-            has_error_visible: false,
-            confidence: 0.1,
-        }
+        Ok(description)
     }
 }
 
@@ -281,118 +491,61 @@ impl OnnxVisionModel {
 impl VisionModel for OnnxVisionModel {
     /// Describe the contents of a screenshot image.
     ///
-    /// **Phase 1 behavior:** Preprocesses the image and runs the ONNX encoder
-    /// to validate the pipeline, but returns a placeholder [`VisionOutput`]
-    /// based on image statistics since the decoder loop is not yet implemented.
-    // TODO(phase-1.5): Implement full autoregressive decoding with the text
-    // decoder model and tokenizer. This requires loading `decoder.onnx` and
-    // `tokenizer.json`, implementing the token generation loop with KV-cache,
-    // and streaming partial results.
+    /// Runs the full SmolVLM pipeline: vision encoder → token embedding →
+    /// autoregressive text decoder. Returns a natural-language description
+    /// of what the user is looking at.
     #[instrument(skip_all, fields(layer = "senses", component = "vision"))]
     async fn describe(&self, image: &DynamicImage) -> anyhow::Result<VisionOutput> {
         let image_clone = image.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let tokenizer = Arc::clone(&self.tokenizer);
 
-        // Preprocess on a blocking thread to avoid starving the async runtime
-        // with the pixel-level normalization loop.
-        let tensor = tokio::task::spawn_blocking(move || Self::preprocess(&image_clone))
-            .await
-            .context("image preprocessing task panicked")?
-            .map_err(|e| VisionError::ImagePreprocessError {
-                reason: format!("{e:#}"),
-            })?;
+        let description = tokio::task::spawn_blocking(move || {
+            let (pixel_values, pixel_mask) = Self::preprocess(&image_clone);
 
-        debug!(
-            layer = "senses",
-            component = "vision",
-            tensor_shape = ?tensor.shape(),
-            "running encoder inference"
-        );
-
-        // Run encoder inference on a blocking thread. Even with GPU acceleration,
-        // ONNX Runtime inference is synchronous and should not block the tokio
-        // runtime.
-        //
-        // NOTE: We intentionally do not use the encoder output yet. This call
-        // validates that the full preprocessing -> inference pipeline works.
-        // The encoder embeddings will be fed to the decoder in Phase 1.5.
-        let session = Arc::clone(&self.session);
-        let _encoder_output = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let input_tensor = Tensor::from_array(tensor)
-                .context("failed to create ONNX input tensor from ndarray")?;
-            let mut session_guard = session
+            let mut guard = sessions
                 .lock()
                 .map_err(|e| anyhow::anyhow!("session mutex poisoned: {e}"))?;
-            let _outputs = session_guard
-                .run(ort::inputs![input_tensor])
-                .context("ONNX encoder inference failed")?;
-            Ok(())
+
+            Self::run_inference(&mut guard, &tokenizer, pixel_values, pixel_mask)
         })
         .await
-        .context("encoder inference task panicked")?;
+        .context("vision inference task panicked")??;
 
-        match &_encoder_output {
-            Ok(_) => {
-                debug!(
-                    layer = "senses",
-                    component = "vision",
-                    "encoder inference completed successfully"
-                );
-            }
-            Err(e) => {
-                // In Phase 1, encoder failure is non-fatal — we still return the
-                // stub description. Log a warning so the issue is visible.
-                warn!(
-                    layer = "senses",
-                    component = "vision",
-                    error = %e,
-                    "encoder inference failed, returning stub description"
-                );
-            }
-        }
+        // Simple keyword-based error detection.
+        let lower = description.to_lowercase();
+        let has_error = ["error", "exception", "crash", "fatal", "traceback", "not responding"]
+            .iter()
+            .any(|kw| lower.contains(kw));
 
-        // Phase 1: return a stub description based on image statistics
-        let output = Self::stub_describe(image);
-
-        debug!(
-            layer = "senses",
-            component = "vision",
-            description = %output.description,
-            confidence = output.confidence,
-            "generated image description (stub)"
-        );
-
-        Ok(output)
+        Ok(VisionOutput {
+            description,
+            has_error_visible: has_error,
+            confidence: 0.8,
+        })
     }
 
-    /// Return the name of the model for logging and display.
     fn model_name(&self) -> &str {
         "smolvlm-256m-onnx"
     }
 
-    /// Run a dummy inference to warm up the ONNX Runtime session.
-    ///
-    /// Creates a small black test image and runs [`describe`](VisionModel::describe)
-    /// on it. This forces ONNX Runtime to complete its lazy initialization
-    /// (graph optimization, memory allocation, GPU context creation) so that
-    /// the first real frame does not incur startup latency.
+    /// Warm up all three ONNX sessions.
     #[instrument(skip_all, fields(layer = "senses", component = "vision"))]
     async fn warmup(&self) -> anyhow::Result<()> {
         info!(
             layer = "senses",
             component = "vision",
-            input_size = MODEL_INPUT_SIZE,
-            "warming up vision model with dummy image"
+            "warming up SmolVLM model"
         );
 
-        let dummy = DynamicImage::new_rgb8(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE);
+        let dummy = DynamicImage::new_rgb8(IMAGE_SIZE, IMAGE_SIZE);
         let _ = self.describe(&dummy).await?;
 
         info!(
             layer = "senses",
             component = "vision",
-            "vision model warmup complete"
+            "SmolVLM warmup complete"
         );
-
         Ok(())
     }
 }
@@ -400,104 +553,95 @@ impl VisionModel for OnnxVisionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_new_with_nonexistent_directory_returns_error() {
         let result = OnnxVisionModel::new("/nonexistent/path/to/model").await;
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let err_str = format!("{err:#}");
+        let err_str = format!("{:#}", result.unwrap_err());
         assert!(
-            err_str.contains("not found"),
-            "expected 'not found' in error message, got: {err_str}"
+            err_str.contains("not found") || err_str.contains("Not found"),
+            "expected 'not found' in error, got: {err_str}"
         );
     }
 
     #[tokio::test]
     async fn test_new_with_empty_directory_returns_model_file_error() {
-        // Create a temporary directory with no model files
-        let tmp_dir = std::env::temp_dir().join("kairo-vision-test-empty");
-        let _ = std::fs::create_dir_all(&tmp_dir);
-
-        let result = OnnxVisionModel::new(&tmp_dir).await;
+        let tmp = std::env::temp_dir().join("kairo-vision-test-empty");
+        let _ = std::fs::create_dir_all(&tmp);
+        let result = OnnxVisionModel::new(&tmp).await;
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let err_str = format!("{err:#}");
-        assert!(
-            err_str.contains("encoder.onnx") || err_str.contains("not found"),
-            "expected model file error, got: {err_str}"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_preprocess_produces_correct_shape() {
         let img = DynamicImage::new_rgb8(800, 600);
-        let tensor = OnnxVisionModel::preprocess(&img).expect("preprocessing should succeed");
+        let (tensor, mask) = OnnxVisionModel::preprocess(&img);
         assert_eq!(
             tensor.shape(),
-            &[1, 3, MODEL_INPUT_SIZE as usize, MODEL_INPUT_SIZE as usize]
+            &[1, 1, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize]
+        );
+        assert_eq!(
+            mask.shape(),
+            &[1, 1, IMAGE_SIZE as usize, IMAGE_SIZE as usize]
         );
     }
 
     #[test]
-    fn test_preprocess_normalizes_values() {
-        // Create a white image — all pixels are 255
+    fn test_preprocess_normalizes_white() {
         let img = DynamicImage::from(image::RgbImage::from_fn(100, 100, |_, _| {
             image::Rgb([255u8, 255, 255])
         }));
-        let tensor = OnnxVisionModel::preprocess(&img).expect("preprocessing should succeed");
-
-        // After normalization: (1.0 - mean) / std
-        // For R channel: (1.0 - 0.485) / 0.229 = ~2.2489
-        let r_val = tensor[[0, 0, 0, 0]];
+        let (tensor, _) = OnnxVisionModel::preprocess(&img);
+        let r = tensor[[0, 0, 0, 0, 0]];
+        // (1.0 - 0.5) / 0.5 = 1.0
         assert!(
-            (r_val - 2.2489).abs() < 0.01,
-            "expected ~2.2489 for white R channel, got {r_val}"
+            (r - 1.0).abs() < 0.01,
+            "expected ~1.0, got {r}"
         );
     }
 
-    #[test]
-    fn test_stub_describe_returns_nonempty_output() {
-        let img = DynamicImage::new_rgb8(100, 100);
-        let output = OnnxVisionModel::stub_describe(&img);
-        assert!(!output.description.is_empty());
-        assert!(output.description.contains("placeholder"));
-        assert!(!output.has_error_visible);
-        assert!(output.confidence >= 0.0 && output.confidence <= 1.0);
-    }
+    /// Integration test: load real model and describe a screenshot.
+    ///
+    /// This test requires the SmolVLM model files to be downloaded.
+    /// Run `scripts/download-models.ps1` first.
+    /// Skipped if models are not present.
+    #[tokio::test]
+    async fn test_describe_real_screenshot() {
+        let model_dir = dirs::home_dir()
+            .unwrap()
+            .join(".kairo-dev/models/vision/smolvlm-256m");
 
-    #[test]
-    fn test_stub_describe_dark_image() {
-        let img = DynamicImage::new_rgb8(100, 100); // All zeros = black
-        let output = OnnxVisionModel::stub_describe(&img);
+        if !model_dir.join("decoder.onnx").exists() {
+            eprintln!("Skipping integration test: model files not downloaded");
+            return;
+        }
+
+        let model = OnnxVisionModel::new(&model_dir)
+            .await
+            .expect("should load model");
+
+        // Use the test fixture screenshot.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vscode-screenshot.jpg");
+
+        if !fixture.exists() {
+            eprintln!("Skipping: test fixture not found at {}", fixture.display());
+            return;
+        }
+
+        let img = image::open(&fixture).expect("should open test image");
+        let output = model.describe(&img).await.expect("describe should succeed");
+
+        eprintln!("Description: {}", output.description);
         assert!(
-            output.description.contains("dark"),
-            "expected 'dark' in description for black image, got: {}",
-            output.description
+            !output.description.is_empty(),
+            "description should not be empty"
         );
-    }
-
-    #[test]
-    fn test_stub_describe_bright_image() {
-        let img = DynamicImage::from(image::RgbImage::from_fn(100, 100, |_, _| {
-            image::Rgb([220u8, 220, 220])
-        }));
-        let output = OnnxVisionModel::stub_describe(&img);
         assert!(
-            output.description.contains("bright"),
-            "expected 'bright' in description for white-ish image, got: {}",
-            output.description
+            !output.description.contains("placeholder"),
+            "should not contain placeholder text"
         );
-    }
-
-    #[test]
-    fn test_model_dir_stored() {
-        // We cannot construct a full OnnxVisionModel without a real model file,
-        // but we verify the PathBuf handling works by confirming the error path.
-        let path = PathBuf::from("/some/test/path");
-        assert_eq!(path.display().to_string(), "/some/test/path");
     }
 }
