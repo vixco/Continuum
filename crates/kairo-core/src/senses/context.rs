@@ -239,10 +239,12 @@ fn is_in_call(process_name: &str, window_title: &str) -> bool {
     }
 
     // Browser-based call detection via title keywords.
-    if BROWSER_PROCESSES.iter().any(|&b| process_lower == b) {
-        if CALL_TITLE_KEYWORDS.iter().any(|&kw| title_lower.contains(kw)) {
-            return true;
-        }
+    if BROWSER_PROCESSES.iter().any(|&b| process_lower == b)
+        && CALL_TITLE_KEYWORDS
+            .iter()
+            .any(|&kw| title_lower.contains(kw))
+    {
+        return true;
     }
 
     false
