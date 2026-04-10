@@ -71,18 +71,18 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Goal:** A small local LLM reads perception frames and outputs triage decisions.
 
-**Deliverable:** The triage layer runs the Qwen 2.5 3B model via llama.cpp, evaluates each salient perception frame, and produces a JSON decision within 500 ms.
+**Deliverable:** The triage layer runs the Qwen 3 4B model via llama.cpp, evaluates each salient perception frame, and produces a JSON decision within 1.5 seconds.
 
 **Done when:**
 
-- [ ] `crates/kairo-llm` wraps `llama.cpp` via `llama-cpp-rs` with a simple streaming chat API
-- [ ] Model files are downloadable via `scripts/download-models.ps1`, stored in `~/.kairo/models/`
-- [ ] `crates/kairo-core/src/triage/mod.rs` implements the decision loop
-- [ ] `prompts/triage-system.md` is written and loaded at startup
-- [ ] The triage layer receives frames from the perception stream and emits decisions to a decision queue
-- [ ] `ignore`, `remember`, `whisper`, `execute_simple`, and `wake_orchestrator` decisions are all handled
-- [ ] Decision latency is measured and logged; if > 2 seconds, a warning is raised
-- [ ] Integration tests cover at least 20 distinct frame scenarios with expected decisions
+- [x] `crates/kairo-llm` wraps `llama.cpp` via `llama-cpp-2` with streaming generation, grammar-constrained JSON, and warmup
+- [x] Model files are downloadable via `scripts/download-models.ps1`, stored in `~/.kairo-dev/models/`
+- [x] `crates/kairo-core/src/triage/mod.rs` implements the decision loop with 3-retry fallback
+- [x] `prompts/triage-system.md` is written and loaded at startup with signal reliability hierarchy
+- [x] The triage layer receives frames from the perception stream via `--triage` flag on kairo-perception
+- [x] `ignore`, `remember`, `whisper`, `execute_simple`, and `wake_orchestrator` decisions are all handled
+- [x] Decision latency is measured and logged; if > 2 seconds, a warning is raised
+- [x] Benchmark harness covers 20 distinct frame scenarios with expected decisions
 
 **Why this matters:** The triage layer is what makes Kairo economically viable. If triage is wrong, Opus gets woken up for nonsense and costs explode.
 

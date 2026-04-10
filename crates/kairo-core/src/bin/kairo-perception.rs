@@ -13,6 +13,7 @@
 //!
 //! ```bash
 //! cargo run --bin kairo-perception
+//! cargo run --bin kairo-perception -- --triage   # with triage decisions
 //! ```
 //!
 //! Configuration is loaded from `~/.kairo-dev/config.toml`. If no config
@@ -20,6 +21,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
@@ -33,14 +35,23 @@ use kairo_core::senses::context::ContextWatcher;
 use kairo_core::senses::frame::PerceptionFrameBuilder;
 use kairo_core::senses::types::{AudioObservation, ContextObservation, ScreenObservation};
 use kairo_core::senses::vision::VisionWatcher;
+use kairo_core::triage::handlers::handle_decision;
+use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let triage_enabled = std::env::args().any(|a| a == "--triage");
+
     // Initialize structured logging.
+    let default_filter = if triage_enabled {
+        "info,kairo_core=debug,kairo_vision=debug,kairo_llm=debug"
+    } else {
+        "info,kairo_core=debug,kairo_vision=debug"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,kairo_core=debug,kairo_vision=debug")),
+                .unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_target(false)
         .compact()
@@ -49,6 +60,7 @@ async fn main() -> Result<()> {
     tracing::info!(
         layer = "senses",
         component = "main",
+        triage = triage_enabled,
         "Starting kairo-perception"
     );
 
@@ -134,13 +146,75 @@ async fn main() -> Result<()> {
             .await;
     });
 
+    // Optionally initialize the triage layer.
+    let triage: Option<TriageLayer> = if triage_enabled {
+        let model_path = kairo_dev_dir()
+            .join("models")
+            .join("triage")
+            .join("qwen3-4b-q4_k_m.gguf");
+
+        if !model_path.exists() {
+            tracing::error!(
+                layer = "triage",
+                component = "main",
+                path = %model_path.display(),
+                "Triage model not found. Run: powershell scripts/download-models.ps1"
+            );
+            None
+        } else {
+            tracing::info!(
+                layer = "triage",
+                component = "main",
+                model = %model_path.display(),
+                "Initializing triage layer..."
+            );
+
+            let triage_config = TriageConfig {
+                model_path: model_path.to_string_lossy().into_owned(),
+                n_threads: 4,
+                ..Default::default()
+            };
+
+            match TriageLayer::new(triage_config) {
+                Ok(t) => {
+                    if let Err(e) = t.warmup().await {
+                        tracing::warn!(
+                            layer = "triage",
+                            component = "main",
+                            error = %e,
+                            "Triage model warmup failed"
+                        );
+                    }
+                    tracing::info!(
+                        layer = "triage",
+                        component = "main",
+                        "Triage layer ready"
+                    );
+                    Some(t)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        layer = "triage",
+                        component = "main",
+                        error = %e,
+                        "Failed to initialize triage layer, running perception-only"
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     tracing::info!(
         layer = "senses",
         component = "main",
+        triage = triage.is_some(),
         "All senses watchers running. Press Ctrl+C to stop."
     );
 
-    // Main loop: receive frames, log to DB, print summary.
+    // Main loop: receive frames, log to DB, optionally triage, print summary.
     let mut frame_count: u64 = 0;
     let mut main_shutdown = shutdown_rx.clone();
     loop {
@@ -155,8 +229,39 @@ async fn main() -> Result<()> {
                     .unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");
 
+                // Run triage if enabled.
+                let triage_str = if let Some(ref triage_layer) = triage {
+                    let triage_start = Instant::now();
+                    let decision = triage_layer.evaluate(&frame, "").await;
+                    let triage_ms = triage_start.elapsed().as_millis();
+
+                    tracing::debug!(
+                        layer = "triage",
+                        component = "main",
+                        frame_id = %frame.id,
+                        decision = decision.variant_name(),
+                        latency_ms = triage_ms as u64,
+                        "Triage decision"
+                    );
+
+                    // Execute the handler.
+                    if let Err(e) = handle_decision(&decision) {
+                        tracing::warn!(
+                            layer = "triage",
+                            component = "handler",
+                            error = %e,
+                            decision = %decision,
+                            "Handler failed"
+                        );
+                    }
+
+                    format!(" | triage={}", decision.variant_name())
+                } else {
+                    String::new()
+                };
+
                 println!(
-                    "[{ts}] app={app} | screen=\"{desc}\" | audio=\"{audio}\" | salience={sal:.2}",
+                    "[{ts}] app={app} | screen=\"{desc}\" | audio=\"{audio}\" | salience={sal:.2}{triage_str}",
                     app = frame.context.foreground_process_name,
                     desc = truncate(&frame.screen.description, 60),
                     audio = truncate(audio_text, 40),

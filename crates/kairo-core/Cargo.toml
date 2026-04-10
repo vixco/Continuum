@@ -46,6 +46,10 @@ windows = { version = "0.59", features = [
 name = "kairo-perception"
 path = "src/bin/kairo-perception.rs"
 
+[[bin]]
+name = "kairo-triage-bench"
+path = "src/bin/kairo-triage-bench.rs"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"

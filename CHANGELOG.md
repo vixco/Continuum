@@ -5,6 +5,29 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- **Phase 2 — Triage layer**: local LLM evaluates salient perception frames and outputs structured decisions
+- `kairo-llm` crate: wraps `llama-cpp-2` (llama.cpp Rust bindings) with LocalLlm struct — GGUF model loading, free-form generation, GBNF grammar-constrained JSON generation, streaming output, model warmup
+- TriageDecision enum: 5 variants (ignore, remember, whisper, execute_simple, wake_orchestrator) with serde JSON parsing and truncation
+- TriageLayer: evaluation loop with 3-retry fallback (grammar first, prompt-only retries, default to Ignore), consecutive failure health alerts
+- Decision handlers: allowlisted execute_simple actions (launch_app, show_notification, toggle_mute), TTS and orchestrator wake placeholders
+- GBNF grammar file (`prompts/triage-grammar.gbnf`) enforcing strict triage JSON schema
+- Triage system prompt (`prompts/triage-system.md`) with signal reliability hierarchy and Qwen 3 `/no_think` thinking mode suppression
+- `--triage` flag on `kairo-perception` binary: optional real-time triage decisions in terminal output
+- `kairo-triage-bench` binary: benchmarks triage accuracy and latency against 20 hand-labeled frames
+- Benchmark dataset: `benchmarks/triage-frames.jsonl` with 20 labeled frames (5 ignore, 5 remember, 5 wake, 5 ambiguous)
+- Decision document: 004-triage-model.md (Qwen 3 4B chosen over Qwen 2.5 3B, Gemma 3, Phi-4, Llama 3.2)
+- Triage documentation: `docs/triage.md` with model swapping, debugging, signal hierarchy
+
+### Changed
+- Default triage model upgraded from Qwen 2.5 3B to Qwen 3 4B (Q4_K_M, ~2.5 GB) — better Dutch comprehension and JSON instruction following
+- Default salience threshold lowered from 0.15 to 0.10 — triage is cheap enough for window-change events
+- Updated `ARCHITECTURE.md` Layer 2 section for Qwen 3 4B with thinking mode documentation
+- Updated `config/default-models.toml` with new triage model config
+- Updated `scripts/download-models.ps1` with Qwen 3 4B download
+
+### Fixed
+- `foreground_process_name` always empty in perception output — replaced `GetModuleBaseNameW` (requires `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`) with `QueryFullProcessImageNameW` (works with `PROCESS_QUERY_LIMITED_INFORMATION`)
+
 - **Phase 1 — Perception layer**: full senses subsystem producing continuous PerceptionFrame stream
 - `kairo-vision` crate: VisionModel trait with OnnxVisionModel — full autoregressive SmolVLM-256M decoder loop (vision encoder → token embedding → KV-cache decoder → tokenizer decode)
 - Screen capture via `xcap` (GDI/BitBlt, no yellow border): primary monitor capture, 1280x720 downscaling, JPEG screenshot saving
