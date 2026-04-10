@@ -6,9 +6,11 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ### Added
 - **Phase 1 — Perception layer**: full senses subsystem producing continuous PerceptionFrame stream
-- `kairo-vision` crate: VisionModel trait with OnnxVisionModel (SmolVLM-256M via ort), image preprocessing pipeline, warmup support
+- `kairo-vision` crate: VisionModel trait with OnnxVisionModel — full autoregressive SmolVLM-256M decoder loop (vision encoder → token embedding → KV-cache decoder → tokenizer decode)
 - Screen capture via `xcap` (GDI/BitBlt, no yellow border): primary monitor capture, 1280x720 downscaling, JPEG screenshot saving
-- Audio pipeline: cpal mic capture, energy-based VAD, whisper-rs batch transcription, rubato resampling (behind `audio` feature flag)
+- Audio pipeline (default-enabled): cpal mic capture, energy-based VAD, whisper-rs batch transcription, rubato resampling
+- `.cargo/config.toml` with build environment variables (LIBCLANG_PATH, CMAKE_GENERATOR, ORT_DYLIB_PATH)
+- End-to-end smoke test documentation (docs/phase-1-smoke-test.md)
 - Context poller: foreground window title/process via Windows APIs, idle time detection, call detection (Discord/Teams/Zoom/Meet/Slack)
 - PerceptionFrameBuilder: assembles frames from three senses channels, computes salience heuristic (5 rules)
 - SQLite raw log via sqlx: schema creation, write/query frames, nightly rotation with configurable retention

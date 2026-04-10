@@ -118,6 +118,7 @@ impl std::fmt::Debug for ModelSessions {
 pub struct OnnxVisionModel {
     sessions: Arc<Mutex<ModelSessions>>,
     tokenizer: Arc<tokenizers::Tokenizer>,
+    #[allow(dead_code)]
     model_dir: PathBuf,
 }
 
@@ -329,7 +330,7 @@ impl OnnxVisionModel {
         input_ids.extend(user_hdr.get_ids().iter().map(|&id| id as i64));
         // <fake_token_around_image> <image>×N <fake_token_around_image>
         input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
-        input_ids.extend(std::iter::repeat(IMAGE_TOKEN_ID).take(num_image_tokens));
+        input_ids.extend(std::iter::repeat_n(IMAGE_TOKEN_ID, num_image_tokens));
         input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
         // \nDescribe...<|im_end|>
         input_ids.extend_from_slice(&user_ids);
