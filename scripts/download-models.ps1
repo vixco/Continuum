@@ -58,6 +58,41 @@ if (Test-Path $WhisperPath) {
     }
 }
 
+# --- Qwen 3 4B Q4_K_M (Triage LLM) ---
+$TriageDir = Join-Path $ModelsBase "triage"
+$TriagePath = Join-Path $TriageDir "qwen3-4b-q4_k_m.gguf"
+$TriageSha256 = "" # TODO: fill after first download verification
+
+if (Test-Path $TriagePath) {
+    $fileSize = (Get-Item $TriagePath).Length
+    if ($fileSize -gt 2000000000) {
+        Write-Host "[OK] Qwen 3 4B Q4_K_M already exists ($([math]::Round($fileSize / 1MB)) MB)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Qwen 3 4B file exists but seems too small ($([math]::Round($fileSize / 1MB)) MB), re-downloading..." -ForegroundColor Yellow
+        Remove-Item $TriagePath
+    }
+}
+
+if (-not (Test-Path $TriagePath)) {
+    Write-Host "[DL] Downloading Qwen 3 4B Q4_K_M GGUF (~2.5 GB)..." -ForegroundColor Yellow
+    Write-Host "     This is the triage model. It will take a few minutes." -ForegroundColor Gray
+    New-Item -ItemType Directory -Force -Path $TriageDir | Out-Null
+
+    # Bartowski quantization from HuggingFace
+    $TriageUrl = "https://huggingface.co/bartowski/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
+
+    try {
+        Invoke-WebRequest -Uri $TriageUrl -OutFile $TriagePath -UseBasicParsing
+        $dlSize = (Get-Item $TriagePath).Length
+        Write-Host "[OK] Qwen 3 4B downloaded to $TriagePath ($([math]::Round($dlSize / 1MB)) MB)" -ForegroundColor Green
+    } catch {
+        Write-Host "[WARN] Failed to download Qwen 3 4B: $_" -ForegroundColor Red
+        Write-Host "       You can download it manually from:" -ForegroundColor Gray
+        Write-Host "       $TriageUrl" -ForegroundColor Gray
+        Write-Host "       Save to: $TriagePath" -ForegroundColor Gray
+    }
+}
+
 Write-Host ""
 Write-Host "Model directory: $ModelsBase" -ForegroundColor Gray
 Write-Host ""

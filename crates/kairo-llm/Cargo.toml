@@ -6,9 +6,16 @@ license.workspace = true
 description = "Local LLM runtime wrapper (llama.cpp) for Kairo's triage layer"
 
 [dependencies]
+llama-cpp-2 = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+encoding_rs = "0.8"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]

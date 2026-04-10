@@ -11,13 +11,15 @@ gpu_enabled = false  # Phase 1: CPU only. Set true for CUDA acceleration.
 # Alternatives: moondream-2b (recommended for GPU users), florence-2-base, florence-2-large, minicpm-v-2.6
 
 [triage]
-name = "Qwen 2.5 3B Instruct"
-variant = "qwen2.5-3b-instruct-q4_k_m"
-path = "~/.kairo/models/triage/qwen2.5-3b-instruct-q4_k_m.gguf"
-size_mb = 2048
+name = "Qwen 3 4B"
+variant = "qwen3-4b-q4_k_m"
+path = "~/.kairo-dev/models/triage/qwen3-4b-q4_k_m.gguf"
+size_mb = 2560
 runtime = "llama-cpp"
-gpu_layers = "auto"  # "auto" = use GPU if available, 0 = CPU only
-# Alternatives: qwen3-4b, gemma-3-4b, phi-4-mini, llama-3.2-3b
+gpu_layers = 0  # CPU-only by default. Set to "auto" or a number to offload layers to GPU.
+# Thinking mode must be disabled for triage — the system prompt includes /no_think.
+# Low-RAM alternative: qwen2.5-3b-instruct-q4_k_m (~1.9 GB, weaker Dutch)
+# Other alternatives: gemma-3-4b, phi-4-mini, llama-3.2-3b
 
 [orchestrator]
 name = "Claude Opus 4.6"

@@ -1,0 +1,21 @@
+# GBNF grammar for Kairo triage decisions.
+# Ensures the LLM can only output valid JSON matching one of the 5 decision variants.
+# String length is NOT bounded in grammar — post-processing truncates to 200 chars.
+
+root          ::= "{" ws "\"decision\"" ws ":" ws decision-body ws "}"
+
+decision-body ::= ignore | remember | whisper | execute-simple | wake-orchestrator
+
+ignore            ::= "\"ignore\""
+remember          ::= "\"remember\"" ws "," ws "\"summary\"" ws ":" ws string
+whisper           ::= "\"whisper\"" ws "," ws "\"text\"" ws ":" ws string
+execute-simple    ::= "\"execute_simple\"" ws "," ws "\"action\"" ws ":" ws string
+wake-orchestrator ::= "\"wake_orchestrator\"" ws "," ws "\"reason\"" ws ":" ws string
+
+string ::= "\"" chars "\""
+chars  ::= char*
+char   ::= [^"\\] | "\\" escape
+escape ::= ["\\bfnrt/] | "u" hex hex hex hex
+hex    ::= [0-9a-fA-F]
+
+ws ::= [ \t\n]*

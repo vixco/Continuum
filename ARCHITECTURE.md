@@ -205,13 +205,16 @@ Only frames above a threshold (default 0.15) reach the triage layer. Everything 
 
 The triage layer is a small local LLM (3–4B parameters) that reads every salient perception frame and decides what to do. It is the gatekeeper that decides whether to spend money on Opus or not.
 
-**Default model:** Qwen 2.5 3B Instruct (Q4 quantization, ~2 GB RAM, 40 tokens/sec CPU, 150+ GPU).
+**Default model:** Qwen 3 4B (Q4_K_M quantization, ~2.5 GB RAM, 30–35 tokens/sec CPU, 150+ GPU).
 
-**Alternatives:**
-- Qwen 3 4B
-- Gemma 3 4B (better Dutch)
-- Phi-4 mini (3.8B)
-- Llama 3.2 3B
+Qwen 3 has a "thinking" mode that **must be disabled** for triage use. The triage prompt includes a `/no_think` tag in the system message to suppress chain-of-thought reasoning, which would add latency and tokens unnecessary for a classification task.
+
+**Low-RAM alternative:** Qwen 2.5 3B Instruct (Q4_K_M, ~1.9 GB) for systems with ≤4 GB available RAM. Slightly weaker Dutch comprehension and JSON instruction following, but faster at ~40 tokens/sec CPU.
+
+**Other alternatives:**
+- Gemma 3 4B (good Dutch, weaker at strict JSON grammar compliance)
+- Phi-4 mini 3.8B (strong JSON, weak Dutch — not recommended)
+- Llama 3.2 3B (fast, weak Dutch — not recommended)
 - Any GGUF-compatible model via local file path
 
 ### Triage prompt
