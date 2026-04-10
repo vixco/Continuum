@@ -1,0 +1,39 @@
+# Rust
+target/
+*.pdb
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+dist/
+.DS_Store
+next-env.d.ts
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+*.dmg
+*.msi
+*.exe
+*.nsis
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Kairo dev workspace
+.kairo-dev/
+
+# OS files
+Thumbs.db
+Desktop.ini

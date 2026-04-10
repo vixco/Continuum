@@ -1,0 +1,60 @@
+# Kairo default model configuration
+# Override in ~/.kairo/config.toml under [models]
+
+[vision]
+name = "Moondream 2"
+variant = "moondream-2b-fp16"
+path = "~/.kairo/models/vision/moondream-2b-fp16.onnx"
+size_mb = 300
+runtime = "onnx"
+# Alternatives: florence-2-base, florence-2-large, minicpm-v-2.6
+
+[triage]
+name = "Qwen 2.5 3B Instruct"
+variant = "qwen2.5-3b-instruct-q4_k_m"
+path = "~/.kairo/models/triage/qwen2.5-3b-instruct-q4_k_m.gguf"
+size_mb = 2048
+runtime = "llama-cpp"
+gpu_layers = "auto"  # "auto" = use GPU if available, 0 = CPU only
+# Alternatives: qwen3-4b, gemma-3-4b, phi-4-mini, llama-3.2-3b
+
+[orchestrator]
+name = "Claude Opus 4.6"
+model_id = "claude-opus-4-6"
+runtime = "claude-cli"
+# No local model — uses claude CLI subprocess
+
+[workers]
+mode = "auto"  # "auto" | "budget" (sonnet) | "power" (opus)
+budget_model = "claude-sonnet-4-6"
+power_model = "claude-opus-4-6"
+max_concurrent = 3
+
+[stt]
+name = "Whisper small"
+variant = "whisper-small"
+path = "~/.kairo/models/stt/whisper-small.bin"
+size_mb = 244
+runtime = "whisper-cpp"
+# Alternatives: whisper-tiny, whisper-base, whisper-medium, whisper-large-v3
+
+[tts]
+name = "Piper"
+variant = "en_US-lessac-medium"
+path = "~/.kairo/models/tts/en_US-lessac-medium.onnx"
+size_mb = 75
+runtime = "piper"
+# Alternatives: kokoro-tts, elevenlabs (requires api_key)
+
+[tts.elevenlabs]
+enabled = false
+# api_key is read from ELEVENLABS_API_KEY env var
+voice_id = ""
+model_id = "eleven_turbo_v2_5"
+
+[wake_word]
+name = "Porcupine"
+keyword = "hey kairo"
+sensitivity = 0.5
+# Path to custom .ppn file, or empty for built-in
+custom_keyword_path = ""

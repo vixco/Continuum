@@ -1,0 +1,72 @@
+# Kairo MCP tool permission tiers
+#
+# Tiers:
+#   auto            — can be called without confirmation
+#   session-approved — requires confirmation once per session, then allowed
+#   always-confirm  — requires confirmation on every call
+#   blocked         — cannot be called unless explicitly enabled by user
+#
+# Override in ~/.kairo/permissions.toml
+
+# --- Memory tools ---
+[memory]
+memory_query = "auto"
+memory_write = "auto"
+memory_fact_get = "auto"
+memory_fact_set = "session-approved"
+memory_recent = "auto"
+
+# --- Perception tools ---
+[perception]
+perception_current = "auto"
+perception_screenshot = "auto"
+perception_transcribe = "auto"
+
+# --- Voice tools ---
+[voice]
+voice_speak = "auto"
+voice_listen = "auto"
+
+# --- Windows tools ---
+[windows]
+windows_list_apps = "auto"
+windows_focus_app = "session-approved"
+windows_launch = "session-approved"
+windows_close_app = "always-confirm"
+windows_ui_click = "always-confirm"
+windows_ui_type = "always-confirm"
+windows_clipboard_get = "session-approved"
+windows_clipboard_set = "session-approved"
+windows_notification = "auto"
+
+# --- Shell tools ---
+[shell]
+shell_run = "session-approved"
+shell_run_elevated = "always-confirm"
+shell_background = "session-approved"
+
+# --- Worker tools ---
+[workers]
+spawn_worker = "session-approved"
+worker_status = "auto"
+worker_cancel = "session-approved"
+
+# --- Schedule tools ---
+[schedule]
+schedule_once = "session-approved"
+schedule_recurring = "always-confirm"
+schedule_list = "auto"
+schedule_cancel = "session-approved"
+
+# --- System tools ---
+[system]
+system_health = "auto"
+system_config_get = "auto"
+system_config_set = "always-confirm"
+
+# --- Blocked by default ---
+[blocked]
+# These require explicit user opt-in
+modify_kairo_installation = "blocked"
+access_credential_stores = "blocked"
+access_password_managers = "blocked"

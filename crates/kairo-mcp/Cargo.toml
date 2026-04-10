@@ -1,0 +1,20 @@
+[package]
+name = "kairo-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server exposing Windows-specific tools to Claude Code for Kairo"
+
+[[bin]]
+name = "kairo-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "0.8"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
