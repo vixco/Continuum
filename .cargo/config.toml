@@ -1,0 +1,22 @@
+# Cargo build configuration for Kairo
+#
+# whisper-rs-sys requires:
+# - LLVM/libclang for bindgen (set LIBCLANG_PATH)
+# - cmake for building whisper.cpp
+# - MSVC system headers for bindgen on Windows
+#
+# ort (ONNX Runtime) requires:
+# - onnxruntime.dll at runtime (set ORT_DYLIB_PATH)
+
+[env]
+# LLVM/clang for whisper-rs bindgen. Adjust if LLVM is installed elsewhere.
+LIBCLANG_PATH = "C:/LLVM/bin"
+
+# Clang + MSVC include paths for bindgen header resolution
+BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\""""
+
+# Force Visual Studio 2019 generator (cmake auto-detection may pick wrong version)
+CMAKE_GENERATOR = "Visual Studio 16 2019"
+
+# ONNX Runtime library path for ort load-dynamic feature
+ORT_DYLIB_PATH = "C:/onnxruntime/onnxruntime.dll"

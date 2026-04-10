@@ -11,9 +11,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, StreamConfig};
+use cpal::{SampleFormat, StreamConfig};
+use rubato::audioadapter::Adapter;
+use rubato::audioadapter_buffers::direct::SequentialSliceOfSlices;
 use rubato::{
-    SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -237,12 +240,13 @@ fn resample_to_16khz(
 
     let ratio = f64::from(TARGET_SAMPLE_RATE) / f64::from(source_rate);
 
-    let mut resampler = SincFixedIn::<f32>::new(
+    let mut resampler = Async::<f32>::new_sinc(
         ratio,
         2.0,
-        params,
+        &params,
         RESAMPLER_CHUNK_SIZE,
         1, // mono
+        FixedAsync::Input,
     )
     .context("Failed to create resampler")?;
 
@@ -259,21 +263,26 @@ fn resample_to_16khz(
             chunk.to_vec()
         };
 
+        let input_slice: &[f32] = &input_chunk;
+        let input_slices: &[&[f32]] = &[input_slice];
+        let input_adapter =
+            SequentialSliceOfSlices::new(input_slices, 1, input_chunk.len())
+                .context("Failed to create input adapter")?;
         let result = resampler
-            .process(&[&input_chunk], None)
+            .process(&input_adapter, 0, None)
             .context("Resampler processing failed")?;
 
-        if let Some(channel_data) = result.first() {
-            // Only keep output proportional to the actual input length
-            // (not the zero-padded portion) for the last chunk.
-            if chunk.len() < RESAMPLER_CHUNK_SIZE {
-                let actual_output_len =
-                    (channel_data.len() as f64 * chunk.len() as f64 / RESAMPLER_CHUNK_SIZE as f64)
-                        as usize;
-                output.extend_from_slice(&channel_data[..actual_output_len.min(channel_data.len())]);
-            } else {
-                output.extend_from_slice(channel_data);
-            }
+        let frames = result.frames();
+        let channel_data = result.take_data();
+        // Only keep output proportional to the actual input length
+        // (not the zero-padded portion) for the last chunk.
+        if chunk.len() < RESAMPLER_CHUNK_SIZE {
+            let actual_output_len =
+                (frames as f64 * chunk.len() as f64 / RESAMPLER_CHUNK_SIZE as f64)
+                    as usize;
+            output.extend_from_slice(&channel_data[..actual_output_len.min(channel_data.len())]);
+        } else {
+            output.extend_from_slice(&channel_data[..frames]);
         }
     }
 
@@ -592,7 +601,8 @@ impl AudioWatcher {
             .ok_or_else(|| anyhow::anyhow!("No default audio input device found"))?;
 
         let device_name = device
-            .name()
+            .description()
+            .map(|d| format!("{d:?}"))
             .unwrap_or_else(|_| "unknown".to_string());
 
         tracing::info!(
@@ -605,7 +615,7 @@ impl AudioWatcher {
         // Try to get a config that matches 16 kHz mono f32 first.
         let config = self.select_input_config(&device)?;
 
-        let native_rate = config.sample_rate.0;
+        let native_rate = config.sample_rate;
         let native_channels = config.channels;
 
         tracing::info!(
@@ -655,7 +665,7 @@ impl AudioWatcher {
         // Try the preferred config first: 16 kHz, mono, f32.
         let preferred = StreamConfig {
             channels: 1,
-            sample_rate: SampleRate(TARGET_SAMPLE_RATE),
+            sample_rate: TARGET_SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -665,8 +675,8 @@ impl AudioWatcher {
             for range in supported_configs {
                 if range.sample_format() == SampleFormat::F32
                     && range.channels() == 1
-                    && range.min_sample_rate().0 <= TARGET_SAMPLE_RATE
-                    && range.max_sample_rate().0 >= TARGET_SAMPLE_RATE
+                    && range.min_sample_rate() <= TARGET_SAMPLE_RATE
+                    && range.max_sample_rate() >= TARGET_SAMPLE_RATE
                 {
                     tracing::debug!(
                         layer = "senses",
@@ -686,7 +696,7 @@ impl AudioWatcher {
         tracing::info!(
             layer = "senses",
             component = "audio",
-            sample_rate = default_config.sample_rate().0,
+            sample_rate = default_config.sample_rate(),
             channels = default_config.channels(),
             format = ?default_config.sample_format(),
             "Using default input config (will resample to 16kHz mono)"
@@ -753,26 +763,36 @@ impl AudioWatcher {
                 .full(params, &samples)
                 .context("Whisper inference failed")?;
 
-            let num_segments = state
-                .full_n_segments()
-                .context("Failed to get whisper segment count")?;
+            let num_segments = state.full_n_segments();
 
             let mut transcript = String::new();
             for i in 0..num_segments {
-                match state.full_get_segment_text(i) {
-                    Ok(text) => {
-                        if !transcript.is_empty() {
-                            transcript.push(' ');
+                match state.get_segment(i) {
+                    Some(segment) => {
+                        match segment.to_str_lossy() {
+                            Ok(text) => {
+                                if !transcript.is_empty() {
+                                    transcript.push(' ');
+                                }
+                                transcript.push_str(text.trim());
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    layer = "senses",
+                                    component = "audio",
+                                    segment = i,
+                                    error = %err,
+                                    "Failed to get whisper segment text"
+                                );
+                            }
                         }
-                        transcript.push_str(text.trim());
                     }
-                    Err(err) => {
+                    None => {
                         tracing::warn!(
                             layer = "senses",
                             component = "audio",
                             segment = i,
-                            error = %err,
-                            "Failed to get whisper segment text"
+                            "Whisper segment not found"
                         );
                     }
                 }
