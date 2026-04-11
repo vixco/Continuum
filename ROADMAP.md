@@ -71,7 +71,9 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Goal:** A small local LLM reads perception frames and outputs triage decisions.
 
-**Deliverable:** The triage layer runs the Qwen 3 4B model via llama.cpp, evaluates each salient perception frame, and produces a JSON decision within 1.5 seconds.
+**Deliverable:** The triage layer runs the Qwen 3 8B model via llama.cpp, evaluates each salient perception frame, and produces a JSON decision within 1.5 seconds.
+
+**Status:** Complete (2026-04-11). 19/20 accuracy (95%), P50 964ms, P95 1143ms.
 
 **Done when:**
 

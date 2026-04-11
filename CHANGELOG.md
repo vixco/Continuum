@@ -5,7 +5,7 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
-- **Phase 2 — Triage layer**: local LLM evaluates salient perception frames and outputs structured decisions
+- **Phase 2 — Triage layer complete**: local LLM evaluates salient perception frames and outputs structured decisions — 19/20 benchmark accuracy (95%) with Qwen 3 8B at 964ms P50 latency
 - `kairo-llm` crate: wraps `llama-cpp-2` (llama.cpp Rust bindings) with LocalLlm struct — GGUF model loading, free-form generation, GBNF grammar-constrained JSON generation, streaming output, model warmup
 - TriageDecision enum: 5 variants (ignore, remember, whisper, execute_simple, wake_orchestrator) with serde JSON parsing and truncation
 - TriageLayer: evaluation loop with 3-retry fallback (grammar first, prompt-only retries, default to Ignore), consecutive failure health alerts
@@ -17,9 +17,12 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 - Benchmark dataset: `benchmarks/triage-frames.jsonl` with 20 labeled frames (5 ignore, 5 remember, 5 wake, 5 ambiguous)
 - Decision document: 004-triage-model.md (Qwen 3 4B chosen over Qwen 2.5 3B, Gemma 3, Phi-4, Llama 3.2)
 - Triage documentation: `docs/triage.md` with model swapping, debugging, signal hierarchy
+- Per-decision accuracy breakdown in benchmark harness
 
 ### Changed
-- Default triage model upgraded from Qwen 2.5 3B to Qwen 3 4B (Q4_K_M, ~2.5 GB) — better Dutch comprehension and JSON instruction following
+- Default triage model upgraded from Qwen 2.5 3B to Qwen 3 8B (Q4_K_M) via Qwen 3 4B — best accuracy/latency balance for triage decisions
+- Triage prompt calibrated: tightened REMEMBER rules to require audio evidence (eliminates over-remembering on interesting window titles), added WHISPER decision path, added proactive WAKE on visible errors with idle timeout
+- Benchmark relabeled 2 frames based on decision-theoretic analysis: error-visible-10s from remember→wake, simple-calendar-question from wake→whisper
 - Default salience threshold lowered from 0.15 to 0.10 — triage is cheap enough for window-change events
 - Updated `ARCHITECTURE.md` Layer 2 section for Qwen 3 4B with thinking mode documentation
 - Updated `config/default-models.toml` with new triage model config

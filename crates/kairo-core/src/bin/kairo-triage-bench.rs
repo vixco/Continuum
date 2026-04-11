@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     let entries: Vec<BenchEntry> = bench_data
         .lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//"))
         .enumerate()
         .map(|(i, line)| {
             serde_json::from_str(line)
@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
     let mut correct = 0u32;
     let mut total = 0u32;
     let mut latencies: Vec<f64> = Vec::new();
+    let mut results: Vec<(&str, String)> = Vec::new(); // (expected, got)
 
     println!(
         "{:<4} {:<18} {:<18} {:<8} {:<10}",
@@ -138,12 +139,13 @@ async fn main() -> Result<()> {
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
         latencies.push(latency_ms);
 
-        let got = decision.variant_name();
+        let got = decision.variant_name().to_owned();
         let matched = got == entry.expected;
         if matched {
             correct += 1;
         }
         total += 1;
+        results.push((entry.expected.as_str(), got.clone()));
 
         let match_str = if matched { "OK" } else { "MISS" };
         println!(
@@ -156,8 +158,24 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Statistics.
+    // Per-decision accuracy breakdown.
     println!("\n{}", "=".repeat(62));
+
+    let mut per_decision: std::collections::BTreeMap<&str, (u32, u32)> =
+        std::collections::BTreeMap::new();
+    for (expected, got) in &results {
+        let (c, t) = per_decision.entry(*expected).or_insert((0, 0));
+        *t += 1;
+        if got == expected {
+            *c += 1;
+        }
+    }
+
+    println!("\nPer-decision accuracy:");
+    for (decision, (c, t)) in &per_decision {
+        let pct = if *t > 0 { *c as f64 / *t as f64 * 100.0 } else { 0.0 };
+        println!("  {:<18} {}/{} ({:.0}%)", decision, c, t, pct);
+    }
 
     let accuracy = if total > 0 {
         correct as f64 / total as f64 * 100.0
