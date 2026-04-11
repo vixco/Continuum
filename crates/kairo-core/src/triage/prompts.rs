@@ -93,24 +93,44 @@ pub fn build_triage_grammar() -> String {
 /// Placeholders: `{user}`, `{PERCEPTION_FRAME}`, `{MEMORY_SUMMARY}`.
 const PROMPT_TEMPLATE: &str = include_str!("../../../../prompts/triage-system.md");
 
-/// Build the full triage prompt for a single evaluation call.
+/// Build the full triage prompt in Qwen 3 ChatML format.
 ///
-/// Substitutes the perception frame JSON and memory summary into the
-/// template. The user name defaults to "the user" until Phase 3 adds
-/// user profile support.
+/// The ChatML wrapper is required for two reasons:
+/// 1. `/no_think` only suppresses thinking tokens inside a ChatML user turn
+/// 2. The model generates cleaner single-JSON output in chat mode vs raw text
+///
+/// Format:
+/// ```text
+/// <|im_start|>system
+/// {system instructions}<|im_end|>
+/// <|im_start|>user
+/// /no_think
+/// {frame + memory}<|im_end|>
+/// <|im_start|>assistant
+/// ```
 pub fn build_triage_prompt(frame: &PerceptionFrame, memory_summary: &str) -> String {
-    let frame_json = serde_json::to_string_pretty(frame).unwrap_or_else(|_| "{}".to_string());
+    let frame_json = serde_json::to_string(frame).unwrap_or_else(|_| "{}".to_string());
 
     let memory = if memory_summary.is_empty() {
-        "No recent memory available."
+        "No recent memory."
     } else {
         memory_summary
     };
 
-    PROMPT_TEMPLATE
+    let system_content = PROMPT_TEMPLATE
         .replace("{user}", "the user")
-        .replace("{PERCEPTION_FRAME}", &frame_json)
-        .replace("{MEMORY_SUMMARY}", memory)
+        .replace("{PERCEPTION_FRAME}", "")
+        .replace("{MEMORY_SUMMARY}", "")
+        .trim()
+        .to_string();
+
+    format!(
+        "<|im_start|>system\n{system_content}<|im_end|>\n\
+         <|im_start|>user\n/no_think\n\
+         Frame: {frame_json}\n\
+         Memory: {memory}<|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
 }
 
 #[cfg(test)]
@@ -158,12 +178,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prompt_substitutes_frame() {
+    fn test_build_prompt_is_chatml() {
+        let prompt = build_triage_prompt(&sample_frame(), "");
+        assert!(prompt.starts_with("<|im_start|>system\n"));
+        assert!(prompt.contains("<|im_end|>"));
+        assert!(prompt.contains("<|im_start|>user\n/no_think\n"));
+        assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn test_build_prompt_contains_frame_data() {
         let prompt = build_triage_prompt(&sample_frame(), "");
         assert!(prompt.contains("Code.exe"));
         assert!(prompt.contains("main.rs - kairo-ai"));
-        assert!(!prompt.contains("{PERCEPTION_FRAME}"));
-        assert!(!prompt.contains("{MEMORY_SUMMARY}"));
     }
 
     #[test]
@@ -175,6 +202,6 @@ mod tests {
     #[test]
     fn test_build_prompt_empty_memory_gets_placeholder() {
         let prompt = build_triage_prompt(&sample_frame(), "");
-        assert!(prompt.contains("No recent memory available"));
+        assert!(prompt.contains("No recent memory."));
     }
 }

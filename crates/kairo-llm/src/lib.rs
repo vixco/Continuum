@@ -312,7 +312,7 @@ fn generate_sync(
     // Tokenize the prompt.
     let tokens = inner
         .model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(prompt, AddBos::Never)
         .context("Tokenization failed")?;
 
     debug!(
@@ -430,7 +430,7 @@ where
 
     let tokens = inner
         .model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(prompt, AddBos::Never)
         .context("Tokenization failed")?;
 
     let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
