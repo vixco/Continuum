@@ -29,7 +29,14 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 - Updated `scripts/download-models.ps1` with Qwen 3 4B download
 
 ### Fixed
+- SmolVLM decoder repetition loop — replaced greedy argmax with repetition-penalty sampling (rep_penalty=1.15, no_repeat_ngram=3, temperature=0.3, top_p=0.9) plus repetition safety net
+- Triage `llama_context` recreated on every call — now cached and reused with KV cache clearing between evaluations
+- Triage KV cache on CPU instead of GPU — `kairo-perception` was using `TriageConfig::default()` with `gpu_layers: 0`; now explicitly sets `gpu_layers: 999` matching the benchmark config
+- `TriageConfig::default()` gpu_layers changed from 0 to 999 to prevent future GPU misconfiguration
 - `foreground_process_name` always empty in perception output — replaced `GetModuleBaseNameW` (requires `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`) with `QueryFullProcessImageNameW` (works with `PROCESS_QUERY_LIMITED_INFORMATION`)
+
+### Known limitations
+- SmolVLM-256M vision model hallucinates on complex screens (browser windows, dense UI). Triage is designed to treat vision as corroborating evidence only; primary signals are foreground_process_name and audio transcript. Vision quality will improve in Phase 3 when orchestrator receives raw screenshots directly to Claude Opus.
 
 - **Phase 1 — Perception layer**: full senses subsystem producing continuous PerceptionFrame stream
 - `kairo-vision` crate: VisionModel trait with OnnxVisionModel — full autoregressive SmolVLM-256M decoder loop (vision encoder → token embedding → KV-cache decoder → tokenizer decode)

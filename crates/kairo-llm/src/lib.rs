@@ -18,13 +18,14 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use tracing::{debug, info, warn};
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -121,6 +122,14 @@ pub enum LlmError {
 
 /// Inner state shared across the `Arc` boundary.
 struct LlmInner {
+    /// Cached context for reuse across generate calls. Declared before `model`
+    /// so it drops first (Rust drops fields in declaration order).
+    ///
+    /// SAFETY: The lifetime is transmuted from `'model` to `'static`. Safe because:
+    /// - The context and model are in the same `Arc<LlmInner>`, same real lifetime
+    /// - `ctx_cache` drops before `model` (field declaration order)
+    /// - `LlamaContext::drop` only calls `llama_free`, does not access the model
+    ctx_cache: Mutex<Option<LlamaContext<'static>>>,
     backend: LlamaBackend,
     model: LlamaModel,
     config: LlmConfig,
@@ -186,6 +195,7 @@ impl LocalLlm {
 
         Ok(Self {
             inner: Arc::new(LlmInner {
+                ctx_cache: Mutex::new(None),
                 backend,
                 model,
                 config,
@@ -297,17 +307,28 @@ fn generate_sync(
 ) -> Result<String> {
     let max_tokens = opts.max_tokens.unwrap_or(inner.config.max_tokens);
 
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(inner.config.context_size))
-        .with_n_threads(inner.config.n_threads as i32)
-        .with_n_threads_batch(inner.config.n_threads_batch as i32);
+    // Reuse cached context (create on first call, clear KV cache on subsequent).
+    let mut ctx_guard = inner.ctx_cache.lock().unwrap_or_else(|e| e.into_inner());
 
-    let mut ctx = inner
-        .model
-        .new_context(&inner.backend, ctx_params)
-        .map_err(|e| LlmError::LoadFailed {
-            reason: format!("Context creation failed: {e:?}"),
-        })?;
+    if ctx_guard.is_none() {
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(inner.config.context_size))
+            .with_n_threads(inner.config.n_threads as i32)
+            .with_n_threads_batch(inner.config.n_threads_batch as i32);
+
+        let new_ctx = inner
+            .model
+            .new_context(&inner.backend, ctx_params)
+            .map_err(|e| LlmError::LoadFailed {
+                reason: format!("Context creation failed: {e:?}"),
+            })?;
+
+        // SAFETY: Erase the lifetime. See LlmInner::ctx_cache doc for invariants.
+        *ctx_guard = Some(unsafe { std::mem::transmute(new_ctx) });
+    }
+
+    let ctx = ctx_guard.as_mut().expect("ctx just initialized");
+    ctx.clear_kv_cache();
 
     // Tokenize the prompt.
     let tokens = inner
@@ -374,7 +395,7 @@ fn generate_sync(
     let mut saw_open_brace = false;
 
     for _ in 0..max_tokens {
-        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        let token = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
         if inner.model.is_eog_token(token) {
@@ -438,17 +459,28 @@ where
 {
     let max_tokens = opts.max_tokens.unwrap_or(inner.config.max_tokens);
 
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(inner.config.context_size))
-        .with_n_threads(inner.config.n_threads as i32)
-        .with_n_threads_batch(inner.config.n_threads_batch as i32);
+    // Reuse cached context (same as generate_sync).
+    let mut ctx_guard = inner.ctx_cache.lock().unwrap_or_else(|e| e.into_inner());
 
-    let mut ctx = inner
-        .model
-        .new_context(&inner.backend, ctx_params)
-        .map_err(|e| LlmError::LoadFailed {
-            reason: format!("Context creation failed: {e:?}"),
-        })?;
+    if ctx_guard.is_none() {
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(inner.config.context_size))
+            .with_n_threads(inner.config.n_threads as i32)
+            .with_n_threads_batch(inner.config.n_threads_batch as i32);
+
+        let new_ctx = inner
+            .model
+            .new_context(&inner.backend, ctx_params)
+            .map_err(|e| LlmError::LoadFailed {
+                reason: format!("Context creation failed: {e:?}"),
+            })?;
+
+        // SAFETY: See LlmInner::ctx_cache doc for invariants.
+        *ctx_guard = Some(unsafe { std::mem::transmute(new_ctx) });
+    }
+
+    let ctx = ctx_guard.as_mut().expect("ctx just initialized");
+    ctx.clear_kv_cache();
 
     let tokens = inner
         .model
@@ -485,7 +517,7 @@ where
     let mut n_cur = batch.n_tokens();
 
     for _ in 0..max_tokens {
-        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        let token = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
         if inner.model.is_eog_token(token) {

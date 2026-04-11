@@ -78,6 +78,15 @@ const HEAD_DIM: usize = 64;
 /// Maximum tokens to generate.
 const MAX_NEW_TOKENS: usize = 64;
 
+/// Repetition penalty for the decoder (>1.0 penalizes repeated tokens).
+const REP_PENALTY: f32 = 1.15;
+
+/// Decoder sampling temperature (low but non-zero to break ties).
+const VISION_TEMPERATURE: f32 = 0.3;
+
+/// Top-p (nucleus) sampling threshold for the decoder.
+const VISION_TOP_P: f32 = 0.9;
+
 // ---------------------------------------------------------------------------
 // Internal session bundle
 // ---------------------------------------------------------------------------
@@ -427,13 +436,89 @@ impl OnnxVisionModel {
             let vocab = logits.shape()[2];
             let last = logits.shape()[1] - 1;
 
-            let mut best_tok: i64 = 0;
-            let mut best_val = f32::NEG_INFINITY;
-            for v in 0..vocab {
-                let s = logits[[0, last, v]];
-                if s > best_val {
-                    best_val = s;
-                    best_tok = v as i64;
+            // ---- Sampling with repetition penalty, n-gram blocking, temperature, top-p ----
+            let mut token_logits: Vec<f32> =
+                (0..vocab).map(|v| logits[[0, last, v]]).collect();
+
+            // (a) Repetition penalty: penalize tokens already in output.
+            for &prev_tok in &generated {
+                let idx = prev_tok as usize;
+                if idx < vocab {
+                    if token_logits[idx] > 0.0 {
+                        token_logits[idx] /= REP_PENALTY;
+                    } else {
+                        token_logits[idx] *= REP_PENALTY;
+                    }
+                }
+            }
+
+            // (b) No-repeat 3-gram blocking: if the last 2 generated tokens match
+            // a previous bigram, block whatever token followed that bigram.
+            if generated.len() >= 2 {
+                let tail = (
+                    generated[generated.len() - 2],
+                    generated[generated.len() - 1],
+                );
+                for w in generated.windows(3) {
+                    if (w[0], w[1]) == tail {
+                        let blocked = w[2] as usize;
+                        if blocked < vocab {
+                            token_logits[blocked] = f32::NEG_INFINITY;
+                        }
+                    }
+                }
+            }
+
+            // (c) Temperature scaling.
+            for l in token_logits.iter_mut() {
+                *l /= VISION_TEMPERATURE;
+            }
+
+            // (d) Softmax → probabilities.
+            let max_l = token_logits
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> =
+                token_logits.iter().map(|&l| (l - max_l).exp()).collect();
+            let sum_exp: f32 = exps.iter().sum();
+            let probs: Vec<f32> = exps.iter().map(|e| e / sum_exp).collect();
+
+            // (e) Top-p (nucleus) sampling: keep tokens until cumulative prob >= TOP_P.
+            let mut sorted_idx: Vec<usize> = (0..vocab).collect();
+            sorted_idx.sort_unstable_by(|&a, &b| {
+                probs[b]
+                    .partial_cmp(&probs[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut cumul = 0.0f32;
+            let mut nucleus: Vec<(usize, f32)> = Vec::new();
+            for &idx in &sorted_idx {
+                nucleus.push((idx, probs[idx]));
+                cumul += probs[idx];
+                if cumul >= VISION_TOP_P {
+                    break;
+                }
+            }
+
+            // (f) Sample from nucleus using hash-based PRNG (avoids rand dep).
+            let norm: f32 = nucleus.iter().map(|(_, p)| p).sum();
+            let r = {
+                let seed = step as u64
+                    ^ (generated.len() as u64).wrapping_mul(0x517cc1b727220a95);
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&seed, &mut h);
+                let hash = std::hash::Hasher::finish(&h);
+                (hash % 1_000_000) as f32 / 1_000_000.0 * norm
+            };
+            let mut acc = 0.0f32;
+            let mut best_tok: i64 = nucleus[0].0 as i64;
+            for &(idx, p) in &nucleus {
+                acc += p;
+                if acc >= r {
+                    best_tok = idx as i64;
+                    break;
                 }
             }
 
@@ -442,6 +527,29 @@ impl OnnxVisionModel {
                 break;
             }
             generated.push(best_tok);
+
+            // Repetition safety net: if last 10 tokens contain a repeated 3-gram, stop.
+            if generated.len() >= 6 {
+                let start = generated.len().saturating_sub(10);
+                let tail = &generated[start..];
+                let mut seen = std::collections::HashSet::new();
+                let mut repeated = false;
+                for w in tail.windows(3) {
+                    if !seen.insert((w[0], w[1], w[2])) {
+                        repeated = true;
+                        break;
+                    }
+                }
+                if repeated {
+                    debug!(
+                        layer = "senses",
+                        component = "vision",
+                        step,
+                        "Repetition safety net triggered"
+                    );
+                    break;
+                }
+            }
 
             // Update KV-cache from decoder outputs [1..61].
             let n_out = dec_out.len();

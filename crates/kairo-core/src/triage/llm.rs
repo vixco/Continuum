@@ -45,7 +45,7 @@ impl Default for TriageConfig {
             model_path: String::new(),
             context_size: 4096,
             n_threads: 4,
-            gpu_layers: 0,
+            gpu_layers: 999,
             max_tokens: 128,
             temperature: 0.1,
             latency_warn_ms: 2000,

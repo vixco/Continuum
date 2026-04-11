@@ -169,10 +169,20 @@ async fn main() -> Result<()> {
                 "Initializing triage layer..."
             );
 
+            let n_threads = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+                .max(4)
+                .min(14);
+
             let triage_config = TriageConfig {
                 model_path: model_path.to_string_lossy().into_owned(),
-                n_threads: 4,
-                ..Default::default()
+                context_size: 2048,
+                n_threads,
+                gpu_layers: 999,
+                max_tokens: 256,
+                temperature: 0.0,
+                latency_warn_ms: 2000,
             };
 
             match TriageLayer::new(triage_config) {
