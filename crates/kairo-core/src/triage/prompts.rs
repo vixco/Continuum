@@ -88,26 +88,14 @@ pub fn build_triage_grammar() -> String {
     }
 }
 
-/// The triage system prompt template.
-///
-/// Placeholders: `{user}`, `{PERCEPTION_FRAME}`, `{MEMORY_SUMMARY}`.
-const PROMPT_TEMPLATE: &str = include_str!("../../../../prompts/triage-system.md");
+/// The triage system prompt, kept deliberately short to minimize prompt
+/// processing time. At ~250 tokens this is 4x shorter than the original.
+const SYSTEM_PROMPT: &str = include_str!("../../../../prompts/triage-system.md");
 
-/// Build the full triage prompt in Qwen 3 ChatML format.
+/// Build the triage prompt in Qwen 3 ChatML format.
 ///
-/// The ChatML wrapper is required for two reasons:
-/// 1. `/no_think` only suppresses thinking tokens inside a ChatML user turn
-/// 2. The model generates cleaner single-JSON output in chat mode vs raw text
-///
-/// Format:
-/// ```text
-/// <|im_start|>system
-/// {system instructions}<|im_end|>
-/// <|im_start|>user
-/// /no_think
-/// {frame + memory}<|im_end|>
-/// <|im_start|>assistant
-/// ```
+/// The ChatML wrapper is required so `/no_think` suppresses thinking tokens.
+/// The frame is serialized as compact JSON in the user turn to save tokens.
 pub fn build_triage_prompt(frame: &PerceptionFrame, memory_summary: &str) -> String {
     let frame_json = serde_json::to_string(frame).unwrap_or_else(|_| "{}".to_string());
 
@@ -117,15 +105,8 @@ pub fn build_triage_prompt(frame: &PerceptionFrame, memory_summary: &str) -> Str
         memory_summary
     };
 
-    let system_content = PROMPT_TEMPLATE
-        .replace("{user}", "the user")
-        .replace("{PERCEPTION_FRAME}", "")
-        .replace("{MEMORY_SUMMARY}", "")
-        .trim()
-        .to_string();
-
     format!(
-        "<|im_start|>system\n{system_content}<|im_end|>\n\
+        "<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n\
          <|im_start|>user\n/no_think\n\
          Frame: {frame_json}\n\
          Memory: {memory}<|im_end|>\n\
@@ -172,9 +153,15 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_template_is_nonempty() {
-        assert!(PROMPT_TEMPLATE.contains("{PERCEPTION_FRAME}"));
-        assert!(PROMPT_TEMPLATE.contains("{MEMORY_SUMMARY}"));
+    fn test_system_prompt_is_compact() {
+        assert!(SYSTEM_PROMPT.contains("triage"));
+        assert!(SYSTEM_PROMPT.contains("ignore"));
+        // System prompt should be under 1200 bytes (~300 tokens)
+        assert!(
+            SYSTEM_PROMPT.len() < 1200,
+            "System prompt too long: {} bytes",
+            SYSTEM_PROMPT.len()
+        );
     }
 
     #[test]
