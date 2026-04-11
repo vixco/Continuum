@@ -5,6 +5,25 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- **Phase 3 — Orchestrator**: Claude Opus 4.6 wakes up, speaks, and remembers
+- Orchestrator subprocess manager: spawns fresh `claude -p` process per wake, streams response events, captures cost/duration (ADR 005: fresh process per wake — conversation purity over process reuse)
+- Episodic memory: LanceDB vector store with fastembed BGESmallENV15Q (384-dim, 66 MB) for semantic similarity search over past events
+- Semantic memory: SQLite store for stable facts about the user, projects, and preferences with key-value + graph edges
+- Memory retrieval: combines episodic vector search + semantic fact lookup into a single MemoryContext for each wake
+- Wake context builder: assembles orchestrator user message from current frame, history, memories, and wake reason (~400 tokens)
+- Compact orchestrator system prompt (`prompts/orchestrator-system.md`): ~400 tokens, derived from SOUL.md, with Kairo personality, behavior rules, language detection, and Phase 3 guardrails
+- `kairo` binary: complete runtime with perception + triage + orchestrator in one process
+- Integration test with mock Claude Code event stream (no API key required)
+- Decision document: 005-orchestrator-lifecycle.md
+
+### Changed
+- `orchestrator/spawn.rs`: rewritten from placeholder to full subprocess lifecycle
+- `orchestrator/mod.rs`: re-exports OrchestratorConfig, OrchestratorEvent, WakeResult, wake_orchestrator
+- `memory/mod.rs`: added retrieval module
+- `memory/episodic.rs`: implemented with LanceDB + fastembed (was stub)
+- `memory/semantic.rs`: implemented with SQLite (was stub)
+- Added lancedb, fastembed, arrow-array, arrow-schema, futures to workspace dependencies
+
 - **Phase 2 — Triage layer complete**: local LLM evaluates salient perception frames and outputs structured decisions — 19/20 benchmark accuracy (95%) with Qwen 3 8B at 964ms P50 latency
 - `kairo-llm` crate: wraps `llama-cpp-2` (llama.cpp Rust bindings) with LocalLlm struct — GGUF model loading, free-form generation, GBNF grammar-constrained JSON generation, streaming output, model warmup
 - TriageDecision enum: 5 variants (ignore, remember, whisper, execute_simple, wake_orchestrator) with serde JSON parsing and truncation

@@ -82,9 +82,10 @@ mod tests {
     fn test_system_prompt_is_compact() {
         assert!(SYSTEM_PROMPT.contains("triage"));
         assert!(SYSTEM_PROMPT.contains("ignore"));
-        // System prompt should be under 1200 bytes (~300 tokens)
+        // System prompt should be under 4500 bytes (~1100 tokens).
+        // Grew in Phase 2 with signal reliability hierarchy and calibrated rules.
         assert!(
-            SYSTEM_PROMPT.len() < 1200,
+            SYSTEM_PROMPT.len() < 4500,
             "System prompt too long: {} bytes",
             SYSTEM_PROMPT.len()
         );

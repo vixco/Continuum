@@ -37,3 +37,4 @@ apps/desktop/src-tauri/gen/
 # OS files
 Thumbs.db
 Desktop.ini
+.fastembed_cache/

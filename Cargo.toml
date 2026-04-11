@@ -30,3 +30,9 @@ ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray
 image = "0.25"
 ndarray = "0.17"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+# Phase 3: Memory layer
+lancedb = "0.27"
+fastembed = { version = "5.13", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
+arrow-array = "57"
+arrow-schema = "57"

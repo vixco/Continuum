@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file tells Claude Code how to work on the Kairo repository. Read it before touching any code.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Who you are in this repo
 
@@ -47,6 +47,54 @@ scripts/               Install and dev setup scripts
 ```
 
 See `ARCHITECTURE.md` for the full directory layout and what goes where.
+
+## Build prerequisites
+
+The workspace has native dependencies that must be present before `cargo build` succeeds. These are configured in `.cargo/config.toml`:
+
+- **LLVM/libclang** — required by `whisper-rs` bindgen. Set `LIBCLANG_PATH` (default: `C:/LLVM/bin`)
+- **CMake + Ninja** — required by `whisper-rs` (whisper.cpp build). `CMAKE_GENERATOR` is set to `Ninja`
+- **ONNX Runtime** — required at runtime by `kairo-vision` via `ort` (load-dynamic). Set `ORT_DYLIB_PATH`
+- **protoc** — required by `lancedb` (prost-build). Set `PROTOC` env var
+- **MSVC Build Tools** — Windows SDK headers for bindgen
+
+Run `scripts/dev-setup.ps1` to install these automatically, or see `.cargo/config.toml` for the exact paths expected.
+
+## Common commands
+
+```bash
+# Ensure cargo is on PATH in bash (may be needed per-session)
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Build
+cargo build                              # debug build, full workspace
+cargo build -p kairo-core                # single crate
+cargo build --release                    # release build
+
+# Lint and format
+cargo fmt --all                          # format all crates
+cargo fmt --all -- --check               # check formatting without modifying
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Test
+cargo test                               # all tests in workspace
+cargo test -p kairo-core                 # tests for one crate
+cargo test -p kairo-core -- triage       # tests matching "triage" in kairo-core
+cargo test -p kairo-core --test orchestrator_mock  # run a specific integration test
+
+# Run binaries
+cargo run --bin kairo-perception         # live perception stream
+cargo run --bin kairo-perception -- --triage  # perception + triage decisions
+cargo run --bin kairo-triage-bench       # triage accuracy benchmark (20 frames)
+cargo run --bin kairo                    # main orchestrator binary
+
+# Triage benchmark (measures accuracy + latency, expects model in ~/.kairo-dev/models/)
+cargo run --bin kairo-triage-bench       # runs 20-frame benchmark, reports accuracy/P50/P95
+```
+
+## Current project status
+
+Phases 0–3 are complete (bootstrap, perception, triage, orchestrator). Currently at the boundary of Phase 3/4. See `ROADMAP.md` for the full phase plan and checkbox status. The triage layer uses Qwen 3 8B (upgraded from 2.5 3B) with 95% accuracy on the benchmark suite.
 
 ## Coding standards
 

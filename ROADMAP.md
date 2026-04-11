@@ -100,17 +100,17 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Done when:**
 
-- [ ] `crates/kairo-core/src/orchestrator/mod.rs` implements the full spawn + stream loop
-- [ ] `prompts/orchestrator-system.md` is written (imports SOUL.md and adds runtime context)
-- [ ] The orchestrator receives a wake context (current frame + memory recall + active project)
-- [ ] Opus's response is streamed token-by-token and displayed in real time
-- [ ] Memory system is implemented:
-  - [ ] `crates/kairo-core/src/memory/raw_log.rs` (SQLite, already from Phase 1)
-  - [ ] `crates/kairo-core/src/memory/episodic.rs` with LanceDB and fastembed
-  - [ ] `crates/kairo-core/src/memory/semantic.rs` with SQLite
+- [x] `crates/kairo-core/src/orchestrator/mod.rs` implements the full spawn + stream loop
+- [x] `prompts/orchestrator-system.md` is written (compact 400-token operational prompt derived from SOUL.md)
+- [x] The orchestrator receives a wake context (current frame + memory recall + active project)
+- [x] Opus's response is streamed token-by-token and displayed in real time
+- [x] Memory system is implemented:
+  - [x] `crates/kairo-core/src/memory/raw_log.rs` (SQLite, already from Phase 1)
+  - [x] `crates/kairo-core/src/memory/episodic.rs` with LanceDB and fastembed
+  - [x] `crates/kairo-core/src/memory/semantic.rs` with SQLite
 - [ ] A background task distills episodic memories from raw log every 15 minutes
-- [ ] Memory retrieval (vector search + triage re-rank) runs before every wake-up
-- [ ] A simple stdout-only voice proxy (no real TTS yet) prints Opus's text as speech placeholder
+- [x] Memory retrieval (vector search + semantic fact lookup) runs before every wake-up
+- [x] A simple stdout-only voice proxy (no real TTS yet) prints Opus's text with KAIRO: prefix
 
 **Why this matters:** This is the first moment Kairo is actually doing what Kairo is supposed to do. You will feel the system come alive here.
 
