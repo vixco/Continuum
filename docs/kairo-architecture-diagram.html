@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kairo AI — Architecture Overview</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0e1a;
+    font-family: 'Inter', sans-serif;
+    color: #e2e8f0;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+
+  .canvas {
+    width: 1400px;
+    background: linear-gradient(180deg, #0d1224 0%, #0a0e1a 100%);
+    border-radius: 24px;
+    border: 1px solid rgba(99, 179, 237, 0.15);
+    overflow: hidden;
+    box-shadow: 0 0 80px rgba(66, 153, 225, 0.08);
+  }
+
+  /* ── Header ── */
+  .header {
+    text-align: center;
+    padding: 48px 40px 32px;
+    background: linear-gradient(180deg, rgba(66, 153, 225, 0.06) 0%, transparent 100%);
+    border-bottom: 1px solid rgba(99, 179, 237, 0.08);
+  }
+  .header h1 {
+    font-size: 42px;
+    font-weight: 900;
+    letter-spacing: -1px;
+    background: linear-gradient(135deg, #63b3ed, #a78bfa, #f687b3);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .header .tagline {
+    font-size: 16px;
+    color: #94a3b8;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .header .subtitle {
+    margin-top: 16px;
+    font-size: 18px;
+    color: #cbd5e1;
+    max-width: 700px;
+    margin-left: auto;
+    margin-right: auto;
+    line-height: 1.6;
+  }
+
+  /* ── Main grid ── */
+  .layers {
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* ── Layer card ── */
+  .layer {
+    border-radius: 16px;
+    padding: 28px 32px;
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 28px;
+    align-items: center;
+  }
+  .layer::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.06);
+    pointer-events: none;
+  }
+
+  /* Layer colors */
+  .layer-1 { background: linear-gradient(135deg, rgba(72, 187, 120, 0.10) 0%, rgba(72, 187, 120, 0.03) 100%); }
+  .layer-1 .layer-badge { background: rgba(72, 187, 120, 0.15); color: #68d391; border: 1px solid rgba(72, 187, 120, 0.25); }
+  .layer-1 .layer-num { color: #48bb78; }
+
+  .layer-2 { background: linear-gradient(135deg, rgba(237, 187, 56, 0.10) 0%, rgba(237, 187, 56, 0.03) 100%); }
+  .layer-2 .layer-badge { background: rgba(237, 187, 56, 0.15); color: #f6e05e; border: 1px solid rgba(237, 187, 56, 0.25); }
+  .layer-2 .layer-num { color: #ecc94b; }
+
+  .layer-3 { background: linear-gradient(135deg, rgba(129, 140, 248, 0.10) 0%, rgba(129, 140, 248, 0.03) 100%); }
+  .layer-3 .layer-badge { background: rgba(129, 140, 248, 0.15); color: #a3bffa; border: 1px solid rgba(129, 140, 248, 0.25); }
+  .layer-3 .layer-num { color: #818cf8; }
+
+  .layer-4 { background: linear-gradient(135deg, rgba(245, 101, 101, 0.10) 0%, rgba(245, 101, 101, 0.03) 100%); }
+  .layer-4 .layer-badge { background: rgba(245, 101, 101, 0.15); color: #feb2b2; border: 1px solid rgba(245, 101, 101, 0.25); }
+  .layer-4 .layer-num { color: #f56565; }
+
+  /* Left column: identity */
+  .layer-identity {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .layer-icon {
+    font-size: 44px;
+    line-height: 1;
+  }
+  .layer-num {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+  .layer-name {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+  .layer-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 100px;
+    letter-spacing: 0.5px;
+  }
+
+  /* Right column: content */
+  .layer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .layer-desc {
+    font-size: 15px;
+    color: #cbd5e1;
+    line-height: 1.6;
+  }
+  .layer-desc strong {
+    color: #f1f5f9;
+  }
+
+  .tech-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .chip {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #94a3b8;
+  }
+
+  /* ── Flow arrows ── */
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 4px 0;
+    color: #475569;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 1px;
+  }
+  .flow-arrow .arrow {
+    font-size: 20px;
+    opacity: 0.5;
+  }
+  .flow-arrow .label {
+    background: rgba(255,255,255,0.03);
+    padding: 4px 16px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.05);
+  }
+
+  /* ── Bottom panel: cost + key insight ── */
+  .bottom-panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    padding: 0 40px 40px;
+  }
+  .panel {
+    border-radius: 14px;
+    padding: 24px 28px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .panel-cost {
+    background: linear-gradient(135deg, rgba(72, 187, 120, 0.06), rgba(129, 140, 248, 0.06));
+  }
+  .panel-key {
+    background: linear-gradient(135deg, rgba(245, 101, 101, 0.06), rgba(237, 187, 56, 0.06));
+  }
+  .panel h3 {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 16px;
+  }
+  .cost-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .cost-row:last-child { border: none; }
+  .cost-label { font-size: 14px; color: #94a3b8; }
+  .cost-value {
+    font-size: 14px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 6px;
+  }
+  .cost-free { color: #68d391; background: rgba(72,187,120,0.1); }
+  .cost-cheap { color: #f6e05e; background: rgba(237,187,56,0.1); }
+  .cost-moderate { color: #a3bffa; background: rgba(129,140,248,0.1); }
+  .cost-expensive { color: #feb2b2; background: rgba(245,101,101,0.1); }
+
+  .key-points {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .key-point {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #cbd5e1;
+  }
+  .key-point .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 6px;
+    flex-shrink: 0;
+  }
+  .dot-green { background: #48bb78; }
+  .dot-yellow { background: #ecc94b; }
+  .dot-purple { background: #818cf8; }
+  .dot-red { background: #f56565; }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    padding: 20px 40px 32px;
+    font-size: 12px;
+    color: #334155;
+    letter-spacing: 1px;
+  }
+
+  /* ── Data flow side labels ── */
+  .flow-sidebar {
+    position: relative;
+  }
+  .data-flow-label {
+    position: absolute;
+    left: -2px;
+    top: 50%;
+    transform: translateY(-50%) rotate(-90deg);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .data-up { color: rgba(72, 187, 120, 0.3); }
+  .cmd-down { color: rgba(245, 101, 101, 0.3); }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>KAIRO</h1>
+    <div class="tagline">Desktop-Native Ambient AI Assistant</div>
+    <div class="subtitle">
+      A local-first AI that watches your screen, listens to your voice, thinks when it matters, and acts on your behalf — all running on your Windows PC.
+    </div>
+  </div>
+
+  <!-- Layers -->
+  <div class="layers">
+
+    <!-- Layer 1: Senses -->
+    <div class="layer layer-1">
+      <div class="layer-identity">
+        <div class="layer-icon">👁️</div>
+        <div class="layer-num">Layer 1</div>
+        <div class="layer-name">Senses</div>
+        <div class="layer-badge">Always On · Free</div>
+      </div>
+      <div class="layer-content">
+        <div class="layer-desc">
+          <strong>Watches your screen and listens to your mic 24/7.</strong>
+          Takes a screenshot every few seconds, transcribes speech, and checks which app you're using.
+          Produces a structured "perception frame" — a snapshot of what's happening right now.
+          Runs entirely on your machine. No data leaves your PC.
+        </div>
+        <div class="tech-chips">
+          <span class="chip">Moondream (Vision AI)</span>
+          <span class="chip">Whisper (Speech-to-Text)</span>
+          <span class="chip">Windows API (Context)</span>
+          <span class="chip">Screenshot every 2–5s</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div class="flow-arrow">
+      <span class="arrow">▼</span>
+      <span class="label">Perception frames flow up</span>
+      <span class="arrow">▼</span>
+    </div>
+
+    <!-- Layer 2: Triage -->
+    <div class="layer layer-2">
+      <div class="layer-identity">
+        <div class="layer-icon">⚖️</div>
+        <div class="layer-num">Layer 2</div>
+        <div class="layer-name">Triage</div>
+        <div class="layer-badge">Local LLM · Near-Free</div>
+      </div>
+      <div class="layer-content">
+        <div class="layer-desc">
+          <strong>The gatekeeper — decides if something is worth attention.</strong>
+          A small AI model (Qwen 3 8B) reads each perception frame and makes a snap decision in under 1 second:
+          <em>ignore it, remember it silently, whisper a quick response, or wake up the big brain.</em>
+          This is what keeps costs near zero — 95% of frames get filtered out here.
+        </div>
+        <div class="tech-chips">
+          <span class="chip">Qwen 3 8B (local)</span>
+          <span class="chip">llama.cpp</span>
+          <span class="chip">~960ms per decision</span>
+          <span class="chip">95% accuracy</span>
+          <span class="chip">5 decision types</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div class="flow-arrow">
+      <span class="arrow">▼</span>
+      <span class="label">Only important events pass through (~5%)</span>
+      <span class="arrow">▼</span>
+    </div>
+
+    <!-- Layer 3: Orchestrator -->
+    <div class="layer layer-3">
+      <div class="layer-identity">
+        <div class="layer-icon">🧠</div>
+        <div class="layer-num">Layer 3</div>
+        <div class="layer-name">Orchestrator</div>
+        <div class="layer-badge">Claude Opus · Pay-per-use</div>
+      </div>
+      <div class="layer-content">
+        <div class="layer-desc">
+          <strong>The brain — only wakes up when real thinking is needed.</strong>
+          Claude Opus 4.6 (Anthropic's most powerful AI) is launched as a subprocess via the official CLI.
+          It receives the current context + relevant memories, reasons about what to do,
+          speaks back to you, and can delegate complex tasks to workers. Streams responses in real-time for low latency.
+        </div>
+        <div class="tech-chips">
+          <span class="chip">Claude Opus 4.6</span>
+          <span class="chip">Official CLI (subprocess)</span>
+          <span class="chip">Stream-JSON protocol</span>
+          <span class="chip">Episodic + Semantic Memory</span>
+          <span class="chip">LanceDB vectors</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div class="flow-arrow">
+      <span class="arrow">▼</span>
+      <span class="label">Commands flow down — spawns workers for complex tasks</span>
+      <span class="arrow">▼</span>
+    </div>
+
+    <!-- Layer 4: Workers -->
+    <div class="layer layer-4">
+      <div class="layer-identity">
+        <div class="layer-icon">⚡</div>
+        <div class="layer-num">Layer 4</div>
+        <div class="layer-name">Workers</div>
+        <div class="layer-badge">Claude Code · Task-based</div>
+      </div>
+      <div class="layer-content">
+        <div class="layer-desc">
+          <strong>The hands — does the actual work.</strong>
+          Headless Claude Code sessions that can write code, fix bugs, manage files,
+          open apps, run terminal commands, and interact with your Windows desktop.
+          Multiple workers can run in parallel. Each has access to tools via the MCP server.
+        </div>
+        <div class="tech-chips">
+          <span class="chip">Claude Code (headless)</span>
+          <span class="chip">MCP Tool Server</span>
+          <span class="chip">Windows Automation</span>
+          <span class="chip">File System</span>
+          <span class="chip">Shell Commands</span>
+          <span class="chip">Parallel execution</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom panels -->
+  <div class="bottom-panels">
+    <div class="panel panel-cost">
+      <h3>💰 Cost per Layer</h3>
+      <div class="cost-row">
+        <span class="cost-label">Layer 1 — Senses</span>
+        <span class="cost-value cost-free">$0 (local models)</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-label">Layer 2 — Triage</span>
+        <span class="cost-value cost-cheap">$0 (local LLM)</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-label">Layer 3 — Orchestrator</span>
+        <span class="cost-value cost-moderate">~¢2–5 per wake-up</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-label">Layer 4 — Workers</span>
+        <span class="cost-value cost-expensive">~¢5–50 per task</span>
+      </div>
+    </div>
+    <div class="panel panel-key">
+      <h3>🔑 Key Principles</h3>
+      <div class="key-points">
+        <div class="key-point">
+          <div class="dot dot-green"></div>
+          <span><strong>100% local-first</strong> — senses and triage never leave your PC. No telemetry, no cloud dependency for basic operation.</span>
+        </div>
+        <div class="key-point">
+          <div class="dot dot-yellow"></div>
+          <span><strong>Cost scales with intelligence</strong> — cheap models handle simple tasks, expensive models only wake for complex reasoning.</span>
+        </div>
+        <div class="key-point">
+          <div class="dot dot-purple"></div>
+          <span><strong>Official CLI only</strong> — Claude is invoked via the official <code>claude</code> CLI as a subprocess. No API keys, no token scraping.</span>
+        </div>
+        <div class="key-point">
+          <div class="dot dot-red"></div>
+          <span><strong>Self-healing</strong> — a dedicated repair agent can diagnose and fix its own component failures automatically.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    KAIRO — Windows · Rust + Tauri + Next.js · Apache 2.0 · github.com/PrincNL/kairo-ai
+  </div>
+
+</div>
+</body>
+</html>

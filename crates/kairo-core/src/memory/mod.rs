@@ -15,4 +15,5 @@
 
 pub mod episodic;
 pub mod raw_log;
+pub mod retrieval;
 pub mod semantic;

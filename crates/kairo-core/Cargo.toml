@@ -27,6 +27,13 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 dirs = "6"
 toml = "0.8"
 
+# Phase 3: Memory layer
+lancedb = { workspace = true }
+fastembed = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+futures = "0.3"
+
 # Audio pipeline (requires LLVM/libclang + cmake for whisper-rs build)
 cpal = "0.17"
 whisper-rs = "0.16"
@@ -41,6 +48,10 @@ windows = { version = "0.59", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
 ] }
+
+[[bin]]
+name = "kairo"
+path = "src/bin/kairo.rs"
 
 [[bin]]
 name = "kairo-perception"

@@ -7,6 +7,15 @@
 #
 # ort (ONNX Runtime) requires:
 # - onnxruntime.dll at runtime (set ORT_DYLIB_PATH)
+#
+# lance-encoding (via lancedb) requires:
+# - protoc (Protocol Buffers compiler) for prost-build
+#   Download from: https://github.com/protocolbuffers/protobuf/releases
+#   Set PROTOC env var to the path of protoc.exe
+
+[build]
+# Keep all build artifacts on F: drive (not C:) for performance
+target-dir = "F:/TRYORVIA/kairo-ai/target"
 
 [env]
 # LLVM/clang for whisper-rs bindgen. Adjust if LLVM is installed elsewhere.
@@ -21,3 +30,6 @@ CMAKE_GENERATOR = "Ninja"
 
 # ONNX Runtime library path for ort load-dynamic feature
 ORT_DYLIB_PATH = "C:/onnxruntime/onnxruntime.dll"
+
+# Protocol Buffers compiler for lance-encoding (via lancedb)
+PROTOC = "C:/Users/games/.kairo-dev/tools/protoc/bin/protoc.exe"
