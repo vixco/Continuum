@@ -1,18 +1,10 @@
-# GBNF grammar for Kairo triage decisions.
-# Ensures the LLM can only output valid JSON matching one of the 5 decision variants.
-# String length is NOT bounded in grammar — post-processing truncates to 200 chars.
-# String rule matches llama.cpp's reference json.gbnf format.
+root ::= ignore | remember | whisper | exec | wake
 
-root ::= "{" ws "\"decision\"" ws ":" ws decision-body ws "}"
+ignore  ::= "{\"decision\":\"ignore\"}"
+remember ::= "{\"decision\":\"remember\",\"summary\":" ws str "}"
+whisper  ::= "{\"decision\":\"whisper\",\"text\":" ws str "}"
+exec     ::= "{\"decision\":\"execute_simple\",\"action\":" ws str "}"
+wake     ::= "{\"decision\":\"wake_orchestrator\",\"reason\":" ws str "}"
 
-decision-body ::= ignore | remember | whisper | execute-simple | wake-orchestrator
-
-ignore            ::= "\"ignore\""
-remember          ::= "\"remember\"" ws "," ws "\"summary\"" ws ":" ws string
-whisper           ::= "\"whisper\"" ws "," ws "\"text\"" ws ":" ws string
-execute-simple    ::= "\"execute_simple\"" ws "," ws "\"action\"" ws ":" ws string
-wake-orchestrator ::= "\"wake_orchestrator\"" ws "," ws "\"reason\"" ws ":" ws string
-
-string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
-
-ws ::= [ \t\n]*
+str ::= "\"" ([^"\\] | "\\" ["\\/bfnrt])* "\""
+ws  ::= " "?

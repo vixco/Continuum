@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use kairo_llm::{GenerateOpts, LlmConfig, LocalLlm};
 
 use crate::senses::types::PerceptionFrame;
-use crate::triage::prompts::{build_triage_grammar, build_triage_prompt};
+use crate::triage::prompts::build_triage_prompt;
 use crate::triage::TriageDecision;
 
 /// Configuration for the triage layer.
@@ -60,8 +60,6 @@ impl Default for TriageConfig {
 pub struct TriageLayer {
     llm: LocalLlm,
     config: TriageConfig,
-    /// Pre-compiled GBNF grammar string for triage decisions.
-    grammar: String,
     /// Counter of consecutive total failures (3 retries all failed).
     consecutive_failures: std::sync::Arc<AtomicU32>,
 }
@@ -88,12 +86,10 @@ impl TriageLayer {
         };
 
         let llm = LocalLlm::new(llm_config)?;
-        let grammar = build_triage_grammar();
 
         Ok(Self {
             llm,
             config,
-            grammar,
             consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
         })
     }
@@ -124,17 +120,12 @@ impl TriageLayer {
             seed: 0,
         };
 
-        // All attempts use prompt-only generation with strict JSON parsing.
-        // Grammar-constrained sampling is disabled: llama.cpp's GBNF runtime
-        // can abort() on assertion failures (stacks.empty()) which cannot be
-        // caught from Rust. Prompt engineering with low temperature + strict
-        // parsing is reliable enough for the 5-variant triage schema.
-        let json_prompt = format!(
-            "{prompt}\n\nIMPORTANT: Output ONLY a valid JSON object. No explanation, no markdown code fences, no prose. Just the JSON."
-        );
-
+        // Prompt-only generation with brace-depth early stopping.
+        // Grammar mode is disabled due to GGML_ASSERT crashes on Qwen 3.
+        // The early-stop-on-} in kairo-llm cuts generation as soon as the
+        // JSON object closes, keeping output to ~10-30 tokens.
         for attempt in 1..=3 {
-            match self.llm.generate(&json_prompt, &opts).await {
+            match self.llm.generate(&prompt, &opts).await {
                 Ok(raw) => {
                     let trimmed = raw.trim();
                     warn!(

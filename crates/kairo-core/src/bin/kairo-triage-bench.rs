@@ -87,10 +87,10 @@ async fn main() -> Result<()> {
     println!("Loaded {} benchmark frames", entries.len());
     println!("Model: {}\n", model_path.display());
 
-    // Debug: dump generated grammar
-    let grammar = kairo_core::triage::prompts::build_triage_grammar();
-    println!("--- Generated GBNF grammar ({} bytes) ---", grammar.len());
-    println!("{}", &grammar[..grammar.len().min(2000)]);
+    // Debug: dump grammar
+    let grammar = kairo_core::triage::prompts::TRIAGE_GRAMMAR;
+    println!("--- GBNF grammar ({} bytes) ---", grammar.len());
+    println!("{grammar}");
     println!("--- End grammar ---\n");
 
     // Initialize triage layer.

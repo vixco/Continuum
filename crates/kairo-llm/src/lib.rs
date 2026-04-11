@@ -334,7 +334,19 @@ fn generate_sync(
         .context("Failed to decode prompt batch")?;
 
     // Build sampler chain.
+    //
+    // With grammar mode, the grammar sampler must run FIRST so it masks
+    // invalid tokens before top_k/top_p reduce the candidate set. If
+    // top_k runs first and picks a grammar-invalid token, the grammar
+    // sampler zeroes all remaining logits, causing an assertion failure
+    // in llama-grammar.cpp.
     let mut samplers: Vec<LlamaSampler> = Vec::new();
+    // Grammar mode disabled: llama.cpp's GBNF sampler triggers
+    // GGML_ASSERT(!stacks.empty()) abort on Qwen 3 regardless of
+    // grammar content, sampler ordering, or lazy triggers. Root cause
+    // appears to be a tokenizer/grammar interaction specific to this
+    // model. Prompt-only mode with early-stop-on-} is used instead.
+    let _ = grammar; // suppress unused warning
     if opts.top_k > 0 {
         samplers.push(LlamaSampler::top_k(opts.top_k));
     }
@@ -343,15 +355,6 @@ fn generate_sync(
     }
     if opts.temperature > 0.0 {
         samplers.push(LlamaSampler::temp(opts.temperature));
-    }
-    if let Some(gbnf) = grammar {
-        let grammar_sampler =
-            LlamaSampler::grammar(&inner.model, gbnf, "root").map_err(|e| {
-                LlmError::GrammarFailed {
-                    reason: format!("{e:?}"),
-                }
-            })?;
-        samplers.push(grammar_sampler);
     }
     // Final selection sampler.
     if opts.temperature > 0.0 {
@@ -362,9 +365,13 @@ fn generate_sync(
     let mut sampler = LlamaSampler::chain_simple(samplers);
 
     // Generation loop.
+    // Track brace depth for early stopping: once we've seen a complete
+    // JSON object (depth returns to 0 after going positive), stop.
     let mut output = String::new();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut n_cur = batch.n_tokens();
+    let mut brace_depth: i32 = 0;
+    let mut saw_open_brace = false;
 
     for _ in 0..max_tokens {
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
@@ -375,7 +382,22 @@ fn generate_sync(
         }
 
         match inner.model.token_to_piece(token, &mut decoder, true, None) {
-            Ok(piece) => output.push_str(&piece),
+            Ok(piece) => {
+                // Track brace depth for early stop.
+                for ch in piece.chars() {
+                    if ch == '{' {
+                        brace_depth += 1;
+                        saw_open_brace = true;
+                    } else if ch == '}' {
+                        brace_depth -= 1;
+                    }
+                }
+                output.push_str(&piece);
+                // Stop as soon as we close the top-level JSON object.
+                if saw_open_brace && brace_depth <= 0 {
+                    break;
+                }
+            }
             Err(e) => {
                 warn!(
                     layer = "triage",

@@ -2849,7 +2849,6 @@ dependencies = [
  "image",
  "kairo-llm",
  "kairo-vision",
- "llama-cpp-2",
  "rubato",
  "serde",
  "serde_json",
