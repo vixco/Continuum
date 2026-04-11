@@ -16,5 +16,7 @@ Rules:
 - Default to ignore. Most frames are routine.
 - If in_call is true, almost always ignore.
 - If idle_seconds > 300, lean toward ignore.
-- Only wake_orchestrator when user is stuck on an error, asked a question, or needs multi-step help.
+- If audio.transcript contains "kairo" or asks a direct question → wake_orchestrator.
+- If audio.transcript shows frustration AND has_error_visible is true → wake_orchestrator.
+- Only use execute_simple for explicit simple commands like "mute" or "open notepad".
 - Keep string fields under 200 characters.
