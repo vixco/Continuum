@@ -16,6 +16,6 @@ tracing = { workspace = true }
 encoding_rs = "0.8"
 
 [features]
-default = []
+default = ["cuda"]
 cuda = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]

@@ -258,6 +258,8 @@ Recent memory summary:
 Output (one JSON object, nothing else):
 ```
 
+**GPU acceleration:** CUDA GPU offload is enabled by default and recommended for all users with NVIDIA GPUs. With GPU offload, prompt processing runs at 1000+ tokens/sec (vs ~45 tok/s on CPU), bringing triage latency from ~12 seconds to under 1 second. Users without compatible GPUs fall back to CPU automatically — llama.cpp detects GPU availability at runtime. For CPU-only users, consider the Qwen 2.5 3B model (smaller, faster on CPU).
+
 The triage LLM must respond in under 500 ms. If it takes longer than 2 seconds, Kairo logs a warning and considers quantization adjustment.
 
 ### Voice fast path

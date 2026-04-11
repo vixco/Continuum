@@ -16,7 +16,7 @@ variant = "qwen3-4b-q4_k_m"
 path = "~/.kairo-dev/models/triage/qwen3-4b-q4_k_m.gguf"
 size_mb = 2560
 runtime = "llama-cpp"
-gpu_layers = 0  # CPU-only by default. Set to "auto" or a number to offload layers to GPU.
+gpu_layers = -1  # -1 or 999 = offload all layers to GPU (recommended). 0 = CPU only.
 # Thinking mode must be disabled for triage — the system prompt includes /no_think.
 # Low-RAM alternative: qwen2.5-3b-instruct-q4_k_m (~1.9 GB, weaker Dutch)
 # Other alternatives: gemma-3-4b, phi-4-mini, llama-3.2-3b

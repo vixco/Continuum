@@ -46,7 +46,7 @@ pub struct LlmConfig {
     pub n_threads: u32,
     /// Number of CPU threads for batch prompt processing.
     pub n_threads_batch: u32,
-    /// Number of GPU layers to offload. 0 = CPU only.
+    /// Number of layers to offload to GPU. 999 = all layers (recommended). 0 = CPU only.
     pub gpu_layers: u32,
     /// Maximum tokens to generate per call (safety cap).
     pub max_tokens: u32,
@@ -59,7 +59,7 @@ impl Default for LlmConfig {
             context_size: 4096,
             n_threads: 4,
             n_threads_batch: 4,
-            gpu_layers: 0,
+            gpu_layers: 999,
             max_tokens: 256,
         }
     }
@@ -530,7 +530,7 @@ mod tests {
         let config = LlmConfig::default();
         assert_eq!(config.context_size, 4096);
         assert_eq!(config.n_threads, 4);
-        assert_eq!(config.gpu_layers, 0);
+        assert_eq!(config.gpu_layers, 999);
         assert_eq!(config.max_tokens, 256);
     }
 
