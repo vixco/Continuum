@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let model_path = kairo_dev_dir()
         .join("models")
         .join("triage")
-        .join("qwen3-4b-q4_k_m.gguf");
+        .join("qwen3-8b-q4_k_m.gguf");
 
     if !model_path.exists() {
         eprintln!(

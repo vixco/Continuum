@@ -119,12 +119,26 @@ if ((Test-Path $StaleEncoder) -and ((Get-Item $StaleEncoder).Length -lt $MinVali
 }
 
 # ============================================================================
-# Qwen 3 4B Q4_K_M (Triage LLM — Layer 2)
+# Qwen 3 8B Q4_K_M (Triage LLM — Layer 2, default)
 # ============================================================================
 # Source: Official Qwen org on HuggingFace (no auth required).
-# Note: bartowski repo is auth-gated; the official Qwen org is not.
+# 8B recommended for accuracy on Dutch + decision boundary classification.
 
-Write-Host "`n--- Qwen 3 4B Q4_K_M (Triage) ---" -ForegroundColor Cyan
+Write-Host "`n--- Qwen 3 8B Q4_K_M (Triage, default) ---" -ForegroundColor Cyan
+
+Download-Model `
+    -Name "Qwen 3 8B Q4_K_M" `
+    -Url "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" `
+    -OutPath (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf") `
+    -ExpectedSizeMB "4800"
+
+# ============================================================================
+# Qwen 3 4B Q4_K_M (Triage LLM — low-VRAM fallback)
+# ============================================================================
+# For GPUs with <6GB VRAM or CPU-only users. Lower accuracy on Dutch and
+# decision boundaries compared to 8B.
+
+Write-Host "`n--- Qwen 3 4B Q4_K_M (Triage, fallback) ---" -ForegroundColor Cyan
 
 Download-Model `
     -Name "Qwen 3 4B Q4_K_M" `
@@ -157,7 +171,8 @@ $critical = @(
     @("Vision embed_tokens", (Join-Path $VisionDir "embed_tokens.onnx")),
     @("Vision decoder", (Join-Path $VisionDir "decoder.onnx")),
     @("Vision tokenizer", (Join-Path $VisionDir "tokenizer.json")),
-    @("Triage model", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf")),
+    @("Triage model (8B)", (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf")),
+    @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf")),
     @("Whisper STT", (Join-Path $ModelsBase "stt\whisper-small.bin"))
 )
 
