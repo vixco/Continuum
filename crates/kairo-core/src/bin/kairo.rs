@@ -23,6 +23,8 @@ use tracing_subscriber::EnvFilter;
 
 use kairo_vision::VisionModel;
 
+use std::path::Path;
+
 use kairo_core::config::{kairo_dev_dir, load_config, KairoConfig};
 use kairo_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use kairo_core::memory::raw_log::RawLog;
@@ -44,7 +46,25 @@ use kairo_core::triage::TriageDecision;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Flags.
-    let force_wake = std::env::args().any(|a| a == "--force-wake");
+    let args: Vec<String> = std::env::args().collect();
+    let force_wake = args.iter().any(|a| a == "--force-wake");
+    let reset_audio = args.iter().any(|a| a == "--reset-audio");
+
+    // --- Config (before tracing init so the picker prompt is the first thing
+    // the user sees on a fresh install). ---
+    let dev_dir = kairo_dev_dir();
+    std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.kairo-dev/")?;
+    let config_path = dev_dir.join("config.toml");
+    let mut config = load_config(&config_path).context("Failed to load configuration")?;
+
+    // Interactive audio device picker — runs on first install, when the user
+    // passes `--reset-audio`, or when the saved device no longer matches.
+    if config.audio.enabled {
+        ensure_audio_device(&mut config, &config_path, reset_audio)?;
+    }
+
+    std::fs::create_dir_all(&config.storage.screenshots_dir)
+        .context("Failed to create screenshots directory")?;
 
     // Structured logging.
     let default_filter = "info,kairo_core=debug,kairo_vision=info,kairo_llm=info";
@@ -61,15 +81,6 @@ async fn main() -> Result<()> {
         component = "kairo",
         "Starting Kairo — perception + triage + orchestrator"
     );
-
-    // --- Config ---
-    let dev_dir = kairo_dev_dir();
-    let config_path = dev_dir.join("config.toml");
-    let config = load_config(&config_path).context("Failed to load configuration")?;
-
-    std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.kairo-dev/")?;
-    std::fs::create_dir_all(&config.storage.screenshots_dir)
-        .context("Failed to create screenshots directory")?;
 
     // --- Memory stores ---
     let raw_log = RawLog::open(&config.storage.db_path)
@@ -544,6 +555,58 @@ impl kairo_vision::VisionModel for StubVisionModel {
     async fn warmup(&self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Resolves which audio input device to use. Runs the interactive picker if:
+/// - `--reset-audio` was passed,
+/// - no device is saved in config yet, or
+/// - the device at the saved index no longer has the saved name (hardware
+///   reordered). On a clean match, returns silently so tracing-init output
+///   flows straight into perception startup with no user interaction.
+fn ensure_audio_device(
+    config: &mut KairoConfig,
+    config_path: &Path,
+    reset_audio: bool,
+) -> Result<()> {
+    use kairo_core::senses::audio::{
+        clear_audio_config, pick_interactive, save_audio_config, verify_saved,
+    };
+
+    if reset_audio {
+        clear_audio_config(config_path).context("Failed to clear saved audio device")?;
+        config.audio.device_name.clear();
+        config.audio.device_index = None;
+        println!("--reset-audio: cleared saved audio device.\n");
+    }
+
+    let has_saved =
+        config.audio.device_index.is_some() && !config.audio.device_name.is_empty();
+    if has_saved {
+        let idx = config
+            .audio
+            .device_index
+            .expect("has_saved implies device_index is Some");
+        if verify_saved(idx, &config.audio.device_name) {
+            // Silent reuse — saved device is still at the same cpal index.
+            return Ok(());
+        }
+        eprintln!(
+            "Saved audio device '{}' is no longer at index {} (hardware changed or reordered).",
+            config.audio.device_name, idx
+        );
+        eprintln!("Please pick your microphone again.\n");
+    }
+
+    let pick = pick_interactive()?;
+    save_audio_config(config_path, &pick).context("Failed to save audio device choice")?;
+    config.audio.device_index = Some(pick.index);
+    config.audio.device_name = pick.name.clone();
+    println!(
+        "\nSaved audio device: [{}] {}\n",
+        pick.index + 1,
+        pick.name
+    );
+    Ok(())
 }
 
 /// Finds the system prompt file.

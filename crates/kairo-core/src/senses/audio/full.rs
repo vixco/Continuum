@@ -289,6 +289,15 @@ fn resample_to_16khz(
     Ok(output)
 }
 
+/// Returns a human-readable name for a device via the non-deprecated
+/// `description()` API, falling back to `<unnamed>` on error.
+fn device_display_name(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unnamed>".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // AudioWatcher
 // ---------------------------------------------------------------------------
@@ -444,6 +453,14 @@ impl AudioWatcher {
         // they are sliced into VAD chunks.
         let mut raw_buffer: Vec<f32> = Vec::new();
 
+        // --- DIAGNOSTIC: periodic RMS / stats tracking ---
+        let mut diag_stats_last_log = Instant::now();
+        let mut diag_buffers_seen: u64 = 0;
+        let mut diag_samples_seen: u64 = 0;
+        let mut diag_peak_rms: f32 = 0.0;
+        let mut diag_speech_chunks: u64 = 0;
+        let mut diag_silence_chunks: u64 = 0;
+
         loop {
             // Check shutdown.
             if *shutdown.borrow() {
@@ -461,6 +478,25 @@ impl AudioWatcher {
             loop {
                 match sample_rx.try_recv() {
                     Ok(samples) => {
+                        // --- DIAGNOSTIC: log RMS of every buffer that reaches us ---
+                        let rms = if samples.is_empty() {
+                            0.0
+                        } else {
+                            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+                            (sum_sq / samples.len() as f32).sqrt()
+                        };
+                        diag_buffers_seen += 1;
+                        diag_samples_seen += samples.len() as u64;
+                        if rms > diag_peak_rms {
+                            diag_peak_rms = rms;
+                        }
+                        tracing::trace!(
+                            layer = "senses",
+                            component = "audio",
+                            buffer_samples = samples.len(),
+                            rms = rms,
+                            "Raw audio buffer received from cpal"
+                        );
                         raw_buffer.extend(samples);
                         drained = true;
                     }
@@ -474,6 +510,27 @@ impl AudioWatcher {
                         return;
                     }
                 }
+            }
+
+            // --- DIAGNOSTIC: every 2s, log aggregate audio stats ---
+            if diag_stats_last_log.elapsed() >= Duration::from_secs(2) {
+                tracing::info!(
+                    layer = "senses",
+                    component = "audio",
+                    buffers = diag_buffers_seen,
+                    samples = diag_samples_seen,
+                    peak_rms = diag_peak_rms,
+                    vad_threshold = self.config.vad_threshold,
+                    speech_chunks = diag_speech_chunks,
+                    silence_chunks = diag_silence_chunks,
+                    "Audio stats (last 2s window)"
+                );
+                diag_stats_last_log = Instant::now();
+                diag_buffers_seen = 0;
+                diag_samples_seen = 0;
+                diag_peak_rms = 0.0;
+                diag_speech_chunks = 0;
+                diag_silence_chunks = 0;
             }
 
             // If we got no new samples, yield briefly and try again.
@@ -517,7 +574,23 @@ impl AudioWatcher {
                 let chunk = &samples_16khz[offset..offset + VAD_CHUNK_SAMPLES];
                 offset += VAD_CHUNK_SAMPLES;
 
+                // --- DIAGNOSTIC: compute chunk energy before feeding VAD ---
+                let chunk_energy = EnergyVad::rms_energy(chunk);
                 let decision = vad.feed_chunk(chunk, &mut vad_state);
+                if chunk_energy > self.config.vad_threshold {
+                    diag_speech_chunks += 1;
+                } else {
+                    diag_silence_chunks += 1;
+                }
+                tracing::trace!(
+                    layer = "senses",
+                    component = "audio",
+                    chunk_rms = chunk_energy,
+                    threshold = self.config.vad_threshold,
+                    decision = ?decision,
+                    buffer_samples = vad_state.speech_buffer.len(),
+                    "VAD chunk decision"
+                );
 
                 match decision {
                     VadDecision::SegmentComplete | VadDecision::SegmentForceSplit => {
@@ -596,20 +669,104 @@ impl AudioWatcher {
     ) -> Result<(std_mpsc::Receiver<Vec<f32>>, u32, u16, cpal::Stream)> {
         let host = cpal::default_host();
 
-        let device = host
+        // --- DIAGNOSTIC: enumerate every available input device ---
+        let default_id = host
             .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("No default audio input device found"))?;
+            .and_then(|d| d.id().ok())
+            .map(|id| id.to_string());
 
-        let device_name = device
-            .description()
-            .map(|d| format!("{d:?}"))
-            .unwrap_or_else(|_| "unknown".to_string());
+        match host.input_devices() {
+            Ok(iter) => {
+                for (i, d) in iter.enumerate() {
+                    let name = device_display_name(&d);
+                    let id_str = d.id().ok().map(|id| id.to_string());
+                    let (cfg_rate, cfg_ch, cfg_fmt) = match d.default_input_config() {
+                        Ok(c) => (
+                            c.sample_rate(),
+                            c.channels(),
+                            format!("{:?}", c.sample_format()),
+                        ),
+                        Err(e) => (0, 0, format!("err: {e}")),
+                    };
+                    let is_default = match (&id_str, &default_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    tracing::info!(
+                        layer = "senses",
+                        component = "audio",
+                        idx = i,
+                        name = %name,
+                        id = id_str.as_deref().unwrap_or("<no id>"),
+                        default_rate = cfg_rate,
+                        channels = cfg_ch,
+                        format = %cfg_fmt,
+                        is_default = is_default,
+                        "Available audio input device"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    layer = "senses",
+                    component = "audio",
+                    error = %e,
+                    "Failed to enumerate audio input devices"
+                );
+            }
+        }
+
+        // Device selection: the interactive picker in `senses::audio::picker`
+        // runs before AudioWatcher and saves the user's choice to
+        // `[audio].device_index` + `[audio].device_name`. If both are set, we
+        // open the device at that index. If the saved name no longer matches
+        // what's actually at that index (hardware reordered), we bail and let
+        // the next startup re-pick via `--reset-audio`.
+        let device = match self.config.device_index {
+            Some(idx) => {
+                let devices: Vec<cpal::Device> = host
+                    .input_devices()
+                    .context("Failed to enumerate audio input devices")?
+                    .collect();
+                if idx >= devices.len() {
+                    anyhow::bail!(
+                        "Configured device_index {idx} is out of range ({} devices enumerated). \
+                         Run `kairo --reset-audio` to re-pick.",
+                        devices.len()
+                    );
+                }
+                let candidate = devices
+                    .into_iter()
+                    .nth(idx)
+                    .expect("bounds checked above");
+                let actual_name = device_display_name(&candidate);
+                if !self.config.device_name.is_empty() && actual_name != self.config.device_name {
+                    anyhow::bail!(
+                        "Device at index {idx} is now '{actual_name}' but config saved '{}'. \
+                         Run `kairo --reset-audio` to re-pick.",
+                        self.config.device_name
+                    );
+                }
+                candidate
+            }
+            None => host
+                .default_input_device()
+                .ok_or_else(|| anyhow::anyhow!("No default audio input device found"))?,
+        };
+
+        let device_name = device_display_name(&device);
+        let reason = if self.config.device_index.is_some() {
+            "picker-saved device_index + device_name"
+        } else {
+            "system default (no device configured — run picker)"
+        };
 
         tracing::info!(
             layer = "senses",
             component = "audio",
             device = %device_name,
-            "Using audio input device"
+            reason = reason,
+            "Selected audio input device"
         );
 
         // Try to get a config that matches 16 kHz mono f32 first.
@@ -746,6 +903,22 @@ impl AudioWatcher {
 
         let start = Instant::now();
 
+        // --- DIAGNOSTIC: log what Whisper is actually about to receive ---
+        let input_rms = if samples.is_empty() {
+            0.0
+        } else {
+            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+            (sum_sq / samples.len() as f32).sqrt()
+        };
+        tracing::info!(
+            layer = "senses",
+            component = "audio",
+            input_samples = samples.len(),
+            input_duration_ms = duration_ms,
+            input_rms = input_rms,
+            "Whisper invocation starting"
+        );
+
         let observation = tokio::task::spawn_blocking(move || -> Result<AudioObservation> {
             let mut state = whisper_ctx
                 .create_state()
@@ -820,13 +993,14 @@ impl AudioWatcher {
         .context("Whisper transcription task panicked")??;
 
         let elapsed = start.elapsed();
-        tracing::debug!(
+        tracing::info!(
             layer = "senses",
             component = "audio",
             duration_ms = duration_ms,
             transcription_ms = elapsed.as_millis() as u64,
             transcript_len = observation.transcript.len(),
-            "Transcription complete"
+            transcript = %observation.transcript,
+            "Whisper transcription complete"
         );
 
         Ok(observation)

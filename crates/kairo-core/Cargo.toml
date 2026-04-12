@@ -61,6 +61,10 @@ path = "src/bin/kairo-perception.rs"
 name = "kairo-triage-bench"
 path = "src/bin/kairo-triage-bench.rs"
 
+[[bin]]
+name = "audio-probe"
+path = "src/bin/audio-probe.rs"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"

@@ -73,6 +73,14 @@ pub struct AudioConfig {
     pub silence_duration_ms: u64,
     /// Maximum speech segment length in seconds before forced split.
     pub max_segment_secs: u64,
+    /// Display name of the chosen input device. Saved by the interactive
+    /// picker on first run. Paired with `device_index` — both are checked on
+    /// startup; if the name at that index no longer matches, the picker is
+    /// re-invoked.
+    pub device_name: String,
+    /// cpal enumeration index of the chosen input device. `None` means
+    /// "not yet picked, run the interactive picker on startup".
+    pub device_index: Option<usize>,
 }
 
 /// Configuration for the context poller.
@@ -164,6 +172,8 @@ impl Default for AudioConfig {
             vad_threshold: 0.5,
             silence_duration_ms: 500,
             max_segment_secs: 8,
+            device_name: String::new(),
+            device_index: None,
         }
     }
 }
