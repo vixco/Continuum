@@ -24,9 +24,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use kairo_vision::VisionModel;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
-use kairo_vision::VisionModel;
 
 use kairo_core::config::{kairo_dev_dir, load_config, KairoConfig};
 use kairo_core::memory::raw_log::RawLog;
@@ -50,8 +50,7 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(default_filter)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_target(false)
         .compact()
@@ -66,8 +65,7 @@ async fn main() -> Result<()> {
 
     // Load configuration.
     let config_path = kairo_dev_dir().join("config.toml");
-    let config = load_config(&config_path)
-        .context("Failed to load configuration")?;
+    let config = load_config(&config_path).context("Failed to load configuration")?;
 
     tracing::info!(
         layer = "senses",
@@ -78,8 +76,7 @@ async fn main() -> Result<()> {
 
     // Ensure data directories exist.
     let dev_dir = kairo_dev_dir();
-    std::fs::create_dir_all(&dev_dir)
-        .context("Failed to create ~/.kairo-dev/")?;
+    std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.kairo-dev/")?;
     std::fs::create_dir_all(&config.storage.screenshots_dir)
         .context("Failed to create screenshots directory")?;
 
@@ -172,8 +169,7 @@ async fn main() -> Result<()> {
             let n_threads = std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
                 .unwrap_or(4)
-                .max(4)
-                .min(14);
+                .clamp(4, 14);
 
             let triage_config = TriageConfig {
                 model_path: model_path.to_string_lossy().into_owned(),
@@ -195,11 +191,7 @@ async fn main() -> Result<()> {
                             "Triage model warmup failed"
                         );
                     }
-                    tracing::info!(
-                        layer = "triage",
-                        component = "main",
-                        "Triage layer ready"
-                    );
+                    tracing::info!(layer = "triage", component = "main", "Triage layer ready");
                     Some(t)
                 }
                 Err(e) => {
@@ -316,9 +308,7 @@ async fn main() -> Result<()> {
 }
 
 /// Initialize the vision model, falling back to a stub if loading fails.
-async fn init_vision_model(
-    config: &KairoConfig,
-) -> Arc<dyn kairo_vision::VisionModel> {
+async fn init_vision_model(config: &KairoConfig) -> Arc<dyn kairo_vision::VisionModel> {
     let model_path = &config.vision.model_path;
 
     match kairo_vision::onnx::OnnxVisionModel::new(model_path).await {
@@ -353,10 +343,7 @@ struct StubVisionModel;
 
 #[async_trait::async_trait]
 impl kairo_vision::VisionModel for StubVisionModel {
-    async fn describe(
-        &self,
-        _image: &image::DynamicImage,
-    ) -> Result<kairo_vision::VisionOutput> {
+    async fn describe(&self, _image: &image::DynamicImage) -> Result<kairo_vision::VisionOutput> {
         Ok(kairo_vision::VisionOutput {
             description: "(no vision model loaded)".to_string(),
             has_error_visible: false,

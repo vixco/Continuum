@@ -94,7 +94,7 @@ cargo run --bin kairo-triage-bench       # runs 20-frame benchmark, reports accu
 
 ## Current project status
 
-Phases 0–3 are complete (bootstrap, perception, triage, orchestrator). Currently at the boundary of Phase 3/4. See `ROADMAP.md` for the full phase plan and checkbox status. The triage layer uses Qwen 3 8B (upgraded from 2.5 3B) with 95% accuracy on the benchmark suite.
+Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `kairo-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
 
 ## Coding standards
 

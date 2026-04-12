@@ -1,13 +1,12 @@
 //! # MCP tool modules
 //!
-//! Each module implements one namespace of Kairo's MCP tool suite.
-//! Tools are registered with the rmcp server builder at startup.
+//! Each submodule implements one functional group of Kairo's MCP tool suite.
+//! Tool methods are mounted on [`crate::server::KairoMcpServer`] via rmcp's
+//! `#[tool_router]` macro; these modules hold supporting types, helpers, and
+//! (eventually) extracted implementations kept out of the server file for
+//! readability.
 
+pub mod fs;
 pub mod memory;
-pub mod perception;
-pub mod schedule;
-pub mod shell;
 pub mod system;
-pub mod voice;
-pub mod windows;
-pub mod workers;
+pub mod web;

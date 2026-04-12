@@ -61,3 +61,11 @@ keyword = "hey kairo"
 sensitivity = 0.5
 # Path to custom .ppn file, or empty for built-in
 custom_keyword_path = ""
+
+# Phase 4: MCP server configuration (filesystem allowlist extension)
+# Default allowed roots: ~/.kairo-dev/ and every semantic fact matching key
+# "project.*.dir". The deny list is hardcoded and cannot be disabled. Add extra
+# read-only directories here to expand what Opus can inspect via fs_read_file /
+# fs_list_dir. Paths support ~ expansion.
+[mcp.fs]
+extra_paths = []

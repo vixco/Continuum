@@ -7,10 +7,7 @@
 //! This test does NOT require an API key or network access.
 
 use kairo_core::orchestrator::events::ClaudeEvent;
-use kairo_core::orchestrator::spawn::{OrchestratorEvent, WakeResult};
-use std::io::Write;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use kairo_core::orchestrator::spawn::OrchestratorEvent;
 
 /// Pre-recorded events from a real Claude Code CLI session (Phase 0).
 /// The mock subprocess will emit these on stdout.

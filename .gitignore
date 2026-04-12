@@ -38,3 +38,6 @@ apps/desktop/src-tauri/gen/
 Thumbs.db
 Desktop.ini
 .fastembed_cache/
+
+# Claude Code local session settings
+.claude/

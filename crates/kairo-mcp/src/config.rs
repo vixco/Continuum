@@ -1,0 +1,125 @@
+//! # kairo-mcp configuration
+//!
+//! Loads the `[mcp]` section of `~/.kairo-dev/config.toml`. Parsing is
+//! best-effort — bad or missing config must never block MCP server startup,
+//! since the orchestrator spawns us on every wake and a failed start breaks
+//! the whole cognitive loop.
+
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+/// MCP-specific configuration (subset of the full Kairo config).
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct McpServerConfig {
+    pub fs: McpFsConfig,
+}
+
+/// Filesystem-allowlist expansion settings.
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct McpFsConfig {
+    /// Extra absolute paths the user opts in to beyond the hardcoded defaults.
+    /// `~` is expanded at load time. Denied dirs/patterns still apply even
+    /// inside these roots.
+    pub extra_paths: Vec<PathBuf>,
+}
+
+/// Loads the `[mcp]` section from `<data_dir>/config.toml`. Returns defaults
+/// on any failure and logs a warning; never errors upward.
+pub fn load(data_dir: &Path) -> McpServerConfig {
+    let path = data_dir.join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return McpServerConfig::default(),
+    };
+
+    #[derive(Deserialize)]
+    struct Wrapped {
+        #[serde(default)]
+        mcp: McpServerConfig,
+    }
+
+    match toml::from_str::<Wrapped>(&text) {
+        Ok(w) => expand_home(w.mcp, data_dir),
+        Err(e) => {
+            tracing::warn!(
+                layer = "mcp",
+                component = "config",
+                path = %path.display(),
+                error = %e,
+                "Failed to parse [mcp] section — using defaults"
+            );
+            McpServerConfig::default()
+        }
+    }
+}
+
+fn expand_home(mut cfg: McpServerConfig, data_dir: &Path) -> McpServerConfig {
+    // Expand a leading `~` in extra_paths. Use the parent of data_dir as the
+    // home directory (since data_dir is usually `~/.kairo-dev/`). Fall back to
+    // dirs::home_dir() if that heuristic fails.
+    let home = dirs::home_dir()
+        .or_else(|| data_dir.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    for p in &mut cfg.fs.extra_paths {
+        if let Ok(rest) = p.strip_prefix("~") {
+            *p = home.join(rest);
+        }
+    }
+    cfg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn missing_config_returns_defaults() {
+        let dir = tempdir().unwrap();
+        let cfg = load(dir.path());
+        assert!(cfg.fs.extra_paths.is_empty());
+    }
+
+    #[test]
+    fn valid_config_is_parsed() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+            [mcp.fs]
+            extra_paths = ["C:/code/simcharts", "D:/notes"]
+            "#,
+        )
+        .unwrap();
+        let cfg = load(dir.path());
+        assert_eq!(cfg.fs.extra_paths.len(), 2);
+    }
+
+    #[test]
+    fn malformed_config_returns_defaults_not_panic() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "this is not valid toml [[[").unwrap();
+        let cfg = load(dir.path());
+        assert!(cfg.fs.extra_paths.is_empty());
+    }
+
+    #[test]
+    fn tilde_expansion_in_extra_paths() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+            [mcp.fs]
+            extra_paths = ["~/notes"]
+            "#,
+        )
+        .unwrap();
+        let cfg = load(dir.path());
+        assert_eq!(cfg.fs.extra_paths.len(), 1);
+        let p = cfg.fs.extra_paths[0].to_string_lossy().to_string();
+        assert!(!p.starts_with('~'), "tilde should be expanded, got {p}");
+    }
+}

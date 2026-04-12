@@ -97,6 +97,13 @@ async fn main() -> Result<()> {
         system_prompt_path: prompt_path,
         timeout_secs: 60,
         bare_mode: false,
+        // Phase 4: enable MCP tools. Data dir is the same ~/.kairo-dev/
+        // the main runtime uses, so the MCP server reads/writes the same
+        // semantic + episodic stores.
+        mcp_enabled: true,
+        mcp_server_path: None,
+        mcp_config_path: None,
+        mcp_data_dir: Some(dev_dir.clone()),
     };
 
     tracing::info!(
@@ -186,8 +193,7 @@ async fn main() -> Result<()> {
             let n_threads = std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
                 .unwrap_or(4)
-                .max(4)
-                .min(14);
+                .clamp(4, 14);
 
             let triage_config = TriageConfig {
                 model_path: model_path.to_string_lossy().into_owned(),
@@ -358,7 +364,11 @@ async fn main() -> Result<()> {
     raw_log.close().await;
     semantic.close().await;
 
-    tracing::info!(layer = "system", component = "kairo", "Kairo stopped cleanly");
+    tracing::info!(
+        layer = "system",
+        component = "kairo",
+        "Kairo stopped cleanly"
+    );
     Ok(())
 }
 
@@ -378,7 +388,7 @@ async fn do_wake(
     // 1. Memory context.
     let memory_context = {
         let mut ep = episodic.lock().await;
-        retrieve_context(trigger_frame, &mut *ep, semantic).await?
+        retrieve_context(trigger_frame, &mut ep, semantic).await?
     };
 
     tracing::debug!(
@@ -519,10 +529,7 @@ struct StubVisionModel;
 
 #[async_trait::async_trait]
 impl kairo_vision::VisionModel for StubVisionModel {
-    async fn describe(
-        &self,
-        _image: &image::DynamicImage,
-    ) -> Result<kairo_vision::VisionOutput> {
+    async fn describe(&self, _image: &image::DynamicImage) -> Result<kairo_vision::VisionOutput> {
         Ok(kairo_vision::VisionOutput {
             description: "(no vision model loaded)".to_string(),
             has_error_visible: false,
