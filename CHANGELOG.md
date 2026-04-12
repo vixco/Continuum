@@ -5,6 +5,32 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- **Phase 4 — MCP tools**: Kairo's orchestrator can now do things, not just talk — a standalone `kairo-mcp` binary exposes 11 Rust-native tools to Claude Opus at wake time via `--mcp-config`
+- `kairo-mcp` binary (rmcp 1.4, stdio transport, `--version` flag): registered on every wake with `--strict-mcp-config`, advertises protocol `V_2024_11_05` with `enable_tools()` capabilities
+- Memory tools (`mcp__kairo__memory_*`): `query_episodic` (vector search via existing LanceDB), `list_facts` (prefix filter), `get_fact`, `set_fact` (rejects `system.*` and `kairo.*` prefixes; confidence clamped by source — inferred ≤0.7, observed ≤0.8, user_stated ≤0.9)
+- System tools (`mcp__kairo__system_*`): `current_time` (ISO-8601 + tz offset), `active_window` (reuses `senses::context::foreground_window`), `clipboard_get` (Win32 OpenClipboard/CF_UNICODETEXT), `notification` (Windows toast via `tauri-winrt-notification`, 10s per-process rate limit, title/body truncated at 64/200 chars)
+- Filesystem tools (`mcp__kairo__fs_*`): `read_file` (100 KB cap with truncation prefix, UTF-8 only), `list_dir` (500 entries, per-entry allowlist filtering); read-only by design — no writes, deletes, moves, or mutations
+- Filesystem allowlist (`crates/kairo-mcp/src/allowlist.rs`): single `is_path_allowed` gatekeeper — root check (data dir + `project.*.dir` semantic facts + `[mcp.fs].extra_paths` opt-in), hardcoded `DENY_DIRS` (`.ssh`, `.aws`, `.gnupg`, `.docker`, `User Data`, `Profiles`, `node_modules`, `target`, `AppData`, etc.), hardcoded `DENY_PATTERNS` (`*.pem`, `*.key`, `id_rsa*`, `.env*`, `*.kdbx`, etc.)
+- Web tool (`mcp__kairo__web_fetch`): HTTP GET only, 50 KB streaming cap with truncation prefix, pre-flight DNS resolution with public-IP check (RFC 1918, loopback, link-local, multicast, CGNAT 100.64/10, RFC 6598, IPv6 ULA + link-local all rejected), redirects disabled entirely to close redirect-SSRF, 5s total timeout
+- Tool-call audit: every MCP invocation fires a background tokio task that writes an episodic event with `kind=ToolCall`, sanitized args (keys matching `/password|secret|token|apikey|auth/i` redacted, strings >500 chars truncated), and ≤200-char result summary — fire-and-forget so lazy `EpisodicStore` init doesn't block tool responses
+- `EventKind::ToolCall` variant added to `crates/kairo-core/src/memory/episodic.rs`
+- MCP orchestrator wiring (`crates/kairo-core/src/orchestrator/spawn.rs`): generates `mcp-config.json` at wake time (absolute binary path + `KAIRO_DATA_DIR` env), adds `--mcp-config` + `--strict-mcp-config`, changes `allowedTools` from `""` to `"mcp__kairo__*"`, flips `--permission-mode` from `plan` to `default` (plan mode blocks tool execution)
+- `OrchestratorConfig` fields: `mcp_enabled: bool`, `mcp_server_path: Option<PathBuf>`, `mcp_config_path: Option<PathBuf>`, `mcp_data_dir: Option<PathBuf>`; binary resolver falls back through config → `KAIRO_MCP_BIN` env → sibling of current exe → PATH lookup
+- Orchestrator system prompt (`prompts/orchestrator-system.md`): added Tools section with memory-first, read-only-fs, public-only-web, and no-notification-spam guidance; explicit warning about reserved `system.*`/`kairo.*` memory keys
+- MCP config (`config/default-models.toml`): new `[mcp.fs]` section with `extra_paths = []` for user-controlled allowlist expansion
+- `docs/mcp-tools.md`: complete tool reference with JSON examples, security model documentation, and E2E verification runbook
+- Protocol integration test (`crates/kairo-mcp/tests/protocol.rs`): spawns the binary, drives JSON-RPC initialize → tools/list → tools/call over stdio, asserts all 11 tools registered and `system_current_time` returns a valid ISO-8601 timestamp
+- 50 unit tests across audit, allowlist, config, memory, system, fs, web modules
+- Echo smoke-test example (`crates/kairo-mcp/examples/echo_smoke.rs`): retained as diagnostic tool for verifying rmcp ↔ claude CLI handshake independently
+- End-to-end verified: real `kairo-mcp.exe` spawned by real `claude -p` successfully answered `system_current_time` during smoke test (returned `2026-04-12T20:47:01.698257+02:00`)
+
+### Changed
+- `crates/kairo-core/src/senses/context.rs`: added `pub fn foreground_window()` wrapping the internal Win32 helper so `kairo-mcp`'s `system_active_window` tool can reuse the existing implementation
+- `crates/kairo-core/src/bin/kairo.rs`: `OrchestratorConfig` initializer now includes `mcp_enabled: true` and passes `~/.kairo-dev/` as `mcp_data_dir`
+- `crates/kairo-llm/src/lib.rs`: added explicit type annotations on two `std::mem::transmute` calls for clippy `missing_transmute_annotations` lint
+- `crates/kairo-core/src/memory/episodic.rs`: `Embedder::embed_batch` now takes `Vec<String>` by value to avoid clippy `unnecessary_to_owned`
+
+### Added
 - **Phase 3 — Orchestrator**: Claude Opus 4.6 wakes up, speaks, and remembers
 - Orchestrator subprocess manager: spawns fresh `claude -p` process per wake, streams response events, captures cost/duration (ADR 005: fresh process per wake — conversation purity over process reuse)
 - Episodic memory: LanceDB vector store with fastembed BGESmallENV15Q (384-dim, 66 MB) for semantic similarity search over past events

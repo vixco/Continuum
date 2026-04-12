@@ -67,7 +67,10 @@ async fn main() -> Result<()> {
     // Load benchmark frames.
     let bench_path = PathBuf::from("benchmarks/triage-frames.jsonl");
     if !bench_path.exists() {
-        eprintln!("ERROR: Benchmark frames not found at {}", bench_path.display());
+        eprintln!(
+            "ERROR: Benchmark frames not found at {}",
+            bench_path.display()
+        );
         std::process::exit(1);
     }
 
@@ -98,8 +101,7 @@ async fn main() -> Result<()> {
     let n_threads = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(4)
-        .max(4)
-        .min(14); // Leave 2 cores for the OS
+        .clamp(4, 14); // Leave 2 cores for the OS
 
     println!("Threads: {}", n_threads);
 
@@ -173,7 +175,11 @@ async fn main() -> Result<()> {
 
     println!("\nPer-decision accuracy:");
     for (decision, (c, t)) in &per_decision {
-        let pct = if *t > 0 { *c as f64 / *t as f64 * 100.0 } else { 0.0 };
+        let pct = if *t > 0 {
+            *c as f64 / *t as f64 * 100.0
+        } else {
+            0.0
+        };
         println!("  {:<18} {}/{} ({:.0}%)", decision, c, t, pct);
     }
 

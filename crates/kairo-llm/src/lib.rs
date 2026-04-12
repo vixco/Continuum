@@ -159,10 +159,7 @@ impl LocalLlm {
     pub fn new(config: LlmConfig) -> Result<Self> {
         let path = &config.model_path;
         if !Path::new(path).exists() {
-            return Err(LlmError::ModelNotFound {
-                path: path.clone(),
-            }
-            .into());
+            return Err(LlmError::ModelNotFound { path: path.clone() }.into());
         }
 
         info!(
@@ -174,17 +171,16 @@ impl LocalLlm {
             "Loading LLM model"
         );
 
-        let backend =
-            LlamaBackend::init().context("Failed to initialize llama.cpp backend")?;
+        let backend = LlamaBackend::init().context("Failed to initialize llama.cpp backend")?;
 
-        let model_params = LlamaModelParams::default()
-            .with_n_gpu_layers(config.gpu_layers);
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
         let model_params = pin!(model_params);
 
-        let model = LlamaModel::load_from_file(&backend, path, &model_params)
-            .map_err(|e| LlmError::LoadFailed {
+        let model = LlamaModel::load_from_file(&backend, path, &model_params).map_err(|e| {
+            LlmError::LoadFailed {
                 reason: format!("{e:?}"),
-            })?;
+            }
+        })?;
 
         info!(
             layer = "triage",
@@ -221,11 +217,7 @@ impl LocalLlm {
                 ..Default::default()
             };
             let _ = generate_sync(&inner, "Hello", None, &opts);
-            debug!(
-                layer = "triage",
-                component = "llm",
-                "Warmup complete"
-            );
+            debug!(layer = "triage", component = "llm", "Warmup complete");
             Ok(())
         })
         .await?
@@ -236,8 +228,7 @@ impl LocalLlm {
         let inner = self.inner.clone();
         let prompt = prompt.to_string();
         let opts = opts.clone();
-        tokio::task::spawn_blocking(move || generate_sync(&inner, &prompt, None, &opts))
-            .await?
+        tokio::task::spawn_blocking(move || generate_sync(&inner, &prompt, None, &opts)).await?
     }
 
     /// Generate text constrained by a GBNF grammar, then parse as JSON.
@@ -324,7 +315,9 @@ fn generate_sync(
             })?;
 
         // SAFETY: Erase the lifetime. See LlmInner::ctx_cache doc for invariants.
-        *ctx_guard = Some(unsafe { std::mem::transmute(new_ctx) });
+        *ctx_guard = Some(unsafe {
+            std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(new_ctx)
+        });
     }
 
     let ctx = ctx_guard.as_mut().expect("ctx just initialized");
@@ -476,7 +469,9 @@ where
             })?;
 
         // SAFETY: See LlmInner::ctx_cache doc for invariants.
-        *ctx_guard = Some(unsafe { std::mem::transmute(new_ctx) });
+        *ctx_guard = Some(unsafe {
+            std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(new_ctx)
+        });
     }
 
     let ctx = ctx_guard.as_mut().expect("ctx just initialized");

@@ -107,10 +107,7 @@ impl SemanticStore {
         if let Some(parent) = Path::new(db_path).parent() {
             if !db_path.starts_with("sqlite:") || !db_path.contains(":memory:") {
                 std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create database directory: {}",
-                        parent.display()
-                    )
+                    format!("Failed to create database directory: {}", parent.display())
                 })?;
             }
         }
@@ -171,26 +168,18 @@ impl SemanticStore {
         .context("Failed to create semantic_edges table")?;
 
         // Index for querying facts by prefix (e.g. all "project.simcharts.*" facts).
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_facts_key ON semantic_facts(key)",
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create key index")?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_facts_key ON semantic_facts(key)")
+            .execute(&self.pool)
+            .await
+            .context("Failed to create key index")?;
 
         // Index for querying edges by source.
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_edges_from ON semantic_edges(from_key)",
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create edge from_key index")?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_edges_from ON semantic_edges(from_key)")
+            .execute(&self.pool)
+            .await
+            .context("Failed to create edge from_key index")?;
 
-        debug!(
-            layer = "memory",
-            component = "semantic",
-            "Schema verified"
-        );
+        debug!(layer = "memory", component = "semantic", "Schema verified");
 
         Ok(())
     }
@@ -385,13 +374,12 @@ impl SemanticStore {
 
     /// Returns all edges pointing to the given key.
     pub async fn edges_to(&self, to_key: &str) -> Result<Vec<Edge>> {
-        let rows = sqlx::query(
-            "SELECT from_key, to_key, relation FROM semantic_edges WHERE to_key = ?1",
-        )
-        .bind(to_key)
-        .fetch_all(&self.pool)
-        .await
-        .context("Failed to query edges to key")?;
+        let rows =
+            sqlx::query("SELECT from_key, to_key, relation FROM semantic_edges WHERE to_key = ?1")
+                .bind(to_key)
+                .fetch_all(&self.pool)
+                .await
+                .context("Failed to query edges to key")?;
 
         Ok(rows
             .iter()
@@ -536,19 +524,39 @@ mod tests {
         let store = SemanticStore::open("sqlite::memory:").await.unwrap();
 
         store
-            .upsert_fact(&make_fact("project.kairo.stack", "\"Rust\"", 1.0, FactSource::UserStated))
+            .upsert_fact(&make_fact(
+                "project.kairo.stack",
+                "\"Rust\"",
+                1.0,
+                FactSource::UserStated,
+            ))
             .await
             .unwrap();
         store
-            .upsert_fact(&make_fact("project.kairo.repo", "\"/kairo-ai\"", 1.0, FactSource::UserStated))
+            .upsert_fact(&make_fact(
+                "project.kairo.repo",
+                "\"/kairo-ai\"",
+                1.0,
+                FactSource::UserStated,
+            ))
             .await
             .unwrap();
         store
-            .upsert_fact(&make_fact("project.simcharts.stack", "\"React\"", 0.9, FactSource::Observed))
+            .upsert_fact(&make_fact(
+                "project.simcharts.stack",
+                "\"React\"",
+                0.9,
+                FactSource::Observed,
+            ))
             .await
             .unwrap();
         store
-            .upsert_fact(&make_fact("user.name", "\"Toshan\"", 1.0, FactSource::UserStated))
+            .upsert_fact(&make_fact(
+                "user.name",
+                "\"Toshan\"",
+                1.0,
+                FactSource::UserStated,
+            ))
             .await
             .unwrap();
 
@@ -594,15 +602,30 @@ mod tests {
         let store = SemanticStore::open("sqlite::memory:").await.unwrap();
 
         store
-            .upsert_fact(&make_fact("high.conf", "\"yes\"", 0.95, FactSource::UserStated))
+            .upsert_fact(&make_fact(
+                "high.conf",
+                "\"yes\"",
+                0.95,
+                FactSource::UserStated,
+            ))
             .await
             .unwrap();
         store
-            .upsert_fact(&make_fact("mid.conf", "\"maybe\"", 0.6, FactSource::Observed))
+            .upsert_fact(&make_fact(
+                "mid.conf",
+                "\"maybe\"",
+                0.6,
+                FactSource::Observed,
+            ))
             .await
             .unwrap();
         store
-            .upsert_fact(&make_fact("low.conf", "\"uncertain\"", 0.3, FactSource::Inferred))
+            .upsert_fact(&make_fact(
+                "low.conf",
+                "\"uncertain\"",
+                0.3,
+                FactSource::Inferred,
+            ))
             .await
             .unwrap();
 
@@ -691,10 +714,7 @@ mod tests {
         store.upsert_fact(&fact).await.unwrap();
 
         let retrieved = store.get_fact("observed.fact").await.unwrap().unwrap();
-        assert_eq!(
-            retrieved.source_frame_id.as_deref(),
-            Some("abc-123-def")
-        );
+        assert_eq!(retrieved.source_frame_id.as_deref(), Some("abc-123-def"));
 
         store.close().await;
     }

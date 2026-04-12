@@ -230,6 +230,20 @@ mod win {
 }
 
 // ---------------------------------------------------------------------------
+// Public helpers for external crates
+// ---------------------------------------------------------------------------
+
+/// Returns `(window_title, process_name)` for the current foreground window.
+///
+/// On non-Windows platforms both strings are empty. Errors at the Win32 layer
+/// are swallowed and return empty strings — consumers should treat this as a
+/// best-effort lookup. Added in Phase 4 to back the `system_active_window`
+/// MCP tool.
+pub fn foreground_window() -> (String, String) {
+    win::get_foreground_window_info()
+}
+
+// ---------------------------------------------------------------------------
 // Call detection
 // ---------------------------------------------------------------------------
 
@@ -546,7 +560,10 @@ mod tests {
         let (title, process) = win::get_foreground_window_info();
         // Both may be empty if we're running headless, but they should be valid strings.
         assert!(title.len() < 1024, "Title should be reasonable length");
-        assert!(process.len() < 512, "Process name should be reasonable length");
+        assert!(
+            process.len() < 512,
+            "Process name should be reasonable length"
+        );
     }
 
     #[cfg(windows)]
@@ -596,7 +613,9 @@ mod tests {
         assert!(diff.num_seconds() < 5);
 
         // Signal shutdown.
-        shutdown_tx.send(true).expect("Shutdown send should succeed");
+        shutdown_tx
+            .send(true)
+            .expect("Shutdown send should succeed");
 
         // The watcher should exit cleanly.
         let result = tokio::time::timeout(Duration::from_secs(3), handle)
@@ -626,6 +645,9 @@ mod tests {
             .expect("Watcher should stop within 5 seconds")
             .expect("Watcher task should not panic");
 
-        assert!(result.is_err(), "Watcher should return error on closed channel");
+        assert!(
+            result.is_err(),
+            "Watcher should return error on closed channel"
+        );
     }
 }

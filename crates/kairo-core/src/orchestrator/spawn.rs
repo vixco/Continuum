@@ -16,6 +16,7 @@
 //! - If the process exits with non-zero: log error, return partial results
 //! - If stdout stream ends without a result event: timeout, kill process
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -37,6 +38,24 @@ pub struct OrchestratorConfig {
     pub timeout_secs: u64,
     /// Whether to use --bare mode (skip hooks, plugins, etc).
     pub bare_mode: bool,
+    /// Phase 4: enable the Kairo MCP server. When true, generates an
+    /// mcp-config.json at wake time and passes --mcp-config /
+    /// --strict-mcp-config to the claude CLI, switches allowedTools to
+    /// `mcp__kairo__*`, and lifts permission-mode from "plan" to "default"
+    /// (plan mode blocks tool execution). Defaults to true.
+    pub mcp_enabled: bool,
+    /// Path to the `kairo-mcp` binary. If None, the orchestrator resolves it
+    /// at wake time from `KAIRO_MCP_BIN` env var, sibling-of-current-exe, or
+    /// a PATH lookup.
+    pub mcp_server_path: Option<PathBuf>,
+    /// Where to write the generated mcp-config.json file. If None, uses
+    /// `<data_dir>/mcp-config.json` where data_dir is derived from the
+    /// mcp_data_dir field.
+    pub mcp_config_path: Option<PathBuf>,
+    /// KAIRO_DATA_DIR env var passed to the MCP server (for opening semantic
+    /// / episodic stores). If None, the MCP server falls back to its own
+    /// default (~/.kairo-dev/).
+    pub mcp_data_dir: Option<PathBuf>,
 }
 
 impl Default for OrchestratorConfig {
@@ -46,6 +65,10 @@ impl Default for OrchestratorConfig {
             system_prompt_path: String::new(),
             timeout_secs: 60,
             bare_mode: true,
+            mcp_enabled: true,
+            mcp_server_path: None,
+            mcp_config_path: None,
+            mcp_data_dir: None,
         }
     }
 }
@@ -120,9 +143,32 @@ pub async fn wake_orchestrator(
             .arg(&config.system_prompt_path);
     }
 
-    // No tools in Phase 3.
-    cmd.arg("--allowedTools").arg("");
-    cmd.arg("--permission-mode").arg("plan");
+    // Phase 4: attach the Kairo MCP server if enabled.
+    //
+    // NOTE on --permission-mode: Phase 3 used "plan", which blocks tool
+    // execution (it is purely a planning mode). With MCP tools we need
+    // "default" so the orchestrator can actually call them. Read the CLI help
+    // for --permission-mode before changing this again — a silent switch back
+    // to "plan" would make every tool call into a no-op.
+    if config.mcp_enabled {
+        let mcp_bin = resolve_mcp_binary(config)?;
+        let mcp_config_file = write_mcp_config(config, &mcp_bin)?;
+        cmd.arg("--mcp-config").arg(&mcp_config_file);
+        cmd.arg("--strict-mcp-config");
+        cmd.arg("--allowedTools").arg("mcp__kairo__*");
+        cmd.arg("--permission-mode").arg("default");
+        info!(
+            layer = "orchestrator",
+            component = "spawn",
+            mcp_bin = %mcp_bin.display(),
+            mcp_config = %mcp_config_file.display(),
+            "MCP enabled for this wake"
+        );
+    } else {
+        // Phase 3 compatibility — no tools, plan mode.
+        cmd.arg("--allowedTools").arg("");
+        cmd.arg("--permission-mode").arg("plan");
+    }
 
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -175,16 +221,10 @@ pub async fn wake_orchestrator(
     );
 
     // Read stdout with timeout.
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to open stdout pipe")?;
+    let stdout = child.stdout.take().context("Failed to open stdout pipe")?;
 
     // Capture stderr in background for diagnostics.
-    let stderr = child
-        .stderr
-        .take()
-        .context("Failed to open stderr pipe")?;
+    let stderr = child.stderr.take().context("Failed to open stderr pipe")?;
     let stderr_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         let mut output = String::new();
@@ -235,7 +275,9 @@ pub async fn wake_orchestrator(
                 "Orchestrator timed out — killing process"
             );
             let _ = child.kill().await;
-            on_event(OrchestratorEvent::Error("Orchestrator timed out".to_string()));
+            on_event(OrchestratorEvent::Error(
+                "Orchestrator timed out".to_string(),
+            ));
             WakeResult {
                 response_text: String::new(),
                 cost_usd: None,
@@ -274,6 +316,104 @@ pub async fn wake_orchestrator(
     }
 
     Ok(wake_result)
+}
+
+/// Locates the `kairo-mcp` binary by checking, in order:
+/// (1) explicit `OrchestratorConfig.mcp_server_path`,
+/// (2) `KAIRO_MCP_BIN` environment variable,
+/// (3) sibling of the current executable (`target/debug/kairo-mcp[.exe]`),
+/// (4) the bare name `kairo-mcp` (relying on PATH).
+fn resolve_mcp_binary(config: &OrchestratorConfig) -> Result<PathBuf> {
+    if let Some(p) = &config.mcp_server_path {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+        return Err(anyhow::anyhow!(
+            "Configured mcp_server_path does not exist: {}",
+            p.display()
+        ));
+    }
+
+    if let Ok(env_bin) = std::env::var("KAIRO_MCP_BIN") {
+        let p = PathBuf::from(env_bin);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let candidate = dir.join(if cfg!(windows) {
+                "kairo-mcp.exe"
+            } else {
+                "kairo-mcp"
+            });
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Fall back to the bare name — claude CLI will fail at spawn time if it's
+    // not on PATH, which surfaces a clearer error than anything we'd invent.
+    Ok(PathBuf::from(if cfg!(windows) {
+        "kairo-mcp.exe"
+    } else {
+        "kairo-mcp"
+    }))
+}
+
+/// Writes an mcp-config.json pointing at the given kairo-mcp binary and
+/// returns its path. Re-written on every wake so changes to `mcp_data_dir`
+/// or `mcp_server_path` take effect immediately.
+fn write_mcp_config(config: &OrchestratorConfig, mcp_bin: &std::path::Path) -> Result<PathBuf> {
+    let config_path = config
+        .mcp_config_path
+        .clone()
+        .or_else(|| {
+            config
+                .mcp_data_dir
+                .as_ref()
+                .map(|d| d.join("mcp-config.json"))
+        })
+        .or_else(|| dirs::home_dir().map(|h| h.join(".kairo-dev").join("mcp-config.json")))
+        .context("Could not determine path for mcp-config.json")?;
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create MCP config parent dir: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let env_block = if let Some(dir) = &config.mcp_data_dir {
+        serde_json::json!({ "KAIRO_DATA_DIR": dir.to_string_lossy() })
+    } else {
+        serde_json::json!({})
+    };
+
+    let doc = serde_json::json!({
+        "mcpServers": {
+            "kairo": {
+                "type": "stdio",
+                "command": mcp_bin.to_string_lossy(),
+                "args": [],
+                "env": env_block,
+            }
+        }
+    });
+
+    let text = serde_json::to_string_pretty(&doc).context("Failed to serialize mcp-config.json")?;
+    std::fs::write(&config_path, text).with_context(|| {
+        format!(
+            "Failed to write mcp-config.json at {}",
+            config_path.display()
+        )
+    })?;
+
+    Ok(config_path)
 }
 
 /// Processes the event stream from stdout, collecting text and emitting events.

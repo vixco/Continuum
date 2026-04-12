@@ -11,9 +11,7 @@
 
 use anyhow::{Context, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{
-    Array, Float32Array, FixedSizeListArray, RecordBatch, StringArray,
-};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, Utc};
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -44,6 +42,8 @@ pub enum EventKind {
     UserMessage,
     /// Kairo produced a response.
     KairoResponse,
+    /// An MCP tool was invoked by the orchestrator (audit trail).
+    ToolCall,
 }
 
 impl EventKind {
@@ -53,6 +53,7 @@ impl EventKind {
             Self::Wake => "wake",
             Self::UserMessage => "user_message",
             Self::KairoResponse => "kairo_response",
+            Self::ToolCall => "tool_call",
         }
     }
 
@@ -62,6 +63,7 @@ impl EventKind {
             "wake" => Self::Wake,
             "user_message" => Self::UserMessage,
             "kairo_response" => Self::KairoResponse,
+            "tool_call" => Self::ToolCall,
             _ => Self::Remember,
         }
     }
@@ -143,9 +145,9 @@ impl Embedder {
     }
 
     /// Generates embeddings for multiple texts in a batch.
-    pub fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_batch(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         self.model
-            .embed(texts.to_vec(), None)
+            .embed(texts, None)
             .context("Failed to generate batch embeddings")
     }
 }
@@ -172,9 +174,8 @@ impl EpisodicStore {
     pub async fn open(db_dir: &str) -> Result<Self> {
         // Ensure the directory exists.
         if !db_dir.starts_with("memory://") {
-            std::fs::create_dir_all(db_dir).with_context(|| {
-                format!("Failed to create LanceDB directory: {db_dir}")
-            })?;
+            std::fs::create_dir_all(db_dir)
+                .with_context(|| format!("Failed to create LanceDB directory: {db_dir}"))?;
         }
 
         let db = connect(db_dir)
@@ -394,14 +395,13 @@ impl EpisodicStore {
                     .and_then(|t| serde_json::from_str(t.value(i)).ok())
                     .unwrap_or_default();
 
-                let source_frame_id = frame_ids
-                    .and_then(|f| {
-                        if f.is_null(i) {
-                            None
-                        } else {
-                            Some(f.value(i).to_string())
-                        }
-                    });
+                let source_frame_id = frame_ids.and_then(|f| {
+                    if f.is_null(i) {
+                        None
+                    } else {
+                        Some(f.value(i).to_string())
+                    }
+                });
 
                 let distance = distances.map(|d| d.value(i)).unwrap_or(0.0);
 
@@ -482,14 +482,13 @@ impl EpisodicStore {
                     .and_then(|t| serde_json::from_str(t.value(i)).ok())
                     .unwrap_or_default();
 
-                let source_frame_id = frame_ids
-                    .and_then(|f| {
-                        if f.is_null(i) {
-                            None
-                        } else {
-                            Some(f.value(i).to_string())
-                        }
-                    });
+                let source_frame_id = frame_ids.and_then(|f| {
+                    if f.is_null(i) {
+                        None
+                    } else {
+                        Some(f.value(i).to_string())
+                    }
+                });
 
                 events.push(EpisodicEvent {
                     id: ids.value(i).to_string(),
