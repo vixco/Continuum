@@ -11,11 +11,6 @@
 //! ```bash
 //! cargo run --release --bin kairo
 //! ```
-//!
-//! Requires:
-//! - Claude Code CLI installed and authenticated (`claude login`)
-//! - Triage model downloaded (`scripts/download-models.ps1`)
-//! - ONNX Runtime DLL in PATH or `~/.kairo-dev/lib/`
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -23,8 +18,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing_subscriber::EnvFilter;
+
+use kairo_vision::VisionModel;
 
 use kairo_core::config::{kairo_dev_dir, load_config, KairoConfig};
 use kairo_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
@@ -36,23 +33,27 @@ use kairo_core::orchestrator::wake_context::build_wake_message;
 use kairo_core::senses::audio::AudioWatcher;
 use kairo_core::senses::context::ContextWatcher;
 use kairo_core::senses::frame::PerceptionFrameBuilder;
-use kairo_core::senses::types::{AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation};
+use kairo_core::senses::types::{
+    AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation,
+};
 use kairo_core::senses::vision::VisionWatcher;
 use kairo_core::triage::handlers::handle_decision;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 use kairo_core::triage::TriageDecision;
-use kairo_vision::VisionModel;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize structured logging.
+    // Flags.
+    let force_wake = std::env::args().any(|a| a == "--force-wake");
+
+    // Structured logging.
     let default_filter = "info,kairo_core=debug,kairo_vision=info,kairo_llm=info";
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(default_filter)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_target(false)
+        .compact()
         .init();
 
     tracing::info!(
@@ -61,39 +62,41 @@ async fn main() -> Result<()> {
         "Starting Kairo — perception + triage + orchestrator"
     );
 
-    let config = load_config().unwrap_or_default();
+    // --- Config ---
     let dev_dir = kairo_dev_dir();
+    let config_path = dev_dir.join("config.toml");
+    let config = load_config(&config_path).context("Failed to load configuration")?;
+
+    std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.kairo-dev/")?;
+    std::fs::create_dir_all(&config.storage.screenshots_dir)
+        .context("Failed to create screenshots directory")?;
 
     // --- Memory stores ---
-    let raw_log_path = format!(
-        "sqlite:{}/raw_log.sqlite",
-        dev_dir.to_str().unwrap_or("~/.kairo-dev")
-    );
-    let raw_log = RawLog::open(&raw_log_path).await?;
+    let raw_log = RawLog::open(&config.storage.db_path)
+        .await
+        .context("Failed to open raw log database")?;
 
-    let semantic_path = format!(
-        "sqlite:{}/semantic.sqlite",
-        dev_dir.to_str().unwrap_or("~/.kairo-dev")
+    let semantic_path = dev_dir.join("semantic.sqlite");
+    let semantic = Arc::new(
+        SemanticStore::open(&semantic_path.to_string_lossy())
+            .await
+            .context("Failed to open semantic memory")?,
     );
-    let semantic = Arc::new(SemanticStore::open(&semantic_path).await?);
 
     let episodic_dir = dev_dir.join("episodic_db");
-    let episodic = Arc::new(tokio::sync::Mutex::new(
-        EpisodicStore::open(episodic_dir.to_str().unwrap_or("~/.kairo-dev/episodic_db")).await?,
+    let episodic = Arc::new(Mutex::new(
+        EpisodicStore::open(&episodic_dir.to_string_lossy())
+            .await
+            .context("Failed to open episodic memory")?,
     ));
 
     // --- Orchestrator config ---
     let prompt_path = find_system_prompt(&dev_dir);
     let orch_config = OrchestratorConfig {
-        model: config
-            .get("orchestrator")
-            .and_then(|o| o.get("model"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-opus-4-6")
-            .to_string(),
+        model: "claude-opus-4-6".to_string(),
         system_prompt_path: prompt_path,
         timeout_secs: 60,
-        bare_mode: true,
+        bare_mode: false,
     };
 
     tracing::info!(
@@ -116,74 +119,108 @@ async fn main() -> Result<()> {
         let _ = ctrl_c_shutdown.send(true);
     });
 
-    // --- Perception layer ---
+    // --- Perception channels ---
+    let (screen_tx, screen_rx) = mpsc::channel::<ScreenObservation>(16);
+    let (audio_tx, audio_rx) = mpsc::channel::<AudioObservation>(16);
+    let (ctx_tx, ctx_rx) = mpsc::channel::<ContextObservation>(64);
     let (frame_tx, mut frame_rx) = mpsc::channel::<PerceptionFrame>(32);
 
-    // Vision watcher.
-    let vision_model = match VisionModel::load_default().await {
-        Ok(m) => Some(Arc::new(m)),
-        Err(e) => {
-            tracing::warn!(
-                layer = "senses",
-                component = "vision",
-                error = %e,
-                "Vision model unavailable — running without screen descriptions"
-            );
-            None
-        }
-    };
+    // --- Vision ---
+    let vision_model = init_vision_model(&config).await;
 
-    let interval_secs = config
-        .get("senses")
-        .and_then(|s| s.get("interval_seconds"))
-        .and_then(|v| v.as_integer())
-        .unwrap_or(3) as u64;
-
-    let frame_builder = PerceptionFrameBuilder::new(frame_tx.clone(), interval_secs);
-    let vision_watcher = VisionWatcher::new(vision_model.clone());
-    let context_watcher = ContextWatcher::new();
-
-    // Start watchers.
-    let fb_shutdown = shutdown_rx.clone();
-    let vw = vision_watcher.clone();
-    let cw = context_watcher.clone();
+    let vision_watcher = VisionWatcher::new(
+        config.screen.clone(),
+        vision_model,
+        PathBuf::from(&config.storage.screenshots_dir),
+    );
+    let vision_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        frame_builder.run(vw, cw, fb_shutdown).await;
+        vision_watcher.run(screen_tx, vision_shutdown).await;
     });
 
-    // Audio watcher (best-effort).
-    let audio_tx = frame_tx.clone();
+    // --- Audio ---
+    let audio_watcher = AudioWatcher::new(config.audio.clone());
     let audio_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        match AudioWatcher::new() {
-            Ok(aw) => aw.run(audio_tx, audio_shutdown).await,
-            Err(e) => {
-                tracing::warn!(
-                    layer = "senses",
-                    component = "audio",
-                    error = %e,
-                    "Audio watcher unavailable"
-                );
-            }
-        }
+        audio_watcher.run(audio_tx, audio_shutdown).await;
     });
 
-    // --- Triage layer ---
-    let triage = {
-        let triage_config = TriageConfig::from_kairo_config(&config);
-        match TriageLayer::new(triage_config).await {
-            Ok(t) => {
-                tracing::info!(layer = "triage", component = "kairo", "Triage ready");
-                Some(t)
-            }
-            Err(e) => {
-                tracing::error!(
-                    layer = "triage",
-                    component = "kairo",
-                    error = %e,
-                    "Triage unavailable — orchestrator will not be woken automatically"
-                );
-                None
+    // --- Context ---
+    let context_watcher = ContextWatcher::new(config.context.clone());
+    let context_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let _ = context_watcher.run(ctx_tx, context_shutdown).await;
+    });
+
+    // --- Frame builder ---
+    let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
+    let builder_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        frame_builder
+            .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
+            .await;
+    });
+
+    // --- Triage ---
+    let triage: Option<TriageLayer> = {
+        let model_path = dev_dir
+            .join("models")
+            .join("triage")
+            .join("qwen3-8b-q4_k_m.gguf");
+
+        if !model_path.exists() {
+            tracing::error!(
+                layer = "triage",
+                component = "kairo",
+                path = %model_path.display(),
+                "Triage model not found. Run: powershell scripts/download-models.ps1"
+            );
+            None
+        } else {
+            tracing::info!(
+                layer = "triage",
+                component = "kairo",
+                "Initializing triage..."
+            );
+
+            let n_threads = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+                .max(4)
+                .min(14);
+
+            let triage_config = TriageConfig {
+                model_path: model_path.to_string_lossy().into_owned(),
+                context_size: 2048,
+                n_threads,
+                gpu_layers: 999,
+                max_tokens: 256,
+                temperature: 0.0,
+                latency_warn_ms: 2000,
+            };
+
+            match TriageLayer::new(triage_config) {
+                Ok(t) => {
+                    if let Err(e) = t.warmup().await {
+                        tracing::warn!(
+                            layer = "triage",
+                            component = "kairo",
+                            error = %e,
+                            "Triage warmup failed"
+                        );
+                    }
+                    tracing::info!(layer = "triage", component = "kairo", "Triage ready");
+                    Some(t)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        layer = "triage",
+                        component = "kairo",
+                        error = %e,
+                        "Triage failed to init — orchestrator will not be woken"
+                    );
+                    None
+                }
             }
         }
     };
@@ -191,6 +228,7 @@ async fn main() -> Result<()> {
     tracing::info!(
         layer = "system",
         component = "kairo",
+        triage = triage.is_some(),
         "All layers running. Press Ctrl+C to stop."
     );
 
@@ -204,12 +242,11 @@ async fn main() -> Result<()> {
             Some(frame) = frame_rx.recv() => {
                 frame_count += 1;
 
-                // Print one-line status.
                 let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");
 
-                // Run triage if available.
-                let decision = if let Some(ref triage_layer) = triage {
+                // Triage.
+                let decision: Option<TriageDecision> = if let Some(ref triage_layer) = triage {
                     let triage_start = Instant::now();
                     let d = triage_layer.evaluate(&frame, "").await;
                     let triage_ms = triage_start.elapsed().as_millis();
@@ -223,9 +260,10 @@ async fn main() -> Result<()> {
                     );
 
                     println!(
-                        "[{ts}] {app} | \"{desc}\" | triage={decision}",
+                        "[{ts}] {app} | \"{desc}\" | audio=\"{audio}\" | triage={decision}",
                         app = frame.context.foreground_process_name,
                         desc = truncate(&frame.screen.description, 50),
+                        audio = truncate(audio_text, 30),
                         decision = d.variant_name(),
                     );
 
@@ -256,21 +294,29 @@ async fn main() -> Result<()> {
                     recent_frames.remove(0);
                 }
 
+                // --force-wake: override triage on the first frame to test the pipeline.
+                let effective_decision = if force_wake && frame_count == 1 {
+                    println!("[--force-wake: forcing wake on frame 1]");
+                    Some(TriageDecision::WakeOrchestrator {
+                        reason: "Force wake for testing — user wants to verify the orchestrator pipeline works end-to-end".to_string(),
+                    })
+                } else {
+                    decision.clone()
+                };
+
                 // Handle decision.
-                if let Some(ref decision) = decision {
+                if let Some(ref decision) = effective_decision {
                     match decision {
                         TriageDecision::WakeOrchestrator { reason } => {
-                            // THE REAL THING: wake Opus.
-                            let wake_result = do_wake(
+                            let history = recent_frames[..recent_frames.len().saturating_sub(1)].to_vec();
+                            if let Err(e) = do_wake(
                                 &frame,
-                                &recent_frames,
+                                &history,
                                 reason,
                                 &orch_config,
                                 &semantic,
                                 &episodic,
-                            ).await;
-
-                            if let Err(e) = wake_result {
+                            ).await {
                                 tracing::error!(
                                     layer = "orchestrator",
                                     component = "kairo",
@@ -281,7 +327,6 @@ async fn main() -> Result<()> {
                             }
                         }
                         _ => {
-                            // Handle non-wake decisions the old way.
                             if let Err(e) = handle_decision(decision) {
                                 tracing::warn!(
                                     layer = "triage",
@@ -306,90 +351,84 @@ async fn main() -> Result<()> {
     tracing::info!(
         layer = "system",
         component = "kairo",
-        frames_processed = frame_count,
+        frames = frame_count,
         "Shutting down..."
     );
 
     raw_log.close().await;
     semantic.close().await;
 
-    tracing::info!(layer = "system", component = "kairo", "Kairo stopped.");
+    tracing::info!(layer = "system", component = "kairo", "Kairo stopped cleanly");
     Ok(())
 }
 
 /// Performs a full orchestrator wake cycle.
-///
-/// 1. Retrieves memory context
-/// 2. Builds wake message
-/// 3. Spawns claude process
-/// 4. Streams response to terminal
-/// 5. Stores interaction in episodic memory
 async fn do_wake(
     trigger_frame: &PerceptionFrame,
     history_frames: &[PerceptionFrame],
     reason: &str,
     config: &OrchestratorConfig,
     semantic: &Arc<SemanticStore>,
-    episodic: &Arc<tokio::sync::Mutex<EpisodicStore>>,
+    episodic: &Arc<Mutex<EpisodicStore>>,
 ) -> Result<()> {
     let wake_start = Instant::now();
 
     println!("\n--- KAIRO WAKING ---");
 
-    // 1. Retrieve memory context.
+    // 1. Memory context.
     let memory_context = {
         let mut ep = episodic.lock().await;
         retrieve_context(trigger_frame, &mut *ep, semantic).await?
     };
 
-    let retrieval_ms = wake_start.elapsed().as_millis();
     tracing::debug!(
         layer = "orchestrator",
         component = "kairo",
-        retrieval_ms = retrieval_ms as u64,
-        "Memory retrieval complete"
+        retrieval_ms = wake_start.elapsed().as_millis() as u64,
+        "Memory retrieved"
     );
 
-    // 2. Build wake message.
+    // 2. Wake message.
     let user_message = build_wake_message(trigger_frame, history_frames, &memory_context, reason);
 
-    tracing::debug!(
-        layer = "orchestrator",
-        component = "kairo",
-        message_len = user_message.len(),
-        "Wake message built"
-    );
-
-    // 3. Spawn orchestrator and stream response.
+    // 3. Spawn orchestrator + stream.
     print!("KAIRO: ");
-    std::io::stdout().flush()?;
+    std::io::stdout().flush().ok();
 
     let mut full_response = String::new();
-
-    let result = wake_orchestrator(config, &user_message, |event| {
-        match &event {
-            OrchestratorEvent::TextDelta(text) => {
-                print!("{text}");
+    let result = wake_orchestrator(config, &user_message, |event| match &event {
+        OrchestratorEvent::TextDelta(text) => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+            full_response.push_str(text);
+        }
+        OrchestratorEvent::ResponseComplete {
+            full_text,
+            cost_usd,
+            duration_ms,
+            ..
+        } => {
+            // If no text_delta events came through, print the full text now.
+            if full_response.is_empty() && !full_text.is_empty() {
+                print!("{full_text}");
                 std::io::stdout().flush().ok();
-                full_response.push_str(text);
+                full_response.push_str(full_text);
             }
-            OrchestratorEvent::ResponseComplete { cost_usd, duration_ms, .. } => {
-                println!();
-                let cost_str = cost_usd.map(|c| format!(" ${c:.4}")).unwrap_or_default();
-                let dur_str = duration_ms.map(|d| format!(" {d}ms")).unwrap_or_default();
-                println!("--- [{dur_str}{cost_str}] ---\n");
-            }
-            OrchestratorEvent::Error(msg) => {
-                println!("\n[ERROR: {msg}]");
-            }
-            OrchestratorEvent::SessionReady { session_id } => {
-                tracing::debug!(
-                    layer = "orchestrator",
-                    component = "kairo",
-                    session_id = %session_id,
-                    "Session ready"
-                );
-            }
+            println!();
+            let cost_str = cost_usd.map(|c| format!(" ${c:.4}")).unwrap_or_default();
+            let dur_str = duration_ms.map(|d| format!(" {d}ms")).unwrap_or_default();
+            println!("--- [{dur_str}{cost_str}] ---\n");
+        }
+        OrchestratorEvent::Error(msg) => {
+            println!("\n[ERROR: {msg}]");
+        }
+        OrchestratorEvent::SessionReady { session_id } => {
+            tracing::debug!(
+                layer = "orchestrator",
+                component = "kairo",
+                session_id = %session_id,
+                "Session ready"
+            );
         }
     })
     .await?;
@@ -398,7 +437,6 @@ async fn do_wake(
     if result.success && !full_response.is_empty() {
         let mut ep = episodic.lock().await;
 
-        // Store the wake event.
         let wake_event = EpisodicEvent {
             id: uuid::Uuid::new_v4().to_string(),
             ts: trigger_frame.ts,
@@ -417,12 +455,11 @@ async fn do_wake(
             );
         }
 
-        // Store Kairo's response.
         let response_event = EpisodicEvent {
             id: uuid::Uuid::new_v4().to_string(),
             ts: chrono::Utc::now(),
             kind: EventKind::KairoResponse,
-            summary: truncate(&full_response, 200).to_string(),
+            summary: truncate(&full_response, 200),
             importance: 0.7,
             tags: vec!["response".to_string()],
             source_frame_id: Some(trigger_frame.id.to_string()),
@@ -437,11 +474,10 @@ async fn do_wake(
         }
     }
 
-    let total_ms = wake_start.elapsed().as_millis();
     tracing::info!(
         layer = "orchestrator",
         component = "kairo",
-        total_ms = total_ms as u64,
+        total_ms = wake_start.elapsed().as_millis() as u64,
         cost_usd = result.cost_usd,
         success = result.success,
         "Wake cycle complete"
@@ -450,21 +486,71 @@ async fn do_wake(
     Ok(())
 }
 
-/// Finds the system prompt file, checking several locations.
-fn find_system_prompt(dev_dir: &PathBuf) -> String {
-    // Check dev dir first.
+/// Initialize the vision model with stub fallback.
+async fn init_vision_model(config: &KairoConfig) -> Arc<dyn kairo_vision::VisionModel> {
+    let model_path = &config.vision.model_path;
+
+    match kairo_vision::onnx::OnnxVisionModel::new(model_path).await {
+        Ok(model) => {
+            if let Err(e) = model.warmup().await {
+                tracing::warn!(
+                    layer = "senses",
+                    component = "kairo",
+                    error = %e,
+                    "Vision warmup failed, using stub"
+                );
+            }
+            Arc::new(model)
+        }
+        Err(e) => {
+            tracing::warn!(
+                layer = "senses",
+                component = "kairo",
+                model_path = model_path,
+                error = %e,
+                "Failed to load vision model, using stub"
+            );
+            Arc::new(StubVisionModel)
+        }
+    }
+}
+
+struct StubVisionModel;
+
+#[async_trait::async_trait]
+impl kairo_vision::VisionModel for StubVisionModel {
+    async fn describe(
+        &self,
+        _image: &image::DynamicImage,
+    ) -> Result<kairo_vision::VisionOutput> {
+        Ok(kairo_vision::VisionOutput {
+            description: "(no vision model loaded)".to_string(),
+            has_error_visible: false,
+            confidence: 0.0,
+        })
+    }
+
+    fn model_name(&self) -> &str {
+        "stub"
+    }
+
+    async fn warmup(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Finds the system prompt file.
+fn find_system_prompt(dev_dir: &std::path::Path) -> String {
     let dev_prompt = dev_dir.join("orchestrator-system.md");
     if dev_prompt.exists() {
         return dev_prompt.to_string_lossy().to_string();
     }
 
-    // Check project prompts/ directory (for development).
-    let project_prompt = PathBuf::from("prompts/orchestrator-system.md");
+    let project_prompt = std::path::PathBuf::from("prompts/orchestrator-system.md");
     if project_prompt.exists() {
         return project_prompt.to_string_lossy().to_string();
     }
 
-    // Fallback: empty string means no system prompt file.
     tracing::warn!(
         layer = "orchestrator",
         component = "kairo",
@@ -473,11 +559,10 @@ fn find_system_prompt(dev_dir: &PathBuf) -> String {
     String::new()
 }
 
-/// Truncates a string to the given max length, appending "..." if truncated.
-fn truncate(s: &str, max_len: usize) -> &str {
+fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s
+        s.to_string()
     } else {
-        &s[..max_len]
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
