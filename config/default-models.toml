@@ -33,6 +33,18 @@ budget_model = "claude-sonnet-4-6"
 power_model = "claude-opus-4-6"
 max_concurrent = 3
 
+[audio]
+# Chosen audio input device. Kairo runs an interactive picker on first start
+# (or when you pass `--reset-audio`, or when the hardware has changed) and
+# saves the result here. Pick by running `kairo` once, or by running
+# `cargo run --release --bin audio-probe` to re-pick without booting the full
+# runtime.
+#
+# These fields are written by the picker at runtime to
+# ~/.kairo-dev/config.toml. Leave them empty here — this file is a template.
+# device_name  = "Microphone"     # display name from cpal description()
+# device_index = 2                # cpal enumeration index at pick time
+
 [stt]
 name = "Whisper small"
 variant = "whisper-small"
