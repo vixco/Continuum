@@ -36,7 +36,9 @@ futures = "0.3"
 
 # Audio pipeline (requires LLVM/libclang + cmake for whisper-rs build)
 cpal = "0.17"
-whisper-rs = "0.16"
+# `cuda` feature enables whisper.cpp's cuBLAS backend, which coexists with
+# llama-cpp-2's CUDA build (both use the same CUDA Toolkit on the user's box).
+whisper-rs = { version = "0.16", features = ["cuda"] }
 rubato = "2"
 
 [target.'cfg(windows)'.dependencies]
