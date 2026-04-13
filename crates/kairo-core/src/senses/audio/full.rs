@@ -4,6 +4,7 @@
 //! energy-based VAD, resamples to 16 kHz with `rubato`, and transcribes
 //! via `whisper-rs`.
 
+use std::collections::VecDeque;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,27 +34,53 @@ const VAD_CHUNK_SAMPLES: usize = 512;
 const WHISPER_THREADS: i32 = 4;
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
 
+/// Rolling window (in VAD chunks) over which the adaptive VAD averages
+/// silence RMS to compute the noise floor. 312 chunks × 32 ms ≈ 10 seconds.
+const VAD_NOISE_WINDOW_CHUNKS: u64 = 312;
+
+/// Initial warmup period (in VAD chunks) during which every chunk unconditionally
+/// contributes to the noise floor estimate. Lets the detector calibrate even if
+/// the user starts speaking right away — worst case, a few syllables at the
+/// very start are treated as silence, then the adaptive threshold kicks in.
+/// 31 chunks × 32 ms ≈ 1 second.
+const VAD_WARMUP_CHUNKS: u64 = 31;
+
 // ---------------------------------------------------------------------------
-// Energy-based VAD
+// Adaptive energy-based VAD
 // ---------------------------------------------------------------------------
 
-/// Simple energy-based voice activity detector.
+/// Self-calibrating voice activity detector.
 ///
-/// Computes the RMS energy of each 32 ms chunk and compares it against a
-/// configurable threshold. When energy exceeds the threshold, the chunk is
-/// classified as speech. After `silence_duration_ms` of consecutive non-speech
-/// chunks the segment is considered complete.
+/// Tracks a rolling 10-second window of silence-chunk RMS values and sets the
+/// speech threshold to `max(floor, noise_floor_mean × multiplier)`. This means
+/// a quiet laptop mic (noise ≈ 0.0005) uses the floor (0.005), while a hot
+/// USB mic (noise ≈ 0.01) auto-raises to ≈ 0.05 — without user tuning.
 ///
-/// This is a Phase 1 approach. A future upgrade to Silero VAD will provide
-/// higher accuracy, especially in noisy environments.
-struct EnergyVad {
-    /// RMS energy threshold (0.0 - 1.0). Chunks with energy above this
-    /// value are classified as speech.
-    threshold: f32,
+/// The first ~1 second is treated as unconditional silence (warmup) so the
+/// noise floor has samples to calibrate from even if speech starts immediately.
+struct AdaptiveVad {
+    /// Absolute minimum threshold, regardless of noise floor. Protects against
+    /// pathologically quiet rooms where noise_floor × multiplier would fall
+    /// below typical speech RMS.
+    floor: f32,
+    /// Multiplier applied to the rolling noise floor. Speech must exceed
+    /// `noise_floor × multiplier` to be detected.
+    multiplier: f32,
     /// Number of consecutive silence chunks required to end a speech segment.
     silence_chunks_needed: usize,
     /// Maximum number of samples in a single speech segment before forced split.
     max_segment_samples: usize,
+    /// Rolling window of `(chunk_index, rms)` entries classified as silence.
+    /// Older entries are evicted when they fall outside the noise window.
+    silence_ring: VecDeque<(u64, f32)>,
+    /// Monotonically increasing chunk counter used for ring-eviction timing.
+    current_chunk: u64,
+    /// Chunks remaining in the warmup period. While > 0, every chunk is
+    /// considered silence for noise-floor purposes.
+    warmup_remaining: u64,
+    /// Most recently computed threshold. Cached here so the outer loop can
+    /// include it in trace logs without re-running the mean.
+    last_threshold: f32,
 }
 
 /// Result of feeding a chunk to the VAD.
@@ -99,17 +126,32 @@ impl VadState {
     }
 }
 
-impl EnergyVad {
-    /// Creates a new energy-based VAD with the given parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `threshold` - RMS energy threshold (0.0 - 1.0).
-    /// * `silence_duration_ms` - How long silence must persist (in ms) before
-    ///   a speech segment is considered complete.
-    /// * `max_segment_secs` - Maximum segment length in seconds before forced split.
-    fn new(threshold: f32, silence_duration_ms: u64, max_segment_secs: u64) -> Self {
-        // Each VAD chunk is 32 ms at 16 kHz.
+impl AdaptiveVad {
+    /// Creates a new adaptive VAD with production warmup (~1s).
+    fn new(
+        floor: f32,
+        multiplier: f32,
+        silence_duration_ms: u64,
+        max_segment_secs: u64,
+    ) -> Self {
+        Self::new_with_warmup(
+            floor,
+            multiplier,
+            silence_duration_ms,
+            max_segment_secs,
+            VAD_WARMUP_CHUNKS,
+        )
+    }
+
+    /// Inner constructor — exposes `warmup` for test code that wants the
+    /// adaptive threshold to kick in immediately.
+    fn new_with_warmup(
+        floor: f32,
+        multiplier: f32,
+        silence_duration_ms: u64,
+        max_segment_secs: u64,
+        warmup: u64,
+    ) -> Self {
         let chunk_duration_ms = (VAD_CHUNK_SAMPLES as u64 * 1000) / u64::from(TARGET_SAMPLE_RATE);
         let silence_chunks_needed = if chunk_duration_ms > 0 {
             (silence_duration_ms / chunk_duration_ms).max(1) as usize
@@ -117,17 +159,27 @@ impl EnergyVad {
             1
         };
         let max_segment_samples = (max_segment_secs * u64::from(TARGET_SAMPLE_RATE)) as usize;
+        // Floor below ~0.0001 is below the noise floor of any real microphone
+        // and would make the VAD trigger constantly. Clamp defensively.
+        let floor = floor.max(0.0001);
+        // Multiplier < 1 means threshold drops below the noise floor — the
+        // VAD would classify its own silence as speech. Clamp to 1.
+        let multiplier = multiplier.max(1.0);
 
         Self {
-            threshold,
+            floor,
+            multiplier,
             silence_chunks_needed,
             max_segment_samples,
+            silence_ring: VecDeque::with_capacity(VAD_NOISE_WINDOW_CHUNKS as usize),
+            current_chunk: 0,
+            warmup_remaining: warmup,
+            last_threshold: floor,
         }
     }
 
-    /// Computes the RMS energy of a slice of f32 samples.
-    ///
-    /// Returns 0.0 for empty slices.
+    /// Computes the RMS energy of a slice of f32 samples. Returns 0.0 for
+    /// empty slices.
     fn rms_energy(samples: &[f32]) -> f32 {
         if samples.is_empty() {
             return 0.0;
@@ -136,20 +188,74 @@ impl EnergyVad {
         (sum_sq / samples.len() as f32).sqrt()
     }
 
-    /// Feeds a chunk of exactly [`VAD_CHUNK_SAMPLES`] samples into the VAD
-    /// and returns a decision.
+    /// Mean RMS of the chunks currently in the noise window. 0.0 when the
+    /// window is empty (fresh VAD before any silence chunk has been observed).
+    fn noise_floor(&self) -> f32 {
+        if self.silence_ring.is_empty() {
+            return 0.0;
+        }
+        let sum: f32 = self.silence_ring.iter().map(|(_, rms)| *rms).sum();
+        sum / self.silence_ring.len() as f32
+    }
+
+    /// Effective speech threshold at the current moment. Public for the outer
+    /// loop's periodic stats log.
+    fn current_threshold(&self) -> f32 {
+        (self.noise_floor() * self.multiplier).max(self.floor)
+    }
+
+    /// Feeds a chunk of exactly [`VAD_CHUNK_SAMPLES`] samples into the VAD,
+    /// updates the rolling noise floor, and returns a decision.
     ///
     /// Callers must maintain a [`VadState`] across calls and pass it here.
-    fn feed_chunk(&self, chunk: &[f32], state: &mut VadState) -> VadDecision {
-        let energy = Self::rms_energy(chunk);
-        let is_speech = energy > self.threshold;
+    fn feed_chunk(&mut self, chunk: &[f32], state: &mut VadState) -> VadDecision {
+        let rms = Self::rms_energy(chunk);
+        self.current_chunk += 1;
+
+        // Evict silence samples that have fallen outside the rolling window.
+        let oldest_allowed = self
+            .current_chunk
+            .saturating_sub(VAD_NOISE_WINDOW_CHUNKS);
+        while let Some(&(idx, _)) = self.silence_ring.front() {
+            if idx < oldest_allowed {
+                self.silence_ring.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let in_warmup = self.warmup_remaining > 0;
+        let threshold = self.current_threshold();
+        self.last_threshold = threshold;
+        let is_speech = !in_warmup && rms > threshold;
+
+        // Warmup: every chunk feeds the noise floor so the threshold has
+        // something to work with. Post-warmup: only chunks we classified as
+        // silence contribute, so speech itself doesn't poison the estimate.
+        if in_warmup || !is_speech {
+            self.silence_ring.push_back((self.current_chunk, rms));
+        }
+        if in_warmup {
+            self.warmup_remaining -= 1;
+        }
 
         if is_speech {
+            let just_started = !state.speech_active;
             state.speech_active = true;
             state.consecutive_silence_chunks = 0;
             state.speech_buffer.extend_from_slice(chunk);
 
-            // Check for force-split.
+            if just_started {
+                tracing::info!(
+                    layer = "senses",
+                    component = "audio",
+                    rms = rms,
+                    threshold = threshold,
+                    noise_floor = self.noise_floor(),
+                    "Speech segment started"
+                );
+            }
+
             if state.speech_buffer.len() >= self.max_segment_samples {
                 tracing::debug!(
                     layer = "senses",
@@ -442,8 +548,9 @@ impl AudioWatcher {
 
         let needs_resample = native_rate != TARGET_SAMPLE_RATE || native_channels != 1;
 
-        let vad = EnergyVad::new(
+        let mut vad = AdaptiveVad::new(
             self.config.vad_threshold,
+            self.config.vad_noise_floor_multiplier,
             self.config.silence_duration_ms,
             self.config.max_segment_secs,
         );
@@ -520,7 +627,9 @@ impl AudioWatcher {
                     buffers = diag_buffers_seen,
                     samples = diag_samples_seen,
                     peak_rms = diag_peak_rms,
-                    vad_threshold = self.config.vad_threshold,
+                    vad_floor = self.config.vad_threshold,
+                    vad_threshold_now = vad.last_threshold,
+                    noise_floor = vad.noise_floor(),
                     speech_chunks = diag_speech_chunks,
                     silence_chunks = diag_silence_chunks,
                     "Audio stats (last 2s window)"
@@ -575,9 +684,9 @@ impl AudioWatcher {
                 offset += VAD_CHUNK_SAMPLES;
 
                 // --- DIAGNOSTIC: compute chunk energy before feeding VAD ---
-                let chunk_energy = EnergyVad::rms_energy(chunk);
+                let chunk_energy = AdaptiveVad::rms_energy(chunk);
                 let decision = vad.feed_chunk(chunk, &mut vad_state);
-                if chunk_energy > self.config.vad_threshold {
+                if chunk_energy > vad.last_threshold {
                     diag_speech_chunks += 1;
                 } else {
                     diag_silence_chunks += 1;
@@ -586,7 +695,9 @@ impl AudioWatcher {
                     layer = "senses",
                     component = "audio",
                     chunk_rms = chunk_energy,
-                    threshold = self.config.vad_threshold,
+                    floor = self.config.vad_threshold,
+                    threshold = vad.last_threshold,
+                    noise_floor = vad.noise_floor(),
                     decision = ?decision,
                     buffer_samples = vad_state.speech_buffer.len(),
                     "VAD chunk decision"
@@ -602,13 +713,13 @@ impl AudioWatcher {
                         let duration_ms =
                             (segment.len() as u64 * 1000) / u64::from(TARGET_SAMPLE_RATE);
 
-                        tracing::debug!(
+                        tracing::info!(
                             layer = "senses",
                             component = "audio",
                             duration_ms = duration_ms,
                             samples = segment.len(),
                             forced = (decision == VadDecision::SegmentForceSplit),
-                            "Speech segment complete, sending to whisper"
+                            "Speech segment ended"
                         );
 
                         // Transcribe the segment.
@@ -1035,12 +1146,20 @@ impl AudioWatcher {
 mod tests {
     use super::*;
 
-    // -- EnergyVad tests --
+    // -- AdaptiveVad tests --
+    // All tests use `new_with_warmup(..., 0)` so the adaptive threshold kicks
+    // in immediately and the probe warmup doesn't swallow the first chunks.
+    // `multiplier = 1.0` keeps behaviour close to the old fixed-threshold
+    // VAD: since silence has rms ~0, threshold stays at the floor.
+
+    fn test_vad(floor: f32, silence_ms: u64, max_secs: u64) -> AdaptiveVad {
+        AdaptiveVad::new_with_warmup(floor, 1.0, silence_ms, max_secs, 0)
+    }
 
     #[test]
     fn test_rms_energy_silence() {
         let silence = vec![0.0f32; VAD_CHUNK_SAMPLES];
-        let energy = EnergyVad::rms_energy(&silence);
+        let energy = AdaptiveVad::rms_energy(&silence);
         assert!(
             energy.abs() < f32::EPSILON,
             "RMS energy of silence should be 0.0, got {energy}"
@@ -1050,7 +1169,7 @@ mod tests {
     #[test]
     fn test_rms_energy_loud_signal() {
         let loud = vec![0.5f32; VAD_CHUNK_SAMPLES];
-        let energy = EnergyVad::rms_energy(&loud);
+        let energy = AdaptiveVad::rms_energy(&loud);
         assert!(
             (energy - 0.5).abs() < 0.01,
             "RMS energy of constant 0.5 signal should be ~0.5, got {energy}"
@@ -1059,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_rms_energy_empty() {
-        let energy = EnergyVad::rms_energy(&[]);
+        let energy = AdaptiveVad::rms_energy(&[]);
         assert!(
             energy.abs() < f32::EPSILON,
             "RMS energy of empty slice should be 0.0"
@@ -1068,7 +1187,7 @@ mod tests {
 
     #[test]
     fn test_vad_detects_speech_above_threshold() {
-        let vad = EnergyVad::new(0.01, 500, 8);
+        let mut vad = test_vad(0.01, 500, 8);
         let mut state = VadState::new();
 
         let speech_chunk = vec![0.1f32; VAD_CHUNK_SAMPLES];
@@ -1081,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_vad_silence_below_threshold() {
-        let vad = EnergyVad::new(0.01, 500, 8);
+        let mut vad = test_vad(0.01, 500, 8);
         let mut state = VadState::new();
 
         let silence_chunk = vec![0.0f32; VAD_CHUNK_SAMPLES];
@@ -1095,7 +1214,7 @@ mod tests {
     #[test]
     fn test_vad_segment_complete_after_silence() {
         // silence_duration_ms = 64 ms, at 32 ms/chunk = 2 chunks needed.
-        let vad = EnergyVad::new(0.01, 64, 8);
+        let mut vad = test_vad(0.01, 64, 8);
         let mut state = VadState::new();
 
         // Feed one speech chunk.
@@ -1120,7 +1239,7 @@ mod tests {
     fn test_vad_force_split_at_max_segment() {
         // max_segment_secs = 1, so max samples = 16000.
         // Each chunk is 512 samples, so 32 chunks = 16384 >= 16000.
-        let vad = EnergyVad::new(0.01, 500, 1);
+        let mut vad = test_vad(0.01, 500, 1);
         let mut state = VadState::new();
 
         let speech = vec![0.1f32; VAD_CHUNK_SAMPLES];
@@ -1142,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_vad_take_segment_resets_state() {
-        let vad = EnergyVad::new(0.01, 500, 8);
+        let mut vad = test_vad(0.01, 500, 8);
         let mut state = VadState::new();
 
         let speech = vec![0.1f32; VAD_CHUNK_SAMPLES];
@@ -1254,12 +1373,12 @@ mod tests {
         );
     }
 
-    // -- EnergyVad edge cases --
+    // -- AdaptiveVad edge cases --
 
     #[test]
     fn test_vad_multiple_segments() {
         // Verify the VAD can detect multiple speech segments in sequence.
-        let vad = EnergyVad::new(0.01, 64, 8);
+        let mut vad = test_vad(0.01, 64, 8);
         let mut state = VadState::new();
 
         let speech = vec![0.1f32; VAD_CHUNK_SAMPLES];
@@ -1283,24 +1402,68 @@ mod tests {
     #[test]
     fn test_vad_new_calculates_silence_chunks() {
         // 500ms silence at 32ms/chunk = floor(500/32) = 15 chunks, clamped to >= 1.
-        let vad = EnergyVad::new(0.5, 500, 8);
+        let vad = test_vad(0.5, 500, 8);
         assert_eq!(vad.silence_chunks_needed, 15);
 
         // 32ms silence = exactly 1 chunk.
-        let vad2 = EnergyVad::new(0.5, 32, 8);
+        let vad2 = test_vad(0.5, 32, 8);
         assert_eq!(vad2.silence_chunks_needed, 1);
 
         // 10ms silence = less than one chunk, clamped to 1.
-        let vad3 = EnergyVad::new(0.5, 10, 8);
+        let vad3 = test_vad(0.5, 10, 8);
         assert_eq!(vad3.silence_chunks_needed, 1);
     }
 
     #[test]
     fn test_vad_max_segment_samples() {
-        let vad = EnergyVad::new(0.5, 500, 8);
+        let vad = test_vad(0.5, 500, 8);
         assert_eq!(vad.max_segment_samples, 8 * 16_000);
 
-        let vad2 = EnergyVad::new(0.5, 500, 1);
+        let vad2 = test_vad(0.5, 500, 1);
         assert_eq!(vad2.max_segment_samples, 16_000);
+    }
+
+    #[test]
+    fn test_vad_adaptive_threshold_rises_with_noise_floor() {
+        // When ambient noise is high, the adaptive threshold should follow
+        // it up so noise-level chunks don't register as speech, while a chunk
+        // well above the multiplier still does.
+        //
+        // Uses production warmup (~1s) so the noise floor can calibrate on
+        // the ambient chunks before the multiplier-based threshold takes
+        // effect — without warmup, every chunk would be classified as speech
+        // and the silence ring would never fill.
+        let mut vad = AdaptiveVad::new(0.005, 5.0, 500, 8);
+        let mut state = VadState::new();
+
+        // Feed enough ambient-noise chunks to exit warmup and stabilize the
+        // noise floor. 50 chunks > VAD_WARMUP_CHUNKS (31).
+        let noisy_silence = vec![0.02f32; VAD_CHUNK_SAMPLES];
+        for _ in 0..50 {
+            vad.feed_chunk(&noisy_silence, &mut state);
+        }
+
+        assert!(
+            vad.noise_floor() > 0.015,
+            "noise floor should track ambient level, got {}",
+            vad.noise_floor()
+        );
+        assert!(
+            vad.current_threshold() > 0.05,
+            "threshold should be 5× noise floor, got {}",
+            vad.current_threshold()
+        );
+
+        // A chunk at the ambient level should NOT start a new speech segment
+        // (state was just cleared because warmup ended without active speech).
+        assert!(!state.speech_active);
+        let d = vad.feed_chunk(&noisy_silence, &mut state);
+        assert_eq!(d, VadDecision::Silence);
+        assert!(!state.speech_active);
+
+        // A chunk well above threshold should register.
+        let loud = vec![0.3f32; VAD_CHUNK_SAMPLES];
+        let d = vad.feed_chunk(&loud, &mut state);
+        assert_eq!(d, VadDecision::Speech);
     }
 }
