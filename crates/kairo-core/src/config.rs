@@ -67,8 +67,17 @@ pub struct AudioConfig {
     pub enabled: bool,
     /// Path to the whisper model file.
     pub whisper_model_path: String,
-    /// VAD speech probability threshold (0.0-1.0).
+    /// Floor for the adaptive VAD threshold. The actual threshold used is
+    /// `max(vad_threshold, noise_floor × vad_noise_floor_multiplier)`, so
+    /// this value serves as an absolute minimum in very quiet environments.
+    /// Default 0.005 catches genuine speech without tripping on a typical
+    /// noise floor of 0.0001–0.001.
     pub vad_threshold: f32,
+    /// Multiplier applied to the rolling noise floor when computing the
+    /// effective VAD threshold. Default 5.0 — speech must be at least 5×
+    /// the ambient level to trigger. Raise if your room is noisy, lower if
+    /// you speak quietly.
+    pub vad_noise_floor_multiplier: f32,
     /// Silence duration in ms before a speech segment ends.
     pub silence_duration_ms: u64,
     /// Maximum speech segment length in seconds before forced split.
@@ -169,13 +178,15 @@ impl Default for AudioConfig {
                 .join("whisper-small.bin")
                 .to_string_lossy()
                 .into_owned(),
-            // Energy-based VAD threshold (RMS, 0.0–1.0). Real speech sits
-            // around 0.01–0.05 on a typical USB mic; the previous 0.5 default
-            // meant VAD never fired. 0.02 is just above ambient hum/keyboard
-            // noise on most setups. Tune in `[audio].vad_threshold` if your
-            // mic is unusually hot or muffled.
-            vad_threshold: 0.02,
-            silence_duration_ms: 500,
+            // Adaptive VAD: floor 0.005 catches quiet speech; the 5×
+            // noise-floor multiplier raises the effective threshold on
+            // noisy setups automatically. See `AdaptiveVad` for details.
+            vad_threshold: 0.005,
+            vad_noise_floor_multiplier: 5.0,
+            // 800 ms of trailing silence before a segment closes. Natural
+            // mid-sentence pauses (commas, thinking) stay inside one segment
+            // so Whisper sees the whole utterance.
+            silence_duration_ms: 800,
             max_segment_secs: 8,
             device_name: String::new(),
             device_index: None,

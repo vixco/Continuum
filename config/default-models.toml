@@ -45,14 +45,24 @@ max_concurrent = 3
 # device_name  = "Microphone"     # display name from cpal description()
 # device_index = 2                # cpal enumeration index at pick time
 
-# Energy-based VAD threshold (RMS, 0.0–1.0). Above this = speech, below = silence.
-# Real speech on a typical USB mic peaks around 0.01–0.05 — tune for your
-# environment. Lower = more sensitive (may pick up keyboard/fan noise);
-# higher = needs louder speech to trigger.
-vad_threshold = 0.02
+# Adaptive VAD: the runtime threshold is
+#   max(vad_threshold, noise_floor × vad_noise_floor_multiplier)
+# where noise_floor is the mean RMS of the last ~10 s of silence chunks.
+# Defaults self-calibrate across quiet laptop mics and hot USB mics without
+# manual tuning.
+
+# Absolute minimum RMS below which no chunk is ever considered speech.
+# Keeps a dead-silent room from mis-triggering on microscopic noise.
+vad_threshold = 0.005
+
+# How many times the rolling noise floor is multiplied for the speech
+# threshold. Higher = less sensitive (needs louder speech). Lower = more
+# sensitive (may trigger on fans / keyboard clicks).
+vad_noise_floor_multiplier = 5.0
 
 # Trailing silence (ms) before a speech segment is closed and sent to whisper.
-silence_duration_ms = 500
+# 800 ms keeps natural mid-sentence pauses inside the same segment.
+silence_duration_ms = 800
 
 # Force-split a single segment if it exceeds this many seconds (prevents
 # whisper inference on multi-minute monologues).
