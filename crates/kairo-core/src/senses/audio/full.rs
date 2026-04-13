@@ -1014,19 +1014,39 @@ impl AudioWatcher {
 
         let start = Instant::now();
 
-        // --- DIAGNOSTIC: log what Whisper is actually about to receive ---
+        // --- DIAGNOSTIC: log what Whisper is about to receive ---
         let input_rms = if samples.is_empty() {
             0.0
         } else {
             let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
             (sum_sq / samples.len() as f32).sqrt()
         };
+
+        // Normalize the segment to peak ±0.5 before whisper. Typical USB-mic
+        // input lands around 0.01–0.05 peak — whisper's feature extraction
+        // is trained on audio closer to ±0.3, and too-quiet input comes back
+        // with empty transcripts even though speech is audible. Scaling to a
+        // known peak is the standard preprocessing step for whisper.
+        let mut samples = samples;
+        let peak_abs = samples
+            .iter()
+            .map(|&s| s.abs())
+            .fold(0.0_f32, f32::max);
+        let norm_scale = if peak_abs > 0.0 { 0.5 / peak_abs } else { 1.0 };
+        if (norm_scale - 1.0).abs() > f32::EPSILON {
+            for s in samples.iter_mut() {
+                *s *= norm_scale;
+            }
+        }
+
         tracing::info!(
             layer = "senses",
             component = "audio",
             input_samples = samples.len(),
             input_duration_ms = duration_ms,
             input_rms = input_rms,
+            peak_abs = peak_abs,
+            norm_scale = norm_scale,
             "Whisper invocation starting"
         );
 
