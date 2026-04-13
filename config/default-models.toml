@@ -45,6 +45,19 @@ max_concurrent = 3
 # device_name  = "Microphone"     # display name from cpal description()
 # device_index = 2                # cpal enumeration index at pick time
 
+# Energy-based VAD threshold (RMS, 0.0–1.0). Above this = speech, below = silence.
+# Real speech on a typical USB mic peaks around 0.01–0.05 — tune for your
+# environment. Lower = more sensitive (may pick up keyboard/fan noise);
+# higher = needs louder speech to trigger.
+vad_threshold = 0.02
+
+# Trailing silence (ms) before a speech segment is closed and sent to whisper.
+silence_duration_ms = 500
+
+# Force-split a single segment if it exceeds this many seconds (prevents
+# whisper inference on multi-minute monologues).
+max_segment_secs = 8
+
 [stt]
 name = "Whisper small"
 variant = "whisper-small"

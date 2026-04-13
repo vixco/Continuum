@@ -169,7 +169,12 @@ impl Default for AudioConfig {
                 .join("whisper-small.bin")
                 .to_string_lossy()
                 .into_owned(),
-            vad_threshold: 0.5,
+            // Energy-based VAD threshold (RMS, 0.0–1.0). Real speech sits
+            // around 0.01–0.05 on a typical USB mic; the previous 0.5 default
+            // meant VAD never fired. 0.02 is just above ambient hum/keyboard
+            // noise on most setups. Tune in `[audio].vad_threshold` if your
+            // mic is unusually hot or muffled.
+            vad_threshold: 0.02,
             silence_duration_ms: 500,
             max_segment_secs: 8,
             device_name: String::new(),
