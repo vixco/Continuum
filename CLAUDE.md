@@ -60,6 +60,38 @@ The workspace has native dependencies that must be present before `cargo build` 
 
 Run `scripts/dev-setup.ps1` to install these automatically, or see `.cargo/config.toml` for the exact paths expected.
 
+## Build workflow
+
+**Release mode is the default for running `kairo.exe`.** The debug build
+of the main binary does not work on Windows: `llama-cpp-sys-2` compiles
+its C++ wrapper files through `cc::Build`, which picks `/MDd` in debug
+profiles and links against `ucrtbased.dll`. Rust itself uses `/MD` on
+MSVC regardless of profile, so the resulting binary mixes debug and
+release CRTs and crashes in `ucrtbased!read.cpp:381` during whisper
+model load. Multiple workarounds were tried (`[env]`, profile
+overrides, `CMAKE_BUILD_TYPE`) — none plumbed through to `cc::Build`
+cleanly enough to fix it without vendoring `llama-cpp-sys-2`.
+
+So: for the Kairo runtime, always use release.
+
+```bash
+cargo run --release --bin kairo         # the daily driver
+```
+
+**Debug mode still works for:** library tests (`cargo test -p kairo-core`),
+examples that don't depend on llama-cpp-sys-2 (`cargo run --example
+voice_test -p kairo-core`), `kairo-mcp`, and `kairo-perception`. Debug
+breaks specifically at the wake-up path when the Qwen triage LLM gets
+loaded.
+
+**sccache is enabled via `.cargo/config.toml`** to cache C++/CUDA
+compiles. First build is normal speed (~9 min release, 20 min debug).
+Subsequent clean rebuilds across branches are dramatically faster —
+sccache hits turn whisper.cpp + llama.cpp + CUDA kernel recompilation
+into near-instant cache retrievals. Requires `sccache.exe` on PATH
+(install from https://github.com/mozilla/sccache/releases — prebuilt
+Windows binary, drop at `~/.cargo/bin/sccache.exe`).
+
 ## Common commands
 
 ```bash
@@ -67,9 +99,9 @@ Run `scripts/dev-setup.ps1` to install these automatically, or see `.cargo/confi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Build
-cargo build                              # debug build, full workspace
-cargo build -p kairo-core                # single crate
-cargo build --release                    # release build
+cargo build --release                    # release build (default for kairo.exe)
+cargo build -p kairo-core                # debug build of a single crate (ok)
+cargo build                              # debug build, full workspace (WARNING: kairo.exe debug is broken, see above)
 
 # Lint and format
 cargo fmt --all                          # format all crates
@@ -83,10 +115,10 @@ cargo test -p kairo-core -- triage       # tests matching "triage" in kairo-core
 cargo test -p kairo-core --test orchestrator_mock  # run a specific integration test
 
 # Run binaries
-cargo run --bin kairo-perception         # live perception stream
-cargo run --bin kairo-perception -- --triage  # perception + triage decisions
-cargo run --bin kairo-triage-bench       # triage accuracy benchmark (20 frames)
-cargo run --bin kairo                    # main orchestrator binary
+cargo run --bin kairo-perception         # live perception stream (debug ok)
+cargo run --bin kairo-perception -- --triage  # perception + triage decisions (debug ok)
+cargo run --bin kairo-triage-bench       # triage accuracy benchmark (debug ok)
+cargo run --release --bin kairo          # main orchestrator binary (RELEASE only — see Build workflow above)
 
 # Triage benchmark (measures accuracy + latency, expects model in ~/.kairo-dev/models/)
 cargo run --bin kairo-triage-bench       # runs 20-frame benchmark, reports accuracy/P50/P95
