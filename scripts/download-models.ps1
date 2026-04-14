@@ -193,10 +193,24 @@ Download-Model `
     -ExpectedSizeMB "2500"
 
 # ============================================================================
-# Whisper small (STT -- Layer 1 audio)
+# Whisper medium (STT -- Layer 1 audio, default)
 # ============================================================================
+# medium (1.5 GB) is the default because whisper-small struggles with the
+# wake word "Kairo" -- it isn't in the vocab and small hallucinates real
+# English words around it ("You're one guy at all", "Hey, can I have one?").
+# medium recognises uncommon proper nouns much more reliably, and the RTX
+# 3060 runs it in ~200 ms per 3-second clip.
+# Small is downloaded too so users can switch back via config if needed.
 
-Write-Host "`n--- Whisper small (STT) ---" -ForegroundColor Cyan
+Write-Host "`n--- Whisper medium (STT, default) ---" -ForegroundColor Cyan
+
+Download-Model `
+    -Name "Whisper medium" `
+    -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin" `
+    -OutPath (Join-Path $ModelsBase "stt\whisper-medium.bin") `
+    -ExpectedSizeMB "1533"
+
+Write-Host "`n--- Whisper small (STT, fallback) ---" -ForegroundColor Cyan
 
 Download-Model `
     -Name "Whisper small" `
@@ -343,7 +357,8 @@ $critical = @(
     @("Vision tokenizer",       (Join-Path $VisionDir "tokenizer.json"),           10000),
     @("Triage model (8B)",      (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf"), $MinValidSize),
     @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf"), $MinValidSize),
-    @("Whisper STT",            (Join-Path $ModelsBase "stt\whisper-small.bin"),   $MinValidSize),
+    @("Whisper medium",         (Join-Path $ModelsBase "stt\whisper-medium.bin"),  $MinValidSize),
+    @("Whisper small (fallback)", (Join-Path $ModelsBase "stt\whisper-small.bin"), $MinValidSize),
     @("Piper EN voice",         (Join-Path $TtsDir "en_US-lessac-medium.onnx"),    $MinValidSize),
     @("Piper NL voice",         (Join-Path $TtsDir "nl_NL-mls-medium.onnx"),       $MinValidSize),
     @("Piper binary",           $PiperExe,                                         100000),

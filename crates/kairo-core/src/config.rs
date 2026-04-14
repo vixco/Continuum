@@ -325,8 +325,13 @@ impl Default for AudioConfig {
         let models_dir = kairo_dev_dir().join("models").join("stt");
         Self {
             enabled: true,
+            // whisper-medium (1.5 GB) recognises proper nouns like "Kairo"
+            // reliably where whisper-small (244 MB) hallucinates real-word
+            // mistranscriptions. The 3x size cost is paid for by the wake
+            // gate actually working. Swap to whisper-small.bin if memory
+            // is constrained or you don't mind more mis-detections.
             whisper_model_path: models_dir
-                .join("whisper-small.bin")
+                .join("whisper-medium.bin")
                 .to_string_lossy()
                 .into_owned(),
             // Force English for the default wake path. Whisper-small's
