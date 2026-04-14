@@ -992,13 +992,34 @@ impl AudioWatcher {
             "Whisper invocation starting"
         );
 
+        // Clone the language string for move into the blocking task.
+        let language = self.config.whisper_language.clone();
+
         let observation = tokio::task::spawn_blocking(move || -> Result<AudioObservation> {
             let mut state = whisper_ctx
                 .create_state()
                 .context("Failed to create whisper state")?;
 
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params.set_language(Some("auto"));
+            // Force language unless explicitly set to "auto". Short VAD
+            // segments (<2 s) are unreliable for whisper's auto-detector
+            // and routinely come back as `[BLANK_AUDIO]` when it can't
+            // commit to a language.
+            if language == "auto" {
+                params.set_language(Some("auto"));
+            } else {
+                params.set_language(Some(&language));
+            }
+            // Suppress the `[BLANK_AUDIO]` and `[MUSIC]` marker tokens —
+            // we only want real transcribed text out. Without this,
+            // whisper-small cheerfully emits `[BLANK_AUDIO]` for any clip
+            // it's not confident about, even ones that are clearly speech.
+            params.set_suppress_blank(true);
+            params.set_suppress_nst(true);
+            // Don't carry context from the previous segment. Each VAD
+            // segment is an independent utterance; prior context can bias
+            // the decoder into repeating earlier tokens.
+            params.set_no_context(true);
             params.set_print_special(false);
             params.set_print_progress(false);
             params.set_print_realtime(false);
