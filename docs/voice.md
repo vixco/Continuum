@@ -12,8 +12,9 @@ configurable knob, and how to diagnose things when they go wrong.
 │  LAYER 1 — senses::audio (always on)                                 │
 │  mic capture → adaptive VAD → whisper.cpp transcription              │
 │                                                                      │
-│  Dutch language is forced by default for better short-clip accuracy. │
-│  Segments under ~300 ms of trailing silence stay glued together.     │
+│  Language auto-detected per segment so the user can speak any        │
+│  language whisper understands. Segments under ~300 ms of trailing    │
+│  silence stay glued together.                                        │
 └─────────────────┬────────────────────────────────────────────────────┘
                   │ AudioObservation { transcript, language }
                   ▼
@@ -96,6 +97,17 @@ On top of the pipeline:
   (Discord, Teams, Zoom, Meet), orchestrator responses and whisper
   decisions are logged instead of spoken. Kairo goes silent; the user
   stays in control of their call.
+
+- **Multilingual input, English output** — whisper transcribes any
+  language (`audio.whisper_language = "auto"`) so the user can speak
+  Dutch, English, German, or anything else whisper covers. Kairo
+  *understands* the transcript in its native language and *responds*
+  through the English Piper voice. This is a conscious 2026-04 choice:
+  the Dutch Piper voice (`nl_NL-mls-medium`) produces barely-intelligible
+  speech, so shipping English-only hurts the user less than bad Dutch
+  TTS would. When better voices land, flip
+  `voice.language_detection_enabled = true` and add a
+  `[tts.voices.<lang>]` section per language.
 
 - **Conversation follow-up** — after `do_wake` completes, Kairo sets a
   `followup_until` deadline. Speech within that window starts a new voice
@@ -183,7 +195,7 @@ with defaults in `config/default-models.toml`. Most fields are under
 | `min_utterance_chars` | `3` | Lower bound on utterance length before endpoint can fire. |
 | `barge_in_enabled` | `true` | Stop playback when fresh user speech arrives. |
 | `ambient_mute_enabled` | `true` | Stay silent while the user is in a call. |
-| `language_detection_enabled` | `true` | Route TTS voice by detected speech language. |
+| `language_detection_enabled` | `false` | Route TTS voice by detected speech language. Disabled by default so Kairo always responds via the English voice. |
 | `default_language` | `"en"` | Language used when detection is unavailable. |
 | `volume` | `0.8` | Master playback gain in `[0.0, 1.0]`. Applied in the cpal callback. |
 | `feedback_sounds` | `true` | Play chime/click/beep cues on state transitions. |
@@ -271,10 +283,21 @@ are missing.
 is missing or empty. Re-run the download script — it installs the
 dictionary alongside `piper.exe` from the same release bundle.
 
-**Wrong language.** Whisper is force-set to Dutch by default (see
-`audio.whisper_language` in the config). If most of your voice commands
-are English, set it to `en` or `auto`. Language routing then picks the
-matching Piper voice.
+**Wrong language on output.** Kairo is English-only by design right now
+(see the "Multilingual input, English output" note above). The user's
+speech is transcribed in whatever language they used, but the orchestrator
+and triage prompts instruct Kairo to respond in English so the English
+TTS voice sounds natural. If you have a quality Dutch/other voice and
+want multilingual output, uncomment the `[tts.voices.<lang>]` section in
+the config, flip `voice.language_detection_enabled = true`, and drop the
+"always respond in English" rule from
+`prompts/orchestrator-system.md`.
+
+**Whisper detects the wrong input language.** `audio.whisper_language`
+defaults to `"auto"`, which relies on whisper's per-segment detection.
+On short clips (< 1 second) detection can trip — force a concrete code
+(`"en"`, `"nl"`, `"de"`) to bias toward your primary spoken language.
+Forcing doesn't affect output language, only STT accuracy.
 
 **Wake word never matches.** The current path is transcript-based — it
 requires the wake phrase to survive whisper transcription. Very short

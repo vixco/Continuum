@@ -45,6 +45,13 @@ max_concurrent = 3
 # device_name  = "Microphone"     # display name from cpal description()
 # device_index = 2                # cpal enumeration index at pick time
 
+# Whisper input language. "auto" = detect per segment (recommended, lets the
+# user speak any language). A concrete code ("nl", "en", "de") forces that
+# language; good if auto-detect trips on your voice but costs multilingual
+# comprehension. Kairo's output language is controlled separately under
+# [tts] — the two are intentionally decoupled.
+whisper_language = "auto"
+
 # Adaptive VAD: the runtime threshold is
 #   max(vad_threshold, noise_floor × vad_noise_floor_multiplier)
 # where noise_floor is the mean RMS of the last ~10 s of silence chunks.
@@ -87,11 +94,24 @@ runtime = "whisper-cpp"
 
 [tts]
 # Phase 5 TTS is fully local (Piper). Every model file must exist before
-# `cargo run --bin kairo` attempts to speak — otherwise whisper decisions
+# `cargo run --bin kairo` attempts to speak - otherwise whisper decisions
 # and orchestrator responses will fall through to log-only mode.
 #
 # Run `powershell scripts/download-models.ps1` to populate ~/.kairo-dev/models/tts/
 # AND to install piper.exe + espeak-ng-data under ~/.kairo-dev/bin/piper/.
+#
+# OUTPUT STRATEGY: Kairo speaks English by default because the Dutch Piper
+# voices available as of 2026-04 (nl_NL-mls-medium) produce barely-
+# intelligible speech. Input is still multilingual - whisper.cpp
+# transcribes any language the user speaks and Kairo understands it;
+# Kairo just always responds in English.
+#
+# To re-enable multilingual output later (e.g. once a better Dutch voice
+# ships):
+#   1. Set [voice].language_detection_enabled = true
+#   2. Uncomment the [tts.voices.nl] section below (and/or add more)
+#   3. Drop the "always respond in English" rule from
+#      prompts/orchestrator-system.md
 
 enabled = true
 
@@ -106,8 +126,8 @@ engine = "piper"
 espeak_data_dir = "~/.kairo-dev/models/tts/espeak-ng-data"
 
 # BCP-47 short code of the voice used when no language hint is available.
-# Language routing swaps per detected whisper language when both voices
-# are configured.
+# When language_detection_enabled = false (default), this is the ONLY
+# voice Kairo ever uses, regardless of the transcribed input language.
 primary = "en"
 
 # length_scale = 1.0 is Piper's default. <1.0 speeds up speech, >1.0 slows
@@ -117,15 +137,17 @@ primary = "en"
 [tts.voices.en]
 model_path  = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx"
 config_path = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx.json"
-# en_US-lessac-medium is single-speaker — leave unset.
+# en_US-lessac-medium is single-speaker - leave unset.
 # speaker_id = 0
 
-[tts.voices.nl]
-model_path  = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx"
-config_path = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx.json"
-# nl_NL-mls is multi-speaker. Speaker 0 is the default. Set 1..N to pick
-# a different voice from the same model.
-speaker_id = 0
+# Dutch voice disabled by default - nl_NL-mls-medium produces low-
+# intelligibility speech. The download script still installs the files
+# so you can opt in by uncommenting this section and setting
+# [voice].language_detection_enabled = true.
+# [tts.voices.nl]
+# model_path  = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx"
+# config_path = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx.json"
+# speaker_id  = 0
 
 # Optional ElevenLabs streaming cloud backend. Disabled by default. To
 # activate, set engine = "elevenlabs" above and provide credentials here.
@@ -150,7 +172,14 @@ endpoint_silence_ms = 700
 min_utterance_chars = 3
 barge_in_enabled = true
 ambient_mute_enabled = true
-language_detection_enabled = true
+
+# Route TTS to a per-language voice based on whisper's detected language.
+# Disabled by default: Kairo understands any language the user speaks
+# (whisper_language = "auto" above) but always responds in English via
+# the [tts].primary voice. Enable only if you have a quality voice file
+# for every language you want Kairo to speak.
+language_detection_enabled = false
+
 default_language = "en"
 
 # Master playback gain [0.0, 1.0]. Applied in the cpal callback; takes

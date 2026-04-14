@@ -41,16 +41,21 @@ struct TestPhrase {
     text: &'static str,
 }
 
+/// One phrase per language we might have a voice for. Each phrase is only
+/// synthesised when the matching voice is actually configured — the
+/// default config ships English-only, and Dutch is skipped cleanly rather
+/// than being forced through the English voice (which would pronounce the
+/// Dutch text with an English accent and prove nothing).
 const PHRASES: &[TestPhrase] = &[
-    TestPhrase {
-        language: "nl",
-        label: "Dutch",
-        text: "Hallo, ik ben Kairo. Alles werkt zoals het hoort.",
-    },
     TestPhrase {
         language: "en",
         label: "English",
         text: "Hello, I am Kairo. Everything is working.",
+    },
+    TestPhrase {
+        language: "nl",
+        label: "Dutch",
+        text: "Hallo, ik ben Kairo. Alles werkt zoals het hoort.",
     },
 ];
 
@@ -178,8 +183,23 @@ fn main() -> Result<()> {
     playback.wait_drain();
 
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
+    let configured_langs: std::collections::HashSet<&str> = config
+        .tts
+        .voices
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
 
     for phrase in PHRASES {
+        if !configured_langs.contains(phrase.language) {
+            println!(
+                "\n[voice_test] ── {} ({}): skipped (no voice configured — add a \
+                 [tts.voices.{}] section to enable)",
+                phrase.label, phrase.language, phrase.language
+            );
+            continue;
+        }
+
         println!(
             "\n[voice_test] ── {} ({}): {:?}",
             phrase.label, phrase.language, phrase.text

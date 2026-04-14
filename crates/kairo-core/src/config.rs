@@ -329,10 +329,12 @@ impl Default for AudioConfig {
                 .join("whisper-small.bin")
                 .to_string_lossy()
                 .into_owned(),
-            // Dutch is Kairo's primary user language per SOUL.md. Forcing it
-            // gives noticeably better transcripts than auto-detection on the
-            // short clips the VAD produces.
-            whisper_language: "nl".to_string(),
+            // "auto" lets whisper detect the language per segment so the
+            // user can speak any language. Forcing a concrete code is an
+            // option for users where auto-detect trips on their voice.
+            // This is decoupled from TTS output language — Kairo can
+            // understand Dutch input while still responding in English.
+            whisper_language: "auto".to_string(),
             // Adaptive VAD: floor 0.005 catches quiet speech; the 5×
             // noise-floor multiplier raises the effective threshold on
             // noisy setups automatically. See `AdaptiveVad` for details.
@@ -406,7 +408,12 @@ impl Default for VoiceConfig {
             min_utterance_chars: 3,
             barge_in_enabled: true,
             ambient_mute_enabled: true,
-            language_detection_enabled: true,
+            // Disabled by default: Kairo speaks English only. Whisper still
+            // transcribes any spoken language (audio.whisper_language =
+            // "auto"), so Kairo understands multilingual input but routes
+            // all TTS through the English primary voice. Enable when every
+            // target language has a quality Piper voice configured.
+            language_detection_enabled: false,
             default_language: "en".to_string(),
             volume: 0.8,
             feedback_sounds: true,
@@ -419,6 +426,11 @@ impl Default for VoiceConfig {
 impl Default for TtsConfig {
     fn default() -> Self {
         let tts_dir = kairo_dev_dir().join("models").join("tts");
+        // English-only by default. The Dutch Piper voices available as of
+        // 2026-04 (nl_NL-mls-medium) produce barely-intelligible speech, so
+        // we don't ship a second voice in the default bank. Users who want
+        // multilingual TTS add a [tts.voices.<lang>] section and flip
+        // voice.language_detection_enabled to true.
         let mut voices = std::collections::HashMap::new();
         voices.insert(
             "en".to_string(),
@@ -432,22 +444,6 @@ impl Default for TtsConfig {
                     .to_string_lossy()
                     .into_owned(),
                 speaker_id: None,
-            },
-        );
-        voices.insert(
-            "nl".to_string(),
-            TtsVoiceConfig {
-                model_path: tts_dir
-                    .join("nl_NL-mls-medium.onnx")
-                    .to_string_lossy()
-                    .into_owned(),
-                config_path: tts_dir
-                    .join("nl_NL-mls-medium.onnx.json")
-                    .to_string_lossy()
-                    .into_owned(),
-                // nl_NL-mls is a multi-speaker model. `None` falls back to
-                // speaker 0 — pick a specific speaker via the config file.
-                speaker_id: Some(0),
             },
         );
         Self {
@@ -510,7 +506,11 @@ mod tests {
         assert!(config.tts.enabled);
         assert_eq!(config.tts.primary, "en");
         assert!(config.tts.voices.contains_key("en"));
-        assert!(config.tts.voices.contains_key("nl"));
+        // Kairo is English-only by default; Dutch is opt-in (see
+        // TtsConfig::default docs).
+        assert!(!config.tts.voices.contains_key("nl"));
+        assert!(!config.voice.language_detection_enabled);
+        assert_eq!(config.audio.whisper_language, "auto");
     }
 
     #[test]
