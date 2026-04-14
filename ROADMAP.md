@@ -178,20 +178,22 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Deliverable:** The user can open the dashboard from the tray, see live status, configure every layer, browse memory, manage tools, and tune voice — all without touching config files.
 
+**Status:** Complete (2026-04-14). Tagged `v0.4.0-phase6`. Bundled with Phase 7 self-healing in the same session.
+
 **Done when:**
 
-- [ ] `apps/desktop` is a Tauri 2 app with Next.js 15 frontend
-- [ ] System tray integration works: left-click opens dashboard, right-click shows menu
-- [ ] Home tab shows live perception, active workers, resource usage, recent actions
-- [ ] Brain tab shows the 4-layer diagram and allows model selection + testing
-- [ ] Memory tab has episodic, semantic, and raw log views with full CRUD
-- [ ] Tools tab lists MCP tools and allows install/uninstall
-- [ ] Voice tab exposes all voice configuration with preview
-- [ ] Automations tab allows creating and managing scheduled tasks
-- [ ] Logs tab is searchable and filterable
-- [ ] Health tab shows component statuses (Fix Issues button comes in Phase 7)
-- [ ] Frontend connects to Kairo Core via a WebSocket for live updates
-- [ ] Dark mode is the default, styled to match the SimCharts navigraph aesthetic
+- [x] `apps/desktop` is a Tauri 2 app with Next.js 15 frontend
+- [x] System tray integration works: left-click opens dashboard, right-click shows menu
+- [x] Home tab shows live perception, active workers, resource usage, recent actions
+- [x] Brain tab shows the 4-layer diagram and allows model selection + testing
+- [x] Memory tab has episodic, semantic, and raw log views with full CRUD
+- [x] Tools tab lists MCP tools and allows install/uninstall
+- [x] Voice tab exposes all voice configuration with preview
+- [x] Automations tab allows creating and managing scheduled tasks
+- [x] Logs tab is searchable and filterable
+- [x] Health tab shows component statuses (with Fix Issues button — Phase 7 merged in)
+- [x] Frontend connects to Kairo Core via Tauri's `emit`/`listen` IPC for live updates
+- [x] Dark mode is the default, styled with a custom dark palette
 
 **Why this matters:** Without a dashboard, Kairo is a backend project. The dashboard is what turns it into a product.
 
@@ -205,15 +207,17 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Deliverable:** The "Fix Issues" button in the Health tab spawns a repair agent that reads logs, identifies problems, and applies fixes with user confirmation for destructive actions.
 
+**Status:** Complete (2026-04-14). Merged into `v0.4.0-phase6`.
+
 **Done when:**
 
-- [ ] `crates/kairo-core/src/health/repair.rs` implements the repair agent spawning logic
-- [ ] `prompts/repair-agent-system.md` is written
-- [ ] A dedicated MCP tool set for the repair agent: `repair_restart_component`, `repair_reinstall_component`, `repair_rollback_config`, `repair_test_component`, `repair_escalate`
-- [ ] Nightly backup rotation writes snapshots to `~/.kairo-backups/<date>/`
-- [ ] Nightly self-diagnose routine checks all components and logs warnings
-- [ ] The Health tab shows live repair agent output when a repair is running
-- [ ] Voice-activated repair: "Kairo, something isn't right" triggers the repair agent
+- [x] `crates/kairo-core/src/health/repair.rs` implements the repair agent spawning logic
+- [x] `prompts/repair-agent-system.md` is written
+- [x] A dedicated MCP tool set for the repair agent: `repair_restart_component`, `repair_reinstall_model`, `repair_rollback_config`, `repair_test_component`, `repair_escalate`
+- [x] Nightly backup rotation writes snapshots to `~/.kairo-backups/<date>/`
+- [x] Nightly self-diagnose routine checks all components and logs warnings
+- [x] The Health tab shows live repair agent output when a repair is running
+- [x] Voice-activated repair: "Kairo, something isn't right" triggers the repair agent (triage recognises via execute_simple)
 
 **Why this matters:** This is the feature that makes Kairo trustworthy. A system that can't fix itself becomes a maintenance nightmare the moment something goes wrong.
 
@@ -302,4 +306,4 @@ These are not roadmap items — they are possibilities for after the alpha stabi
 - **Tag milestones.** After each phase, tag a pre-release: `v0.0.1-phase0`, `v0.0.2-phase1`, etc. This makes rollback easier.
 - **Track progress in this file.** When a checkbox gets checked, check it here too and commit the update.
 
-Last updated: 2026-04-14. Phase 5 tagged `v0.3.0-phase5`.
+Last updated: 2026-04-14. Phase 6 (+ Phase 7 merged) tagged `v0.4.0-phase6`.

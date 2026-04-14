@@ -17,11 +17,25 @@
 //! Data flows upward from senses to orchestrator. Commands flow downward from
 //! orchestrator to workers and tools. The triage layer acts as the gate.
 
+// Always available — these modules power the desktop dashboard and don't
+// need llama-cpp / whisper / lancedb.
+pub mod automations;
 pub mod config;
 pub mod health;
-pub mod memory;
-pub mod orchestrator;
+pub mod logs;
+pub mod runtime;
+pub mod runtime_publish;
 pub mod senses;
+pub mod state;
 pub mod triage;
+
+// Heavy runtime modules — gated on the `runtime` feature so the desktop
+// crate can depend on kairo-core without pulling C++ build deps.
+#[cfg(feature = "runtime")]
+pub mod memory;
+#[cfg(feature = "runtime")]
+pub mod orchestrator;
+#[cfg(feature = "runtime")]
 pub mod voice;
+#[cfg(feature = "runtime")]
 pub mod workers;

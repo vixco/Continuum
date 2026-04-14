@@ -9,8 +9,16 @@ description = "Kairo desktop app — Tauri 2 backend"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-kairo-core = { path = "../../../crates/kairo-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+kairo-core = { path = "../../../crates/kairo-core", default-features = false }

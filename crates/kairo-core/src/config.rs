@@ -516,7 +516,9 @@ mod tests {
         // TtsConfig::default docs).
         assert!(!config.tts.voices.contains_key("nl"));
         assert!(!config.voice.language_detection_enabled);
-        assert_eq!(config.audio.whisper_language, "auto");
+        // Default is forced to "en" to make the wake word reliable on short
+        // clips — see AudioConfig::default docs.
+        assert_eq!(config.audio.whisper_language, "en");
     }
 
     #[test]

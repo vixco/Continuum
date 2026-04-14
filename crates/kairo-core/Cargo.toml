@@ -5,6 +5,27 @@ edition.workspace = true
 license.workspace = true
 description = "Main orchestration runtime for Kairo — the four-layer cognitive engine"
 
+[features]
+# `runtime` is on by default so `cargo build -p kairo-core` and the kairo
+# binary work unchanged. The desktop app sets `default-features = false` to
+# avoid pulling llama-cpp + whisper into the Tauri build — it only needs
+# the state / log / health / config modules.
+default = ["runtime"]
+runtime = [
+    "dep:kairo-llm",
+    "dep:kairo-vision",
+    "dep:xcap",
+    "dep:sqlx",
+    "dep:lancedb",
+    "dep:fastembed",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:cpal",
+    "dep:whisper-rs",
+    "dep:rubato",
+    "dep:futures",
+]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -17,33 +38,25 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 image = { workspace = true }
-
-# Phase 1: Senses layer
-kairo-vision = { path = "../kairo-vision" }
-# Phase 2: Triage layer
-kairo-llm = { path = "../kairo-llm" }
-xcap = "0.8"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 dirs = "6"
 toml = "0.8"
+parking_lot = "0.12"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# Phase 3: Memory layer
-lancedb = { workspace = true }
-fastembed = { workspace = true }
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
-futures = "0.3"
-
-# Audio pipeline (requires LLVM/libclang + cmake for whisper-rs build)
-cpal = "0.17"
-# `cuda` feature enables whisper.cpp's cuBLAS backend, which coexists with
-# llama-cpp-2's CUDA build (both use the same CUDA Toolkit on the user's box).
-whisper-rs = { version = "0.16", features = ["cuda"] }
-rubato = "2"
-
-# Voice pipeline (Phase 5) uses the local Piper CLI as a subprocess. Keeping
-# Piper out of the Rust dependency graph avoids ort/ndarray ABI conflicts with
-# kairo-vision.
+# Optional (feature = "runtime"): heavy native deps
+kairo-vision = { path = "../kairo-vision", optional = true }
+kairo-llm = { path = "../kairo-llm", optional = true }
+xcap = { version = "0.8", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], optional = true }
+lancedb = { workspace = true, optional = true }
+fastembed = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
+cpal = { version = "0.17", optional = true }
+whisper-rs = { version = "0.16", features = ["cuda"], optional = true }
+rubato = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
@@ -58,18 +71,22 @@ windows = { version = "0.59", features = [
 [[bin]]
 name = "kairo"
 path = "src/bin/kairo.rs"
+required-features = ["runtime"]
 
 [[bin]]
 name = "kairo-perception"
 path = "src/bin/kairo-perception.rs"
+required-features = ["runtime"]
 
 [[bin]]
 name = "kairo-triage-bench"
 path = "src/bin/kairo-triage-bench.rs"
+required-features = ["runtime"]
 
 [[bin]]
 name = "audio-probe"
 path = "src/bin/audio-probe.rs"
+required-features = ["runtime"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
