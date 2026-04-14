@@ -4,6 +4,16 @@
 //! wake-word backend later, but the core runtime already has continuous
 //! Whisper transcripts, so Phase 5 gates voice commands with a transcript
 //! wake phrase by default.
+//!
+//! ## Homophone handling
+//!
+//! Whisper-small almost always transcribes "Kairo" as "Cairo" (the
+//! Egyptian capital — a real English word) because "Kairo" isn't in its
+//! vocabulary. To keep the wake gate from false-rejecting every real
+//! utterance, the detector expands the configured keyword into a small
+//! set of phonetic variants before matching. Currently just K→C, which
+//! covers the observed problem; a future fuzzy-matcher can replace this
+//! if needed.
 
 /// Result of a wake phrase detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,29 +28,39 @@ pub struct WakeDetection {
 #[derive(Debug, Clone)]
 pub struct TranscriptWakeDetector {
     keyword: String,
-    normalized_keyword: String,
+    variants: Vec<String>,
 }
 
 impl TranscriptWakeDetector {
     /// Creates a new transcript detector for a configurable keyword.
+    /// The keyword is automatically expanded to include common whisper
+    /// homophone variants (e.g. `kairo` → also matches `cairo`).
     pub fn new(keyword: impl Into<String>) -> Self {
         let keyword = keyword.into();
-        let normalized_keyword = normalize_text(&keyword);
-        Self {
-            keyword,
-            normalized_keyword,
-        }
+        let normalized = normalize_text(&keyword);
+        let variants = expand_variants(&normalized);
+        Self { keyword, variants }
     }
 
-    /// Returns a detection if `transcript` contains the configured wake phrase.
+    /// Returns a detection if `transcript` contains any wake-phrase variant.
     pub fn detect(&self, transcript: &str) -> Option<WakeDetection> {
-        if self.normalized_keyword.is_empty() {
-            return None;
-        }
-
         let normalized = normalize_text(transcript);
-        let idx = normalized.find(&self.normalized_keyword)?;
-        let after_start = idx + self.normalized_keyword.len();
+        // Pick the variant that matches earliest in the transcript so that
+        // "utterance_after_wake" reflects everything the user said after
+        // the wake phrase, not after some overlapping sub-phrase.
+        let mut best: Option<(usize, &String)> = None;
+        for v in &self.variants {
+            if v.is_empty() {
+                continue;
+            }
+            if let Some(idx) = normalized.find(v.as_str()) {
+                if best.map(|(best_idx, _)| idx < best_idx).unwrap_or(true) {
+                    best = Some((idx, v));
+                }
+            }
+        }
+        let (idx, matched) = best?;
+        let after_start = idx + matched.len();
         let after = normalized[after_start..].trim().to_string();
         Some(WakeDetection {
             keyword: self.keyword.clone(),
@@ -48,20 +68,47 @@ impl TranscriptWakeDetector {
         })
     }
 
-    /// Configured keyword.
+    /// Configured keyword (original, pre-normalization).
     pub fn keyword(&self) -> &str {
         &self.keyword
     }
 
+    /// Normalized variants the detector actually matches against. Exposed
+    /// for logging and tests.
+    pub fn variants(&self) -> &[String] {
+        &self.variants
+    }
+
     /// Returns true if this detector appears usable.
     pub fn is_healthy(&self) -> bool {
-        !self.normalized_keyword.is_empty()
+        self.variants.iter().any(|v| !v.is_empty())
     }
 
     /// Returns true if a restart can plausibly fix detector state.
     pub fn should_restart(&self) -> bool {
         false
     }
+}
+
+/// Expand a normalized keyword into phonetic variants whisper may produce.
+///
+/// Rule set (kept deliberately small):
+///  - Every `k` → `c` (handles "kairo"→"cairo", "kyle"→"cyle")
+///  - Adds the unchanged keyword first so primary spelling wins ties.
+///
+/// Future: drop in a fuzzy matcher (Jaro-Winkler) with a confidence
+/// threshold if more variants are needed.
+pub fn expand_variants(normalized_keyword: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(2);
+    if normalized_keyword.is_empty() {
+        return out;
+    }
+    out.push(normalized_keyword.to_string());
+    let k_to_c = normalized_keyword.replace('k', "c");
+    if k_to_c != normalized_keyword {
+        out.push(k_to_c);
+    }
+    out
 }
 
 /// Normalize transcript text for phrase matching.
@@ -104,5 +151,65 @@ mod tests {
     #[test]
     fn normalize_collapses_symbols_and_spaces() {
         assert_eq!(normalize_text("  Hey,  KAIRO! "), "hey kairo");
+    }
+
+    #[test]
+    fn matches_whisper_k_to_c_homophone() {
+        // Whisper-small transcribes "Hey Kairo" as "Ei, Cairo!" (PT) or
+        // "Hey Cairo!" (EN). Both should still fire the wake detector.
+        let detector = TranscriptWakeDetector::new("hey kairo");
+        assert!(detector.detect("Hey Cairo, what's the time?").is_some());
+        assert!(detector.detect("Ei, Cairo!").is_some());
+    }
+
+    #[test]
+    fn utterance_after_wake_captures_remaining_command() {
+        let detector = TranscriptWakeDetector::new("hey kairo");
+        let got = detector.detect("hey cairo open the build log").unwrap();
+        assert_eq!(got.utterance_after_wake, "open the build log");
+    }
+
+    #[test]
+    fn earliest_variant_wins_on_multiple_matches() {
+        // If both variants appear, we want the first-occurring one so
+        // `utterance_after_wake` is the longest possible tail.
+        let detector = TranscriptWakeDetector::new("hey kairo");
+        let got = detector
+            .detect("hey cairo, hey kairo, check this")
+            .unwrap();
+        // "hey cairo" appears first; after = "hey kairo check this"
+        assert!(got.utterance_after_wake.contains("check this"));
+    }
+
+    #[test]
+    fn expand_variants_produces_k_and_c_versions() {
+        let v = expand_variants("hey kairo");
+        assert_eq!(v, vec!["hey kairo".to_string(), "hey cairo".to_string()]);
+    }
+
+    #[test]
+    fn expand_variants_only_original_when_no_k() {
+        let v = expand_variants("hey jarvis");
+        assert_eq!(v, vec!["hey jarvis".to_string()]);
+    }
+
+    #[test]
+    fn expand_variants_empty_input() {
+        assert!(expand_variants("").is_empty());
+    }
+
+    #[test]
+    fn detector_with_empty_keyword_is_unhealthy() {
+        let detector = TranscriptWakeDetector::new("");
+        assert!(!detector.is_healthy());
+        assert!(detector.detect("anything").is_none());
+    }
+
+    #[test]
+    fn variants_accessor_exposes_normalized_set() {
+        let detector = TranscriptWakeDetector::new("Hey Kairo!");
+        let vs = detector.variants();
+        assert!(vs.contains(&"hey kairo".to_string()));
+        assert!(vs.contains(&"hey cairo".to_string()));
     }
 }
