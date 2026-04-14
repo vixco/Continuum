@@ -36,3 +36,24 @@ lancedb = "0.27"
 fastembed = { version = "5.13", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
 arrow-array = "57"
 arrow-schema = "57"
+
+# --- CRT-consistency overrides for MSVC debug builds ---
+#
+# Cargo sets DEBUG=true in the env for build scripts of any package that has
+# `debug != 0` in its profile. `cc::Build` (used by llama-cpp-sys-2 to compile
+# wrapper_common.cpp / wrapper_oai.cpp) reads that DEBUG var and picks /MDd,
+# which links the wrapper objects against ucrtbased.dll + VCRUNTIME140D.dll.
+# Rust itself always uses /MD on MSVC, so the resulting kairo.exe ends up
+# with both CRTs — and whisper_model_load's file handles crossing the
+# boundary trigger a debug-CRT assertion in ucrtbased!read.cpp:381.
+#
+# Setting `debug = false` for just this crate (and no other, so our own
+# Rust code keeps its symbols) flips the env var for llama-cpp-sys-2's
+# build script only, which is exactly the right surface area. Forget
+# trying to override DEBUG via [env] — cargo overwrites that for build
+# scripts.
+#
+# See .cargo/config.toml for the matching CMAKE_BUILD_TYPE=Release pin,
+# which covers llama.cpp/whisper.cpp's CMake-driven build.
+[profile.dev.package.llama-cpp-sys-2]
+debug = false
