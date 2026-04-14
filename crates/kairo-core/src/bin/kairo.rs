@@ -1079,8 +1079,16 @@ fn find_system_prompt(dev_dir: &std::path::Path) -> String {
 
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        return s.to_string();
     }
+    // Walk back from the byte cutoff to the nearest char boundary so we
+    // don't panic when max_len lands inside a multi-byte UTF-8 codepoint
+    // (happens with curly quotes "  " and other chars in vision model
+    // output, e.g. `"Beer in Bordeaux, 2016"`).
+    let target = max_len.saturating_sub(3);
+    let mut cut = target.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
