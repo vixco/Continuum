@@ -954,6 +954,29 @@ fn init_tts_and_feedback(config: &KairoConfig) -> (Option<Arc<SpeechController>>
 
     let feedback = FeedbackPlayer::new(playback.clone(), config.voice.feedback_sounds);
 
+    // Piper warmup: the first synth call pays ~2-3 s of Piper process
+    // startup + model load even on a warm OS file cache. Run a tiny
+    // dummy synth here so the first *real* utterance doesn't eat that
+    // latency on the user-visible path. The audio is discarded.
+    let warmup_engine = engine.clone();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        match warmup_engine.synthesize(".") {
+            Ok(_) => tracing::info!(
+                layer = "voice",
+                component = "kairo",
+                warmup_ms = start.elapsed().as_millis() as u64,
+                "Piper warmup done"
+            ),
+            Err(e) => tracing::warn!(
+                layer = "voice",
+                component = "kairo",
+                error = %e,
+                "Piper warmup failed — first real utterance will be slow"
+            ),
+        }
+    });
+
     tracing::info!(
         layer = "voice",
         component = "kairo",
