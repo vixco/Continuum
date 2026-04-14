@@ -197,10 +197,14 @@ fn frame_tags(frame: &PerceptionFrame) -> Vec<String> {
 
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        return s.to_string();
     }
+    let target = max_len.saturating_sub(3);
+    let mut cut = target.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
 
 #[cfg(test)]

@@ -360,11 +360,16 @@ impl kairo_vision::VisionModel for StubVisionModel {
     }
 }
 
-/// Truncates a string to `max_len` characters, adding "..." if truncated.
+/// Truncates a string to at most `max_len` bytes, ending on a UTF-8
+/// char boundary, adding "..." if truncated.
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        return s.to_string();
     }
+    let target = max_len.saturating_sub(3);
+    let mut cut = target.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }

@@ -321,10 +321,16 @@ pub(crate) fn find_sentence_end(s: &str) -> Option<usize> {
 
 fn truncate_for_log(s: &str) -> String {
     if s.len() <= 60 {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..57])
+        return s.to_string();
     }
+    // Walk back to the nearest char boundary so we don't panic on
+    // multi-byte UTF-8 codepoints (Kairo's responses contain curly
+    // quotes, em-dashes, etc.).
+    let mut cut = 57.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
 
 // ---------------------------------------------------------------------------
