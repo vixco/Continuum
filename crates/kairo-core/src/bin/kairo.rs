@@ -329,29 +329,62 @@ async fn main() -> Result<()> {
                 let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");
 
-                // Triage.
+                // Triage gate — skip the Qwen call when the frame carries
+                // no reason to wake the orchestrator anyway. Saves a full
+                // GPU burst (~800 ms on Qwen 3 8B) per skipped frame,
+                // which is most frames in steady state. Quality is
+                // unchanged: these frames would have produced
+                // `Ignore` anyway.
+                //
+                // Skip when ALL of:
+                //   - salience < threshold (nothing new happened), AND
+                //   - no audio transcript (user said nothing), AND
+                //   - no error visible on screen, AND
+                //   - orchestrator is either idle, or busy but we still
+                //     have no audio (voice arms first-class — they force
+                //     a triage call because the user might be speaking
+                //     follow-up).
+                let has_audio = frame
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| !a.transcript.trim().is_empty());
+                let skip_triage = frame.salience_hint < config.frame.salience_threshold
+                    && !has_audio
+                    && !frame.screen.has_error_visible;
+
                 let decision: Option<TriageDecision> = if let Some(ref triage_layer) = triage {
-                    let triage_start = Instant::now();
-                    let d = triage_layer.evaluate(&frame, "").await;
-                    let triage_ms = triage_start.elapsed().as_millis();
+                    if skip_triage {
+                        tracing::trace!(
+                            layer = "triage",
+                            component = "kairo",
+                            frame_id = %frame.id,
+                            salience = frame.salience_hint,
+                            "Skipped triage — low-salience idle frame"
+                        );
+                        Some(TriageDecision::Ignore)
+                    } else {
+                        let triage_start = Instant::now();
+                        let d = triage_layer.evaluate(&frame, "").await;
+                        let triage_ms = triage_start.elapsed().as_millis();
 
-                    tracing::debug!(
-                        layer = "triage",
-                        component = "kairo",
-                        decision = d.variant_name(),
-                        latency_ms = triage_ms as u64,
-                        "Triage decision"
-                    );
+                        tracing::debug!(
+                            layer = "triage",
+                            component = "kairo",
+                            decision = d.variant_name(),
+                            latency_ms = triage_ms as u64,
+                            "Triage decision"
+                        );
 
-                    println!(
-                        "[{ts}] {app} | \"{desc}\" | audio=\"{audio}\" | triage={decision}",
-                        app = frame.context.foreground_process_name,
-                        desc = truncate(&frame.screen.description, 50),
-                        audio = truncate(audio_text, 30),
-                        decision = d.variant_name(),
-                    );
+                        println!(
+                            "[{ts}] {app} | \"{desc}\" | audio=\"{audio}\" | triage={decision}",
+                            app = frame.context.foreground_process_name,
+                            desc = truncate(&frame.screen.description, 50),
+                            audio = truncate(audio_text, 30),
+                            decision = d.variant_name(),
+                        );
 
-                    Some(d)
+                        Some(d)
+                    }
                 } else {
                     println!(
                         "[{ts}] {app} | \"{desc}\" | sal={sal:.2}",
