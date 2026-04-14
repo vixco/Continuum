@@ -38,26 +38,25 @@ const RESAMPLER_CHUNK_SIZE: usize = 1024;
 /// silence RMS to compute the noise floor. 312 chunks × 32 ms ≈ 10 seconds.
 const VAD_NOISE_WINDOW_CHUNKS: u64 = 312;
 
-/// Initial warmup period (in VAD chunks) during which every chunk unconditionally
-/// contributes to the noise floor estimate. Lets the detector calibrate even if
-/// the user starts speaking right away — worst case, a few syllables at the
-/// very start are treated as silence, then the adaptive threshold kicks in.
-/// 31 chunks × 32 ms ≈ 1 second.
-const VAD_WARMUP_CHUNKS: u64 = 31;
-
 // ---------------------------------------------------------------------------
 // Adaptive energy-based VAD
 // ---------------------------------------------------------------------------
 
 /// Self-calibrating voice activity detector.
 ///
-/// Tracks a rolling 10-second window of silence-chunk RMS values and sets the
-/// speech threshold to `max(floor, noise_floor_mean × multiplier)`. This means
-/// a quiet laptop mic (noise ≈ 0.0005) uses the floor (0.005), while a hot
-/// USB mic (noise ≈ 0.01) auto-raises to ≈ 0.05 — without user tuning.
+/// Tracks a rolling 10-second window of RMS values from chunks that were
+/// classified as silence, and sets the speech threshold to
+/// `max(floor, noise_floor_mean × multiplier)`. A quiet laptop mic
+/// (ambient ≈ 0.0005) uses the floor (0.005); a hot USB mic lifts the
+/// threshold naturally as its ambient chunks flow into the ring.
 ///
-/// The first ~1 second is treated as unconditional silence (warmup) so the
-/// noise floor has samples to calibrate from even if speech starts immediately.
+/// **No warmup bootstrap.** Only chunks that were actually classified as
+/// silence feed the noise floor. A previous revision had a 1-second warmup
+/// that unconditionally pushed every chunk — this meant a user who spoke
+/// during the first second contaminated the noise floor with speech RMS,
+/// and the threshold would stay poisoned at ~0.2 for the next 10 seconds
+/// (locking real speech out). Without the warmup, speech RMS never enters
+/// the ring, so the threshold can only rise when genuine silence does.
 struct AdaptiveVad {
     /// Absolute minimum threshold, regardless of noise floor. Protects against
     /// pathologically quiet rooms where noise_floor × multiplier would fall
@@ -75,9 +74,6 @@ struct AdaptiveVad {
     silence_ring: VecDeque<(u64, f32)>,
     /// Monotonically increasing chunk counter used for ring-eviction timing.
     current_chunk: u64,
-    /// Chunks remaining in the warmup period. While > 0, every chunk is
-    /// considered silence for noise-floor purposes.
-    warmup_remaining: u64,
     /// Most recently computed threshold. Cached here so the outer loop can
     /// include it in trace logs without re-running the mean.
     last_threshold: f32,
@@ -127,30 +123,12 @@ impl VadState {
 }
 
 impl AdaptiveVad {
-    /// Creates a new adaptive VAD with production warmup (~1s).
+    /// Creates a new adaptive VAD. No warmup — see the struct doc for why.
     fn new(
         floor: f32,
         multiplier: f32,
         silence_duration_ms: u64,
         max_segment_secs: u64,
-    ) -> Self {
-        Self::new_with_warmup(
-            floor,
-            multiplier,
-            silence_duration_ms,
-            max_segment_secs,
-            VAD_WARMUP_CHUNKS,
-        )
-    }
-
-    /// Inner constructor — exposes `warmup` for test code that wants the
-    /// adaptive threshold to kick in immediately.
-    fn new_with_warmup(
-        floor: f32,
-        multiplier: f32,
-        silence_duration_ms: u64,
-        max_segment_secs: u64,
-        warmup: u64,
     ) -> Self {
         let chunk_duration_ms = (VAD_CHUNK_SAMPLES as u64 * 1000) / u64::from(TARGET_SAMPLE_RATE);
         let silence_chunks_needed = if chunk_duration_ms > 0 {
@@ -173,7 +151,6 @@ impl AdaptiveVad {
             max_segment_samples,
             silence_ring: VecDeque::with_capacity(VAD_NOISE_WINDOW_CHUNKS as usize),
             current_chunk: 0,
-            warmup_remaining: warmup,
             last_threshold: floor,
         }
     }
@@ -224,19 +201,18 @@ impl AdaptiveVad {
             }
         }
 
-        let in_warmup = self.warmup_remaining > 0;
         let threshold = self.current_threshold();
         self.last_threshold = threshold;
-        let is_speech = !in_warmup && rms > threshold;
+        let is_speech = rms > threshold;
 
-        // Warmup: every chunk feeds the noise floor so the threshold has
-        // something to work with. Post-warmup: only chunks we classified as
-        // silence contribute, so speech itself doesn't poison the estimate.
-        if in_warmup || !is_speech {
+        // Only chunks classified as silence contribute to the noise floor —
+        // this is the invariant that keeps speech RMS out of the estimate.
+        // On the very first chunks the ring is empty (noise_floor = 0 →
+        // threshold = floor); if audio is genuine silence the ring fills
+        // naturally, if audio is loud speech from the start nothing is
+        // pushed and the threshold stays at the floor, which is correct.
+        if !is_speech {
             self.silence_ring.push_back((self.current_chunk, rms));
-        }
-        if in_warmup {
-            self.warmup_remaining -= 1;
         }
 
         if is_speech {
@@ -1133,13 +1109,12 @@ mod tests {
     use super::*;
 
     // -- AdaptiveVad tests --
-    // All tests use `new_with_warmup(..., 0)` so the adaptive threshold kicks
-    // in immediately and the probe warmup doesn't swallow the first chunks.
-    // `multiplier = 1.0` keeps behaviour close to the old fixed-threshold
-    // VAD: since silence has rms ~0, threshold stays at the floor.
+    // `multiplier = 1.0` keeps behaviour close to a fixed-threshold VAD:
+    // true-silence chunks have rms ~0, so the threshold stays at the floor
+    // and the tests exercise the speech/silence state machine cleanly.
 
     fn test_vad(floor: f32, silence_ms: u64, max_secs: u64) -> AdaptiveVad {
-        AdaptiveVad::new_with_warmup(floor, 1.0, silence_ms, max_secs, 0)
+        AdaptiveVad::new(floor, 1.0, silence_ms, max_secs)
     }
 
     #[test]
@@ -1410,46 +1385,54 @@ mod tests {
     }
 
     #[test]
-    fn test_vad_adaptive_threshold_rises_with_noise_floor() {
-        // When ambient noise is high, the adaptive threshold should follow
-        // it up so noise-level chunks don't register as speech, while a chunk
-        // well above the multiplier still does.
-        //
-        // Uses production warmup (~1s) so the noise floor can calibrate on
-        // the ambient chunks before the multiplier-based threshold takes
-        // effect — without warmup, every chunk would be classified as speech
-        // and the silence ring would never fill.
+    fn test_vad_noise_floor_tracks_silence_chunks() {
+        // Starting with an empty ring, feeding truly-silent chunks should
+        // accumulate them in the ring and leave noise_floor near zero.
+        // Threshold then stays at the floor and subsequent loud chunks are
+        // correctly classified as speech.
         let mut vad = AdaptiveVad::new(0.005, 5.0, 500, 8);
         let mut state = VadState::new();
 
-        // Feed enough ambient-noise chunks to exit warmup and stabilize the
-        // noise floor. 50 chunks > VAD_WARMUP_CHUNKS (31).
-        let noisy_silence = vec![0.02f32; VAD_CHUNK_SAMPLES];
-        for _ in 0..50 {
-            vad.feed_chunk(&noisy_silence, &mut state);
+        let silence = vec![0.0f32; VAD_CHUNK_SAMPLES];
+        for _ in 0..100 {
+            let d = vad.feed_chunk(&silence, &mut state);
+            assert_eq!(d, VadDecision::Silence);
         }
-
+        assert!(vad.noise_floor() < 0.001, "quiet silence → low noise floor");
         assert!(
-            vad.noise_floor() > 0.015,
-            "noise floor should track ambient level, got {}",
-            vad.noise_floor()
+            (vad.current_threshold() - 0.005).abs() < 1e-6,
+            "threshold should still be at the floor"
         );
-        assert!(
-            vad.current_threshold() > 0.05,
-            "threshold should be 5× noise floor, got {}",
-            vad.current_threshold()
-        );
-
-        // A chunk at the ambient level should NOT start a new speech segment
-        // (state was just cleared because warmup ended without active speech).
-        assert!(!state.speech_active);
-        let d = vad.feed_chunk(&noisy_silence, &mut state);
-        assert_eq!(d, VadDecision::Silence);
         assert!(!state.speech_active);
 
-        // A chunk well above threshold should register.
         let loud = vec![0.3f32; VAD_CHUNK_SAMPLES];
         let d = vad.feed_chunk(&loud, &mut state);
         assert_eq!(d, VadDecision::Speech);
+        assert!(state.speech_active);
+    }
+
+    #[test]
+    fn test_vad_speech_does_not_poison_noise_floor() {
+        // Regression: a user who speaks immediately on startup must not
+        // corrupt the adaptive threshold. Speech chunks are classified as
+        // speech from chunk 1 (ring empty → threshold = floor) and NEVER
+        // enter the silence ring, so the threshold stays at the floor
+        // throughout and speech keeps being detected.
+        let mut vad = AdaptiveVad::new(0.005, 5.0, 500, 8);
+        let mut state = VadState::new();
+
+        let loud = vec![0.3f32; VAD_CHUNK_SAMPLES];
+        for _ in 0..200 {
+            let _ = vad.feed_chunk(&loud, &mut state);
+        }
+        assert_eq!(
+            vad.noise_floor(),
+            0.0,
+            "no silence chunks pushed → noise floor stays at 0"
+        );
+        assert!(
+            (vad.current_threshold() - 0.005).abs() < 1e-6,
+            "threshold must stay at floor when the ring is empty"
+        );
     }
 }
