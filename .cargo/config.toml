@@ -28,20 +28,33 @@ BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program File
 # integration that VS 2019 BuildTools doesn't have. Ninja calls nvcc directly.
 CMAKE_GENERATOR = "Ninja"
 
-# Force C++ deps (whisper.cpp, llama.cpp) to build with the Release CRT
-# even when Rust is in debug mode. Without this, the `cmake` crate maps
-# cargo's debug profile to CMAKE_BUILD_TYPE=Debug, which links the C++
-# code against ucrtbased.dll (debug CRT) while Rust itself uses ucrt.dll
-# (release CRT) on Windows. The mismatch triggers a debug-assertion
-# dialog in read.cpp:381 (`_osfile(fh) & FOPEN`) the moment a file
-# handle crosses the Rust↔C++ boundary — Kairo hits this immediately on
-# startup because whisper-rs loads the Whisper model during init.
+# Force C++ deps (whisper.cpp, llama.cpp, and every crate using the `cc`
+# or `cmake` crates for native code) to build with the Release CRT even
+# when Rust itself is in debug mode. Without this, file handles crossing
+# the Rust ↔ native-code boundary trigger a debug-CRT assertion in
+# read.cpp:381 (`_osfile(fh) & FOPEN`) and Kairo crashes with exit
+# code 3 during whisper model load.
 #
-# Release cargo builds already set CMAKE_BUILD_TYPE=Release, so this
-# override only changes behaviour for `cargo build` / `cargo run`
-# without --release. Keeping both profiles on Release CRT keeps the
-# boundary clean.
+# Why both env vars are needed on Windows MSVC:
+#
+# - CMAKE_BUILD_TYPE=Release makes the `cmake` crate pass
+#   -DCMAKE_BUILD_TYPE=Release to cmake, which selects /MD (release CRT)
+#   instead of /MDd (debug CRT) for MSVC builds.
+#
+# - DEBUG=false makes the `cc` crate (used by llama-cpp-sys-2 for its
+#   wrapper C++ files, among others) compile with /MD instead of /MDd.
+#   The `cc` crate keys off the DEBUG env var that cargo normally sets
+#   to "true" for debug profiles; overriding it here forces /MD for all
+#   native C/C++ wrapper builds. Side effect: no -g/ /Zi debug symbols in
+#   the C/C++ code, which is fine — we iterate on the Rust side, not on
+#   llama.cpp internals. OPT_LEVEL=0 is still respected by cc for
+#   generated code, so debug iteration speed isn't affected.
+#
+# Release cargo builds already set both to Release/false equivalents,
+# so these overrides only change behaviour for `cargo build` /
+# `cargo run` without --release.
 CMAKE_BUILD_TYPE = "Release"
+DEBUG = "false"
 
 # ONNX Runtime library path for ort load-dynamic feature
 ORT_DYLIB_PATH = "C:/onnxruntime/onnxruntime.dll"
