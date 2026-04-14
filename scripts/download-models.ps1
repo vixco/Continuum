@@ -75,6 +75,52 @@ function Download-Model {
     }
 }
 
+# Small-file variant for sidecar configs (.onnx.json, tokenizer.json). These
+# are KB-sized so the 1 MB validity floor doesn't apply — we only check that
+# the response is non-empty and does not look like an HTML error page.
+function Download-Sidecar {
+    param(
+        [string]$Name,
+        [string]$Url,
+        [string]$OutPath
+    )
+
+    $dir = Split-Path $OutPath -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+
+    if (Test-Path $OutPath) {
+        $size = (Get-Item $OutPath).Length
+        if ($size -gt 100) {
+            Write-Host "[OK] $Name already exists ($size bytes)" -ForegroundColor Green
+            return
+        } else {
+            Remove-Item $OutPath
+        }
+    }
+
+    Write-Host "[DL] Downloading $Name..." -ForegroundColor Yellow
+    & curl.exe -L --fail --silent -o $OutPath $Url
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] Download failed for $Name" -ForegroundColor Red
+        if (Test-Path $OutPath) { Remove-Item $OutPath }
+        return
+    }
+
+    if (Test-Path $OutPath) {
+        $dlSize = (Get-Item $OutPath).Length
+        $head = Get-Content $OutPath -TotalCount 1 -ErrorAction SilentlyContinue
+        if ($dlSize -lt 100 -or ($head -like "<!DOCTYPE*") -or ($head -like "<html*")) {
+            Write-Host "[FAIL] $Name response is too small or looks like an HTML error page" -ForegroundColor Red
+            Remove-Item $OutPath
+            return
+        }
+        Write-Host "[OK] $Name downloaded ($dlSize bytes)" -ForegroundColor Green
+    }
+}
+
 # ============================================================================
 # SmolVLM-256M (Vision — Layer 1)
 # ============================================================================
@@ -159,6 +205,128 @@ Download-Model `
     -ExpectedSizeMB "465"
 
 # ============================================================================
+# Piper TTS voices (Phase 5 — voice)
+# ============================================================================
+# Piper voices are shipped as paired .onnx + .onnx.json files. Config sidecar
+# holds sample_rate, speaker table, inference params — Kairo reads sample_rate
+# from it at engine init, so both files are required together.
+#
+# MIT-licensed; source: rhasspy/piper-voices on HuggingFace.
+
+Write-Host "`n--- Piper TTS (English — en_US-lessac-medium) ---" -ForegroundColor Cyan
+
+$TtsDir = Join-Path $ModelsBase "tts"
+$PiperBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+
+Download-Model `
+    -Name "Piper EN voice (lessac-medium)" `
+    -Url "$PiperBase/en/en_US/lessac/medium/en_US-lessac-medium.onnx" `
+    -OutPath (Join-Path $TtsDir "en_US-lessac-medium.onnx") `
+    -ExpectedSizeMB "63"
+
+Download-Sidecar `
+    -Name "Piper EN config" `
+    -Url "$PiperBase/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" `
+    -OutPath (Join-Path $TtsDir "en_US-lessac-medium.onnx.json")
+
+Write-Host "`n--- Piper TTS (Dutch — nl_NL-mls-medium) ---" -ForegroundColor Cyan
+
+Download-Model `
+    -Name "Piper NL voice (mls-medium)" `
+    -Url "$PiperBase/nl/nl_NL/mls/medium/nl_NL-mls-medium.onnx" `
+    -OutPath (Join-Path $TtsDir "nl_NL-mls-medium.onnx") `
+    -ExpectedSizeMB "76"
+
+Download-Sidecar `
+    -Name "Piper NL config" `
+    -Url "$PiperBase/nl/nl_NL/mls/medium/nl_NL-mls-medium.onnx.json" `
+    -OutPath (Join-Path $TtsDir "nl_NL-mls-medium.onnx.json")
+
+# ============================================================================
+# Piper binary + espeak-ng-data (Windows)
+# ============================================================================
+# The official rhasspy/piper Windows release zip (piper_windows_amd64.zip)
+# bundles piper.exe alongside the espeak-ng-data directory. We extract the
+# whole tree to ~/.kairo-dev/bin/piper/ and copy espeak-ng-data/ to the
+# location Kairo's config expects.
+#
+# Both the binary and espeak-ng-data come from the same archive — this
+# guarantees version compatibility and avoids depending on the 404'd
+# rhasspy/espeak-ng-data repo. The PiperEngine calls piper.exe as a
+# subprocess and reads PIPER_ESPEAKNG_DATA_DIRECTORY from the environment
+# (set by voice::tts::set_espeak_data_dir).
+
+Write-Host "`n--- Piper binary + espeak-ng-data (Windows) ---" -ForegroundColor Cyan
+
+$EspeakDir = Join-Path $TtsDir "espeak-ng-data"
+$PiperZipUrl = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
+$FallbackEspeakUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2"
+$PiperBinRoot = Join-Path $env:USERPROFILE ".kairo-dev\bin\piper"
+$PiperExe = Join-Path $PiperBinRoot "piper.exe"
+
+$NeedsPiper  = -not (Test-Path $PiperExe)
+$NeedsEspeak = -not ((Test-Path $EspeakDir) -and ((Get-ChildItem $EspeakDir -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count -gt 50))
+
+if (-not $NeedsPiper -and -not $NeedsEspeak) {
+    Write-Host "[OK] Piper binary and espeak-ng-data already installed" -ForegroundColor Green
+    Write-Host "     piper.exe: $PiperExe" -ForegroundColor Gray
+    Write-Host "     espeak-ng-data: $EspeakDir" -ForegroundColor Gray
+} else {
+    $zipPath = Join-Path $env:TEMP "kairo-piper-win-amd64.zip"
+    $extractRoot = Join-Path $env:TEMP "kairo-piper-extract"
+
+    Write-Host "[DL] Downloading Piper Windows release (~22 MB)..." -ForegroundColor Yellow
+    Write-Host "     URL: $PiperZipUrl" -ForegroundColor Gray
+    & curl.exe -L --fail --progress-bar -o $zipPath $PiperZipUrl
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] Could not download Piper Windows release." -ForegroundColor Red
+        Write-Host "       Manual fallback:" -ForegroundColor Gray
+        Write-Host "         1. Download $PiperZipUrl" -ForegroundColor Gray
+        Write-Host "         2. Extract the 'piper' folder to $PiperBinRoot" -ForegroundColor Gray
+        Write-Host "         3. Copy the 'espeak-ng-data' folder to $EspeakDir" -ForegroundColor Gray
+    } else {
+        if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
+        New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+
+        Write-Host "[EX] Extracting..." -ForegroundColor Yellow
+        Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
+
+        # The archive structure is piper/piper.exe + piper/espeak-ng-data/ +
+        # piper/*.dll. Find piper.exe recursively so we don't depend on the
+        # exact nesting changing between releases.
+        $foundExe = Get-ChildItem -Path $extractRoot -Filter "piper.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $foundExe) {
+            Write-Host "[FAIL] piper.exe not found inside archive" -ForegroundColor Red
+        } else {
+            $piperSrcDir = $foundExe.Directory.FullName
+            $espeakSrc   = Join-Path $piperSrcDir "espeak-ng-data"
+
+            # Install the Piper binary tree
+            if (Test-Path $PiperBinRoot) { Remove-Item -Recurse -Force $PiperBinRoot }
+            New-Item -ItemType Directory -Force -Path $PiperBinRoot | Out-Null
+            Copy-Item -Path (Join-Path $piperSrcDir "*") -Destination $PiperBinRoot -Recurse -Force
+            Write-Host "[OK] Piper binary installed at $PiperBinRoot" -ForegroundColor Green
+            Write-Host "     Set KAIRO_PIPER_BIN=$PiperExe or add $PiperBinRoot to PATH" -ForegroundColor Gray
+
+            # Copy espeak-ng-data to the location the Kairo config expects
+            if (Test-Path $espeakSrc) {
+                if (Test-Path $EspeakDir) { Remove-Item -Recurse -Force $EspeakDir }
+                New-Item -ItemType Directory -Force -Path $EspeakDir | Out-Null
+                Copy-Item -Path (Join-Path $espeakSrc "*") -Destination $EspeakDir -Recurse -Force
+                Write-Host "[OK] espeak-ng-data installed at $EspeakDir" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] espeak-ng-data not found alongside piper.exe" -ForegroundColor Yellow
+                Write-Host "       Fallback: $FallbackEspeakUrl" -ForegroundColor Gray
+            }
+        }
+
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================================
 # Summary
 # ============================================================================
 
@@ -173,7 +341,10 @@ $critical = @(
     @("Vision tokenizer", (Join-Path $VisionDir "tokenizer.json")),
     @("Triage model (8B)", (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf")),
     @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf")),
-    @("Whisper STT", (Join-Path $ModelsBase "stt\whisper-small.bin"))
+    @("Whisper STT", (Join-Path $ModelsBase "stt\whisper-small.bin")),
+    @("Piper EN voice", (Join-Path $TtsDir "en_US-lessac-medium.onnx")),
+    @("Piper NL voice", (Join-Path $TtsDir "nl_NL-mls-medium.onnx")),
+    @("Piper binary", $PiperExe)
 )
 
 $allOk = $true

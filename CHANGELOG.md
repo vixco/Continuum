@@ -5,6 +5,37 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 ## [Unreleased]
 
 ### Added
+- **Phase 5 completion (v0.3.0-phase5)**: full voice-pipeline acceptance — TTS foundation (5A), wake + streaming STT (5B), streaming TTS + interrupt + polish (5C) landed together
+- `crates/kairo-core/examples/voice_test.rs`: Phase 5A acceptance gate — loads the Piper voice bank, synthesises Dutch + English, plays through the default cpal output, prints per-language timing
+- `crates/kairo-core/examples/voice_demo.rs`: Phase 5C end-to-end demo — typed transcripts drive wake → endpoint → streaming TTS → follow-up mode, with latency report
+- `crates/kairo-core/examples/voice_latency_bench.rs`: Phase 5C benchmark harness — measures wake / endpoint / synth / playback-start / full-pipeline latency against ARCHITECTURE.md P95 targets over N iterations
+- `crates/kairo-core/src/voice/sounds.rs`: procedurally-generated feedback cues (wake chime 880→1320 Hz ramp, listen click 1200 Hz, done double-click 660 Hz, error double-beep 220→165 Hz) with a `FeedbackPlayer` wrapper that no-ops when disabled or when no playback stream is attached
+- `crates/kairo-core/src/voice/health.rs`: voice-component health probes (`tts_health_from_paths`, `stt_health_from_paths`, `wake_health`, `playback_health`) and a `VoiceHealthReport` aggregator that surfaces the worst status for the Phase 7 repair agent
+- `crates/kairo-core/src/voice/hotkey.rs` (Windows): global hotkey listener via `RegisterHotKey` on a dedicated thread, parses `"Ctrl+Shift+K"`-style chord specs, delivers press events on a tokio `UnboundedReceiver<()>`, unregisters cleanly on drop
+- `crates/kairo-core/src/voice/tts.rs::ElevenLabsEngine`: config-stable extension point for the future cloud TTS plugin — implements `TtsEngine` but returns a clear "Phase 5 extension point" error when called; `tts.engine = "elevenlabs"` logs a warning and falls back to Piper
+- `resolve_piper_binary()` in `voice::tts`: Piper binary lookup now falls through `KAIRO_PIPER_BIN` env → `~/.kairo-dev/bin/piper/piper.exe` (Windows) / `~/.kairo-dev/bin/piper/piper` (Unix) → system PATH, so the download-models script makes things work without extra env setup
+- `PlaybackStream::open_default_with_volume` + `set_volume`/`volume`: master gain applied in the cpal fill callback via an `AtomicU32` bits-of-f32, clamped to `[0.0, 1.0]`, `NaN`/`±∞` coerced to `0.0`
+- Conversation follow-up mode: `bin/kairo.rs` opens a `followup_until` window after each orchestrator wake; fresh speech inside the window starts a session without re-requiring the wake phrase, then falls back to passive mode automatically
+- Hotkey push-to-talk wiring in `bin/kairo.rs`: pressing the configured chord from anywhere flips `hotkey_pending`; the next transcript starts a session directly (skipping the wake phrase)
+- Feedback cues wired into the main runtime: wake chime on wake-phrase match, listen click on follow-up/hotkey session start, error beep when `do_wake` fails
+- `docs/voice.md` rewritten as a comprehensive reference: full pipeline diagram, every config option, latency budget table with P95 targets, troubleshooting guide, architectural rationale (Piper subprocess vs piper-rs, transcript wake vs Porcupine, heuristic endpoint vs LLM, sentence streaming vs token streaming), extension paths for new voices / custom wake / ElevenLabs / feedback cues
+
+### Changed
+- `config/default-models.toml` and `config::VoiceConfig`: added `volume`, `feedback_sounds`, `hotkey`, `conversation_followup_seconds` to `[voice]`; added `engine` and new `[tts.elevenlabs]` section to `[tts]`
+- `scripts/download-models.ps1`: replaced the broken rhasspy/espeak-ng-data download (404'd repo) with the official `piper_windows_amd64.zip` release — installs `piper.exe` under `~/.kairo-dev/bin/piper/`, copies the bundled `espeak-ng-data/` to `~/.kairo-dev/models/tts/espeak-ng-data/`, and verifies the Piper binary in the final check
+- `voice::tts::PiperEngine`: uses `resolve_piper_binary()` instead of hardcoding `"piper"` as the PATH fallback
+- `voice::sounds::FeedbackPlayer`: added `::disabled()` constructor for headless/no-audio paths; the internal `playback` is now `Option<Arc<PlaybackStream>>` so we don't need to open a dummy cpal stream under `--no-tts`
+- `bin/kairo.rs`: TTS init is now `init_tts_and_feedback` returning `(Option<Arc<SpeechController>>, FeedbackPlayer)`, so the same cpal output drives both utterances and UI cues
+- `PlaybackStream::open_default` now delegates to `open_default_with_volume(1.0)` to preserve the existing API surface
+- `voice::mod.rs`: added `pub mod sounds`, `pub mod health`, and gated `pub mod hotkey` behind `#[cfg(windows)]`
+
+### Fixed
+- `download-models.ps1` depended on `github.com/rhasspy/espeak-ng-data`, which is a 404. The new script uses the espeak-ng-data already bundled in the Piper Windows release, which is the upstream-recommended path
+
+- **Phase 5 local voice path**: wake phrase detection over local Whisper transcripts, post-wake voice sessions, endpoint detection, Piper CLI TTS, cpal playback, streaming sentence-level speech, barge-in interruption, quiet mode during calls, and voice/self-healing docs
+- **Phase 3 memory distillation completion**: background distiller promotes qualifying raw perception frames into LanceDB episodic `remember` events every 15 minutes and marks frames with `memory_distilled_at` after successful insert
+- Voice configuration (`[voice]`) for wake keyword, timeout, endpoint silence, barge-in, ambient mute, and language routing; memory distillation configuration (`[memory]`) for interval, lookback, salience threshold, and batch size
+- `docs/voice.md` and `docs/self-healing.md` document the Phase 5 local voice flow and repair-agent recovery procedures
 - **Phase 4 — MCP tools**: Kairo's orchestrator can now do things, not just talk — a standalone `kairo-mcp` binary exposes 11 Rust-native tools to Claude Opus at wake time via `--mcp-config`
 - `kairo-mcp` binary (rmcp 1.4, stdio transport, `--version` flag): registered on every wake with `--strict-mcp-config`, advertises protocol `V_2024_11_05` with `enable_tools()` capabilities
 - Memory tools (`mcp__kairo__memory_*`): `query_episodic` (vector search via existing LanceDB), `list_facts` (prefix filter), `get_fact`, `set_fact` (rejects `system.*` and `kairo.*` prefixes; confidence clamped by source — inferred ≤0.7, observed ≤0.8, user_stated ≤0.9)

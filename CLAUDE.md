@@ -94,7 +94,7 @@ cargo run --bin kairo-triage-bench       # runs 20-frame benchmark, reports accu
 
 ## Current project status
 
-Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `kairo-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
+Phases 0–5 are complete (bootstrap, perception, triage, orchestrator, MCP tools, voice). The orchestrator wakes with 11 MCP tools and Kairo now has a full local voice loop: transcript-based wake detection, heuristic semantic endpoint detection, Piper subprocess TTS with sentence-level streaming, cpal playback with master volume, barge-in, ambient mute during calls, conversation follow-up, Ctrl+Shift+K global hotkey (Windows), procedurally-generated feedback cues, and component-level health probes for the repair agent. Acceptance examples: `cargo run --example voice_test` / `voice_demo` / `voice_latency_bench -p kairo-core`. Next: Phase 6 (dashboard). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
 
 ## Coding standards
 

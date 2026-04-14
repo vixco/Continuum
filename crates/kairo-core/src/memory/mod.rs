@@ -13,6 +13,7 @@
 //! 2. Re-rank results via the triage LLM for relevance
 //! 3. Inject top results into the orchestrator's context
 
+pub mod distill;
 pub mod episodic;
 pub mod raw_log;
 pub mod retrieval;

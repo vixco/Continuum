@@ -68,6 +68,15 @@ silence_duration_ms = 800
 # whisper inference on multi-minute monologues).
 max_segment_secs = 8
 
+[memory]
+# Phase 3 completion: raw perception frames that look worth remembering are
+# distilled into LanceDB episodic memory in the background.
+distillation_enabled = true
+distillation_interval_minutes = 15
+distillation_lookback_minutes = 20
+distillation_min_salience = 0.35
+distillation_batch_size = 100
+
 [stt]
 name = "Whisper small"
 variant = "whisper-small"
@@ -77,25 +86,89 @@ runtime = "whisper-cpp"
 # Alternatives: whisper-tiny, whisper-base, whisper-medium, whisper-large-v3
 
 [tts]
-name = "Piper"
-variant = "en_US-lessac-medium"
-path = "~/.kairo/models/tts/en_US-lessac-medium.onnx"
-size_mb = 75
-runtime = "piper"
-# Alternatives: kokoro-tts, elevenlabs (requires api_key)
+# Phase 5 TTS is fully local (Piper). Every model file must exist before
+# `cargo run --bin kairo` attempts to speak — otherwise whisper decisions
+# and orchestrator responses will fall through to log-only mode.
+#
+# Run `powershell scripts/download-models.ps1` to populate ~/.kairo-dev/models/tts/
+# AND to install piper.exe + espeak-ng-data under ~/.kairo-dev/bin/piper/.
 
+enabled = true
+
+# Engine backend: "piper" (local, default) or "elevenlabs" (cloud plugin,
+# requires an API key below). Phase 5 ships Piper only; ElevenLabs is a
+# config-stable extension point for a later plugin release.
+engine = "piper"
+
+# espeak-ng dictionary directory (exported as PIPER_ESPEAKNG_DATA_DIRECTORY
+# at startup). Installed by scripts/download-models.ps1 from the Piper
+# Windows release bundle.
+espeak_data_dir = "~/.kairo-dev/models/tts/espeak-ng-data"
+
+# BCP-47 short code of the voice used when no language hint is available.
+# Language routing swaps per detected whisper language when both voices
+# are configured.
+primary = "en"
+
+# length_scale = 1.0 is Piper's default. <1.0 speeds up speech, >1.0 slows
+# it down. `None` (omit) uses the value baked into the voice config.
+# length_scale = 1.0
+
+[tts.voices.en]
+model_path  = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx"
+config_path = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx.json"
+# en_US-lessac-medium is single-speaker — leave unset.
+# speaker_id = 0
+
+[tts.voices.nl]
+model_path  = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx"
+config_path = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx.json"
+# nl_NL-mls is multi-speaker. Speaker 0 is the default. Set 1..N to pick
+# a different voice from the same model.
+speaker_id = 0
+
+# Optional ElevenLabs streaming cloud backend. Disabled by default. To
+# activate, set engine = "elevenlabs" above and provide credentials here.
 [tts.elevenlabs]
-enabled = false
-# api_key is read from ELEVENLABS_API_KEY env var
-voice_id = ""
-model_id = "eleven_turbo_v2_5"
+api_key          = ""
+voice_id         = ""
+model_id         = "eleven_turbo_v2_5"
+stability        = 0.5
+similarity_boost = 0.75
 
-[wake_word]
-name = "Porcupine"
-keyword = "hey kairo"
-sensitivity = 0.5
-# Path to custom .ppn file, or empty for built-in
+[voice]
+enabled = true
+wake_word_enabled = true
+wake_keyword = "hey kairo"
+wake_sensitivity = 0.5
+# Optional native wake-word .ppn path. Empty uses local transcript detection
+# over Whisper output, so Kairo still has a fully local wake gate without an
+# access-key dependency in core.
 custom_keyword_path = ""
+listen_timeout_ms = 12000
+endpoint_silence_ms = 700
+min_utterance_chars = 3
+barge_in_enabled = true
+ambient_mute_enabled = true
+language_detection_enabled = true
+default_language = "en"
+
+# Master playback gain [0.0, 1.0]. Applied in the cpal callback; takes
+# effect on the next audio buffer.
+volume = 0.8
+
+# Play short audio cues (chime on wake, click on listen start, double-beep
+# on error). Set to false for fully silent state transitions.
+feedback_sounds = true
+
+# Global hotkey for toggle-listen. Empty string disables it. Modifier
+# chord: "Ctrl", "Shift", "Alt", "Win" joined with "+".
+hotkey = "Ctrl+Shift+K"
+
+# After Kairo finishes speaking, keep the voice session alive this many
+# seconds for a natural follow-up without re-triggering the wake word.
+# Set to 0 to require wake word on every interaction.
+conversation_followup_seconds = 5
 
 # Phase 4: MCP server configuration (filesystem allowlist extension)
 # Default allowed roots: ~/.kairo-dev/ and every semantic fact matching key

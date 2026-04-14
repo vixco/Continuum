@@ -25,6 +25,7 @@ use crate::senses::types::PerceptionFrame;
 ///
 /// Each frame is stored as a row in the `perception_frames` table.
 /// The schema is created automatically on first connection.
+#[derive(Clone)]
 pub struct RawLog {
     pool: Pool<Sqlite>,
 }
@@ -91,13 +92,17 @@ impl RawLog {
                 context_idle_seconds INTEGER,
                 context_in_call INTEGER,
                 salience REAL,
-                triage_decision TEXT
+                triage_decision TEXT,
+                memory_distilled_at TEXT
             )
             "#,
         )
         .execute(&self.pool)
         .await
         .context("Failed to create perception_frames table")?;
+
+        self.ensure_optional_column("perception_frames", "memory_distilled_at", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_frames_ts ON perception_frames(ts)",
@@ -111,6 +116,38 @@ impl RawLog {
             component = "raw_log",
             "Schema verified"
         );
+
+        Ok(())
+    }
+
+    async fn ensure_optional_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<()> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("Failed to inspect {table} schema"))?;
+
+        let exists = rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column);
+
+        if !exists {
+            sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("Failed to add {column} to {table}"))?;
+            info!(
+                layer = "memory",
+                component = "raw_log",
+                table,
+                column,
+                "Added optional raw-log schema column"
+            );
+        }
 
         Ok(())
     }
@@ -281,6 +318,77 @@ impl RawLog {
         Ok(frames)
     }
 
+    /// Returns undistilled frames worth promoting into episodic memory.
+    ///
+    /// Frames qualify if they have audio, visible errors, or salience above
+    /// `min_salience`. The distiller marks successful frames with
+    /// [`mark_frames_distilled`] so restarts do not duplicate memories.
+    pub async fn query_undistilled_frames(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+        min_salience: f32,
+        limit: usize,
+    ) -> Result<Vec<PerceptionFrame>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, ts, screen_description, screen_foreground_app,
+                   screen_has_error, screen_confidence, screen_screenshot_path,
+                   audio_transcript, audio_language, audio_duration_ms, audio_confidence,
+                   context_window_title, context_process_name,
+                   context_idle_seconds, context_in_call,
+                   salience
+            FROM perception_frames
+            WHERE ts >= ?1
+              AND ts <= ?2
+              AND memory_distilled_at IS NULL
+              AND (
+                (audio_transcript IS NOT NULL AND length(trim(audio_transcript)) > 0)
+                OR screen_has_error = 1
+                OR salience >= ?3
+              )
+            ORDER BY ts ASC
+            LIMIT ?4
+            "#,
+        )
+        .bind(since.to_rfc3339())
+        .bind(until.to_rfc3339())
+        .bind(min_salience as f64)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query undistilled perception frames")?;
+
+        let mut frames = Vec::with_capacity(rows.len());
+        for row in rows {
+            frames.push(row_to_frame(&row));
+        }
+        Ok(frames)
+    }
+
+    /// Marks frames as distilled into episodic memory.
+    pub async fn mark_frames_distilled(&self, frame_ids: &[uuid::Uuid]) -> Result<u64> {
+        if frame_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut affected = 0;
+        for id in frame_ids {
+            let result = sqlx::query(
+                "UPDATE perception_frames SET memory_distilled_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("Failed to mark frame distilled")?;
+            affected += result.rows_affected();
+        }
+
+        Ok(affected)
+    }
+
     /// Returns the total number of frames in the raw log.
     pub async fn frame_count(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) as cnt FROM perception_frames")
@@ -357,6 +465,70 @@ impl RawLog {
             component = "raw_log",
             "Raw log database closed"
         );
+    }
+}
+
+fn row_to_frame(row: &sqlx::sqlite::SqliteRow) -> PerceptionFrame {
+    let ts_str: String = row.get("ts");
+    let ts = DateTime::parse_from_rfc3339(&ts_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+
+    let id_str: String = row.get("id");
+    let id = uuid::Uuid::parse_str(&id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
+
+    let audio = {
+        let transcript: Option<String> = row.get("audio_transcript");
+        transcript.map(|t| crate::senses::types::AudioObservation {
+            transcript: t,
+            language: row
+                .get::<Option<String>, _>("audio_language")
+                .unwrap_or_default(),
+            duration_ms: row
+                .get::<Option<i64>, _>("audio_duration_ms")
+                .unwrap_or(0) as u64,
+            confidence: row
+                .get::<Option<f64>, _>("audio_confidence")
+                .unwrap_or(0.0) as f32,
+            ts,
+        })
+    };
+
+    PerceptionFrame {
+        id,
+        ts,
+        screen: crate::senses::types::ScreenObservation {
+            description: row
+                .get::<Option<String>, _>("screen_description")
+                .unwrap_or_default(),
+            foreground_app: row
+                .get::<Option<String>, _>("screen_foreground_app")
+                .unwrap_or_default(),
+            has_error_visible: row
+                .get::<Option<i32>, _>("screen_has_error")
+                .unwrap_or(0)
+                != 0,
+            confidence: row
+                .get::<Option<f64>, _>("screen_confidence")
+                .unwrap_or(0.0) as f32,
+            screenshot_path: row.get("screen_screenshot_path"),
+            ts,
+        },
+        context: crate::senses::types::ContextObservation {
+            foreground_window_title: row
+                .get::<Option<String>, _>("context_window_title")
+                .unwrap_or_default(),
+            foreground_process_name: row
+                .get::<Option<String>, _>("context_process_name")
+                .unwrap_or_default(),
+            idle_seconds: row
+                .get::<Option<i64>, _>("context_idle_seconds")
+                .unwrap_or(0) as u64,
+            in_call: row.get::<Option<i32>, _>("context_in_call").unwrap_or(0) != 0,
+            ts,
+        },
+        audio,
+        salience_hint: row.get::<Option<f64>, _>("salience").unwrap_or(0.0) as f32,
     }
 }
 
