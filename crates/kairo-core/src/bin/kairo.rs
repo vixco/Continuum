@@ -15,7 +15,7 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -23,9 +23,8 @@ use tracing_subscriber::EnvFilter;
 
 use kairo_vision::VisionModel;
 
-use std::path::Path;
-
 use kairo_core::config::{kairo_dev_dir, load_config, KairoConfig};
+use kairo_core::memory::distill::run_memory_distiller;
 use kairo_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use kairo_core::memory::raw_log::RawLog;
 use kairo_core::memory::retrieval::retrieve_context;
@@ -42,6 +41,11 @@ use kairo_core::senses::vision::VisionWatcher;
 use kairo_core::triage::handlers::handle_decision;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 use kairo_core::triage::TriageDecision;
+use kairo_core::voice::playback::PlaybackStream;
+use kairo_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
+use kairo_core::voice::streaming::SpeechController;
+use kairo_core::voice::tts::{set_espeak_data_dir, PiperEngine, TtsEngine};
+use kairo_core::voice::wake::TranscriptWakeDetector;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,18 +53,25 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let force_wake = args.iter().any(|a| a == "--force-wake");
     let reset_audio = args.iter().any(|a| a == "--reset-audio");
+    let no_tts = args.iter().any(|a| a == "--no-tts");
 
-    // --- Config (before tracing init so the picker prompt is the first thing
-    // the user sees on a fresh install). ---
+    // --- Config ---
     let dev_dir = kairo_dev_dir();
     std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.kairo-dev/")?;
     let config_path = dev_dir.join("config.toml");
     let mut config = load_config(&config_path).context("Failed to load configuration")?;
 
-    // Interactive audio device picker — runs on first install, when the user
-    // passes `--reset-audio`, or when the saved device no longer matches.
-    if config.audio.enabled {
-        ensure_audio_device(&mut config, &config_path, reset_audio)?;
+    // Audio device: always use the Windows default input device.
+    // `--reset-audio` just clears any stale picker fields from config.toml so
+    // they don't linger — the selection itself always comes from Windows.
+    if reset_audio {
+        if let Err(e) = kairo_core::senses::audio::clear_audio_config(&config_path) {
+            eprintln!("--reset-audio: failed to clear saved device: {e}");
+        } else {
+            println!("--reset-audio: cleared saved picker fields. Using Windows default.");
+        }
+        config.audio.device_name.clear();
+        config.audio.device_index = None;
     }
 
     std::fs::create_dir_all(&config.storage.screenshots_dir)
@@ -101,6 +112,18 @@ async fn main() -> Result<()> {
             .context("Failed to open episodic memory")?,
     ));
 
+    // --- TTS ---
+    let speech: Option<Arc<SpeechController>> = if no_tts {
+        tracing::info!(
+            layer = "voice",
+            component = "kairo",
+            "--no-tts: speech output disabled"
+        );
+        None
+    } else {
+        init_tts(&config)
+    };
+
     // --- Orchestrator config ---
     let prompt_path = find_system_prompt(&dev_dir);
     let orch_config = OrchestratorConfig {
@@ -135,6 +158,21 @@ async fn main() -> Result<()> {
             "Ctrl+C received, shutting down..."
         );
         let _ = ctrl_c_shutdown.send(true);
+    });
+
+    // Phase 3: background raw-log to episodic-memory distillation.
+    let distiller_shutdown = shutdown_rx.clone();
+    let distiller_raw_log = raw_log.clone();
+    let distiller_episodic = episodic.clone();
+    let distiller_config = config.memory.clone();
+    tokio::spawn(async move {
+        run_memory_distiller(
+            distiller_raw_log,
+            distiller_episodic,
+            distiller_config,
+            distiller_shutdown,
+        )
+        .await;
     });
 
     // --- Perception channels ---
@@ -253,6 +291,8 @@ async fn main() -> Result<()> {
     let mut frame_count: u64 = 0;
     let mut recent_frames: Vec<PerceptionFrame> = Vec::new();
     let mut main_shutdown = shutdown_rx.clone();
+    let wake_detector = TranscriptWakeDetector::new(config.voice.wake_keyword.clone());
+    let mut voice_session: Option<VoiceSession> = None;
 
     loop {
         tokio::select! {
@@ -311,6 +351,14 @@ async fn main() -> Result<()> {
                     recent_frames.remove(0);
                 }
 
+                let voice_decision = update_voice_session(
+                    &frame,
+                    &config,
+                    &wake_detector,
+                    &mut voice_session,
+                    speech.as_ref(),
+                );
+
                 // --force-wake: override triage on the first frame to test the pipeline.
                 let effective_decision = if force_wake && frame_count == 1 {
                     println!("[--force-wake: forcing wake on frame 1]");
@@ -318,7 +366,7 @@ async fn main() -> Result<()> {
                         reason: "Force wake for testing — user wants to verify the orchestrator pipeline works end-to-end".to_string(),
                     })
                 } else {
-                    decision.clone()
+                    voice_decision.or_else(|| decision.clone())
                 };
 
                 // Handle decision.
@@ -326,6 +374,16 @@ async fn main() -> Result<()> {
                     match decision {
                         TriageDecision::WakeOrchestrator { reason } => {
                             let history = recent_frames[..recent_frames.len().saturating_sub(1)].to_vec();
+                            let wake_speech = if config.voice.ambient_mute_enabled && frame.context.in_call {
+                                tracing::info!(
+                                    layer = "voice",
+                                    component = "kairo",
+                                    "Quiet mode active during call; orchestrator response will not be spoken"
+                                );
+                                None
+                            } else {
+                                speech.as_ref()
+                            };
                             if let Err(e) = do_wake(
                                 &frame,
                                 &history,
@@ -333,6 +391,7 @@ async fn main() -> Result<()> {
                                 &orch_config,
                                 &semantic,
                                 &episodic,
+                                wake_speech,
                             ).await {
                                 tracing::error!(
                                     layer = "orchestrator",
@@ -341,6 +400,24 @@ async fn main() -> Result<()> {
                                     "Orchestrator wake failed"
                                 );
                                 println!("[ORCHESTRATOR ERROR: {e}]");
+                            }
+                        }
+                        TriageDecision::Whisper { text } => {
+                            // Phase 5.1: triage-driven local speech, no orchestrator wake.
+                            tracing::info!(
+                                layer = "triage",
+                                component = "kairo",
+                                decision = "whisper",
+                                text = %text,
+                                "Whispering via TTS"
+                            );
+                            if config.voice.ambient_mute_enabled && frame.context.in_call {
+                                println!("[quiet mode: would say via TTS: {text}]");
+                            } else if let Some(ref sc) = speech {
+                                let language = frame.audio.as_ref().map(|a| a.language.as_str());
+                                sc.say_with_language(text, language);
+                            } else {
+                                println!("[would say via TTS: {text}]");
                             }
                         }
                         _ => {
@@ -391,6 +468,7 @@ async fn do_wake(
     config: &OrchestratorConfig,
     semantic: &Arc<SemanticStore>,
     episodic: &Arc<Mutex<EpisodicStore>>,
+    speech: Option<&Arc<SpeechController>>,
 ) -> Result<()> {
     let wake_start = Instant::now();
 
@@ -417,11 +495,15 @@ async fn do_wake(
     std::io::stdout().flush().ok();
 
     let mut full_response = String::new();
+    let mut final_info: Option<(Option<u64>, Option<f64>)> = None;
     let result = wake_orchestrator(config, &user_message, |event| match &event {
         OrchestratorEvent::TextDelta(text) => {
             print!("{text}");
             std::io::stdout().flush().ok();
             full_response.push_str(text);
+            if let Some(sc) = speech {
+                sc.push_delta(text);
+            }
         }
         OrchestratorEvent::ResponseComplete {
             full_text,
@@ -434,11 +516,18 @@ async fn do_wake(
                 print!("{full_text}");
                 std::io::stdout().flush().ok();
                 full_response.push_str(full_text);
+                if let Some(sc) = speech {
+                    // No deltas arrived (some CLI configurations) — speak
+                    // the aggregated text instead.
+                    sc.say(full_text);
+                }
+            } else if let Some(sc) = speech {
+                // Flush any trailing text that didn't terminate with a
+                // sentence boundary so the last words get spoken.
+                sc.flush();
             }
             println!();
-            let cost_str = cost_usd.map(|c| format!(" ${c:.4}")).unwrap_or_default();
-            let dur_str = duration_ms.map(|d| format!(" {d}ms")).unwrap_or_default();
-            println!("--- [{dur_str}{cost_str}] ---\n");
+            final_info = Some((*duration_ms, *cost_usd));
         }
         OrchestratorEvent::Error(msg) => {
             println!("\n[ERROR: {msg}]");
@@ -453,6 +542,23 @@ async fn do_wake(
         }
     })
     .await?;
+
+    // Block until the synthesised audio has finished playing so the
+    // cost/duration summary prints *after* Kairo stops talking. Uses a
+    // blocking wait off the async runtime because the playback thread
+    // is not tokio-aware.
+    if let Some(sc) = speech {
+        let sc = sc.clone();
+        tokio::task::spawn_blocking(move || sc.wait_idle())
+            .await
+            .ok();
+    }
+
+    if let Some((duration_ms, cost_usd)) = final_info {
+        let cost_str = cost_usd.map(|c| format!(" ${c:.4}")).unwrap_or_default();
+        let dur_str = duration_ms.map(|d| format!(" {d}ms")).unwrap_or_default();
+        println!("--- [{dur_str}{cost_str}] ---\n");
+    }
 
     // 4. Store in episodic memory.
     if result.success && !full_response.is_empty() {
@@ -507,6 +613,198 @@ async fn do_wake(
     Ok(())
 }
 
+/// Updates the post-wake voice session and returns an explicit wake decision
+/// once the spoken command is complete.
+fn update_voice_session(
+    frame: &PerceptionFrame,
+    config: &KairoConfig,
+    wake_detector: &TranscriptWakeDetector,
+    voice_session: &mut Option<VoiceSession>,
+    speech: Option<&Arc<SpeechController>>,
+) -> Option<TriageDecision> {
+    if !config.voice.enabled {
+        return None;
+    }
+
+    let Some(audio) = &frame.audio else {
+        return None;
+    };
+
+    let transcript = audio.transcript.trim();
+    if transcript.is_empty() {
+        return None;
+    }
+
+    if config.voice.barge_in_enabled {
+        if let Some(sc) = speech {
+            if sc.is_speaking() {
+                sc.interrupt();
+            }
+        }
+    }
+
+    let mut consumed_by_wake = false;
+    if voice_session.is_none() {
+        if config.voice.wake_word_enabled {
+            if let Some(detection) = wake_detector.detect(transcript) {
+                tracing::info!(
+                    layer = "voice",
+                    component = "wake",
+                    keyword = %detection.keyword,
+                    after_len = detection.utterance_after_wake.len(),
+                    "Wake phrase detected"
+                );
+                *voice_session = Some(VoiceSession::new(
+                    &detection.utterance_after_wake,
+                    &audio.language,
+                ));
+                consumed_by_wake = true;
+            }
+        } else {
+            *voice_session = Some(VoiceSession::new(transcript, &audio.language));
+            consumed_by_wake = true;
+        }
+    }
+
+    if let Some(session) = voice_session.as_mut() {
+        if !consumed_by_wake {
+            session.push_transcript(transcript, &audio.language);
+        }
+
+        let endpoint_detector = SemanticEndpointDetector::new(
+            Duration::from_millis(config.voice.endpoint_silence_ms),
+            Duration::from_millis(config.voice.listen_timeout_ms),
+            config.voice.min_utterance_chars,
+        );
+
+        if matches!(
+            endpoint_detector.decide(session),
+            EndpointDecision::Complete | EndpointDecision::TimedOut
+        ) {
+            let text = session.text().trim().to_string();
+            let language = session.language().to_string();
+            *voice_session = None;
+
+            if text.is_empty() {
+                return None;
+            }
+
+            tracing::info!(
+                layer = "voice",
+                component = "stt",
+                text_len = text.len(),
+                "Voice command endpoint detected"
+            );
+            return Some(TriageDecision::WakeOrchestrator {
+                reason: format!("Voice command ({language}): {text}"),
+            });
+        }
+    }
+
+    None
+}
+
+/// Initialize the TTS pipeline. Returns `None` if TTS is disabled in config
+/// or if any required model file is missing — Kairo degrades to log-only
+/// mode for whisper decisions and orchestrator responses.
+fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
+    let cfg = &config.tts;
+    if !cfg.enabled {
+        tracing::info!(
+            layer = "voice",
+            component = "kairo",
+            "TTS disabled in config"
+        );
+        return None;
+    }
+
+    let espeak_dir = expand_home(&cfg.espeak_data_dir);
+    set_espeak_data_dir(&espeak_dir);
+
+    let voice_cfg = match cfg.voices.get(&cfg.primary) {
+        Some(v) => v,
+        None => {
+            tracing::warn!(
+                layer = "voice",
+                component = "kairo",
+                primary = %cfg.primary,
+                "Primary voice key missing from [tts.voices]; TTS disabled"
+            );
+            return None;
+        }
+    };
+
+    let model_path = expand_home(&voice_cfg.model_path);
+    let config_path = expand_home(&voice_cfg.config_path);
+
+    if !model_path.exists() || !config_path.exists() {
+        tracing::warn!(
+            layer = "voice",
+            component = "kairo",
+            model = %model_path.display(),
+            config = %config_path.display(),
+            "Piper voice files missing — run scripts/download-models.ps1. TTS disabled."
+        );
+        return None;
+    }
+
+    let engine_result = PiperEngine::new(
+        &model_path,
+        &config_path,
+        cfg.length_scale,
+        voice_cfg.speaker_id,
+    );
+    let engine: Arc<dyn TtsEngine> = match engine_result {
+        Ok(e) => Arc::new(e),
+        Err(e) => {
+            tracing::error!(
+                layer = "voice",
+                component = "kairo",
+                error = %e,
+                "Piper engine init failed; TTS disabled"
+            );
+            return None;
+        }
+    };
+
+    let playback = match PlaybackStream::open_default() {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            tracing::error!(
+                layer = "voice",
+                component = "kairo",
+                error = %e,
+                "Audio output device unavailable; TTS disabled"
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(
+        layer = "voice",
+        component = "kairo",
+        voice = %cfg.primary,
+        "TTS ready"
+    );
+    Some(Arc::new(SpeechController::new(engine, playback)))
+}
+
+/// Expand a leading `~/` to the user's home directory. Returns the path
+/// unchanged if no tilde prefix or home lookup fails.
+fn expand_home(raw: &str) -> PathBuf {
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    if raw == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    PathBuf::from(raw)
+}
+
 /// Initialize the vision model with stub fallback.
 async fn init_vision_model(config: &KairoConfig) -> Arc<dyn kairo_vision::VisionModel> {
     let model_path = &config.vision.model_path;
@@ -555,58 +853,6 @@ impl kairo_vision::VisionModel for StubVisionModel {
     async fn warmup(&self) -> Result<()> {
         Ok(())
     }
-}
-
-/// Resolves which audio input device to use. Runs the interactive picker if:
-/// - `--reset-audio` was passed,
-/// - no device is saved in config yet, or
-/// - the device at the saved index no longer has the saved name (hardware
-///   reordered). On a clean match, returns silently so tracing-init output
-///   flows straight into perception startup with no user interaction.
-fn ensure_audio_device(
-    config: &mut KairoConfig,
-    config_path: &Path,
-    reset_audio: bool,
-) -> Result<()> {
-    use kairo_core::senses::audio::{
-        clear_audio_config, pick_interactive, save_audio_config, verify_saved,
-    };
-
-    if reset_audio {
-        clear_audio_config(config_path).context("Failed to clear saved audio device")?;
-        config.audio.device_name.clear();
-        config.audio.device_index = None;
-        println!("--reset-audio: cleared saved audio device.\n");
-    }
-
-    let has_saved =
-        config.audio.device_index.is_some() && !config.audio.device_name.is_empty();
-    if has_saved {
-        let idx = config
-            .audio
-            .device_index
-            .expect("has_saved implies device_index is Some");
-        if verify_saved(idx, &config.audio.device_name) {
-            // Silent reuse — saved device is still at the same cpal index.
-            return Ok(());
-        }
-        eprintln!(
-            "Saved audio device '{}' is no longer at index {} (hardware changed or reordered).",
-            config.audio.device_name, idx
-        );
-        eprintln!("Please pick your microphone again.\n");
-    }
-
-    let pick = pick_interactive()?;
-    save_audio_config(config_path, &pick).context("Failed to save audio device choice")?;
-    config.audio.device_index = Some(pick.index);
-    config.audio.device_name = pick.name.clone();
-    println!(
-        "\nSaved audio device: [{}] {}\n",
-        pick.index + 1,
-        pick.name
-    );
-    Ok(())
 }
 
 /// Finds the system prompt file.
