@@ -4,6 +4,14 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- **Voice output is now English-only by default**: the Dutch Piper voice (`nl_NL-mls-medium`) ships barely-intelligible speech, so the default `TtsConfig` no longer loads it and `voice.language_detection_enabled` defaults to `false`. Whisper input is `whisper_language = "auto"` so the user can still speak any language Kairo understands — Kairo just always responds through the English voice
+- `prompts/orchestrator-system.md`: replaced "match the user's language, default to Dutch" with "always respond in English regardless of the user's spoken language"; explicit override for single turns if the user asks
+- `prompts/triage-system.md`: whisper text MUST be English regardless of input language; the calendar example response translated to English
+- `SOUL.md` Language section: Kairo *understands* any language whisper covers but *responds* in English until better multilingual voices exist; not a values statement, just a current TTS-quality constraint
+- `config/default-models.toml`: Dutch voice entry commented out with a one-block opt-in path; `audio.whisper_language = "auto"`; `voice.language_detection_enabled = false`; explanatory block at top of `[tts]` documenting the strategy and how to re-enable multilingual output later
+- `examples/voice_test.rs`: only synthesises phrases whose language is in the configured voice bank; skips others with a clear "no voice configured" message instead of routing Dutch text through the English voice
+
 ### Added
 - **Phase 5 completion (v0.3.0-phase5)**: full voice-pipeline acceptance — TTS foundation (5A), wake + streaming STT (5B), streaming TTS + interrupt + polish (5C) landed together
 - `crates/kairo-core/examples/voice_test.rs`: Phase 5A acceptance gate — loads the Piper voice bank, synthesises Dutch + English, plays through the default cpal output, prints per-language timing
