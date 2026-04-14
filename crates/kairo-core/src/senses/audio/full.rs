@@ -532,9 +532,16 @@ impl AudioWatcher {
         );
         let mut vad_state = VadState::new();
 
-        // Buffer for accumulating raw samples from the audio callback before
-        // they are sliced into VAD chunks.
+        // Two separate buffers to prevent sample-format mixing:
+        // - `raw_buffer` holds native-rate / native-channels samples from cpal
+        //   (typically 48 kHz stereo on Windows) until we resample.
+        // - `vad_buffer` holds post-resample 16 kHz mono samples waiting to
+        //   be sliced into fixed-size VAD chunks. The leftover (<512 samples)
+        //   from each resample pass is preserved HERE, not pushed back into
+        //   `raw_buffer` — doing that corrupted subsequent resamples and
+        //   caused ~75 % of the audio to be dropped.
         let mut raw_buffer: Vec<f32> = Vec::new();
+        let mut vad_buffer: Vec<f32> = Vec::new();
 
         // --- DIAGNOSTIC: periodic RMS / stats tracking ---
         let mut diag_stats_last_log = Instant::now();
@@ -634,11 +641,12 @@ impl AudioWatcher {
                 continue;
             }
 
-            // Resample if needed (converts to 16 kHz mono).
-            let samples_16khz = if needs_resample {
+            // Resample if needed (converts to 16 kHz mono) and append the
+            // output to the post-resample VAD buffer.
+            if needs_resample {
                 let to_resample = std::mem::take(&mut raw_buffer);
                 match resample_to_16khz(&to_resample, native_rate, native_channels) {
-                    Ok(resampled) => resampled,
+                    Ok(resampled) => vad_buffer.extend(resampled),
                     Err(err) => {
                         tracing::warn!(
                             layer = "senses",
@@ -650,13 +658,14 @@ impl AudioWatcher {
                     }
                 }
             } else {
-                std::mem::take(&mut raw_buffer)
-            };
+                vad_buffer.append(&mut raw_buffer);
+            }
 
-            // Feed samples through the VAD in chunks.
+            // Feed samples through the VAD in chunks. Processed chunks are
+            // drained from `vad_buffer`; the tail remains for the next pass.
             let mut offset = 0;
-            while offset + VAD_CHUNK_SAMPLES <= samples_16khz.len() {
-                let chunk = &samples_16khz[offset..offset + VAD_CHUNK_SAMPLES];
+            while offset + VAD_CHUNK_SAMPLES <= vad_buffer.len() {
+                let chunk = &vad_buffer[offset..offset + VAD_CHUNK_SAMPLES];
                 offset += VAD_CHUNK_SAMPLES;
 
                 // --- DIAGNOSTIC: compute chunk energy before feeding VAD ---
@@ -726,9 +735,10 @@ impl AudioWatcher {
                 }
             }
 
-            // Keep any leftover samples that did not fill a complete chunk.
-            if offset < samples_16khz.len() {
-                raw_buffer.extend_from_slice(&samples_16khz[offset..]);
+            // Drop the chunks we just processed. Any tail that didn't fill
+            // a complete VAD chunk stays in `vad_buffer` for the next pass.
+            if offset > 0 {
+                vad_buffer.drain(..offset);
             }
         }
 
