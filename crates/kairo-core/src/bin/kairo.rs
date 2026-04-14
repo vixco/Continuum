@@ -308,7 +308,17 @@ async fn main() -> Result<()> {
     let mut main_shutdown = shutdown_rx.clone();
     let wake_detector = TranscriptWakeDetector::new(config.voice.wake_keyword.clone());
     let mut voice_session: Option<VoiceSession> = None;
-    let mut followup_until: Option<Instant> = None;
+    // `followup_until` is shared between the main loop (reads + clears) and
+    // the spawned do_wake tasks (writes after a wake completes), so it lives
+    // behind a std::sync::Mutex — locks are held for microseconds.
+    let followup_until: Arc<std::sync::Mutex<Option<Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // `orchestrator_busy` gates new wakes. When true, triage keeps running
+    // but the wake_orchestrator / whisper decisions are suppressed so we
+    // don't stack multiple Opus calls on top of each other. Cleared by the
+    // spawned wake task when do_wake completes.
+    let orchestrator_busy: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut hotkey_pending: bool = false;
 
     loop {
@@ -373,7 +383,7 @@ async fn main() -> Result<()> {
                     &config,
                     &wake_detector,
                     &mut voice_session,
-                    &mut followup_until,
+                    &followup_until,
                     &mut hotkey_pending,
                     speech.as_ref(),
                     &feedback,
@@ -393,58 +403,105 @@ async fn main() -> Result<()> {
                 if let Some(ref decision) = effective_decision {
                     match decision {
                         TriageDecision::WakeOrchestrator { reason } => {
-                            let history = recent_frames[..recent_frames.len().saturating_sub(1)].to_vec();
-                            let wake_speech = if config.voice.ambient_mute_enabled && frame.context.in_call {
-                                tracing::info!(
-                                    layer = "voice",
+                            // If we're already inside a wake (orchestrator still
+                            // streaming from a previous trigger), don't stack — log
+                            // and skip. The user's latest utterance still landed in
+                            // the raw log; they can ask again.
+                            if orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
+                                tracing::warn!(
+                                    layer = "orchestrator",
                                     component = "kairo",
-                                    "Quiet mode active during call; orchestrator response will not be spoken"
+                                    reason = %reason,
+                                    "Orchestrator already busy — skipping new wake"
                                 );
-                                None
                             } else {
-                                speech.as_ref()
-                            };
-                            match do_wake(
-                                &frame,
-                                &history,
-                                reason,
-                                &orch_config,
-                                &semantic,
-                                &episodic,
-                                wake_speech,
-                            ).await {
-                                Ok(()) => {
-                                    // Open the conversation follow-up window so the next
-                                    // user utterance can reach the orchestrator without a
-                                    // fresh wake phrase.
-                                    if config.voice.conversation_followup_seconds > 0 {
-                                        followup_until = Some(
-                                            Instant::now()
-                                                + Duration::from_secs(
-                                                    config.voice.conversation_followup_seconds,
-                                                ),
-                                        );
-                                        tracing::debug!(
-                                            layer = "voice",
-                                            component = "kairo",
-                                            seconds = config.voice.conversation_followup_seconds,
-                                            "Follow-up window open"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        layer = "orchestrator",
+                                let history = recent_frames[..recent_frames.len().saturating_sub(1)].to_vec();
+                                let wake_speech_opt = if config.voice.ambient_mute_enabled && frame.context.in_call {
+                                    tracing::info!(
+                                        layer = "voice",
                                         component = "kairo",
-                                        error = %e,
-                                        "Orchestrator wake failed"
+                                        "Quiet mode active during call; orchestrator response will not be spoken"
                                     );
-                                    println!("[ORCHESTRATOR ERROR: {e}]");
-                                    feedback.play(FeedbackCue::Error);
-                                }
+                                    None
+                                } else {
+                                    speech.clone()
+                                };
+
+                                // Spawn the wake as a tokio task so the main loop
+                                // keeps draining frame_rx. If we awaited here,
+                                // triage would queue up 5–15 stale frames while
+                                // Opus streams for 5–10 s, and every subsequent
+                                // response would be that many seconds behind reality.
+                                orchestrator_busy.store(true, std::sync::atomic::Ordering::Release);
+                                let busy_flag = orchestrator_busy.clone();
+                                let followup_shared = followup_until.clone();
+                                let orch_cfg_clone = orch_config.clone();
+                                let semantic_clone = semantic.clone();
+                                let episodic_clone = episodic.clone();
+                                let feedback_clone = feedback.clone();
+                                let frame_clone = frame.clone();
+                                let reason_clone = reason.clone();
+                                let followup_secs = config.voice.conversation_followup_seconds;
+
+                                tokio::spawn(async move {
+                                    let result = do_wake(
+                                        &frame_clone,
+                                        &history,
+                                        &reason_clone,
+                                        &orch_cfg_clone,
+                                        &semantic_clone,
+                                        &episodic_clone,
+                                        wake_speech_opt.as_ref(),
+                                    )
+                                    .await;
+
+                                    match result {
+                                        Ok(()) => {
+                                            if followup_secs > 0 {
+                                                if let Ok(mut slot) = followup_shared.lock() {
+                                                    *slot = Some(
+                                                        Instant::now()
+                                                            + Duration::from_secs(followup_secs),
+                                                    );
+                                                }
+                                                tracing::debug!(
+                                                    layer = "voice",
+                                                    component = "kairo",
+                                                    seconds = followup_secs,
+                                                    "Follow-up window open"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                layer = "orchestrator",
+                                                component = "kairo",
+                                                error = %e,
+                                                "Orchestrator wake failed"
+                                            );
+                                            println!("[ORCHESTRATOR ERROR: {e}]");
+                                            feedback_clone.play(FeedbackCue::Error);
+                                        }
+                                    }
+
+                                    busy_flag.store(false, std::sync::atomic::Ordering::Release);
+                                });
                             }
                         }
                         TriageDecision::Whisper { text } => {
+                            // Don't step on the orchestrator's speech — if a wake
+                            // is already streaming through TTS, a concurrent
+                            // whisper would either queue behind it (adding delay)
+                            // or race with it (interrupt noise). Silently drop.
+                            if orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
+                                tracing::debug!(
+                                    layer = "triage",
+                                    component = "kairo",
+                                    decision = "whisper",
+                                    text = %text,
+                                    "Suppressed whisper — orchestrator already speaking"
+                                );
+                            } else {
                             // Phase 5.1: triage-driven local speech, no orchestrator wake.
                             tracing::info!(
                                 layer = "triage",
@@ -460,6 +517,7 @@ async fn main() -> Result<()> {
                                 sc.say_with_language(text, language);
                             } else {
                                 println!("[would say via TTS: {text}]");
+                            }
                             }
                         }
                         _ => {
@@ -673,7 +731,7 @@ fn update_voice_session(
     config: &KairoConfig,
     wake_detector: &TranscriptWakeDetector,
     voice_session: &mut Option<VoiceSession>,
-    followup_until: &mut Option<Instant>,
+    followup_until: &Arc<std::sync::Mutex<Option<Instant>>>,
     hotkey_pending: &mut bool,
     speech: Option<&Arc<SpeechController>>,
     feedback: &FeedbackPlayer,
@@ -691,20 +749,41 @@ fn update_voice_session(
         return None;
     }
 
-    if config.voice.barge_in_enabled {
-        if let Some(sc) = speech {
-            if sc.is_speaking() {
+    // While Kairo is actively speaking, the mic is likely picking up its
+    // own TTS output. Drop those transcripts — they almost always contain
+    // fragments of what Kairo just said and will trigger spurious wakes
+    // through the follow-up window. Barge-in is separately handled by the
+    // speech controller's interrupt() call below.
+    if let Some(sc) = speech {
+        if sc.is_speaking() {
+            if config.voice.barge_in_enabled {
                 sc.interrupt();
             }
+            tracing::debug!(
+                layer = "voice",
+                component = "stt",
+                transcript = %transcript,
+                "Dropped transcript — Kairo is currently speaking"
+            );
+            return None;
         }
     }
 
     // Expire the follow-up window before we check it.
     let now = Instant::now();
-    let followup_active = followup_until.is_some_and(|deadline| now < deadline);
-    if !followup_active {
-        *followup_until = None;
-    }
+    let followup_active = {
+        let mut slot = match followup_until.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match *slot {
+            Some(deadline) if now < deadline => true,
+            _ => {
+                *slot = None;
+                false
+            }
+        }
+    };
 
     let mut consumed_by_wake = false;
     if voice_session.is_none() {
@@ -725,7 +804,9 @@ fn update_voice_session(
                 "Starting follow-up voice session without wake word"
             );
             *voice_session = Some(VoiceSession::new(transcript, &audio.language));
-            *followup_until = None;
+            if let Ok(mut slot) = followup_until.lock() {
+                *slot = None;
+            }
             feedback.play(FeedbackCue::Listen);
             consumed_by_wake = true;
         } else if config.voice.wake_word_enabled {
