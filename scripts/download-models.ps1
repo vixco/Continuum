@@ -333,27 +333,36 @@ if (-not $NeedsPiper -and -not $NeedsEspeak) {
 Write-Host "`n============================================" -ForegroundColor Cyan
 Write-Host "Model directory: $ModelsBase" -ForegroundColor Gray
 
-# Verify all critical files are present.
+# Verify all critical files are present. Each entry is
+# (label, path, min-size-bytes). Model files use the default 1 MB floor;
+# piper.exe is ~500 KB so we relax its threshold to 100 KB.
 $critical = @(
-    @("Vision encoder", (Join-Path $VisionDir "vision_encoder.onnx")),
-    @("Vision embed_tokens", (Join-Path $VisionDir "embed_tokens.onnx")),
-    @("Vision decoder", (Join-Path $VisionDir "decoder.onnx")),
-    @("Vision tokenizer", (Join-Path $VisionDir "tokenizer.json")),
-    @("Triage model (8B)", (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf")),
-    @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf")),
-    @("Whisper STT", (Join-Path $ModelsBase "stt\whisper-small.bin")),
-    @("Piper EN voice", (Join-Path $TtsDir "en_US-lessac-medium.onnx")),
-    @("Piper NL voice", (Join-Path $TtsDir "nl_NL-mls-medium.onnx")),
-    @("Piper binary", $PiperExe)
+    @("Vision encoder",         (Join-Path $VisionDir "vision_encoder.onnx"),      $MinValidSize),
+    @("Vision embed_tokens",    (Join-Path $VisionDir "embed_tokens.onnx"),        $MinValidSize),
+    @("Vision decoder",         (Join-Path $VisionDir "decoder.onnx"),             $MinValidSize),
+    @("Vision tokenizer",       (Join-Path $VisionDir "tokenizer.json"),           10000),
+    @("Triage model (8B)",      (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf"), $MinValidSize),
+    @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf"), $MinValidSize),
+    @("Whisper STT",            (Join-Path $ModelsBase "stt\whisper-small.bin"),   $MinValidSize),
+    @("Piper EN voice",         (Join-Path $TtsDir "en_US-lessac-medium.onnx"),    $MinValidSize),
+    @("Piper NL voice",         (Join-Path $TtsDir "nl_NL-mls-medium.onnx"),       $MinValidSize),
+    @("Piper binary",           $PiperExe,                                         100000),
+    @("espeak-ng-data",         (Join-Path $EspeakDir "phontab"),                  1)
 )
 
 $allOk = $true
 foreach ($item in $critical) {
-    $label = $item[0]
-    $path = $item[1]
-    if ((Test-Path $path) -and ((Get-Item $path).Length -gt $MinValidSize)) {
-        $sz = [math]::Round((Get-Item $path).Length / 1MB)
-        Write-Host "  [OK] $label ($sz MB)" -ForegroundColor Green
+    $label   = $item[0]
+    $path    = $item[1]
+    $minSize = $item[2]
+    if ((Test-Path $path) -and ((Get-Item $path).Length -ge $minSize)) {
+        $bytes = (Get-Item $path).Length
+        $display = if ($bytes -ge 1MB) {
+            "$([math]::Round($bytes / 1MB)) MB"
+        } else {
+            "$([math]::Round($bytes / 1KB)) KB"
+        }
+        Write-Host "  [OK] $label ($display)" -ForegroundColor Green
     } else {
         Write-Host "  [MISSING] $label" -ForegroundColor Red
         $allOk = $false
