@@ -1097,6 +1097,31 @@ impl AudioWatcher {
         .context("Whisper transcription task panicked")??;
 
         let elapsed = start.elapsed();
+
+        // Drop known whisper hallucinations. On silence, music, or
+        // low-SNR ambient noise, whisper-small/medium reliably emits a
+        // fixed set of phrases ("Thanks for watching!", "you",
+        // "Subtitles by the Amara.org community", etc.) because those
+        // tokens dominate its training set. Emitting them poisons the
+        // triage/follow-up flow.
+        let observation = if looks_like_hallucination(&observation.transcript) {
+            tracing::debug!(
+                layer = "senses",
+                component = "audio",
+                transcript = %observation.transcript,
+                "Dropped whisper hallucination"
+            );
+            AudioObservation {
+                transcript: String::new(),
+                language: observation.language,
+                duration_ms: observation.duration_ms,
+                confidence: 0.0,
+                ts: observation.ts,
+            }
+        } else {
+            observation
+        };
+
         tracing::info!(
             layer = "senses",
             component = "audio",
@@ -1131,6 +1156,70 @@ impl AudioWatcher {
     }
 }
 
+/// Returns `true` if the transcript matches a known whisper hallucination.
+///
+/// Whisper models (especially whisper-small/medium) reliably emit a fixed
+/// set of training-set phrases when fed silence, music, or low-SNR
+/// ambient audio. These phrases are NOT what the user said — they're the
+/// model's best guess when it has no real speech signal. Emitting them
+/// to the triage layer poisons the follow-up voice session and causes
+/// spurious orchestrator wakes.
+///
+/// This list captures the ones observed in production logs. Extend as
+/// new ones show up. The check is intentionally narrow — we only drop
+/// exact matches (case-insensitive, whitespace-trimmed) or tiny tokens
+/// like bare "you"/"I" that can't carry meaningful commands.
+pub(crate) fn looks_like_hallucination(transcript: &str) -> bool {
+    let t = transcript.trim().to_lowercase();
+    if t.is_empty() {
+        return false; // empty isn't a hallucination; it's just silence
+    }
+
+    // Whisper's most common training-set parrot phrases.
+    const EXACT_HALLUCINATIONS: &[&str] = &[
+        "thanks for watching!",
+        "thanks for watching.",
+        "thanks for watching",
+        "thank you for watching.",
+        "thank you for watching",
+        "thank you for watching!",
+        "thank you.",
+        "thank you!",
+        "thank you",
+        "bye!",
+        "bye.",
+        "bye",
+        "please subscribe.",
+        "please subscribe",
+        "subscribe to my channel",
+        "don't forget to subscribe",
+        "subtitles by the amara.org community",
+        "[music]",
+        "♪ ♪",
+        "♪♪",
+    ];
+    if EXACT_HALLUCINATIONS.iter().any(|h| t == *h) {
+        return true;
+    }
+
+    // Extremely short single-word transcripts are usually whisper
+    // guessing on silence. No real voice command is shorter than this.
+    const TRIVIAL_WORDS: &[&str] = &["you", "i", "a", "the", "um", "uh", ".", "-", "!", "?"];
+    if TRIVIAL_WORDS.iter().any(|w| t == *w) {
+        return true;
+    }
+
+    // "Follow.", "Go.", single-verb dropouts — whisper stopping short.
+    // We accept any utterance ≥ 4 characters OR ≥ 2 words; anything
+    // shorter is too likely to be a mistranscription to act on.
+    let words = t.split_whitespace().count();
+    if t.chars().count() < 4 && words < 2 {
+        return true;
+    }
+
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1138,6 +1227,61 @@ impl AudioWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hallucination_filter_drops_known_parrot_phrases() {
+        for phrase in &[
+            "Thanks for watching!",
+            "thanks for watching",
+            "Thank you.",
+            "you",
+            "I",
+            "Bye!",
+            "Please subscribe.",
+            "♪ ♪",
+            "[Music]",
+            "Subtitles by the Amara.org community",
+        ] {
+            assert!(
+                looks_like_hallucination(phrase),
+                "should drop: {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hallucination_filter_keeps_real_commands() {
+        for phrase in &[
+            "hey kairo what time is it",
+            "open the build log",
+            "what's on my screen",
+            "tell me a joke",
+            "wat staat er op mijn planning",
+            "Hey Cairo, hello.",
+        ] {
+            assert!(
+                !looks_like_hallucination(phrase),
+                "should keep: {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hallucination_filter_keeps_empty() {
+        // Empty isn't a hallucination — it's just "no speech found".
+        // The calling code handles empty differently (no emit) so we
+        // don't want the filter tagging it as suspicious.
+        assert!(!looks_like_hallucination(""));
+        assert!(!looks_like_hallucination("   "));
+    }
+
+    #[test]
+    fn hallucination_filter_drops_tiny_fragments() {
+        // 1-3 char single-word transcripts are noise.
+        assert!(looks_like_hallucination("Hi."));
+        assert!(looks_like_hallucination("Go"));
+        assert!(looks_like_hallucination("."));
+    }
 
     // -- AdaptiveVad tests --
     // `multiplier = 1.0` keeps behaviour close to a fixed-threshold VAD:
