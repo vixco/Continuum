@@ -140,8 +140,7 @@ impl HealthRegistry {
     }
 
     pub async fn run_all(&self) -> Vec<ComponentHealth> {
-        let items: Vec<Arc<RegisteredCheck>> =
-            self.checks.lock().values().cloned().collect();
+        let items: Vec<Arc<RegisteredCheck>> = self.checks.lock().values().cloned().collect();
         let mut out = Vec::with_capacity(items.len());
         for reg in items {
             let start = Instant::now();
@@ -215,9 +214,8 @@ fn derive_status(latest: &HealthResult, stats: &CheckStats) -> ComponentStatus {
     latest.status
 }
 
-pub type ProbeFn = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = HealthResult> + Send>> + Send + Sync + 'static,
->;
+pub type ProbeFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HealthResult> + Send>> + Send + Sync + 'static>;
 
 struct FnCheck {
     name: String,

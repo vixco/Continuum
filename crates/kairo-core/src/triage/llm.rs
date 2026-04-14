@@ -104,11 +104,7 @@ impl TriageLayer {
     /// Uses GBNF grammar-constrained generation as primary method.
     /// Falls back to prompt-only generation with retries on grammar failure.
     /// Returns `TriageDecision::Ignore` as safe default on total failure.
-    pub async fn evaluate(
-        &self,
-        frame: &PerceptionFrame,
-        memory_summary: &str,
-    ) -> TriageDecision {
+    pub async fn evaluate(&self, frame: &PerceptionFrame, memory_summary: &str) -> TriageDecision {
         let start = Instant::now();
         let prompt = build_triage_prompt(frame, memory_summary);
 

@@ -174,9 +174,7 @@ mod tests {
         // If both variants appear, we want the first-occurring one so
         // `utterance_after_wake` is the longest possible tail.
         let detector = TranscriptWakeDetector::new("hey kairo");
-        let got = detector
-            .detect("hey cairo, hey kairo, check this")
-            .unwrap();
+        let got = detector.detect("hey cairo, hey kairo, check this").unwrap();
         // "hey cairo" appears first; after = "hey kairo check this"
         assert!(got.utterance_after_wake.contains("check this"));
     }

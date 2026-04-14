@@ -13,7 +13,10 @@ import type {
   KairoState,
   LogEntry,
   RepairEvent,
+  SaveSkillInput,
   SemanticFact,
+  Skill,
+  WorkerSnapshot,
 } from "./types";
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -119,6 +122,20 @@ export const kairo = {
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   quit: () => invoke<void>("quit_app"),
+  listSkills: () => invoke<Skill[]>("list_skills", undefined, []),
+  saveSkill: (input: SaveSkillInput) =>
+    invoke<Skill>("save_skill", { input }),
+  deleteSkill: (name: string) => invoke<void>("delete_skill", { name }),
+  toggleSkill: (name: string, enabled: boolean) =>
+    invoke<KairoConfig>("toggle_skill", { name, enabled }),
+  installSkillFromUrl: (url: string) =>
+    invoke<Skill>("install_skill_from_url", { url }),
+  listWorkers: (limit?: number) =>
+    invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
+  getWorker: (id: string) =>
+    invoke<WorkerSnapshot | null>("get_worker", { id }, null),
+  cancelWorker: (id: string) => invoke<void>("cancel_worker", { id }),
+  dismissWorker: (id: string) => invoke<void>("dismiss_worker", { id }),
 };
 
 export async function subscribeState(handler: (s: KairoState) => void) {
@@ -273,5 +290,23 @@ export const DEFAULT_CONFIG: KairoConfig = {
       stability: 0.5,
       similarity_boost: 0.75,
     },
+  },
+  workers: {
+    mode: "auto",
+    budget_model: "claude-sonnet-4-6",
+    power_model: "claude-opus-4-6",
+    max_concurrent: 3,
+    default_timeout_secs: 1800,
+    default_allowed_tools: "",
+    status_refresh_ms: 500,
+    failure_streak_limit: 3,
+    failure_window_secs: 600,
+  },
+  skills: {
+    enabled: true,
+    dir: "skills",
+    hot_reload: true,
+    token_budget: 2000,
+    disabled: [],
   },
 };

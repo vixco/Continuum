@@ -124,8 +124,7 @@ pub fn reinstall(data_dir: &Path, target: RepairTarget) -> anyhow::Result<Intent
 /// Rollback immediately — pure disk I/O.
 pub fn rollback(data_dir: &Path, date: &str) -> anyhow::Result<RollbackResponse> {
     let backups_dir = backups_dir_for(data_dir);
-    let restored =
-        kairo_core::health::repair::rollback_config(data_dir, &backups_dir, date)?;
+    let restored = kairo_core::health::repair::rollback_config(data_dir, &backups_dir, date)?;
     Ok(RollbackResponse {
         restored_path: restored.display().to_string(),
     })
@@ -139,9 +138,7 @@ pub fn test(data_dir: &Path, target: RepairTarget) -> TestResponse {
     let (status, note) = match target {
         RepairTarget::Vision => file_status(data_dir.join("models/vision")),
         RepairTarget::Triage => file_status(data_dir.join("models/triage")),
-        RepairTarget::Stt | RepairTarget::Audio => {
-            file_status(data_dir.join("models/stt"))
-        }
+        RepairTarget::Stt | RepairTarget::Audio => file_status(data_dir.join("models/stt")),
         RepairTarget::Tts => file_status(data_dir.join("models/tts")),
         RepairTarget::Orchestrator => (
             if which_claude().is_some() {
@@ -192,10 +189,7 @@ fn file_status(path: PathBuf) -> (String, Option<String>) {
     if path.exists() {
         ("healthy".into(), Some(path.display().to_string()))
     } else {
-        (
-            "error".into(),
-            Some(format!("missing: {}", path.display())),
-        )
+        ("error".into(), Some(format!("missing: {}", path.display())))
     }
 }
 
@@ -259,7 +253,12 @@ mod tests {
     fn rollback_restores_from_backup() {
         let tmp = TempDir::new().unwrap();
         let dev = tmp.path().join("dev");
-        let backups = tmp.path().join("dev").parent().unwrap().join(".kairo-backups");
+        let backups = tmp
+            .path()
+            .join("dev")
+            .parent()
+            .unwrap()
+            .join(".kairo-backups");
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::write(dev.join("config.toml"), "original").unwrap();
         kairo_core::health::backup::run_backup(&dev, &backups).unwrap();

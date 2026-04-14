@@ -26,7 +26,7 @@ pub fn handle_decision(decision: &TriageDecision) -> Result<()> {
         TriageDecision::Remember { summary } => handle_remember(summary),
         TriageDecision::Whisper { text } => handle_whisper(text),
         TriageDecision::ExecuteSimple { action } => handle_execute_simple(action),
-        TriageDecision::WakeOrchestrator { reason } => handle_wake_orchestrator(reason),
+        TriageDecision::WakeOrchestrator { reason, .. } => handle_wake_orchestrator(reason),
     }
 }
 
@@ -202,13 +202,17 @@ mod tests {
         };
         let result = handle_decision(&d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not in the allowlist"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not in the allowlist"));
     }
 
     #[test]
     fn test_handle_wake_orchestrator() {
         let d = TriageDecision::WakeOrchestrator {
             reason: "user asked a complex question".to_string(),
+            suggested_skill: None,
         };
         assert!(handle_decision(&d).is_ok());
     }

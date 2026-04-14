@@ -53,11 +53,9 @@ pub fn run_backup(dev_dir: &Path, backups_dir: &Path) -> Result<BackupResult> {
         .with_context(|| format!("create {}", target_dir.display()))?;
     let zip_path = target_dir.join(format!("kairo-{date_str}.zip"));
 
-    let file = File::create(&zip_path)
-        .with_context(|| format!("create {}", zip_path.display()))?;
+    let file = File::create(&zip_path).with_context(|| format!("create {}", zip_path.display()))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     let mut included = Vec::new();
     for rel in INCLUDED_FILES {
@@ -67,8 +65,7 @@ pub fn run_backup(dev_dir: &Path, backups_dir: &Path) -> Result<BackupResult> {
         }
         zip.start_file(*rel, options)
             .with_context(|| format!("start file {rel}"))?;
-        let mut input =
-            File::open(&src).with_context(|| format!("open {}", src.display()))?;
+        let mut input = File::open(&src).with_context(|| format!("open {}", src.display()))?;
         let mut buf = Vec::new();
         input.read_to_end(&mut buf).ok();
         zip.write_all(&buf)

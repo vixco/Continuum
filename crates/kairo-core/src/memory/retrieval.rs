@@ -58,10 +58,7 @@ pub async fn retrieve_context(
 
     // Search episodic memory for similar events (top 5).
     let similar_events = episodic.search_similar(&query, 5).await?;
-    let similar_events: Vec<EpisodicEvent> = similar_events
-        .into_iter()
-        .map(|r| r.event)
-        .collect();
+    let similar_events: Vec<EpisodicEvent> = similar_events.into_iter().map(|r| r.event).collect();
 
     // Look up relevant semantic facts.
     // Strategy: get user facts + project facts related to current app context.

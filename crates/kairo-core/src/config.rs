@@ -33,6 +33,10 @@ pub struct KairoConfig {
     pub voice: VoiceConfig,
     /// Text-to-speech configuration (Phase 5).
     pub tts: TtsConfig,
+    /// Worker pool configuration (Phase 8).
+    pub workers: WorkersConfig,
+    /// Skills system configuration (Phase 8).
+    pub skills: SkillsConfig,
 }
 
 /// Configuration for the local vision model.
@@ -270,6 +274,90 @@ impl Default for ElevenLabsConfig {
     }
 }
 
+/// Configuration for the worker pool (Phase 8).
+///
+/// Workers are independent Claude Code subprocesses spawned by the orchestrator
+/// to do actual work. The pool enforces concurrency limits, selects models, and
+/// tracks lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkersConfig {
+    /// Global mode. `"auto"` lets the orchestrator's explicit choice win, and
+    /// falls back to a keyword heuristic. `"budget"` forces Sonnet for every
+    /// worker. `"power"` forces Opus.
+    pub mode: String,
+    /// Model id used when mode is `"budget"` or the heuristic picks Sonnet.
+    pub budget_model: String,
+    /// Model id used when mode is `"power"` or the heuristic picks Opus.
+    pub power_model: String,
+    /// Maximum workers running at once. Excess requests queue. Hard cap: 10.
+    pub max_concurrent: usize,
+    /// Default wall-clock timeout per worker (seconds).
+    pub default_timeout_secs: u64,
+    /// Default CSV of tool names the worker may use. `mcp__kairo__*` by default
+    /// plus the standard Claude Code built-ins. Workers never get
+    /// `mcp__kairo__workers__*` — that would allow spawning sub-workers
+    /// directly from a worker, which we route through the orchestrator instead.
+    pub default_allowed_tools: String,
+    /// How often the dashboard and MCP server see worker state updates, in ms.
+    pub status_refresh_ms: u64,
+    /// If a single task pattern fails this many times within `failure_window_secs`,
+    /// the pool refuses to run it again until restart and surfaces an escalation.
+    pub failure_streak_limit: u32,
+    /// Window over which `failure_streak_limit` is counted.
+    pub failure_window_secs: u64,
+}
+
+/// Configuration for the skills system (Phase 8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Whether the skills system is active at all.
+    pub enabled: bool,
+    /// Directory holding `<name>/SKILL.md` files. Relative paths resolve
+    /// relative to the current working directory at load time.
+    pub dir: String,
+    /// Reload SKILL.md files when they change on disk.
+    pub hot_reload: bool,
+    /// Approximate token budget for injected skill content per wake. Matching
+    /// skills are appended until the budget is reached, in match-score order.
+    pub token_budget: usize,
+    /// Skills explicitly disabled by name. Third-party or noisy skills can be
+    /// silenced without deleting the directory.
+    pub disabled: Vec<String>,
+}
+
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+            budget_model: "claude-sonnet-4-6".to_string(),
+            power_model: "claude-opus-4-6".to_string(),
+            max_concurrent: 3,
+            default_timeout_secs: 1800,
+            default_allowed_tools:
+                "Read,Write,Edit,Glob,Grep,Bash,mcp__kairo__memory_*,mcp__kairo__system_*,\
+                 mcp__kairo__fs_*,mcp__kairo__web_fetch"
+                    .to_string(),
+            status_refresh_ms: 500,
+            failure_streak_limit: 3,
+            failure_window_secs: 600,
+        }
+    }
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: "skills".to_string(),
+            hot_reload: true,
+            token_budget: 2000,
+            disabled: Vec::new(),
+        }
+    }
+}
+
 // --- Defaults ---
 
 impl Default for KairoConfig {
@@ -289,6 +377,8 @@ impl Default for KairoConfig {
             memory: MemoryConfig::default(),
             voice: VoiceConfig::default(),
             tts: TtsConfig::default(),
+            workers: WorkersConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -477,8 +567,7 @@ pub fn kairo_dev_dir() -> PathBuf {
 /// Load configuration from a TOML file, falling back to defaults for missing keys.
 pub fn load_config(path: &Path) -> Result<KairoConfig> {
     if path.exists() {
-        let contents =
-            std::fs::read_to_string(path).context("Failed to read config file")?;
+        let contents = std::fs::read_to_string(path).context("Failed to read config file")?;
         let config: KairoConfig =
             toml::from_str(&contents).context("Failed to parse config TOML")?;
         Ok(config)

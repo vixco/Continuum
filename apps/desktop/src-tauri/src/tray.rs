@@ -19,7 +19,9 @@ pub fn init(app: &mut App) -> tauri::Result<()> {
 
     let menu = Menu::with_items(
         app,
-        &[&open, &separator, &pause, &resume, &voice_on, &voice_off, &separator, &quit],
+        &[
+            &open, &separator, &pause, &resume, &voice_on, &voice_off, &separator, &quit,
+        ],
     )?;
 
     let _tray = TrayIconBuilder::with_id("kairo-tray")
@@ -37,10 +39,7 @@ pub fn init(app: &mut App) -> tauri::Result<()> {
                 let _ = app.emit("kairo:control", serde_json::json!({"action": "voice-on"}));
             }
             "voice-off" => {
-                let _ = app.emit(
-                    "kairo:control",
-                    serde_json::json!({"action": "voice-off"}),
-                );
+                let _ = app.emit("kairo:control", serde_json::json!({"action": "voice-off"}));
             }
             "quit" => {
                 app.exit(0);

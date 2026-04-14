@@ -172,7 +172,11 @@ fn summarize_frame(frame: &PerceptionFrame) -> String {
 
 fn frame_importance(frame: &PerceptionFrame) -> f32 {
     let mut score = frame.salience_hint.max(0.4);
-    if frame.audio.as_ref().is_some_and(|a| !a.transcript.trim().is_empty()) {
+    if frame
+        .audio
+        .as_ref()
+        .is_some_and(|a| !a.transcript.trim().is_empty())
+    {
         score += 0.2;
     }
     if frame.screen.has_error_visible {
@@ -183,7 +187,11 @@ fn frame_importance(frame: &PerceptionFrame) -> f32 {
 
 fn frame_tags(frame: &PerceptionFrame) -> Vec<String> {
     let mut tags = vec!["distilled".to_string()];
-    if frame.audio.as_ref().is_some_and(|a| !a.transcript.trim().is_empty()) {
+    if frame
+        .audio
+        .as_ref()
+        .is_some_and(|a| !a.transcript.trim().is_empty())
+    {
         tags.push("audio".to_string());
     }
     if frame.screen.has_error_visible {
@@ -210,9 +218,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::senses::types::{
-        AudioObservation, ContextObservation, ScreenObservation,
-    };
+    use crate::senses::types::{AudioObservation, ContextObservation, ScreenObservation};
 
     fn test_frame(audio: Option<&str>, has_error: bool) -> PerceptionFrame {
         PerceptionFrame {

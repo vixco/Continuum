@@ -1,19 +1,22 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import {
   AlertCircle,
   MessagesSquare,
-  Mic,
   Sparkles,
   Users,
   Wallet,
+  X,
 } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { Card, StatusOrb } from "@/components/ui/primitives";
-import type { VoiceMode, RecentAction } from "@/lib/types";
+import { kairo } from "@/lib/tauri";
+import { Button, Card, StatusOrb } from "@/components/ui/primitives";
+import type { RecentAction, VoiceMode, WorkerSnapshot } from "@/lib/types";
+
+const ACTIVE_STATUSES = new Set(["queued", "starting", "running", "pending"]);
 
 export function HomeTab() {
   const state = useStore((s) => s.state);
@@ -22,6 +25,39 @@ export function HomeTab() {
     : state.orchestrator.active
     ? "thinking"
     : state.voice.mode;
+
+  const [workers, setWorkers] = useState<WorkerSnapshot[]>([]);
+  const [selected, setSelected] = useState<WorkerSnapshot | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const list = await kairo.listWorkers(50);
+        if (!cancelled) {
+          setWorkers(list);
+          if (selected) {
+            const match = list.find((w) => w.id === selected.id) ?? null;
+            setSelected(match);
+          }
+        }
+      } catch {
+        /* dev server or permissions: ignore */
+      }
+    }
+    poll();
+    const t = setInterval(poll, 750);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [selected?.id]);
+
+  const active = workers.filter((w) => ACTIVE_STATUSES.has(w.status));
+  const completed = workers.filter((w) => !ACTIVE_STATUSES.has(w.status)).slice(0, 5);
+  const totalCost = workers
+    .map((w) => w.cost_usd ?? 0)
+    .reduce((a, b) => a + b, 0);
 
   return (
     <div className="mx-auto grid max-w-6xl grid-cols-12 gap-6">
@@ -48,30 +84,41 @@ export function HomeTab() {
         <ScreenshotThumb path={state.perception.last_screenshot_path} />
       </section>
 
-      <Stats />
+      <Stats
+        wakesToday={state.orchestrator.wakes_today}
+        costToday={state.orchestrator.cost_usd_today + totalCost}
+        episodic={state.memory.episodic_count}
+        uptime={state.system.uptime_secs}
+      />
 
       <section className="col-span-12 md:col-span-7">
-        <Card title="Active workers" subtitle={`${state.workers.active.length} running`}>
-          {state.workers.active.length === 0 ? (
+        <Card
+          title="Workers"
+          subtitle={`${active.length} running · ${completed.length} recent`}
+        >
+          {active.length === 0 && completed.length === 0 ? (
             <div className="py-6 text-center text-sm text-ink-dim">
-              No active workers.
+              No workers yet. The orchestrator will spawn them when a task
+              needs more than a few tool calls.
             </div>
           ) : (
             <ul className="space-y-3">
-              {state.workers.active.map((w) => (
-                <li key={w.id}>
-                  <div className="flex items-center justify-between text-sm">
-                    <span>{w.task}</span>
-                    <span className="text-xs text-ink-muted">{w.model}</span>
-                  </div>
-                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-elevated">
-                    <div
-                      className="h-full bg-accent-purple"
-                      style={{ width: `${Math.min(1, w.progress) * 100}%` }}
-                    />
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-dim">{w.status}</div>
-                </li>
+              {active.map((w) => (
+                <WorkerRow
+                  key={w.id}
+                  worker={w}
+                  onSelect={() => setSelected(w)}
+                  onCancel={() => kairo.cancelWorker(w.id)}
+                />
+              ))}
+              {completed.map((w) => (
+                <WorkerRow
+                  key={w.id}
+                  worker={w}
+                  onSelect={() => setSelected(w)}
+                  onCancel={() => kairo.dismissWorker(w.id)}
+                  dismiss
+                />
               ))}
             </ul>
           )}
@@ -103,8 +150,188 @@ export function HomeTab() {
       <section className="col-span-12">
         <RecentTimeline actions={state.recent_actions} />
       </section>
+
+      {selected && (
+        <WorkerDetail worker={selected} onClose={() => setSelected(null)} />
+      )}
     </div>
   );
+}
+
+function WorkerRow({
+  worker,
+  onSelect,
+  onCancel,
+  dismiss,
+}: {
+  worker: WorkerSnapshot;
+  onSelect: () => void;
+  onCancel: () => void;
+  dismiss?: boolean;
+}) {
+  const progressPct = Math.round(Math.min(1, worker.progress) * 100);
+  return (
+    <li>
+      <div
+        className="flex cursor-pointer items-center justify-between gap-2 text-sm"
+        onClick={onSelect}
+      >
+        <span className="flex items-center gap-2">
+          <StatusDot status={worker.status} />
+          <span className="truncate">{worker.task}</span>
+        </span>
+        <span className="flex items-center gap-2 text-xs text-ink-muted">
+          <span>{worker.model.replace("claude-", "")}</span>
+          <span>{worker.elapsed_ms < 1000 ? `${worker.elapsed_ms}ms` : `${Math.floor(worker.elapsed_ms / 1000)}s`}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCancel();
+            }}
+          >
+            {dismiss ? "Dismiss" : "Cancel"}
+          </Button>
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-elevated">
+        <div
+          className="h-full bg-accent-purple"
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+      <div className="mt-1 flex items-center justify-between text-[11px] text-ink-dim">
+        <span className="truncate">{worker.last_line || worker.status}</span>
+        {worker.cost_usd != null && (
+          <span>${worker.cost_usd.toFixed(4)}</span>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function WorkerDetail({
+  worker,
+  onClose,
+}: {
+  worker: WorkerSnapshot;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6">
+      <div className="max-h-[80vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-bg-border bg-bg-surface p-6 shadow-xl">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-xs text-ink-dim">
+              <StatusDot status={worker.status} />
+              <span>{worker.status}</span>
+              <span>·</span>
+              <span>{worker.model}</span>
+              <span>·</span>
+              <span>{worker.priority}</span>
+            </div>
+            <h2 className="mt-2 text-base font-medium text-ink">{worker.task}</h2>
+            <p className="mt-1 text-xs text-ink-dim font-mono">{worker.cwd}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-ink-dim hover:text-ink"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <dl className="mb-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
+          <Stat label="Elapsed" value={`${Math.floor(worker.elapsed_ms / 100) / 10}s`} />
+          <Stat label="Cost" value={worker.cost_usd != null ? `$${worker.cost_usd.toFixed(4)}` : "—"} />
+          <Stat label="Tool calls" value={worker.tool_calls.toString()} />
+          <Stat label="Session" value={worker.session_id?.slice(0, 8) ?? "—"} />
+        </dl>
+
+        {worker.skills.length > 0 && (
+          <div className="mb-4">
+            <div className="text-xs uppercase tracking-wider text-ink-dim">
+              Active skills
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {worker.skills.map((s) => (
+                <span
+                  key={s}
+                  className="rounded bg-bg-elevated px-2 py-0.5 text-xs text-ink"
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mb-2 text-xs uppercase tracking-wider text-ink-dim">
+          Live output
+        </div>
+        <pre className="max-h-96 overflow-y-auto rounded-md border border-bg-border bg-bg-elevated p-3 font-mono text-xs text-ink">
+          {worker.result || worker.last_line || "(no output yet)"}
+        </pre>
+
+        {worker.error && (
+          <div className="mt-3 rounded-md border border-state-error/50 bg-state-error/10 p-3 text-xs text-state-error">
+            <div className="font-medium">Error</div>
+            {worker.error}
+          </div>
+        )}
+
+        <div className="mt-4 flex items-center justify-between text-xs text-ink-dim">
+          <span>Model chose because: {worker.model_reason}</span>
+          {ACTIVE_STATUSES.has(worker.status) ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => kairo.cancelWorker(worker.id)}
+            >
+              Cancel worker
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                kairo.dismissWorker(worker.id);
+                onClose();
+              }}
+            >
+              Dismiss
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-ink-dim">
+        {label}
+      </div>
+      <div className="font-mono text-ink">{value}</div>
+    </div>
+  );
+}
+
+function StatusDot({ status }: { status: string }) {
+  const color =
+    status === "running" || status === "starting"
+      ? "bg-accent-purple"
+      : status === "queued" || status === "pending"
+      ? "bg-accent-blue"
+      : status === "completed"
+      ? "bg-state-healthy"
+      : status === "failed" || status === "timed_out"
+      ? "bg-state-error"
+      : "bg-ink-dim";
+  return <span className={clsx("h-2 w-2 shrink-0 rounded-full", color)} />;
 }
 
 function statusHeadline(mode: VoiceMode, lastReason: string | null): string {
@@ -124,29 +351,22 @@ function statusHeadline(mode: VoiceMode, lastReason: string | null): string {
   }
 }
 
-function Stats() {
-  const state = useStore((s) => s.state);
+function Stats({
+  wakesToday,
+  costToday,
+  episodic,
+  uptime,
+}: {
+  wakesToday: number;
+  costToday: number;
+  episodic: number;
+  uptime: number;
+}) {
   const items = [
-    {
-      label: "Opus wakes",
-      value: state.orchestrator.wakes_today.toLocaleString(),
-      icon: Sparkles,
-    },
-    {
-      label: "Cost today",
-      value: `$${state.orchestrator.cost_usd_today.toFixed(3)}`,
-      icon: Wallet,
-    },
-    {
-      label: "Memories",
-      value: state.memory.episodic_count.toLocaleString(),
-      icon: MessagesSquare,
-    },
-    {
-      label: "Uptime",
-      value: humanDuration(state.system.uptime_secs),
-      icon: Users,
-    },
+    { label: "Opus wakes", value: wakesToday.toLocaleString(), icon: Sparkles },
+    { label: "Cost today", value: `$${costToday.toFixed(3)}`, icon: Wallet },
+    { label: "Memories", value: episodic.toLocaleString(), icon: MessagesSquare },
+    { label: "Uptime", value: humanDuration(uptime), icon: Users },
   ];
   return (
     <section className="col-span-12 grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -174,8 +394,6 @@ function ScreenshotThumb({ path }: { path: string | null }) {
       </div>
     );
   }
-  // Tauri exposes file:// via convertFileSrc; we haven't wired the asset
-  // protocol, so we just show the path in a mini card.
   return (
     <div
       className="flex h-20 w-32 items-center justify-center rounded-md border border-bg-border bg-bg-elevated p-2 text-center text-[10px] text-ink-dim"

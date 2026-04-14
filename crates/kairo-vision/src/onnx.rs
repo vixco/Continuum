@@ -178,11 +178,12 @@ impl OnnxVisionModel {
         );
 
         // Load tokenizer (fast, no need for blocking thread).
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| VisionError::ModelLoadError {
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            VisionError::ModelLoadError {
                 path: tokenizer_path.display().to_string(),
                 reason: format!("{e}"),
-            })?;
+            }
+        })?;
 
         // Load ONNX sessions on a blocking thread.
         let ep = encoder_path.clone();
@@ -334,7 +335,8 @@ impl OnnxVisionModel {
         let mut input_ids: Vec<i64> = Vec::new();
         // <|im_start|>user\n
         input_ids.push(IM_START);
-        let user_hdr = tokenizer.encode("user\n", false)
+        let user_hdr = tokenizer
+            .encode("user\n", false)
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
         input_ids.extend(user_hdr.get_ids().iter().map(|&id| id as i64));
         // <fake_token_around_image> <image>×N <fake_token_around_image>
@@ -401,11 +403,9 @@ impl OnnxVisionModel {
             let attn_a = Array2::from_shape_vec((1, attn_vec.len()), attn_vec.clone())
                 .context("attn array")?;
             let attn_t = Tensor::from_array(attn_a).context("attn")?;
-            let pos_a = Array2::from_shape_vec(
-                (1, seq_len),
-                pos_vec[pos_vec.len() - seq_len..].to_vec(),
-            )
-            .context("pos array")?;
+            let pos_a =
+                Array2::from_shape_vec((1, seq_len), pos_vec[pos_vec.len() - seq_len..].to_vec())
+                    .context("pos array")?;
             let pos_t = Tensor::from_array(pos_a).context("pos")?;
 
             let mut dec_inputs = ort::inputs![
@@ -437,8 +437,7 @@ impl OnnxVisionModel {
             let last = logits.shape()[1] - 1;
 
             // ---- Sampling with repetition penalty, n-gram blocking, temperature, top-p ----
-            let mut token_logits: Vec<f32> =
-                (0..vocab).map(|v| logits[[0, last, v]]).collect();
+            let mut token_logits: Vec<f32> = (0..vocab).map(|v| logits[[0, last, v]]).collect();
 
             // (a) Repetition penalty: penalize tokens already in output.
             for &prev_tok in &generated {
@@ -479,8 +478,7 @@ impl OnnxVisionModel {
                 .iter()
                 .cloned()
                 .fold(f32::NEG_INFINITY, f32::max);
-            let exps: Vec<f32> =
-                token_logits.iter().map(|&l| (l - max_l).exp()).collect();
+            let exps: Vec<f32> = token_logits.iter().map(|&l| (l - max_l).exp()).collect();
             let sum_exp: f32 = exps.iter().sum();
             let probs: Vec<f32> = exps.iter().map(|e| e / sum_exp).collect();
 
@@ -505,8 +503,7 @@ impl OnnxVisionModel {
             // (f) Sample from nucleus using hash-based PRNG (avoids rand dep).
             let norm: f32 = nucleus.iter().map(|(_, p)| p).sum();
             let r = {
-                let seed = step as u64
-                    ^ (generated.len() as u64).wrapping_mul(0x517cc1b727220a95);
+                let seed = step as u64 ^ (generated.len() as u64).wrapping_mul(0x517cc1b727220a95);
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&seed, &mut h);
                 let hash = std::hash::Hasher::finish(&h);
@@ -623,9 +620,16 @@ impl VisionModel for OnnxVisionModel {
 
         // Simple keyword-based error detection.
         let lower = description.to_lowercase();
-        let has_error = ["error", "exception", "crash", "fatal", "traceback", "not responding"]
-            .iter()
-            .any(|kw| lower.contains(kw));
+        let has_error = [
+            "error",
+            "exception",
+            "crash",
+            "fatal",
+            "traceback",
+            "not responding",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw));
 
         Ok(VisionOutput {
             description,
@@ -705,10 +709,7 @@ mod tests {
         let (tensor, _) = OnnxVisionModel::preprocess(&img);
         let r = tensor[[0, 0, 0, 0, 0]];
         // (1.0 - 0.5) / 0.5 = 1.0
-        assert!(
-            (r - 1.0).abs() < 0.01,
-            "expected ~1.0, got {r}"
-        );
+        assert!((r - 1.0).abs() < 0.01, "expected ~1.0, got {r}");
     }
 
     /// Integration test: load real model and describe a screenshot.
@@ -732,8 +733,8 @@ mod tests {
             .expect("should load model");
 
         // Use the test fixture screenshot.
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/vscode-screenshot.jpg");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vscode-screenshot.jpg");
 
         if !fixture.exists() {
             eprintln!("Skipping: test fixture not found at {}", fixture.display());

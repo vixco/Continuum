@@ -115,9 +115,7 @@ fn build_voice_bank(
     }
 
     if loaded.is_empty() {
-        anyhow::bail!(
-            "No Piper voices are installed. Run: powershell scripts/download-models.ps1"
-        );
+        anyhow::bail!("No Piper voices are installed. Run: powershell scripts/download-models.ps1");
     }
 
     // Fall back to the first available language if the configured primary is missing.
@@ -150,9 +148,7 @@ fn main() -> Result<()> {
     let espeak_dir = expand_home(&config.tts.espeak_data_dir);
     println!("[voice_test] espeak-ng-data: {}", espeak_dir.display());
     if !espeak_dir.exists() {
-        eprintln!(
-            "[voice_test] espeak-ng-data directory missing. Run the download script first."
-        );
+        eprintln!("[voice_test] espeak-ng-data directory missing. Run the download script first.");
         std::process::exit(2);
     }
     set_espeak_data_dir(&espeak_dir);
@@ -183,12 +179,8 @@ fn main() -> Result<()> {
     playback.wait_drain();
 
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
-    let configured_langs: std::collections::HashSet<&str> = config
-        .tts
-        .voices
-        .keys()
-        .map(|s| s.as_str())
-        .collect();
+    let configured_langs: std::collections::HashSet<&str> =
+        config.tts.voices.keys().map(|s| s.as_str()).collect();
 
     for phrase in PHRASES {
         if !configured_langs.contains(phrase.language) {

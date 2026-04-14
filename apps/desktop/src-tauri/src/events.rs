@@ -25,10 +25,7 @@ pub fn bridge_state(state: StateHandle, app: AppHandle) {
                 Ok(_) => {
                     // Drain any events that arrived while we slept, then
                     // emit one coalesced snapshot.
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        STATE_DEBOUNCE_MS,
-                    ))
-                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(STATE_DEBOUNCE_MS)).await;
                     while rx.try_recv().is_ok() {}
                     let snap = state.snapshot().await;
                     let _ = app.emit("kairo:state", snap);

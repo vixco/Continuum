@@ -62,10 +62,7 @@ pub fn spawn_ipc_listener(runtime: KairoRuntime, _app: AppHandle) {
     });
 }
 
-async fn tick_once(
-    path: &PathBuf,
-    state: &StateHandle,
-) -> anyhow::Result<()> {
+async fn tick_once(path: &PathBuf, state: &StateHandle) -> anyhow::Result<()> {
     if !path.exists() {
         return Ok(());
     }

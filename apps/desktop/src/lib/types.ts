@@ -189,6 +189,62 @@ export type RepairEvent =
   | { kind: "finished"; ts: string; success: boolean; cost_usd: number | null }
   | { kind: "error"; message: string };
 
+// Phase 8: skills + workers
+
+export interface Skill {
+  name: string;
+  description: string;
+  triggers: string[];
+  source: string | null;
+  manual_only: boolean;
+  enabled: boolean;
+  body: string;
+  path: string;
+}
+
+export interface SaveSkillInput {
+  name: string;
+  description: string;
+  triggers: string[];
+  body: string;
+  source?: string | null;
+  manual_only?: boolean;
+}
+
+export type WorkerStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "pending";
+
+export interface WorkerSnapshot {
+  id: string;
+  task: string;
+  cwd: string;
+  model: string;
+  model_reason: string;
+  status: WorkerStatus;
+  priority: string;
+  requested_by: string | null;
+  skills: string[];
+  tags: string[];
+  started_at: string | null;
+  finished_at: string | null;
+  queued_at: string;
+  elapsed_ms: number;
+  progress: number;
+  last_line: string;
+  tool_calls: number;
+  cost_usd: number | null;
+  session_id: string | null;
+  result: string | null;
+  error: string | null;
+}
+
 export interface KairoConfig {
   vision: {
     name: string;
@@ -262,5 +318,23 @@ export interface KairoConfig {
       stability: number;
       similarity_boost: number;
     };
+  };
+  workers: {
+    mode: string;
+    budget_model: string;
+    power_model: string;
+    max_concurrent: number;
+    default_timeout_secs: number;
+    default_allowed_tools: string;
+    status_refresh_ms: number;
+    failure_streak_limit: number;
+    failure_window_secs: number;
+  };
+  skills: {
+    enabled: boolean;
+    dir: string;
+    hot_reload: boolean;
+    token_budget: number;
+    disabled: string[];
   };
 }

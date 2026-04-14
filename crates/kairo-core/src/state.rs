@@ -304,7 +304,11 @@ impl StateHandle {
                 RecentAction {
                     ts: Utc::now(),
                     kind: RecentActionKind::Triage,
-                    summary: format!("{}: {}", decision.variant_name(), truncate(frame_description, 80)),
+                    summary: format!(
+                        "{}: {}",
+                        decision.variant_name(),
+                        truncate(frame_description, 80)
+                    ),
                     detail: None,
                 },
             );
@@ -455,12 +459,7 @@ impl StateHandle {
             let mut s = self.inner.write().await;
             s.health.components = components;
             s.health.last_check_ts = Some(Utc::now());
-            s.health.error_count_24h = s
-                .health
-                .components
-                .iter()
-                .map(|c| c.error_count_24h)
-                .sum();
+            s.health.error_count_24h = s.health.components.iter().map(|c| c.error_count_24h).sum();
         }
         self.notify(StateEvent::Health);
     }
@@ -478,7 +477,11 @@ impl StateHandle {
                 RecentAction {
                     ts: Utc::now(),
                     kind: RecentActionKind::Repair,
-                    summary: if running { "repair started".into() } else { "repair finished".into() },
+                    summary: if running {
+                        "repair started".into()
+                    } else {
+                        "repair finished".into()
+                    },
                     detail: None,
                 },
             );

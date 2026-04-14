@@ -74,11 +74,7 @@ pub fn capture_primary_monitor() -> Result<image::RgbaImage> {
 /// Uses triangle (bilinear) filtering for a good balance between speed and
 /// quality. Returns a [`DynamicImage`] suitable for saving or passing to
 /// the vision model.
-pub fn downscale_screenshot(
-    screenshot: image::RgbaImage,
-    width: u32,
-    height: u32,
-) -> DynamicImage {
+pub fn downscale_screenshot(screenshot: image::RgbaImage, width: u32, height: u32) -> DynamicImage {
     DynamicImage::ImageRgba8(screenshot).resize_exact(width, height, FilterType::Triangle)
 }
 
@@ -373,8 +369,8 @@ impl VisionWatcher {
                     // The model provides its own error detection and confidence.
                     // We also run keyword-based error detection as a fallback
                     // in case the model missed an obvious error indicator.
-                    let has_error =
-                        output.has_error_visible || description_indicates_error(&output.description);
+                    let has_error = output.has_error_visible
+                        || description_indicates_error(&output.description);
                     (output.description, has_error, output.confidence)
                 }
                 Err(err) => {
@@ -564,7 +560,9 @@ mod tests {
         assert!(!description_indicates_error(
             "A web browser showing a news article"
         ));
-        assert!(!description_indicates_error("Desktop with file explorer open"));
+        assert!(!description_indicates_error(
+            "Desktop with file explorer open"
+        ));
     }
 
     #[tokio::test]
@@ -590,11 +588,8 @@ mod tests {
         // NOTE: This test requires a display to capture. On headless CI it will
         // fail at capture_primary_monitor(). That is expected; the error path
         // logs and skips. We give it a short window and then shut down.
-        let observation = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let observation =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
 
         // Signal shutdown regardless of whether we got an observation.
         let _ = shutdown_tx.send(true);
@@ -629,11 +624,8 @@ mod tests {
 
         // On a machine with a display, the model failure should produce a
         // degraded observation with empty description and 0.0 confidence.
-        let observation = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let observation =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
@@ -668,11 +660,7 @@ mod tests {
         // rather than waiting the full 60-second interval.
         let _ = shutdown_tx.send(true);
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
 
         assert!(
             result.is_ok(),
@@ -703,11 +691,7 @@ mod tests {
         });
 
         // The watcher should exit promptly because the channel is closed.
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(10), handle).await;
 
         assert!(
             result.is_ok(),
@@ -736,11 +720,8 @@ mod tests {
             watcher.run(tx, shutdown_rx).await;
         });
 
-        let observation = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let observation =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;

@@ -235,11 +235,7 @@ impl Visit for EventVisitor {
         self.record_named(field.name(), format!("{value}"));
     }
 
-    fn record_error(
-        &mut self,
-        field: &Field,
-        value: &(dyn std::error::Error + 'static),
-    ) {
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         self.record_named(field.name(), value.to_string());
     }
 
@@ -266,7 +262,6 @@ mod tests {
     use super::*;
     use tracing::info;
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     fn with_buffer<F: FnOnce()>(f: F) -> LogBuffer {
         let buf = LogBuffer::new(128);
@@ -278,7 +273,12 @@ mod tests {
     #[test]
     fn captures_info_events_with_structured_fields() {
         let buf = with_buffer(|| {
-            info!(layer = "triage", component = "llm", latency_ms = 420u64, "decision");
+            info!(
+                layer = "triage",
+                component = "llm",
+                latency_ms = 420u64,
+                "decision"
+            );
         });
         let entries = buf.query(&LogFilter::default());
         assert_eq!(entries.len(), 1);
@@ -287,7 +287,10 @@ mod tests {
         assert_eq!(e.layer.as_deref(), Some("triage"));
         assert_eq!(e.component.as_deref(), Some("llm"));
         assert_eq!(e.level, "info");
-        assert!(e.fields.iter().any(|(k, v)| k == "latency_ms" && v == "420"));
+        assert!(e
+            .fields
+            .iter()
+            .any(|(k, v)| k == "latency_ms" && v == "420"));
     }
 
     #[test]
@@ -306,8 +309,10 @@ mod tests {
             tracing::warn!(layer = "t", "warn event");
             tracing::info!(layer = "t", "info event");
         });
-        let mut f = LogFilter::default();
-        f.level = Some("warn".into());
+        let f = LogFilter {
+            level: Some("warn".into()),
+            ..LogFilter::default()
+        };
         let out = buf.query(&f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].level, "warn");
@@ -319,11 +324,15 @@ mod tests {
             info!(layer = "x", reason = "breakfast", "nothing");
             info!(layer = "x", "brunch happened");
         });
-        let mut f = LogFilter::default();
-        f.text = Some("break".into());
+        let f = LogFilter {
+            text: Some("break".into()),
+            ..LogFilter::default()
+        };
         assert_eq!(buf.query(&f).len(), 1);
-        let mut f2 = LogFilter::default();
-        f2.text = Some("brunch".into());
+        let f2 = LogFilter {
+            text: Some("brunch".into()),
+            ..LogFilter::default()
+        };
         assert_eq!(buf.query(&f2).len(), 1);
     }
 }

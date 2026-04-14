@@ -38,15 +38,17 @@ use kairo_core::senses::types::{
     AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation,
 };
 use kairo_core::senses::vision::VisionWatcher;
+use kairo_core::skills::{MatchContext, SkillLoader, SkillMatcher};
 use kairo_core::triage::handlers::handle_decision;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 use kairo_core::triage::TriageDecision;
 use kairo_core::voice::playback::PlaybackStream;
 use kairo_core::voice::sounds::{FeedbackCue, FeedbackPlayer};
-use kairo_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
 use kairo_core::voice::streaming::SpeechController;
+use kairo_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
 use kairo_core::voice::tts::{set_espeak_data_dir, ElevenLabsEngine, PiperEngine, TtsEngine};
 use kairo_core::voice::wake::TranscriptWakeDetector;
+use kairo_core::workers::{EventSink, FinishSink, WorkerPool, WorkerPoolOptions};
 
 #[cfg(windows)]
 use kairo_core::voice::hotkey::spawn_hotkey_listener;
@@ -163,6 +165,137 @@ async fn main() -> Result<()> {
         );
         let _ = ctrl_c_shutdown.send(true);
     });
+
+    // --- Phase 8: Skills + Worker pool ---
+    let skill_loader = SkillLoader::new(resolve_skills_root(&config));
+    if config.skills.enabled {
+        skill_loader.set_disabled(config.skills.disabled.clone());
+        if let Err(e) = skill_loader.reload() {
+            tracing::warn!(
+                layer = "skills",
+                component = "kairo",
+                error = %e,
+                "Initial skill load failed; continuing without skills"
+            );
+        } else {
+            let names: Vec<String> = skill_loader
+                .enabled()
+                .into_iter()
+                .map(|s| s.frontmatter.name)
+                .collect();
+            tracing::info!(
+                layer = "skills",
+                component = "kairo",
+                count = names.len(),
+                names = ?names,
+                "Skills loaded"
+            );
+        }
+        if config.skills.hot_reload {
+            skill_loader.spawn_watcher(std::time::Duration::from_secs(3), shutdown_rx.clone());
+        }
+    }
+
+    let worker_base_prompt = std::fs::read_to_string(
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("prompts/worker-system.md"),
+    )
+    .ok();
+
+    // The pool's background task holds its own Arc, so once spawned the
+    // `_worker_pool` binding is only needed to keep future health-check
+    // additions ergonomic. Prefix with `_` to signal "not read today".
+    let _worker_pool = {
+        let episodic_for_sink = episodic.clone();
+        let event_sink: EventSink = Arc::new(move |id, event| {
+            use kairo_core::workers::WorkerEvent;
+            if let WorkerEvent::ToolCall { name, .. } = event {
+                let id = id.clone();
+                let episodic = episodic_for_sink.clone();
+                tokio::spawn(async move {
+                    let mut ep = episodic.lock().await;
+                    let event = EpisodicEvent {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        ts: chrono::Utc::now(),
+                        kind: EventKind::ToolCall,
+                        summary: format!("worker[{id}] tool: {name}"),
+                        importance: 0.4,
+                        tags: vec!["worker".into(), format!("worker:{id}"), name],
+                        source_frame_id: None,
+                    };
+                    if let Err(e) = ep.insert_event(&event).await {
+                        tracing::debug!(
+                            layer = "workers",
+                            component = "audit",
+                            error = %e,
+                            "Failed to write worker tool-call audit event"
+                        );
+                    }
+                });
+            }
+        });
+
+        let episodic_for_finish = episodic.clone();
+        let finish_sink: FinishSink = Arc::new(move |snapshot| {
+            let snap = snapshot.clone();
+            let episodic = episodic_for_finish.clone();
+            tokio::spawn(async move {
+                let mut ep = episodic.lock().await;
+                let status = snap.status.as_str();
+                let mut summary = format!(
+                    "worker[{}] {}: {}",
+                    snap.id,
+                    status,
+                    snap.task.chars().take(200).collect::<String>()
+                );
+                if let Some(cost) = snap.cost_usd {
+                    summary.push_str(&format!(" — cost ${:.4}", cost));
+                }
+                if let Some(err) = &snap.error {
+                    summary.push_str(&format!(" — error: {}", err));
+                }
+                let mut tags = vec!["worker".to_string(), format!("worker:{}", snap.id)];
+                tags.extend(snap.tags.iter().cloned());
+                tags.extend(snap.skills.iter().cloned());
+                let event = EpisodicEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now(),
+                    kind: EventKind::ToolCall,
+                    summary,
+                    importance: match status {
+                        "completed" => 0.5,
+                        "failed" | "timed_out" => 0.7,
+                        _ => 0.3,
+                    },
+                    tags,
+                    source_frame_id: None,
+                };
+                let _ = ep.insert_event(&event).await;
+            });
+        });
+
+        let opts = WorkerPoolOptions {
+            config: config.workers.clone(),
+            data_dir: dev_dir.clone(),
+            claude_bin: "claude".into(),
+            skill_loader: Some(skill_loader.clone()),
+            skill_token_budget: config.skills.token_budget,
+            mcp_config_path: None, // workers use their own MCP config if needed
+            base_system_prompt: worker_base_prompt,
+        };
+        let pool = WorkerPool::new(opts)
+            .with_event_sink(event_sink)
+            .with_finish_sink(finish_sink);
+        pool.spawn_background(shutdown_rx.clone());
+        pool
+    };
+    tracing::info!(
+        layer = "workers",
+        component = "kairo",
+        max_concurrent = config.workers.max_concurrent,
+        "Worker pool ready"
+    );
 
     // Phase 3: background raw-log to episodic-memory distillation.
     let distiller_shutdown = shutdown_rx.clone();
@@ -467,6 +600,7 @@ async fn main() -> Result<()> {
                     println!("[--force-wake: forcing wake on frame 1]");
                     Some(TriageDecision::WakeOrchestrator {
                         reason: "Force wake for testing — user wants to verify the orchestrator pipeline works end-to-end".to_string(),
+                        suggested_skill: None,
                     })
                 } else {
                     voice_decision.or_else(|| decision.clone())
@@ -475,7 +609,7 @@ async fn main() -> Result<()> {
                 // Handle decision.
                 if let Some(ref decision) = effective_decision {
                     match decision {
-                        TriageDecision::WakeOrchestrator { reason } => {
+                        TriageDecision::WakeOrchestrator { reason, suggested_skill } => {
                             // If we're already inside a wake (orchestrator still
                             // streaming from a previous trigger), don't stack — log
                             // and skip. The user's latest utterance still landed in
@@ -520,6 +654,10 @@ async fn main() -> Result<()> {
                                 let reason_clone = reason.clone();
                                 let followup_secs = config.voice.conversation_followup_seconds;
                                 let runtime_state_clone = runtime_state.clone();
+                                let skill_loader_clone = skill_loader.clone();
+                                let suggested_skill_clone = suggested_skill.clone();
+                                let skill_budget = config.skills.token_budget;
+                                let dev_dir_clone = dev_dir.clone();
 
                                 tokio::spawn(async move {
                                     let result = do_wake(
@@ -530,6 +668,10 @@ async fn main() -> Result<()> {
                                         &semantic_clone,
                                         &episodic_clone,
                                         wake_speech_opt.as_ref(),
+                                        &skill_loader_clone,
+                                        suggested_skill_clone.as_deref(),
+                                        skill_budget,
+                                        &dev_dir_clone,
                                     )
                                     .await;
 
@@ -651,6 +793,7 @@ async fn main() -> Result<()> {
 }
 
 /// Performs a full orchestrator wake cycle.
+#[allow(clippy::too_many_arguments)]
 async fn do_wake(
     trigger_frame: &PerceptionFrame,
     history_frames: &[PerceptionFrame],
@@ -659,6 +802,10 @@ async fn do_wake(
     semantic: &Arc<SemanticStore>,
     episodic: &Arc<Mutex<EpisodicStore>>,
     speech: Option<&Arc<SpeechController>>,
+    skill_loader: &SkillLoader,
+    suggested_skill: Option<&str>,
+    skill_token_budget: usize,
+    dev_dir: &std::path::Path,
 ) -> Result<()> {
     let wake_start = Instant::now();
 
@@ -680,13 +827,26 @@ async fn do_wake(
     // 2. Wake message.
     let user_message = build_wake_message(trigger_frame, history_frames, &memory_context, reason);
 
-    // 3. Spawn orchestrator + stream.
+    // 3. Compose a dynamic system prompt — base file + matched skills +
+    // any `suggested_skill` hint from the triage layer.
+    let wake_config = compose_wake_config(
+        config,
+        skill_loader,
+        reason,
+        trigger_frame,
+        suggested_skill,
+        skill_token_budget,
+        dev_dir,
+    )
+    .unwrap_or_else(|| config.clone());
+
+    // 4. Spawn orchestrator + stream.
     print!("KAIRO: ");
     std::io::stdout().flush().ok();
 
     let mut full_response = String::new();
     let mut final_info: Option<(Option<u64>, Option<f64>)> = None;
-    let result = wake_orchestrator(config, &user_message, |event| match &event {
+    let result = wake_orchestrator(&wake_config, &user_message, |event| match &event {
         OrchestratorEvent::TextDelta(text) => {
             print!("{text}");
             std::io::stdout().flush().ok();
@@ -944,11 +1104,88 @@ fn update_voice_session(
             );
             return Some(TriageDecision::WakeOrchestrator {
                 reason: format!("Voice command ({language}): {text}"),
+                suggested_skill: None,
             });
         }
     }
 
     None
+}
+
+/// Resolve the skills directory: first checks the repo-relative `skills/`,
+/// then the user's dev-dir fallback. Never panics.
+fn resolve_skills_root(cfg: &KairoConfig) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(&cfg.skills.dir);
+    if p.is_absolute() {
+        return p;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(&cfg.skills.dir);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    kairo_dev_dir().join(&cfg.skills.dir)
+}
+
+/// If any skills match the wake reason, write a dynamic prompt combining
+/// the base system prompt with matched skill content and return a config
+/// clone that points at it. Returns `None` (falling back to the base
+/// config) when nothing matches.
+fn compose_wake_config(
+    base: &OrchestratorConfig,
+    skill_loader: &SkillLoader,
+    reason: &str,
+    frame: &PerceptionFrame,
+    suggested_skill: Option<&str>,
+    token_budget: usize,
+    dev_dir: &std::path::Path,
+) -> Option<OrchestratorConfig> {
+    let skills = skill_loader.enabled();
+    if skills.is_empty() {
+        return None;
+    }
+    let audio_text = frame
+        .audio
+        .as_ref()
+        .map(|a| a.transcript.clone())
+        .unwrap_or_default();
+    let ctx = MatchContext {
+        wake_reason: Some(reason.to_string()),
+        task: None,
+        project: None,
+        audio_transcript: if audio_text.is_empty() {
+            None
+        } else {
+            Some(audio_text)
+        },
+        foreground_app: Some(frame.context.foreground_process_name.clone()),
+        tags: Vec::new(),
+        forced: suggested_skill
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
+    };
+    let (skill_prompt, names) = SkillMatcher::render_prompt(&skills, &ctx, token_budget);
+    if skill_prompt.is_empty() {
+        return None;
+    }
+    let base_text = if base.system_prompt_path.is_empty() {
+        String::new()
+    } else {
+        std::fs::read_to_string(&base.system_prompt_path).unwrap_or_default()
+    };
+    let combined = format!("{base_text}\n\n{skill_prompt}");
+    let dyn_path = dev_dir.join("orchestrator-dynamic.md");
+    std::fs::write(&dyn_path, combined).ok()?;
+    tracing::info!(
+        layer = "skills",
+        component = "kairo",
+        skills = ?names,
+        "Dynamic orchestrator prompt assembled"
+    );
+    let mut new_cfg = base.clone();
+    new_cfg.system_prompt_path = dyn_path.to_string_lossy().into_owned();
+    Some(new_cfg)
 }
 
 /// Spawn the global hotkey listener if configured. Returns `None` when

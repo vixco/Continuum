@@ -44,14 +44,33 @@ pub struct RepairInput<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RepairEvent {
-    Started { ts: DateTime<Utc> },
-    ContextWritten { path: String },
-    AssistantDelta { text: String },
-    ToolCall { name: String },
-    ToolResult { name: String, summary: String },
-    Stderr { line: String },
-    Finished { ts: DateTime<Utc>, success: bool, cost_usd: Option<f64> },
-    Error { message: String },
+    Started {
+        ts: DateTime<Utc>,
+    },
+    ContextWritten {
+        path: String,
+    },
+    AssistantDelta {
+        text: String,
+    },
+    ToolCall {
+        name: String,
+    },
+    ToolResult {
+        name: String,
+        summary: String,
+    },
+    Stderr {
+        line: String,
+    },
+    Finished {
+        ts: DateTime<Utc>,
+        success: bool,
+        cost_usd: Option<f64>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Run the repair agent. Streams events via `on_event`; blocks until the
@@ -68,8 +87,8 @@ where
         path: context_path.display().to_string(),
     });
 
-    let prompt_path = find_prompt(input.repo_root, input.dev_dir)
-        .context("locate repair-agent-system.md")?;
+    let prompt_path =
+        find_prompt(input.repo_root, input.dev_dir).context("locate repair-agent-system.md")?;
 
     input.state.set_repair_running(true).await;
 
@@ -109,7 +128,7 @@ where
             "role": "user",
             "content": format!(
                 "Repair context has been written to {}. Read it, diagnose the root cause, \
-and apply fixes. Follow the system prompt.{reason}",
+    and apply fixes. Follow the system prompt.{reason}",
                 context_path.display(),
                 reason = input.user_reason
                     .as_deref()
@@ -328,19 +347,13 @@ fn find_prompt(repo_root: &Path, dev_dir: &Path) -> Result<PathBuf> {
 
 /// Rollback the config file from a dated backup. Returns the restored
 /// path.
-pub fn rollback_config(
-    dev_dir: &Path,
-    backups_dir: &Path,
-    date: &str,
-) -> Result<PathBuf> {
-    let zip_path = backups_dir
-        .join(date)
-        .join(format!("kairo-{date}.zip"));
+pub fn rollback_config(dev_dir: &Path, backups_dir: &Path, date: &str) -> Result<PathBuf> {
+    let zip_path = backups_dir.join(date).join(format!("kairo-{date}.zip"));
     if !zip_path.exists() {
         anyhow::bail!("backup {} not found", zip_path.display());
     }
-    let file = std::fs::File::open(&zip_path)
-        .with_context(|| format!("open {}", zip_path.display()))?;
+    let file =
+        std::fs::File::open(&zip_path).with_context(|| format!("open {}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("read zip")?;
     let mut entry = archive
         .by_name("config.toml")
@@ -366,7 +379,14 @@ mod tests {
 
     fn input_for(
         tmp: &TempDir,
-    ) -> (PathBuf, PathBuf, KairoConfig, StateHandle, LogBuffer, Vec<ComponentHealth>) {
+    ) -> (
+        PathBuf,
+        PathBuf,
+        KairoConfig,
+        StateHandle,
+        LogBuffer,
+        Vec<ComponentHealth>,
+    ) {
         let dev = tmp.path().join("dev");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&dev).unwrap();
