@@ -827,56 +827,22 @@ impl AudioWatcher {
             }
         }
 
-        // Device selection: the interactive picker in `senses::audio::picker`
-        // runs before AudioWatcher and saves the user's choice to
-        // `[audio].device_index` + `[audio].device_name`. If both are set, we
-        // open the device at that index. If the saved name no longer matches
-        // what's actually at that index (hardware reordered), we bail and let
-        // the next startup re-pick via `--reset-audio`.
-        let device = match self.config.device_index {
-            Some(idx) => {
-                let devices: Vec<cpal::Device> = host
-                    .input_devices()
-                    .context("Failed to enumerate audio input devices")?
-                    .collect();
-                if idx >= devices.len() {
-                    anyhow::bail!(
-                        "Configured device_index {idx} is out of range ({} devices enumerated). \
-                         Run `kairo --reset-audio` to re-pick.",
-                        devices.len()
-                    );
-                }
-                let candidate = devices
-                    .into_iter()
-                    .nth(idx)
-                    .expect("bounds checked above");
-                let actual_name = device_display_name(&candidate);
-                if !self.config.device_name.is_empty() && actual_name != self.config.device_name {
-                    anyhow::bail!(
-                        "Device at index {idx} is now '{actual_name}' but config saved '{}'. \
-                         Run `kairo --reset-audio` to re-pick.",
-                        self.config.device_name
-                    );
-                }
-                candidate
-            }
-            None => host
-                .default_input_device()
-                .ok_or_else(|| anyhow::anyhow!("No default audio input device found"))?,
-        };
+        // Device selection: always use whatever Windows has marked as the
+        // default recording device. This deliberately ignores any saved
+        // `device_index` / `device_name` from earlier picker runs — the
+        // picker fought with Windows' own format negotiation and produced
+        // quieter audio than the default path. Users set their preferred
+        // mic via Windows Sound settings → Input → "Set as default".
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("No default audio input device found"))?;
 
         let device_name = device_display_name(&device);
-        let reason = if self.config.device_index.is_some() {
-            "picker-saved device_index + device_name"
-        } else {
-            "system default (no device configured — run picker)"
-        };
-
         tracing::info!(
             layer = "senses",
             component = "audio",
             device = %device_name,
-            reason = reason,
+            reason = "Windows default input device",
             "Selected audio input device"
         );
 
