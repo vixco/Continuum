@@ -39,6 +39,10 @@ use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
     MemoryQueryEpisodicRequest, MemorySetFactRequest, SetFactResponse,
 };
+use crate::tools::repair::{
+    self as repairtool, EscalateRequest, ReinstallRequest, RestartRequest, RollbackRequest,
+    TestRequest,
+};
 use crate::tools::system::{self as systool, NotificationRequest};
 use crate::tools::web::WebFetchRequest;
 
@@ -426,6 +430,81 @@ impl KairoMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("system_notification", &req, || async {
             Ok::<_, McpError>(systool::show_notification(&req.title, &req.body))
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Repair tools — REPAIR AGENT ONLY. These mutate runtime state through
+    // the intent file protocol; use them only during an active repair
+    // session spawned via `trigger_repair`.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Restart a Kairo subsystem. Queues a restart intent the running kairo runtime picks up on its next tick. Targets: vision | triage | audio | stt | tts | orchestrator | mcp | memory | context_watcher."
+    )]
+    async fn repair_restart_component(
+        &self,
+        Parameters(req): Parameters<RestartRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("repair_restart_component", &req, || async {
+            repairtool::restart(&self.state.data_dir, req.component)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Queue a model reinstall for a component. The runtime re-runs scripts/download-models.ps1 for the matching model on its next tick. Destructive — confirm with the user first."
+    )]
+    async fn repair_reinstall_model(
+        &self,
+        Parameters(req): Parameters<ReinstallRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("repair_reinstall_model", &req, || async {
+            repairtool::reinstall(&self.state.data_dir, req.component)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Rollback config.toml from a dated backup under ~/.kairo-backups/. `date` format is `YYYY-MM-DD`. Destructive — the current config is overwritten; confirm before calling."
+    )]
+    async fn repair_rollback_config(
+        &self,
+        Parameters(req): Parameters<RollbackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("repair_rollback_config", &req, || async {
+            repairtool::rollback(&self.state.data_dir, &req.date)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Quick file-presence sanity check for a component. Returns a snapshot status (healthy | degrading | error | unknown). Use this before and after applying fixes — it does NOT re-run the full health probe; for that, restart the component."
+    )]
+    async fn repair_test_component(
+        &self,
+        Parameters(req): Parameters<TestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("repair_test_component", &req, || async {
+            Ok::<_, McpError>(repairtool::test(&self.state.data_dir, req.component))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Post a user-visible escalation. Writes an intent file the dashboard turns into a red Health-tab banner. Use when the repair requires manual intervention (e.g. re-authenticate claude CLI, free disk space)."
+    )]
+    async fn repair_escalate(
+        &self,
+        Parameters(req): Parameters<EscalateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("repair_escalate", &req, || async {
+            repairtool::escalate(&self.state.data_dir, &req.message)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
         })
         .await
     }

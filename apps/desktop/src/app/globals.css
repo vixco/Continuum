@@ -2,7 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #0a0a0f;
-  color: #e4e4ef;
+@layer base {
+  :root {
+    --color-bg: 10 10 15;
+    --color-surface: 18 18 24;
+    --color-border: 34 34 46;
+    --color-ink: 229 231 235;
+    --color-accent: 124 58 237;
+  }
+
+  html,
+  body {
+    background-color: rgb(var(--color-bg));
+    color: rgb(var(--color-ink));
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+
+  body {
+    min-height: 100vh;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a36;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a4a;
+  }
+}
+
+@layer components {
+  .kairo-card {
+    @apply rounded-lg border border-bg-border bg-bg-surface p-4;
+  }
+  .kairo-subtle {
+    @apply text-ink-muted text-sm;
+  }
+  .kairo-label {
+    @apply uppercase tracking-wider text-[10px] font-semibold text-ink-dim;
+  }
 }

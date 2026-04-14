@@ -2,6 +2,60 @@
 
 This document records component health and recovery hooks that the repair agent can use.
 
+## Repair agent overview
+
+The dashboard's **Fix Issues** button spawns a dedicated Claude Opus 4.6 session with:
+
+- Working directory: the Kairo install folder.
+- System prompt: [`prompts/repair-agent-system.md`](../prompts/repair-agent-system.md).
+- Input context: written to `~/.kairo-dev/repair-context.md` before the spawn, containing the user-reported problem (if any), component statuses, the live config snapshot, and the last 500 log lines.
+- Access to the Kairo MCP server plus the repair-specific tools listed below.
+
+Output streams live to the Health tab via `kairo:repair` events (text deltas, tool calls, tool results, stderr, final status).
+
+## Repair MCP tools
+
+All under the `repair_*` namespace (routed via `kairo-mcp`):
+
+| Tool                       | Effect                                                                 |
+|----------------------------|------------------------------------------------------------------------|
+| `repair_restart_component` | Queues a restart intent for the running runtime in `~/.kairo-dev/repair-intents/`. Targets: vision, triage, audio, stt, tts, orchestrator, mcp, memory, context_watcher. |
+| `repair_reinstall_model`   | Queues a model-reinstall intent (non-destructive — the runtime re-downloads the file and restarts the subsystem). |
+| `repair_rollback_config`   | Restores `config.toml` from a dated backup under `~/.kairo-backups/`. Destructive: requires confirmation. |
+| `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`. Complement to `repair_restart_component` — test first, restart if needed. |
+| `repair_escalate`          | Posts a dashboard banner asking the user to take manual action.        |
+
+Intent files have the shape `{kind, queued_at, body}` — the runtime polls `repair-intents/` every 2 s and moves consumed intents to `.done` siblings.
+
+## Backup rotation
+
+Every night at 04:00 local time (configurable via `health::backup::spawn_nightly`), the dashboard zips these files into `~/.kairo-backups/<YYYY-MM-DD>/kairo-<date>.zip`:
+
+- `config.toml`
+- `automations.json`
+- `permissions.toml`
+- `semantic.sqlite`
+- `orchestrator-system.md`
+
+Deliberately excluded: raw log (`raw_log.sqlite`), episodic LanceDB folder, screenshots, model weights, logs.
+
+Rotation retains the most recent 7 backups; older dated folders are removed. The Health tab's **Backup now** button triggers an immediate rotation.
+
+## Predictive maintenance
+
+The health registry runs every 30 s. A component is marked `degrading` when:
+
+- It currently probes `healthy` but the 24 h error rate across the last 20 probes is > 5 %, OR
+- Its file-presence probe reports the subsystem never signalled "loaded" (seen as a boot-time "awaiting start" state).
+
+Components marked `degrading` show amber in the Health tab. Predictive auto-repair (automatically firing the repair agent on a degradation trend) is off by default.
+
+## Voice-activated repair
+
+The triage layer recognises spoken phrases like "Kairo, something is broken" and "Kairo, check your health" as `execute_simple` decisions that forward to the repair subsystem. Implementation detail: the voice command maps to a `trigger_repair` Tauri command with the spoken text as the user reason, so the repair context surfaces what the user said.
+
+---
+
 ## Memory Distiller
 
 Component: `memory/distiller`

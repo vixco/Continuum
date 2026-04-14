@@ -291,6 +291,43 @@ async fn main() -> Result<()> {
         "All layers running. Press Ctrl+C to stop."
     );
 
+    // --- Runtime state publisher ---
+    //
+    // Writes `~/.kairo-dev/state.json` every 2 s so the dashboard (a
+    // separate Tauri process) can render component statuses without
+    // needing IPC into this process. Flags are updated inline as each
+    // subsystem initialises below and as the main loop mutates voice /
+    // orchestrator state.
+    let runtime_state: Arc<std::sync::Mutex<kairo_core::runtime_publish::RuntimeSnapshot>> =
+        Arc::new(std::sync::Mutex::new(
+            kairo_core::runtime_publish::RuntimeSnapshot {
+                triage_model_loaded: triage.is_some(),
+                vision_model_loaded: true,
+                tts_loaded: speech.is_some(),
+                stt_loaded: config.audio.enabled,
+                orchestrator_ready: !orch_config.system_prompt_path.is_empty(),
+                voice_mode: Some("idle".to_string()),
+                partial_transcript: None,
+                frame_count: 0,
+                wake_count: 0,
+                last_update: chrono::Utc::now().to_rfc3339(),
+            },
+        ));
+    {
+        let state_clone = runtime_state.clone();
+        kairo_core::runtime_publish::spawn_publisher(
+            dev_dir.join("state.json"),
+            2,
+            shutdown_rx.clone(),
+            move || {
+                let guard = state_clone.lock().unwrap_or_else(|p| p.into_inner());
+                let mut snap = guard.clone();
+                snap.last_update = chrono::Utc::now().to_rfc3339();
+                snap
+            },
+        );
+    }
+
     // --- Hotkey (Windows only) ---
     // Drop guard: _hotkey_handle must stay in scope for the listener thread
     // to keep running. Dropping it at end of main unregisters the hotkey.
@@ -325,6 +362,9 @@ async fn main() -> Result<()> {
         tokio::select! {
             Some(frame) = frame_rx.recv() => {
                 frame_count += 1;
+                if let Ok(mut s) = runtime_state.lock() {
+                    s.frame_count = frame_count;
+                }
 
                 let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");
@@ -466,6 +506,10 @@ async fn main() -> Result<()> {
                                 // Opus streams for 5–10 s, and every subsequent
                                 // response would be that many seconds behind reality.
                                 orchestrator_busy.store(true, std::sync::atomic::Ordering::Release);
+                                if let Ok(mut s) = runtime_state.lock() {
+                                    s.wake_count += 1;
+                                    s.voice_mode = Some("thinking".to_string());
+                                }
                                 let busy_flag = orchestrator_busy.clone();
                                 let followup_shared = followup_until.clone();
                                 let orch_cfg_clone = orch_config.clone();
@@ -475,6 +519,7 @@ async fn main() -> Result<()> {
                                 let frame_clone = frame.clone();
                                 let reason_clone = reason.clone();
                                 let followup_secs = config.voice.conversation_followup_seconds;
+                                let runtime_state_clone = runtime_state.clone();
 
                                 tokio::spawn(async move {
                                     let result = do_wake(
@@ -518,6 +563,9 @@ async fn main() -> Result<()> {
                                     }
 
                                     busy_flag.store(false, std::sync::atomic::Ordering::Release);
+                                    if let Ok(mut s) = runtime_state_clone.lock() {
+                                        s.voice_mode = Some("idle".to_string());
+                                    }
                                 });
                             }
                         }

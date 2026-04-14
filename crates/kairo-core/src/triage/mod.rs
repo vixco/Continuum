@@ -13,8 +13,11 @@
 //! - `execute_simple` — perform a pre-approved simple action
 //! - `wake_orchestrator` — wake Claude Opus for genuine reasoning
 
+#[cfg(feature = "runtime")]
 pub mod handlers;
+#[cfg(feature = "runtime")]
 pub mod llm;
+#[cfg(feature = "runtime")]
 pub mod prompts;
 
 use serde::{Deserialize, Serialize};

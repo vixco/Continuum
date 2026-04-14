@@ -84,6 +84,15 @@ voice_test -p kairo-core`), `kairo-mcp`, and `kairo-perception`. Debug
 breaks specifically at the wake-up path when the Qwen triage LLM gets
 loaded.
 
+**The desktop app (`kairo-desktop`) builds fine in debug.** It depends
+on `kairo-core` with `default-features = false`, which gates out the
+llama-cpp / whisper / lancedb modules. `cargo tauri dev` works without
+release tricks. The runtime binary and the dashboard are therefore two
+separate processes that communicate via a tiny JSON file at
+`~/.kairo-dev/state.json` (runtime writes, dashboard reads every 2 s)
+and an intent-file queue at `~/.kairo-dev/repair-intents/` (repair
+agent writes, runtime reads). See `docs/dashboard.md`.
+
 **sccache is enabled via `.cargo/config.toml`** to cache C++/CUDA
 compiles. First build is normal speed (~9 min release, 20 min debug).
 Subsequent clean rebuilds across branches are dramatically faster —
@@ -117,6 +126,9 @@ cargo test -p kairo-core --test orchestrator_mock  # run a specific integration 
 # Run binaries
 cargo run --bin kairo-perception         # live perception stream (debug ok)
 cargo run --bin kairo-perception -- --triage  # perception + triage decisions (debug ok)
+
+# Dashboard
+cd apps/desktop && pnpm install && pnpm tauri dev   # Tauri + Next.js dev (debug ok)
 cargo run --bin kairo-triage-bench       # triage accuracy benchmark (debug ok)
 cargo run --release --bin kairo          # main orchestrator binary (RELEASE only — see Build workflow above)
 
