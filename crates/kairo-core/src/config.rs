@@ -329,12 +329,13 @@ impl Default for AudioConfig {
                 .join("whisper-small.bin")
                 .to_string_lossy()
                 .into_owned(),
-            // "auto" lets whisper detect the language per segment so the
-            // user can speak any language. Forcing a concrete code is an
-            // option for users where auto-detect trips on their voice.
-            // This is decoupled from TTS output language — Kairo can
-            // understand Dutch input while still responding in English.
-            whisper_language: "auto".to_string(),
+            // Force English for the default wake path. Whisper-small's
+            // language auto-detect on short 1-2 second clips is unreliable
+            // (we've seen "hey kairo" mis-detected as Portuguese "Ei,
+            // Cairo!" with p=0.55). Forcing "en" keeps the wake word
+            // intelligible. Users who primarily speak a different language
+            // override this in ~/.kairo-dev/config.toml.
+            whisper_language: "en".to_string(),
             // Adaptive VAD: floor 0.005 catches quiet speech; the 5×
             // noise-floor multiplier raises the effective threshold on
             // noisy setups automatically. See `AdaptiveVad` for details.

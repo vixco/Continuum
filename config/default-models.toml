@@ -45,12 +45,17 @@ max_concurrent = 3
 # device_name  = "Microphone"     # display name from cpal description()
 # device_index = 2                # cpal enumeration index at pick time
 
-# Whisper input language. "auto" = detect per segment (recommended, lets the
-# user speak any language). A concrete code ("nl", "en", "de") forces that
-# language; good if auto-detect trips on your voice but costs multilingual
-# comprehension. Kairo's output language is controlled separately under
-# [tts] — the two are intentionally decoupled.
-whisper_language = "auto"
+# Whisper input language. Default "en" because whisper-small's
+# auto-detect is unreliable on short (< 2 s) wake-word clips — we've
+# seen "hey kairo" mis-detected as Portuguese "Ei, Cairo!" at p=0.55.
+# Forcing English keeps wake detection stable.
+#
+# Change to "nl", "de", or another code if you primarily speak a
+# different language. Change to "auto" if your clips are long enough
+# (>2 s) for confident language detection. Kairo's output language is
+# controlled separately under [tts] — input and output are decoupled,
+# so "en" input still lets Kairo respond in English (current default).
+whisper_language = "en"
 
 # Adaptive VAD: the runtime threshold is
 #   max(vad_threshold, noise_floor × vad_noise_floor_multiplier)
