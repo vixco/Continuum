@@ -28,6 +28,21 @@ BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program File
 # integration that VS 2019 BuildTools doesn't have. Ninja calls nvcc directly.
 CMAKE_GENERATOR = "Ninja"
 
+# Force C++ deps (whisper.cpp, llama.cpp) to build with the Release CRT
+# even when Rust is in debug mode. Without this, the `cmake` crate maps
+# cargo's debug profile to CMAKE_BUILD_TYPE=Debug, which links the C++
+# code against ucrtbased.dll (debug CRT) while Rust itself uses ucrt.dll
+# (release CRT) on Windows. The mismatch triggers a debug-assertion
+# dialog in read.cpp:381 (`_osfile(fh) & FOPEN`) the moment a file
+# handle crosses the Rust↔C++ boundary — Kairo hits this immediately on
+# startup because whisper-rs loads the Whisper model during init.
+#
+# Release cargo builds already set CMAKE_BUILD_TYPE=Release, so this
+# override only changes behaviour for `cargo build` / `cargo run`
+# without --release. Keeping both profiles on Release CRT keeps the
+# boundary clean.
+CMAKE_BUILD_TYPE = "Release"
+
 # ONNX Runtime library path for ort load-dynamic feature
 ORT_DYLIB_PATH = "C:/onnxruntime/onnxruntime.dll"
 
