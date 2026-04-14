@@ -1,9 +1,9 @@
-# Kairo download-models.ps1
+﻿# Kairo download-models.ps1
 # Downloads default model files for Kairo's local inference.
-# Idempotent — skips files that already exist with valid sizes.
+# Idempotent -- skips files that already exist with valid sizes.
 #
 # Uses curl.exe (ships with Windows 10+) instead of Invoke-WebRequest
-# because HuggingFace requires following redirects (302 → CDN) and
+# because HuggingFace requires following redirects (302 -> CDN) and
 # Invoke-WebRequest handles this unreliably on older PowerShell versions.
 
 $ErrorActionPreference = "Stop"
@@ -76,7 +76,7 @@ function Download-Model {
 }
 
 # Small-file variant for sidecar configs (.onnx.json, tokenizer.json). These
-# are KB-sized so the 1 MB validity floor doesn't apply — we only check that
+# are KB-sized so the 1 MB validity floor doesn't apply -- we only check that
 # the response is non-empty and does not look like an HTML error page.
 function Download-Sidecar {
     param(
@@ -122,7 +122,7 @@ function Download-Sidecar {
 }
 
 # ============================================================================
-# SmolVLM-256M (Vision — Layer 1)
+# SmolVLM-256M (Vision -- Layer 1)
 # ============================================================================
 # Source: HuggingFaceTB official repo (onnx-community is now auth-gated).
 # The kairo-vision crate expects: vision_encoder.onnx, embed_tokens.onnx,
@@ -165,7 +165,7 @@ if ((Test-Path $StaleEncoder) -and ((Get-Item $StaleEncoder).Length -lt $MinVali
 }
 
 # ============================================================================
-# Qwen 3 8B Q4_K_M (Triage LLM — Layer 2, default)
+# Qwen 3 8B Q4_K_M (Triage LLM -- Layer 2, default)
 # ============================================================================
 # Source: Official Qwen org on HuggingFace (no auth required).
 # 8B recommended for accuracy on Dutch + decision boundary classification.
@@ -179,7 +179,7 @@ Download-Model `
     -ExpectedSizeMB "4800"
 
 # ============================================================================
-# Qwen 3 4B Q4_K_M (Triage LLM — low-VRAM fallback)
+# Qwen 3 4B Q4_K_M (Triage LLM -- low-VRAM fallback)
 # ============================================================================
 # For GPUs with <6GB VRAM or CPU-only users. Lower accuracy on Dutch and
 # decision boundaries compared to 8B.
@@ -193,7 +193,7 @@ Download-Model `
     -ExpectedSizeMB "2500"
 
 # ============================================================================
-# Whisper small (STT — Layer 1 audio)
+# Whisper small (STT -- Layer 1 audio)
 # ============================================================================
 
 Write-Host "`n--- Whisper small (STT) ---" -ForegroundColor Cyan
@@ -205,15 +205,15 @@ Download-Model `
     -ExpectedSizeMB "465"
 
 # ============================================================================
-# Piper TTS voices (Phase 5 — voice)
+# Piper TTS voices (Phase 5 -- voice)
 # ============================================================================
 # Piper voices are shipped as paired .onnx + .onnx.json files. Config sidecar
-# holds sample_rate, speaker table, inference params — Kairo reads sample_rate
+# holds sample_rate, speaker table, inference params -- Kairo reads sample_rate
 # from it at engine init, so both files are required together.
 #
 # MIT-licensed; source: rhasspy/piper-voices on HuggingFace.
 
-Write-Host "`n--- Piper TTS (English — en_US-lessac-medium) ---" -ForegroundColor Cyan
+Write-Host "`n--- Piper TTS (English -- en_US-lessac-medium) ---" -ForegroundColor Cyan
 
 $TtsDir = Join-Path $ModelsBase "tts"
 $PiperBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -229,7 +229,7 @@ Download-Sidecar `
     -Url "$PiperBase/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" `
     -OutPath (Join-Path $TtsDir "en_US-lessac-medium.onnx.json")
 
-Write-Host "`n--- Piper TTS (Dutch — nl_NL-mls-medium) ---" -ForegroundColor Cyan
+Write-Host "`n--- Piper TTS (Dutch -- nl_NL-mls-medium) ---" -ForegroundColor Cyan
 
 Download-Model `
     -Name "Piper NL voice (mls-medium)" `
@@ -250,7 +250,7 @@ Download-Sidecar `
 # whole tree to ~/.kairo-dev/bin/piper/ and copy espeak-ng-data/ to the
 # location Kairo's config expects.
 #
-# Both the binary and espeak-ng-data come from the same archive — this
+# Both the binary and espeak-ng-data come from the same archive -- this
 # guarantees version compatibility and avoids depending on the 404'd
 # rhasspy/espeak-ng-data repo. The PiperEngine calls piper.exe as a
 # subprocess and reads PIPER_ESPEAKNG_DATA_DIRECTORY from the environment
