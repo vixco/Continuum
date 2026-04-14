@@ -17,9 +17,25 @@
 # Keep all build artifacts on F: drive (not C:) for performance
 target-dir = "F:/TRYORVIA/kairo-ai/target"
 
+# sccache wraps rustc so repeated builds of the same crate+flags are
+# cache hits (near-instant). First build is normal speed, subsequent
+# clean rebuilds across branches are dramatically faster.
+# Install: download the prebuilt Windows binary from
+#   https://github.com/mozilla/sccache/releases → place at ~/.cargo/bin/sccache.exe
+rustc-wrapper = "sccache"
+
 [env]
 # LLVM/clang for whisper-rs bindgen. Adjust if LLVM is installed elsewhere.
 LIBCLANG_PATH = "C:/LLVM/bin"
+
+# sccache also wraps the native C/C++/CUDA compilers invoked by cmake.
+# CMake reads these LAUNCHER variables and transparently prefixes
+# every cl.exe / nvcc call with `sccache`. Dramatically speeds up
+# clean rebuilds of whisper.cpp and llama.cpp (each has ~100 CUDA
+# kernels + hundreds of C++ files).
+CMAKE_C_COMPILER_LAUNCHER = "sccache"
+CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
+CMAKE_CUDA_COMPILER_LAUNCHER = "sccache"
 
 # Clang + MSVC include paths for bindgen header resolution
 BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\""""
