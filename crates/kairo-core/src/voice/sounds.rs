@@ -189,13 +189,7 @@ fn two_note(freq1: f32, freq2: f32, tone_secs: f32, amplitude: f32, gap_secs: f3
 
 /// Two descending tones with a configurable amplitude. Kept separate
 /// from `two_note` so the error cue can use its own amplitude profile.
-fn double_beep(
-    freq1: f32,
-    freq2: f32,
-    tone_secs: f32,
-    gap_secs: f32,
-    amplitude: f32,
-) -> Vec<f32> {
+fn double_beep(freq1: f32, freq2: f32, tone_secs: f32, gap_secs: f32, amplitude: f32) -> Vec<f32> {
     let t1 = soft_tone(freq1, tone_secs, amplitude);
     let t2 = soft_tone(freq2, tone_secs, amplitude);
     let gap = vec![0.0_f32; seconds_to_samples(gap_secs)];
@@ -235,7 +229,10 @@ mod tests {
     #[test]
     fn cues_have_soft_edges() {
         let samples = FeedbackCue::Wake.render();
-        assert!(samples[0].abs() < 0.01, "first sample should be at Hann zero");
+        assert!(
+            samples[0].abs() < 0.01,
+            "first sample should be at Hann zero"
+        );
         assert!(
             samples.last().copied().unwrap_or(1.0).abs() < 0.01,
             "last sample should be at Hann zero"
@@ -253,11 +250,7 @@ mod tests {
             FeedbackCue::Done,
             FeedbackCue::Error,
         ] {
-            let peak = cue
-                .render()
-                .iter()
-                .map(|s| s.abs())
-                .fold(0.0_f32, f32::max);
+            let peak = cue.render().iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
             assert!(peak <= 0.18, "{} cue peaks at {peak}", cue.name());
         }
     }

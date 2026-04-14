@@ -73,9 +73,7 @@ fn load_voice_bank(
         loaded.insert(lang.clone(), engine);
     }
     if loaded.is_empty() {
-        anyhow::bail!(
-            "No Piper voices installed. Run: powershell scripts/download-models.ps1"
-        );
+        anyhow::bail!("No Piper voices installed. Run: powershell scripts/download-models.ps1");
     }
     let primary = if loaded.contains_key(primary) {
         primary.to_string()
@@ -112,11 +110,7 @@ fn canned_response(command: &str) -> MockOrchestratorResponse {
         }
     } else {
         MockOrchestratorResponse {
-            deltas: vec![
-                "Got it — ",
-                "I'll look into that. ",
-                "Anything else?",
-            ],
+            deltas: vec!["Got it — ", "I'll look into that. ", "Anything else?"],
         }
     }
 }
@@ -236,9 +230,7 @@ fn main() -> Result<()> {
 
         // If heuristic says not complete, give it a short silence and retry.
         if matches!(decision, EndpointDecision::Continue) {
-            std::thread::sleep(Duration::from_millis(
-                config.voice.endpoint_silence_ms + 50,
-            ));
+            std::thread::sleep(Duration::from_millis(config.voice.endpoint_silence_ms + 50));
             session.push_transcript("", "en");
         }
 
@@ -277,8 +269,7 @@ fn main() -> Result<()> {
 
         if config.voice.conversation_followup_seconds > 0 {
             followup_until = Some(
-                Instant::now()
-                    + Duration::from_secs(config.voice.conversation_followup_seconds),
+                Instant::now() + Duration::from_secs(config.voice.conversation_followup_seconds),
             );
             println!(
                 "  (follow-up window open for {} s — speak again without wake word)",

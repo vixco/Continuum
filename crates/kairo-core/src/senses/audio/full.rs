@@ -124,12 +124,7 @@ impl VadState {
 
 impl AdaptiveVad {
     /// Creates a new adaptive VAD. No warmup — see the struct doc for why.
-    fn new(
-        floor: f32,
-        multiplier: f32,
-        silence_duration_ms: u64,
-        max_segment_secs: u64,
-    ) -> Self {
+    fn new(floor: f32, multiplier: f32, silence_duration_ms: u64, max_segment_secs: u64) -> Self {
         let chunk_duration_ms = (VAD_CHUNK_SAMPLES as u64 * 1000) / u64::from(TARGET_SAMPLE_RATE);
         let silence_chunks_needed = if chunk_duration_ms > 0 {
             (silence_duration_ms / chunk_duration_ms).max(1) as usize
@@ -190,9 +185,7 @@ impl AdaptiveVad {
         self.current_chunk += 1;
 
         // Evict silence samples that have fallen outside the rolling window.
-        let oldest_allowed = self
-            .current_chunk
-            .saturating_sub(VAD_NOISE_WINDOW_CHUNKS);
+        let oldest_allowed = self.current_chunk.saturating_sub(VAD_NOISE_WINDOW_CHUNKS);
         while let Some(&(idx, _)) = self.silence_ring.front() {
             if idx < oldest_allowed {
                 self.silence_ring.pop_front();
@@ -287,11 +280,7 @@ impl AdaptiveVad {
 /// # Errors
 ///
 /// Returns an error if the resampler cannot be created or if processing fails.
-fn resample_to_16khz(
-    samples: &[f32],
-    source_rate: u32,
-    source_channels: u16,
-) -> Result<Vec<f32>> {
+fn resample_to_16khz(samples: &[f32], source_rate: u32, source_channels: u16) -> Result<Vec<f32>> {
     if source_rate == TARGET_SAMPLE_RATE && source_channels == 1 {
         return Ok(samples.to_vec());
     }
@@ -347,9 +336,8 @@ fn resample_to_16khz(
 
         let input_slice: &[f32] = &input_chunk;
         let input_slices: &[&[f32]] = &[input_slice];
-        let input_adapter =
-            SequentialSliceOfSlices::new(input_slices, 1, input_chunk.len())
-                .context("Failed to create input adapter")?;
+        let input_adapter = SequentialSliceOfSlices::new(input_slices, 1, input_chunk.len())
+            .context("Failed to create input adapter")?;
         let result = resampler
             .process(&input_adapter, 0, None)
             .context("Resampler processing failed")?;
@@ -360,8 +348,7 @@ fn resample_to_16khz(
         // (not the zero-padded portion) for the last chunk.
         if chunk.len() < RESAMPLER_CHUNK_SIZE {
             let actual_output_len =
-                (frames as f64 * chunk.len() as f64 / RESAMPLER_CHUNK_SIZE as f64)
-                    as usize;
+                (frames as f64 * chunk.len() as f64 / RESAMPLER_CHUNK_SIZE as f64) as usize;
             output.extend_from_slice(&channel_data[..actual_output_len.min(channel_data.len())]);
         } else {
             output.extend_from_slice(&channel_data[..frames]);
@@ -454,7 +441,10 @@ impl AudioWatcher {
             }
         };
 
-        Self { config, whisper_ctx }
+        Self {
+            config,
+            whisper_ctx,
+        }
     }
 
     /// Loads a whisper model from the given file path.
@@ -761,9 +751,7 @@ impl AudioWatcher {
     ///
     /// Returns an error if no input device is found, the device does not
     /// support a usable configuration, or the stream cannot be built.
-    fn open_audio_stream(
-        &self,
-    ) -> Result<(std_mpsc::Receiver<Vec<f32>>, u32, u16, cpal::Stream)> {
+    fn open_audio_stream(&self) -> Result<(std_mpsc::Receiver<Vec<f32>>, u32, u16, cpal::Stream)> {
         let host = cpal::default_host();
 
         // --- DIAGNOSTIC: enumerate every available input device ---
@@ -980,10 +968,7 @@ impl AudioWatcher {
         // with empty transcripts even though speech is audible. Scaling to a
         // known peak is the standard preprocessing step for whisper.
         let mut samples = samples;
-        let peak_abs = samples
-            .iter()
-            .map(|&s| s.abs())
-            .fold(0.0_f32, f32::max);
+        let peak_abs = samples.iter().map(|&s| s.abs()).fold(0.0_f32, f32::max);
         let norm_scale = if peak_abs > 0.0 { 0.5 / peak_abs } else { 1.0 };
         if (norm_scale - 1.0).abs() > f32::EPSILON {
             for s in samples.iter_mut() {
@@ -1045,25 +1030,23 @@ impl AudioWatcher {
             let mut transcript = String::new();
             for i in 0..num_segments {
                 match state.get_segment(i) {
-                    Some(segment) => {
-                        match segment.to_str_lossy() {
-                            Ok(text) => {
-                                if !transcript.is_empty() {
-                                    transcript.push(' ');
-                                }
-                                transcript.push_str(text.trim());
+                    Some(segment) => match segment.to_str_lossy() {
+                        Ok(text) => {
+                            if !transcript.is_empty() {
+                                transcript.push(' ');
                             }
-                            Err(err) => {
-                                tracing::warn!(
-                                    layer = "senses",
-                                    component = "audio",
-                                    segment = i,
-                                    error = %err,
-                                    "Failed to get whisper segment text"
-                                );
-                            }
+                            transcript.push_str(text.trim());
                         }
-                    }
+                        Err(err) => {
+                            tracing::warn!(
+                                layer = "senses",
+                                component = "audio",
+                                segment = i,
+                                error = %err,
+                                "Failed to get whisper segment text"
+                            );
+                        }
+                    },
                     None => {
                         tracing::warn!(
                             layer = "senses",
@@ -1242,10 +1225,7 @@ mod tests {
             "[Music]",
             "Subtitles by the Amara.org community",
         ] {
-            assert!(
-                looks_like_hallucination(phrase),
-                "should drop: {phrase:?}"
-            );
+            assert!(looks_like_hallucination(phrase), "should drop: {phrase:?}");
         }
     }
 
@@ -1259,10 +1239,7 @@ mod tests {
             "wat staat er op mijn planning",
             "Hey Cairo, hello.",
         ] {
-            assert!(
-                !looks_like_hallucination(phrase),
-                "should keep: {phrase:?}"
-            );
+            assert!(!looks_like_hallucination(phrase), "should keep: {phrase:?}");
         }
     }
 
@@ -1431,8 +1408,7 @@ mod tests {
             stereo.push(0.4f32);
             stereo.push(0.6f32);
         }
-        let result =
-            resample_to_16khz(&stereo, 16_000, 2).expect("Stereo mixdown should succeed");
+        let result = resample_to_16khz(&stereo, 16_000, 2).expect("Stereo mixdown should succeed");
         assert_eq!(result.len(), 800);
         assert!(
             (result[0] - 0.5).abs() < 0.01,

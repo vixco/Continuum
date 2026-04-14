@@ -95,9 +95,10 @@ pub fn parse_chord(spec: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
                 if vk.is_some() {
                     anyhow::bail!("hotkey spec has more than one non-modifier key: {spec}");
                 }
-                vk = Some(virtual_key_code(key).ok_or_else(|| {
-                    anyhow!("unknown key '{key}' in hotkey spec '{spec}'")
-                })?);
+                vk = Some(
+                    virtual_key_code(key)
+                        .ok_or_else(|| anyhow!("unknown key '{key}' in hotkey spec '{spec}'"))?,
+                );
             }
             _ => {}
         }
@@ -105,7 +106,9 @@ pub fn parse_chord(spec: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
 
     let vk = vk.ok_or_else(|| anyhow!("hotkey spec '{spec}' has no target key"))?;
     if modifiers.0 == 0 {
-        anyhow::bail!("hotkey spec '{spec}' must include at least one modifier (Ctrl/Shift/Alt/Win)");
+        anyhow::bail!(
+            "hotkey spec '{spec}' must include at least one modifier (Ctrl/Shift/Alt/Win)"
+        );
     }
 
     Ok((modifiers | MOD_NOREPEAT, vk))
@@ -147,9 +150,7 @@ fn virtual_key_code(key: &str) -> Option<u32> {
 /// Errors:
 /// - spec parse errors
 /// - `RegisterHotKey` rejection (another app owns the chord, bad combo)
-pub fn spawn_hotkey_listener(
-    spec: &str,
-) -> Result<(HotkeyHandle, mpsc::UnboundedReceiver<()>)> {
+pub fn spawn_hotkey_listener(spec: &str) -> Result<(HotkeyHandle, mpsc::UnboundedReceiver<()>)> {
     let (modifiers, vk) = parse_chord(spec).with_context(|| format!("parse_chord({spec})"))?;
     let (tx, rx) = mpsc::unbounded_channel();
     let stop_id = NEXT_STOP_ID.fetch_add(1, Ordering::Relaxed);

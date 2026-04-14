@@ -26,8 +26,10 @@ pub mod logs;
 pub mod runtime;
 pub mod runtime_publish;
 pub mod senses;
+pub mod skills;
 pub mod state;
 pub mod triage;
+pub mod workers;
 
 // Heavy runtime modules — gated on the `runtime` feature so the desktop
 // crate can depend on kairo-core without pulling C++ build deps.
@@ -37,5 +39,3 @@ pub mod memory;
 pub mod orchestrator;
 #[cfg(feature = "runtime")]
 pub mod voice;
-#[cfg(feature = "runtime")]
-pub mod workers;

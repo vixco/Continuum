@@ -242,10 +242,7 @@ impl TtsEngine for PiperEngine {
         })?;
 
         {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .context("Failed to open Piper stdin")?;
+            let stdin = child.stdin.as_mut().context("Failed to open Piper stdin")?;
             stdin
                 .write_all(text.as_bytes())
                 .context("Failed to write text to Piper stdin")?;
@@ -372,9 +369,15 @@ fn resolve_piper_binary() -> PathBuf {
 
     if let Some(home) = dirs::home_dir() {
         let bundled = if cfg!(windows) {
-            home.join(".kairo-dev").join("bin").join("piper").join("piper.exe")
+            home.join(".kairo-dev")
+                .join("bin")
+                .join("piper")
+                .join("piper.exe")
         } else {
-            home.join(".kairo-dev").join("bin").join("piper").join("piper")
+            home.join(".kairo-dev")
+                .join("bin")
+                .join("piper")
+                .join("piper")
         };
         if bundled.exists() {
             return bundled;
@@ -442,9 +445,7 @@ mod tests {
 
     #[test]
     fn test_read_sample_rate_extra_audio_fields() {
-        let f = write_config(
-            r#"{"audio":{"sample_rate":16000,"quality":"low","channels":1}}"#,
-        );
+        let f = write_config(r#"{"audio":{"sample_rate":16000,"quality":"low","channels":1}}"#);
         assert_eq!(read_sample_rate(f.path()).unwrap(), 16000);
     }
 

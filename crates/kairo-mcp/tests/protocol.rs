@@ -23,6 +23,7 @@ use tokio::process::{ChildStdout, Command};
 use tokio::time::timeout;
 
 const EXPECTED_TOOLS: &[&str] = &[
+    // Phase 4 — memory / system / fs / web
     "memory_query_episodic",
     "memory_list_facts",
     "memory_get_fact",
@@ -34,6 +35,18 @@ const EXPECTED_TOOLS: &[&str] = &[
     "fs_list_dir",
     "web_fetch",
     "system_notification",
+    // Phase 7 — repair
+    "repair_restart_component",
+    "repair_reinstall_model",
+    "repair_rollback_config",
+    "repair_test_component",
+    "repair_escalate",
+    // Phase 8 — workers
+    "workers_spawn_worker",
+    "workers_worker_status",
+    "workers_worker_cancel",
+    "workers_worker_wait",
+    "workers_worker_list",
 ];
 
 fn mcp_bin() -> std::path::PathBuf {

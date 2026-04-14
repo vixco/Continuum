@@ -41,10 +41,7 @@ use crate::senses::types::{
 /// | Error disappeared (was visible, now gone) | +0.1 |
 ///
 /// The final score is clamped to \[0.0, 1.0\].
-pub fn compute_salience(
-    current: &PerceptionFrame,
-    previous: Option<&PerceptionFrame>,
-) -> f32 {
+pub fn compute_salience(current: &PerceptionFrame, previous: Option<&PerceptionFrame>) -> f32 {
     let mut score: f32 = 0.0;
 
     let prev = match previous {
@@ -540,11 +537,8 @@ mod tests {
         });
 
         // Wait for a frame.
-        let received = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            frame_rx.recv(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), frame_rx.recv()).await;
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
@@ -596,11 +590,8 @@ mod tests {
                 .await;
         });
 
-        let received = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            frame_rx.recv(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), frame_rx.recv()).await;
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
@@ -636,11 +627,7 @@ mod tests {
         // Shutdown immediately.
         let _ = shutdown_tx.send(true);
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(3),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(3), handle).await;
 
         assert!(
             result.is_ok(),

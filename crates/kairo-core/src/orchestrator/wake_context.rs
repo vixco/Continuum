@@ -48,7 +48,10 @@ pub fn build_wake_message(
         msg.push_str("\n## Just before\n");
         let frames_to_show = &history_frames[..history_frames.len().min(MAX_HISTORY_FRAMES)];
         for frame in frames_to_show.iter().rev() {
-            msg.push_str(&format!("- {}\n", format_frame_oneline(frame, trigger_frame.ts)));
+            msg.push_str(&format!(
+                "- {}\n",
+                format_frame_oneline(frame, trigger_frame.ts)
+            ));
         }
     }
 
@@ -57,7 +60,11 @@ pub fn build_wake_message(
     if !events.is_empty() {
         msg.push_str("\n## Relevant memories\n");
         for event in events.iter().take(MAX_SIMILAR_EVENTS) {
-            msg.push_str(&format!("- [{}] {}\n", format_relative_time(event.ts), event.summary));
+            msg.push_str(&format!(
+                "- [{}] {}\n",
+                format_relative_time(event.ts),
+                event.summary
+            ));
         }
     }
 
@@ -66,7 +73,11 @@ pub fn build_wake_message(
     if !facts.is_empty() {
         msg.push_str("\n## What you know about the user\n");
         for fact in facts.iter().take(MAX_FACTS) {
-            msg.push_str(&format!("- {}: {}\n", format_fact_key(&fact.key), &fact.value));
+            msg.push_str(&format!(
+                "- {}: {}\n",
+                format_fact_key(&fact.key),
+                &fact.value
+            ));
         }
     }
 
@@ -212,17 +223,15 @@ mod tests {
 
     fn test_memory_context() -> MemoryContext {
         MemoryContext {
-            similar_events: vec![
-                EpisodicEvent {
-                    id: Uuid::new_v4().to_string(),
-                    ts: Utc::now() - Duration::hours(2),
-                    kind: EventKind::Remember,
-                    summary: "User was debugging triage JSON parsing".to_string(),
-                    importance: 0.8,
-                    tags: vec!["debugging".to_string()],
-                    source_frame_id: None,
-                },
-            ],
+            similar_events: vec![EpisodicEvent {
+                id: Uuid::new_v4().to_string(),
+                ts: Utc::now() - Duration::hours(2),
+                kind: EventKind::Remember,
+                summary: "User was debugging triage JSON parsing".to_string(),
+                importance: 0.8,
+                tags: vec!["debugging".to_string()],
+                source_frame_id: None,
+            }],
             relevant_facts: vec![
                 Fact {
                     key: "user.name".to_string(),
@@ -297,7 +306,10 @@ mod tests {
     fn test_format_fact_key() {
         assert_eq!(format_fact_key("user.name"), "Name");
         assert_eq!(format_fact_key("project.kairo.stack"), "kairo stack");
-        assert_eq!(format_fact_key("routine.morning_start"), "routine: morning_start");
+        assert_eq!(
+            format_fact_key("routine.morning_start"),
+            "routine: morning_start"
+        );
     }
 
     #[test]

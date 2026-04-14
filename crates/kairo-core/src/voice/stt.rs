@@ -56,8 +56,7 @@ impl VoiceSession {
     /// Returns true when enough text has arrived and the utterance appears done.
     pub fn is_endpoint(&self, endpoint_silence: Duration, min_chars: usize) -> bool {
         self.text.trim().chars().count() >= min_chars
-            && (self.last_update.elapsed() >= endpoint_silence
-                || looks_complete(&self.text))
+            && (self.last_update.elapsed() >= endpoint_silence || looks_complete(&self.text))
     }
 
     /// Returns true when this session has exceeded its configured maximum age.
@@ -195,22 +194,16 @@ mod tests {
     #[test]
     fn endpoint_detector_completes_semantic_question() {
         let session = VoiceSession::new("wat staat er op mijn planning", "nl");
-        let detector = SemanticEndpointDetector::new(
-            Duration::from_secs(10),
-            Duration::from_secs(30),
-            3,
-        );
+        let detector =
+            SemanticEndpointDetector::new(Duration::from_secs(10), Duration::from_secs(30), 3);
         assert_eq!(detector.decide(&session), EndpointDecision::Complete);
     }
 
     #[test]
     fn endpoint_detector_continues_incomplete_fragment() {
         let session = VoiceSession::new("maybe the", "en");
-        let detector = SemanticEndpointDetector::new(
-            Duration::from_secs(10),
-            Duration::from_secs(30),
-            3,
-        );
+        let detector =
+            SemanticEndpointDetector::new(Duration::from_secs(10), Duration::from_secs(30), 3);
         assert_eq!(detector.decide(&session), EndpointDecision::Continue);
     }
 }

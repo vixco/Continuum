@@ -4,6 +4,42 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+### Added — Phase 8 workers + skills
+
+- **Worker pool** (`crates/kairo-core/src/workers/pool.rs`): queue with priority ordering (user_requested > orchestrator_spawned > scheduled), concurrency cap (`max_concurrent`, default 3, max 10), failure-streak refusal, per-worker snapshot publishing, and dashboard/MCP/audit hooks. Cancellation signals propagate from queued and running workers; pool shutdown gracefully cancels everything.
+- **Worker supervisor** (`crates/kairo-core/src/workers/supervisor.rs`): spawns a fresh `claude --print --output-format stream-json` subprocess per worker, streams events (`SessionReady`, `TextDelta`, `ToolCall`, `Progress`, `Log`, `Finished`), enforces wall-clock timeouts with `tokio::time::timeout_at`, and returns a terminal `WorkerOutcome`. A dry-run mode (`KAIRO_WORKER_DRY_RUN=1`) synthesises a transcript for tests + the `worker_demo` example.
+- **Worker types** (`crates/kairo-core/src/workers/types.rs`): `WorkerSpec`, `WorkerSnapshot`, `WorkerPriority`, `WorkerModelTier`, `WorkerStatus`, `WorkerPoolStats`, `WorkerOutcome`. All serde + non-runtime-gated so the dashboard can read them without llama-cpp.
+- **Intent file protocol** (`crates/kairo-core/src/workers/intent.rs`): MCP writes JSON intents to `~/.kairo-dev/worker-intents/`; kairo-core drains, processes, and writes per-worker snapshots to `~/.kairo-dev/workers/<id>.json` atomically (`.tmp` + rename). Malformed intents are renamed to `.bad` so the loop never starves.
+- **Model selection heuristic** (`crates/kairo-core/src/workers/model_select.rs`): Auto mode picks Opus for refactor/architect/debug-complex/migration work and Sonnet for rename/format/summary/boilerplate; tie goes to Opus. Explicit `"power"`/`"budget"`/`"claude-*"` tiers override; config `mode = "budget"|"power"` beats everything. Every choice is logged with a one-line reason in the worker snapshot.
+- **Worker MCP tools** (`crates/kairo-mcp/src/tools/workers.rs`): `workers_spawn_worker`, `workers_worker_status`, `workers_worker_cancel`, `workers_worker_wait`, `workers_worker_list` — all registered in `KairoMcpServer` under the `mcp__kairo__workers_*` namespace, with full audit coverage.
+- **Skills module** (`crates/kairo-core/src/skills/`):
+  - `frontmatter.rs`: hand-rolled YAML parser for the narrow skill frontmatter (`name`, `description`, `triggers`, `source`, `manual_only`), tolerant of CRLF, inline and list trigger styles, unknown keys.
+  - `loader.rs`: `SkillLoader` scans `skills/`, parses each `SKILL.md`, caches by name, hot-reloads on `mtime` change, surfaces parse errors for the dashboard.
+  - `matcher.rs`: `SkillMatcher` scores skills by trigger substring hits against a `MatchContext` (wake reason, task, project, audio, foreground app, tags, forced). Multi-match with a token budget; forced skills bypass the budget and rank first.
+  - `installer.rs`: `create_skill`, `save_skill`, `delete_skill` with name validation (`[a-zA-Z0-9_-]`) and safe frontmatter serialisation.
+- **Bundled skills**: replaced placeholders with five real skills — `daily-briefing`, `code-review`, `project-context`, `email-draft`, `file-organizer`. Each has concrete procedure, output format, and refusal rules.
+- **Orchestrator prompt injection** (`crates/kairo-core/src/bin/kairo.rs::compose_wake_config`): on each wake, matched skills are appended to the static orchestrator prompt and written to `~/.kairo-dev/orchestrator-dynamic.md`, which the spawned claude process receives via `--append-system-prompt-file`.
+- **Worker prompt injection**: the pool materialises `<data_dir>/worker-prompts/<id>.md` per worker, combining `prompts/worker-system.md` + task-matched skill content, before launching the supervisor.
+- **Triage suggested_skill hint**: `TriageDecision::WakeOrchestrator` grew an optional `suggested_skill` field (serde-skipped when absent, GBNF grammar updated); triage prompt lists available skill names and instructs the layer to tag wakes when a skill clearly applies.
+- **Audit trail**: pool event + finish sinks write to episodic memory — per tool-call events tagged `worker` + `worker:<id>` + tool name (importance 0.4), per terminal-state summary events tagged with the task, skills, and outcome (importance 0.5 completed / 0.7 failed).
+- **Dashboard**:
+  - Tools tab: real skill CRUD — list with source badges, enable/disable toggle persisted to `skills.disabled`, create/edit modal with Markdown body, delete with confirmation, install-from-URL via `git clone --depth 1` + validation.
+  - Home tab: live workers panel polling `list_workers` every 750 ms, status dots, progress bars, cost readout, click-through detail modal with full live output + model-choice reason + cancel/dismiss actions.
+- **Health probes**: new `workers` and `skills` components registered in `components.rs`. `workers` surfaces recent failures and flags 3+ failures in 10 minutes as error. `skills` fails when any `SKILL.md` fails to parse and degrades when zero skills are loaded.
+- **Examples**: `examples/worker_demo.rs` (end-to-end dry-run spawn + wait + report) and `examples/skill_match_demo.rs` (load skills + print matches for a wake reason given as CLI arg).
+- **Tests**: 27 skills unit tests + 21 workers unit tests + 6 MCP workers-tool tests + 8 skills integration tests + 5 workers integration tests (intent → snapshot e2e, cancel of queued worker, priority ordering, failure-streak probe, spawn latency).
+- **Docs**: `docs/workers.md`, `docs/skills.md`, Phase 8 section appended to `docs/mcp-tools.md`, roadmap Phase 8 box ticked.
+
+### Changed — Phase 8
+- `KairoConfig` grew `workers: WorkersConfig` and `skills: SkillsConfig` blocks; defaults wired through `default-models.toml`-compatible TOML.
+- `TriageDecision::WakeOrchestrator` gains `suggested_skill: Option<String>` (serde-skipped when None — backwards-compatible on the wire).
+- `prompts/triage-grammar.gbnf`: `wake_tail` production allows the optional `suggested_skill` field.
+- `prompts/orchestrator-system.md`: added Workers + Skills sections with spawn rules and best practices.
+- `prompts/triage-system.md`: lists the five bundled skill names with example triggers so triage can suggest them.
+- `prompts/worker-system.md` (new): base worker behaviour prompt — one-task scope, narrow tools, structured report format.
+- `crates/kairo-core/src/lib.rs`: `workers` and `skills` are now always-on modules; pool + supervisor + model_select remain gated on `runtime` so the Tauri build stays light.
+- `apps/desktop/src-tauri/src/commands.rs`: added 9 new Tauri commands (`list_skills`, `save_skill`, `delete_skill`, `toggle_skill`, `install_skill_from_url`, `list_workers`, `get_worker`, `cancel_worker`, `dismiss_worker`).
+
 ### Added — Phase 6 dashboard + self-healing
 - **Runtime state store**: `crates/kairo-core/src/state.rs` — single `KairoState` snapshot of perception, triage, orchestrator, workers, voice, memory, health, system, plus a 50-entry recent-actions ring. Typed update helpers on `StateHandle` publish to a tokio broadcast channel; the dashboard subscribes and re-emits coalesced snapshots to the frontend over Tauri's `emit`.
 - **Log ring buffer**: `crates/kairo-core/src/logs.rs` — `BufferLayer` is a `tracing::Layer` that captures every event into a 10 000-entry ring and a tokio broadcast channel. Exposes `LogFilter` (level / layer / component / text / since) and a live subscribe API. The Logs tab reads from it; the Repair agent includes the last 500 lines in its context.

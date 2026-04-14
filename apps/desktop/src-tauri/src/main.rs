@@ -45,7 +45,11 @@ fn main() {
 
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().compact().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_target(false),
+        )
         .with(log_layer)
         .try_init();
 
@@ -136,6 +140,15 @@ fn main() {
             commands::set_paused,
             commands::set_voice_muted,
             commands::quit_app,
+            commands::list_skills,
+            commands::save_skill,
+            commands::delete_skill,
+            commands::toggle_skill,
+            commands::install_skill_from_url,
+            commands::list_workers,
+            commands::get_worker,
+            commands::cancel_worker,
+            commands::dismiss_worker,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

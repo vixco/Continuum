@@ -51,6 +51,11 @@ pub enum TriageDecision {
     WakeOrchestrator {
         /// Why the orchestrator should wake up.
         reason: String,
+        /// Optional hint naming a Kairo skill that probably applies
+        /// (e.g. `"code-review"`). The orchestrator treats it as advisory —
+        /// the real match still happens from the skill loader's triggers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggested_skill: Option<String>,
     },
 }
 
@@ -91,14 +96,16 @@ impl TriageDecision {
             Self::Remember { summary } => Self::Remember {
                 summary: trunc(summary),
             },
-            Self::Whisper { text } => Self::Whisper {
-                text: trunc(text),
-            },
+            Self::Whisper { text } => Self::Whisper { text: trunc(text) },
             Self::ExecuteSimple { action } => Self::ExecuteSimple {
                 action: trunc(action),
             },
-            Self::WakeOrchestrator { reason } => Self::WakeOrchestrator {
+            Self::WakeOrchestrator {
+                reason,
+                suggested_skill,
+            } => Self::WakeOrchestrator {
                 reason: trunc(reason),
+                suggested_skill: suggested_skill.map(trunc),
             },
         }
     }
@@ -121,7 +128,13 @@ impl std::fmt::Display for TriageDecision {
             Self::Remember { summary } => write!(f, "remember: {summary}"),
             Self::Whisper { text } => write!(f, "whisper: {text}"),
             Self::ExecuteSimple { action } => write!(f, "execute_simple: {action}"),
-            Self::WakeOrchestrator { reason } => write!(f, "wake_orchestrator: {reason}"),
+            Self::WakeOrchestrator {
+                reason,
+                suggested_skill,
+            } => match suggested_skill {
+                Some(s) => write!(f, "wake_orchestrator[{s}]: {reason}"),
+                None => write!(f, "wake_orchestrator: {reason}"),
+            },
         }
     }
 }
@@ -212,7 +225,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_think_with_json_inside() {
-        let raw = "<think>\n{\"inner\":true}\n</think>\n{\"decision\":\"remember\",\"summary\":\"test\"}";
+        let raw =
+            "<think>\n{\"inner\":true}\n</think>\n{\"decision\":\"remember\",\"summary\":\"test\"}";
         assert_eq!(
             extract_json_object(raw),
             r#"{"decision":"remember","summary":"test"}"#
@@ -233,10 +247,9 @@ mod tests {
 
     #[test]
     fn test_parse_remember() {
-        let d = TriageDecision::from_json(
-            r#"{"decision":"remember","summary":"user opened VS Code"}"#,
-        )
-        .unwrap();
+        let d =
+            TriageDecision::from_json(r#"{"decision":"remember","summary":"user opened VS Code"}"#)
+                .unwrap();
         assert!(matches!(d, TriageDecision::Remember { .. }));
         if let TriageDecision::Remember { summary } = d {
             assert_eq!(summary, "user opened VS Code");
@@ -293,10 +306,8 @@ mod tests {
     #[test]
     fn test_parse_extra_keys_accepted() {
         // serde by default ignores extra keys
-        let d = TriageDecision::from_json(
-            r#"{"decision":"ignore","extra":"field","another":42}"#,
-        )
-        .unwrap();
+        let d = TriageDecision::from_json(r#"{"decision":"ignore","extra":"field","another":42}"#)
+            .unwrap();
         assert_eq!(d, TriageDecision::Ignore);
     }
 
@@ -345,7 +356,8 @@ mod tests {
         assert_eq!(TriageDecision::Ignore.variant_name(), "ignore");
         assert_eq!(
             TriageDecision::WakeOrchestrator {
-                reason: "test".to_string()
+                reason: "test".to_string(),
+                suggested_skill: None,
             }
             .variant_name(),
             "wake_orchestrator"
@@ -370,6 +382,7 @@ mod tests {
     fn test_roundtrip_serialize_deserialize() {
         let original = TriageDecision::WakeOrchestrator {
             reason: "error detected".to_string(),
+            suggested_skill: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: TriageDecision = serde_json::from_str(&json).unwrap();

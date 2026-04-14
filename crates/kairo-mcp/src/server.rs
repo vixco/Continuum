@@ -45,6 +45,9 @@ use crate::tools::repair::{
 };
 use crate::tools::system::{self as systool, NotificationRequest};
 use crate::tools::web::WebFetchRequest;
+use crate::tools::workers::{
+    self as workertool, SpawnWorkerRequest, WorkerIdRequest, WorkerListRequest, WorkerWaitRequest,
+};
 
 /// Shared server state. Held inside an `Arc` so the handler can derive `Clone`
 /// cheaply.
@@ -504,6 +507,86 @@ impl KairoMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("repair_escalate", &req, || async {
             repairtool::escalate(&self.state.data_dir, &req.message)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Worker tools (Phase 8). Every call writes an intent file that the
+    // running kairo runtime picks up. The runtime's WorkerPool publishes
+    // per-worker snapshots this server reads back for status / wait / list.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Spawn a new Claude Code worker. Hands the runtime a spawn intent and returns the worker id immediately; poll worker_status (or block with worker_wait) for the result. `cwd` must be an absolute path the worker should run in. `model` accepts \"auto\" (default), \"budget\" (Sonnet), \"power\" (Opus), or an explicit \"claude-*\" id. Workers cannot spawn other workers via MCP — use Claude Code's built-in Task tool if sub-agents are needed."
+    )]
+    async fn workers_spawn_worker(
+        &self,
+        Parameters(req): Parameters<SpawnWorkerRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let req_clone = req.clone();
+        self.run_tool("workers_spawn_worker", &req, || async {
+            workertool::spawn(&self.state.data_dir, req_clone)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Return the current snapshot for a worker (status, elapsed_ms, progress, last_line, result on completion). Status is one of queued|starting|running|completed|failed|cancelled|timed_out|pending (pending = the runtime hasn't processed the spawn intent yet)."
+    )]
+    async fn workers_worker_status(
+        &self,
+        Parameters(req): Parameters<WorkerIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("workers_worker_status", &req, || async {
+            workertool::status(&self.state.data_dir, &req.worker_id)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cancel a running or queued worker. Always returns immediately with the latest snapshot. The runtime may take up to one tick to kill the claude subprocess."
+    )]
+    async fn workers_worker_cancel(
+        &self,
+        Parameters(req): Parameters<WorkerIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("workers_worker_cancel", &req, || async {
+            workertool::cancel(&self.state.data_dir, &req.worker_id)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Block until a worker reaches a terminal state (completed, failed, cancelled, timed_out). `timeout_secs` defaults to 60 and is clamped to [1, 300]. Returns the final snapshot either way — don't assume absence of error means success; check `status`."
+    )]
+    async fn workers_worker_wait(
+        &self,
+        Parameters(req): Parameters<WorkerWaitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("workers_worker_wait", &req, || async {
+            let timeout = req.timeout_secs.unwrap_or(60);
+            workertool::wait(&self.state.data_dir, &req.worker_id, timeout)
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List recent worker snapshots. Optional `status` filter (queued|starting|running|completed|failed|cancelled|timed_out). `limit` is clamped to 100."
+    )]
+    async fn workers_worker_list(
+        &self,
+        Parameters(req): Parameters<WorkerListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let req_clone = req.clone();
+        self.run_tool("workers_worker_list", &req, || async {
+            workertool::list(&self.state.data_dir, req_clone)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
         })
         .await

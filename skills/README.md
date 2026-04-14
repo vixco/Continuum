@@ -31,10 +31,23 @@ Instructions for the orchestrator when this skill is active...
 
 ## Bundled skills
 
-- `daily-briefing/` — Generates a morning briefing from memory and calendar
-- `code-review/` — Reviews a codebase or pull request
-- `project-context/` — Loads project-specific context for development workflows
+- `daily-briefing/` — compact spoken morning briefing, < 60 seconds.
+- `code-review/` — structured review of a diff, PR, or file.
+- `project-context/` — tailors responses to a known project's stack and
+  recent history.
+- `email-draft/` — concise reply or new-message drafting with tone
+  matching.
+- `file-organizer/` — plan-then-apply folder tidying, never deletes.
 
 ## Adding skills
 
-Place a new directory under `skills/` with a `SKILL.md` file. Kairo will pick it up on the next restart. Skills can also be installed from the Tools tab in the dashboard.
+Drop a new `<name>/SKILL.md` under `skills/` and Kairo picks it up at
+the next reload (hot reload is on by default — see `SkillsConfig`).
+Skills can also be created, edited, or disabled from the dashboard
+Tools tab.
+
+## Source badge
+
+Each skill's frontmatter may include `source: bundled | user |
+third-party`. The dashboard renders the badge so operators know where
+a skill came from before trusting it.

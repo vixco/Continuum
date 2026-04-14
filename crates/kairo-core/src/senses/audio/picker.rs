@@ -132,10 +132,7 @@ pub fn save_config(config_path: &Path, pick: &DevicePick) -> Result<()> {
     let audio_table = audio
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("[audio] in config.toml is not a table"))?;
-    audio_table.insert(
-        "device_name".to_string(),
-        Value::String(pick.name.clone()),
-    );
+    audio_table.insert("device_name".to_string(), Value::String(pick.name.clone()));
     audio_table.insert(
         "device_index".to_string(),
         Value::Integer(pick.index as i64),
@@ -311,9 +308,8 @@ fn read_config_root(config_path: &Path) -> Result<toml::Table> {
 
 fn write_config_root(config_path: &Path, root: &toml::Table) -> Result<()> {
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create config parent dir {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create config parent dir {}", parent.display()))?;
     }
     let text = toml::to_string_pretty(root).context("Failed to serialize config.toml")?;
     std::fs::write(config_path, text)

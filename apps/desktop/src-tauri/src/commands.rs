@@ -14,7 +14,10 @@ use kairo_core::automations::{Automation, AutomationInput};
 use kairo_core::config::KairoConfig;
 use kairo_core::health::{self, repair::RepairInput};
 use kairo_core::logs::{LogEntry, LogFilter};
+use kairo_core::skills::{self, SkillFrontmatter, SkillLoader};
 use kairo_core::state::{ComponentHealth, KairoState};
+use kairo_core::workers::intent::{self as worker_intent};
+use kairo_core::workers::{WorkerIntent, WorkerSnapshot};
 
 use crate::AppState;
 
@@ -42,12 +45,7 @@ pub async fn update_voice_volume(
     let mute = app.runtime.is_voice_muted();
     app.runtime
         .state
-        .set_voice_config_snapshot(
-            cfg.voice.volume,
-            cfg.voice.wake_word_enabled,
-            mute,
-            None,
-        )
+        .set_voice_config_snapshot(cfg.voice.volume, cfg.voice.wake_word_enabled, mute, None)
         .await;
     Ok(cfg)
 }
@@ -136,9 +134,7 @@ pub struct MemorySummary {
 }
 
 #[tauri::command]
-pub async fn get_memory_summary(
-    app: State<'_, Arc<AppState>>,
-) -> Result<MemorySummary, String> {
+pub async fn get_memory_summary(app: State<'_, Arc<AppState>>) -> Result<MemorySummary, String> {
     let snap = app.runtime.state.snapshot().await;
     Ok(MemorySummary {
         raw_log_rows: snap.memory.raw_log_rows,
@@ -161,10 +157,7 @@ pub async fn search_episodic(
 }
 
 #[tauri::command]
-pub async fn delete_episodic(
-    _app: State<'_, Arc<AppState>>,
-    _id: String,
-) -> Result<(), String> {
+pub async fn delete_episodic(_app: State<'_, Arc<AppState>>, _id: String) -> Result<(), String> {
     Ok(())
 }
 
@@ -178,9 +171,7 @@ pub struct SemanticFact {
 }
 
 #[tauri::command]
-pub async fn list_semantic(
-    _app: State<'_, Arc<AppState>>,
-) -> Result<Vec<SemanticFact>, String> {
+pub async fn list_semantic(_app: State<'_, Arc<AppState>>) -> Result<Vec<SemanticFact>, String> {
     Ok(Vec::new())
 }
 
@@ -194,18 +185,12 @@ pub async fn set_semantic(
 }
 
 #[tauri::command]
-pub async fn delete_semantic(
-    _app: State<'_, Arc<AppState>>,
-    _key: String,
-) -> Result<(), String> {
+pub async fn delete_semantic(_app: State<'_, Arc<AppState>>, _key: String) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub async fn wipe_memory(
-    app: State<'_, Arc<AppState>>,
-    confirm: String,
-) -> Result<(), String> {
+pub async fn wipe_memory(app: State<'_, Arc<AppState>>, confirm: String) -> Result<(), String> {
     if confirm != "DELETE" {
         return Err("wipe requires the literal string \"DELETE\" as confirmation".into());
     }
@@ -224,9 +209,7 @@ pub async fn wipe_memory(
 // --- Automations ---
 
 #[tauri::command]
-pub async fn list_automations(
-    app: State<'_, Arc<AppState>>,
-) -> Result<Vec<Automation>, String> {
+pub async fn list_automations(app: State<'_, Arc<AppState>>) -> Result<Vec<Automation>, String> {
     Ok(app.runtime.automations.list())
 }
 
@@ -254,10 +237,7 @@ pub async fn update_automation(
 }
 
 #[tauri::command]
-pub async fn delete_automation(
-    app: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_automation(app: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     app.runtime
         .automations
         .delete(&id)
@@ -279,9 +259,7 @@ pub async fn toggle_automation(
 // --- Health + repair ---
 
 #[tauri::command]
-pub async fn get_health(
-    app: State<'_, Arc<AppState>>,
-) -> Result<Vec<ComponentHealth>, String> {
+pub async fn get_health(app: State<'_, Arc<AppState>>) -> Result<Vec<ComponentHealth>, String> {
     Ok(app.health.run_all().await)
 }
 
@@ -363,10 +341,7 @@ pub async fn run_backup_now(app: State<'_, Arc<AppState>>) -> Result<String, Str
 }
 
 #[tauri::command]
-pub async fn rollback_config(
-    app: State<'_, Arc<AppState>>,
-    date: String,
-) -> Result<(), String> {
+pub async fn rollback_config(app: State<'_, Arc<AppState>>, date: String) -> Result<(), String> {
     let dev_dir = app.runtime.dev_dir();
     let backups_dir = dev_dir
         .parent()
@@ -380,19 +355,13 @@ pub async fn rollback_config(
 // --- Runtime control ---
 
 #[tauri::command]
-pub async fn set_paused(
-    app: State<'_, Arc<AppState>>,
-    paused: bool,
-) -> Result<(), String> {
+pub async fn set_paused(app: State<'_, Arc<AppState>>, paused: bool) -> Result<(), String> {
     app.runtime.set_paused(paused).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_voice_muted(
-    app: State<'_, Arc<AppState>>,
-    muted: bool,
-) -> Result<(), String> {
+pub async fn set_voice_muted(app: State<'_, Arc<AppState>>, muted: bool) -> Result<(), String> {
     app.runtime.set_voice_muted(muted).await;
     Ok(())
 }
@@ -401,4 +370,208 @@ pub async fn set_voice_muted(
 pub async fn quit_app(app_handle: AppHandle) -> Result<(), String> {
     app_handle.exit(0);
     Ok(())
+}
+
+// --- Phase 8: Skills ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkillView {
+    pub name: String,
+    pub description: String,
+    pub triggers: Vec<String>,
+    pub source: Option<String>,
+    pub manual_only: bool,
+    pub enabled: bool,
+    pub body: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveSkillInput {
+    pub name: String,
+    pub description: String,
+    pub triggers: Vec<String>,
+    pub body: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub manual_only: bool,
+}
+
+fn skills_root(app: &AppState) -> std::path::PathBuf {
+    let cfg = app.runtime.config_snapshot();
+    let p = std::path::PathBuf::from(&cfg.skills.dir);
+    if p.is_absolute() {
+        return p;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(&cfg.skills.dir);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    app.runtime.dev_dir().join(&cfg.skills.dir)
+}
+
+#[tauri::command]
+pub async fn list_skills(app: State<'_, Arc<AppState>>) -> Result<Vec<SkillView>, String> {
+    let root = skills_root(&app);
+    let loader = SkillLoader::new(&root);
+    let cfg = app.runtime.config_snapshot();
+    loader.set_disabled(cfg.skills.disabled.clone());
+    loader.reload().map_err(|e| e.to_string())?;
+    let out: Vec<SkillView> = loader
+        .list()
+        .into_iter()
+        .map(|s| SkillView {
+            name: s.frontmatter.name,
+            description: s.frontmatter.description,
+            triggers: s.frontmatter.triggers,
+            source: s.frontmatter.source,
+            manual_only: s.frontmatter.manual_only,
+            enabled: s.enabled,
+            body: s.body,
+            path: s.path.display().to_string(),
+        })
+        .collect();
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn save_skill(
+    app: State<'_, Arc<AppState>>,
+    input: SaveSkillInput,
+) -> Result<SkillView, String> {
+    let root = skills_root(&app);
+    let fm = SkillFrontmatter {
+        name: input.name,
+        description: input.description,
+        triggers: input.triggers,
+        source: input.source,
+        manual_only: input.manual_only,
+    };
+    let skill = skills::save_skill(&root, fm, &input.body).map_err(|e| e.to_string())?;
+    Ok(SkillView {
+        name: skill.frontmatter.name,
+        description: skill.frontmatter.description,
+        triggers: skill.frontmatter.triggers,
+        source: skill.frontmatter.source,
+        manual_only: skill.frontmatter.manual_only,
+        enabled: skill.enabled,
+        body: skill.body,
+        path: skill.path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn delete_skill(app: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
+    let root = skills_root(&app);
+    skills::delete_skill(&root, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_skill(
+    app: State<'_, Arc<AppState>>,
+    name: String,
+    enabled: bool,
+) -> Result<KairoConfig, String> {
+    app.runtime
+        .update_config(|c| {
+            let already = c.skills.disabled.iter().any(|d| d == &name);
+            if enabled && already {
+                c.skills.disabled.retain(|d| d != &name);
+            } else if !enabled && !already {
+                c.skills.disabled.push(name.clone());
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Rudimentary git-URL installer: runs `git clone --depth 1 <url>` into
+/// a temp dir, validates the SKILL.md, and copies the directory into the
+/// skills root. Requires `git` on PATH.
+#[tauri::command]
+pub async fn install_skill_from_url(
+    app: State<'_, Arc<AppState>>,
+    url: String,
+) -> Result<SkillView, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL must not be empty".into());
+    }
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("git@") {
+        return Err("Only https:// or git@ URLs are allowed".into());
+    }
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let clone_target = tmp.path().join("skill");
+    let status = std::process::Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(trimmed)
+        .arg(&clone_target)
+        .status()
+        .map_err(|e| format!("failed to invoke git: {e}"))?;
+    if !status.success() {
+        return Err("git clone exited with a non-zero status".into());
+    }
+    let skill_md = clone_target.join("SKILL.md");
+    if !skill_md.exists() {
+        return Err("cloned repo does not contain a SKILL.md at its root".into());
+    }
+    let parsed = skills::parse_skill_file(&skill_md).map_err(|e| e.to_string())?;
+    let fm = SkillFrontmatter {
+        source: Some("third-party".into()),
+        ..parsed.frontmatter
+    };
+    let root = skills_root(&app);
+    let skill = skills::save_skill(&root, fm, &parsed.body).map_err(|e| e.to_string())?;
+    Ok(SkillView {
+        name: skill.frontmatter.name,
+        description: skill.frontmatter.description,
+        triggers: skill.frontmatter.triggers,
+        source: skill.frontmatter.source,
+        manual_only: skill.frontmatter.manual_only,
+        enabled: skill.enabled,
+        body: skill.body,
+        path: skill.path.display().to_string(),
+    })
+}
+
+// --- Phase 8: Workers ---
+
+#[tauri::command]
+pub async fn list_workers(
+    app: State<'_, Arc<AppState>>,
+    limit: Option<u32>,
+) -> Result<Vec<WorkerSnapshot>, String> {
+    let dev = app.runtime.dev_dir();
+    let mut items = worker_intent::list_snapshots(&dev).map_err(|e| e.to_string())?;
+    if let Some(l) = limit {
+        items.truncate(l as usize);
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+pub async fn get_worker(
+    app: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Option<WorkerSnapshot>, String> {
+    let dev = app.runtime.dev_dir();
+    worker_intent::read_snapshot(&dev, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_worker(app: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let dev = app.runtime.dev_dir();
+    worker_intent::write_intent(&dev, &WorkerIntent::Cancel { id })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn dismiss_worker(app: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let dev = app.runtime.dev_dir();
+    worker_intent::delete_snapshot(&dev, &id).map_err(|e| e.to_string())
 }

@@ -231,21 +231,25 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 **Deliverable:** Complex multi-step workflows work end-to-end. Example: "Kairo, fix the small bugs in my GitHub repo tonight" spawns a worker that reads issues, creates branches, writes commits, and reports back with a briefing.
 
+**Status:** Complete (2026-04-14). Tagged `v0.5.0-phase8`.
+
 **Done when:**
 
-- [ ] Worker pool in `crates/kairo-core/src/workers/pool.rs` manages concurrency
-- [ ] Workers are spawned via `mcp__kairo__workers__spawn_worker` called by the orchestrator
-- [ ] Each worker runs in its own working directory with its own session id
-- [ ] Worker model selection honors user's budget/power/auto setting
-- [ ] Workers report progress via a status file that the MCP server watches
-- [ ] Worker output streams to the Home tab's active workers panel
-- [ ] Workers can spawn sub-workers via Claude Code's built-in Task tool
-- [ ] Skills directory (`skills/`) is loaded at startup
-- [ ] Orchestrator prompt includes a list of available skills
-- [ ] Three starter skills are implemented:
-  - [ ] `skills/daily-briefing/` — generates a morning briefing from memory + calendar
-  - [ ] `skills/simcharts-dev/` — personalized dev workflow for the SimCharts project
-  - [ ] `skills/code-review/` — reviews a codebase or PR
+- [x] Worker pool in `crates/kairo-core/src/workers/pool.rs` manages concurrency
+- [x] Workers are spawned via `mcp__kairo__workers_spawn_worker` called by the orchestrator
+- [x] Each worker runs in its own working directory with its own session id
+- [x] Worker model selection honors user's budget/power/auto setting
+- [x] Workers report progress via a status file that the MCP server watches
+- [x] Worker output streams to the Home tab's active workers panel
+- [x] Workers can spawn sub-workers via Claude Code's built-in Task tool (MCP `workers_*` excluded from default worker allowlist)
+- [x] Skills directory (`skills/`) is loaded at startup with hot reload
+- [x] Orchestrator prompt includes dynamic skill content at wake time
+- [x] Five starter skills are implemented:
+  - [x] `skills/daily-briefing/` — spoken morning briefing from memory + overnight worker activity
+  - [x] `skills/code-review/` — structured review of a diff / PR / file
+  - [x] `skills/project-context/` — loads project-specific facts + recent episodic history
+  - [x] `skills/email-draft/` — concise reply / new-message drafts matched to recipient tone
+  - [x] `skills/file-organizer/` — plan-then-apply folder tidying, never deletes
 
 **Why this matters:** Workers are how Kairo does long-running work without blocking the orchestrator. This is also where skills earn their keep.
 
@@ -306,4 +310,4 @@ These are not roadmap items — they are possibilities for after the alpha stabi
 - **Tag milestones.** After each phase, tag a pre-release: `v0.0.1-phase0`, `v0.0.2-phase1`, etc. This makes rollback easier.
 - **Track progress in this file.** When a checkbox gets checked, check it here too and commit the update.
 
-Last updated: 2026-04-14. Phase 6 (+ Phase 7 merged) tagged `v0.4.0-phase6`.
+Last updated: 2026-04-14. Phase 6 (+ Phase 7 merged) tagged `v0.4.0-phase6`. Phase 8 tagged `v0.5.0-phase8`.

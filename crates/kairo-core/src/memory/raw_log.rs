@@ -104,18 +104,12 @@ impl RawLog {
         self.ensure_optional_column("perception_frames", "memory_distilled_at", "TEXT")
             .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_frames_ts ON perception_frames(ts)",
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create timestamp index")?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_frames_ts ON perception_frames(ts)")
+            .execute(&self.pool)
+            .await
+            .context("Failed to create timestamp index")?;
 
-        debug!(
-            layer = "senses",
-            component = "raw_log",
-            "Schema verified"
-        );
+        debug!(layer = "senses", component = "raw_log", "Schema verified");
 
         Ok(())
     }
@@ -136,10 +130,12 @@ impl RawLog {
             .any(|row| row.get::<String, _>("name") == column);
 
         if !exists {
-            sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))
-                .execute(&self.pool)
-                .await
-                .with_context(|| format!("Failed to add {column} to {table}"))?;
+            sqlx::query(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Failed to add {column} to {table}"))?;
             info!(
                 layer = "memory",
                 component = "raw_log",
@@ -262,12 +258,8 @@ impl RawLog {
                     language: row
                         .get::<Option<String>, _>("audio_language")
                         .unwrap_or_default(),
-                    duration_ms: row
-                        .get::<Option<i64>, _>("audio_duration_ms")
-                        .unwrap_or(0) as u64,
-                    confidence: row
-                        .get::<Option<f64>, _>("audio_confidence")
-                        .unwrap_or(0.0) as f32,
+                    duration_ms: row.get::<Option<i64>, _>("audio_duration_ms").unwrap_or(0) as u64,
+                    confidence: row.get::<Option<f64>, _>("audio_confidence").unwrap_or(0.0) as f32,
                     ts,
                 })
             };
@@ -282,9 +274,7 @@ impl RawLog {
                     foreground_app: row
                         .get::<Option<String>, _>("screen_foreground_app")
                         .unwrap_or_default(),
-                    has_error_visible: row
-                        .get::<Option<i32>, _>("screen_has_error")
-                        .unwrap_or(0)
+                    has_error_visible: row.get::<Option<i32>, _>("screen_has_error").unwrap_or(0)
                         != 0,
                     confidence: row
                         .get::<Option<f64>, _>("screen_confidence")
@@ -303,15 +293,10 @@ impl RawLog {
                     idle_seconds: row
                         .get::<Option<i64>, _>("context_idle_seconds")
                         .unwrap_or(0) as u64,
-                    in_call: row
-                        .get::<Option<i32>, _>("context_in_call")
-                        .unwrap_or(0)
-                        != 0,
+                    in_call: row.get::<Option<i32>, _>("context_in_call").unwrap_or(0) != 0,
                     ts,
                 },
-                salience_hint: row
-                    .get::<Option<f64>, _>("salience")
-                    .unwrap_or(0.0) as f32,
+                salience_hint: row.get::<Option<f64>, _>("salience").unwrap_or(0.0) as f32,
             });
         }
 
@@ -375,14 +360,13 @@ impl RawLog {
         let now = Utc::now().to_rfc3339();
         let mut affected = 0;
         for id in frame_ids {
-            let result = sqlx::query(
-                "UPDATE perception_frames SET memory_distilled_at = ?1 WHERE id = ?2",
-            )
-            .bind(&now)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .context("Failed to mark frame distilled")?;
+            let result =
+                sqlx::query("UPDATE perception_frames SET memory_distilled_at = ?1 WHERE id = ?2")
+                    .bind(&now)
+                    .bind(id.to_string())
+                    .execute(&self.pool)
+                    .await
+                    .context("Failed to mark frame distilled")?;
             affected += result.rows_affected();
         }
 
@@ -484,12 +468,8 @@ fn row_to_frame(row: &sqlx::sqlite::SqliteRow) -> PerceptionFrame {
             language: row
                 .get::<Option<String>, _>("audio_language")
                 .unwrap_or_default(),
-            duration_ms: row
-                .get::<Option<i64>, _>("audio_duration_ms")
-                .unwrap_or(0) as u64,
-            confidence: row
-                .get::<Option<f64>, _>("audio_confidence")
-                .unwrap_or(0.0) as f32,
+            duration_ms: row.get::<Option<i64>, _>("audio_duration_ms").unwrap_or(0) as u64,
+            confidence: row.get::<Option<f64>, _>("audio_confidence").unwrap_or(0.0) as f32,
             ts,
         })
     };
@@ -504,10 +484,7 @@ fn row_to_frame(row: &sqlx::sqlite::SqliteRow) -> PerceptionFrame {
             foreground_app: row
                 .get::<Option<String>, _>("screen_foreground_app")
                 .unwrap_or_default(),
-            has_error_visible: row
-                .get::<Option<i32>, _>("screen_has_error")
-                .unwrap_or(0)
-                != 0,
+            has_error_visible: row.get::<Option<i32>, _>("screen_has_error").unwrap_or(0) != 0,
             confidence: row
                 .get::<Option<f64>, _>("screen_confidence")
                 .unwrap_or(0.0) as f32,

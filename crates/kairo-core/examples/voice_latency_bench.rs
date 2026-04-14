@@ -71,9 +71,7 @@ fn load_voice_bank(
         loaded.insert(lang.clone(), engine);
     }
     if loaded.is_empty() {
-        anyhow::bail!(
-            "No Piper voices installed. Run: powershell scripts/download-models.ps1"
-        );
+        anyhow::bail!("No Piper voices installed. Run: powershell scripts/download-models.ps1");
     }
     PiperVoiceBank::new(primary.to_string(), loaded)
 }
@@ -171,7 +169,10 @@ fn main() -> Result<()> {
         let decision = endpoint.decide(&session);
         endpoint_ms.push(ep_start.elapsed().as_micros() / 1000);
         assert!(
-            matches!(decision, EndpointDecision::Complete | EndpointDecision::Continue),
+            matches!(
+                decision,
+                EndpointDecision::Complete | EndpointDecision::Continue
+            ),
             "unexpected endpoint decision: {decision:?}"
         );
 

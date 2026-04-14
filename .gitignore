@@ -10,6 +10,7 @@ out/
 dist/
 .DS_Store
 next-env.d.ts
+tsconfig.tsbuildinfo
 
 # Tauri
 apps/desktop/src-tauri/target/

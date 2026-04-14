@@ -11,3 +11,4 @@ pub mod memory;
 pub mod repair;
 pub mod system;
 pub mod web;
+pub mod workers;

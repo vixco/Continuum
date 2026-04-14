@@ -50,6 +50,13 @@ pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
     registry.register(ContextCheck {
         state: state.clone(),
     });
+    registry.register(WorkersCheck {
+        dev_dir: dev_dir.clone(),
+    });
+    registry.register(SkillsCheck {
+        cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
+    });
 }
 
 async fn snap(state: &Arc<RwLock<StateHandle>>) -> kairo_core::state::KairoState {
@@ -141,10 +148,7 @@ impl HealthCheck for OrchestratorCheck {
             if age < 60 * 60 {
                 HealthResult::healthy(1)
             } else {
-                HealthResult::degrading(
-                    "orchestrator has not been woken in the last hour",
-                    1,
-                )
+                HealthResult::degrading("orchestrator has not been woken in the last hour", 1)
             }
         } else {
             HealthResult::degrading("orchestrator never woken", 1)
@@ -260,6 +264,106 @@ impl HealthCheck for McpCheck {
             HealthResult::healthy(1)
         } else {
             HealthResult::degrading("kairo-mcp binary not built yet", 1)
+        }
+    }
+}
+
+struct WorkersCheck {
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for WorkersCheck {
+    fn name(&self) -> &str {
+        "workers"
+    }
+    fn log_path(&self) -> Option<String> {
+        Some("~/.kairo-dev/logs/kairo.log".into())
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some("Check workers/*.json under the Kairo data dir; restart kairo runtime.".into())
+    }
+    async fn probe(&self) -> HealthResult {
+        let snaps = match kairo_core::workers::intent::list_snapshots(&self.dev_dir) {
+            Ok(s) => s,
+            Err(e) => return HealthResult::error(e.to_string(), 1),
+        };
+        let now = chrono::Utc::now();
+        let recent_window = chrono::Duration::minutes(10);
+        let recent_failed = snaps
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    kairo_core::workers::WorkerStatus::Failed
+                        | kairo_core::workers::WorkerStatus::TimedOut
+                )
+            })
+            .filter(|s| {
+                s.finished_at
+                    .map(|ts| now.signed_duration_since(ts) < recent_window)
+                    .unwrap_or(false)
+            })
+            .count();
+        if recent_failed >= 3 {
+            HealthResult::error(
+                format!("{recent_failed} workers failed in the last 10 minutes"),
+                1,
+            )
+        } else if recent_failed > 0 {
+            HealthResult::degrading(
+                format!("{recent_failed} worker failure(s) in the last 10 minutes"),
+                1,
+            )
+        } else {
+            HealthResult::healthy(1)
+        }
+    }
+}
+
+struct SkillsCheck {
+    cfg: Arc<KairoConfig>,
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for SkillsCheck {
+    fn name(&self) -> &str {
+        "skills"
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some("Fix or remove any SKILL.md that failed to parse. See logs.".into())
+    }
+    async fn probe(&self) -> HealthResult {
+        if !self.cfg.skills.enabled {
+            return HealthResult::healthy(1);
+        }
+        let root = std::path::PathBuf::from(&self.cfg.skills.dir);
+        let root = if root.is_absolute() {
+            root
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&self.cfg.skills.dir))
+                .ok()
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| self.dev_dir.join(&self.cfg.skills.dir))
+        };
+        let loader = kairo_core::skills::SkillLoader::new(&root);
+        if let Err(e) = loader.reload() {
+            return HealthResult::error(e.to_string(), 1);
+        }
+        let errors = loader.errors();
+        if !errors.is_empty() {
+            return HealthResult::error(
+                format!("{} skill file(s) failed to parse", errors.len()),
+                1,
+            );
+        }
+        let count = loader.list().len();
+        if count == 0 {
+            HealthResult::degrading("no skills loaded", 1)
+        } else {
+            HealthResult::healthy(1)
         }
     }
 }
