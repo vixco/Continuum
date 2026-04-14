@@ -42,10 +42,14 @@ use kairo_core::triage::handlers::handle_decision;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 use kairo_core::triage::TriageDecision;
 use kairo_core::voice::playback::PlaybackStream;
+use kairo_core::voice::sounds::{FeedbackCue, FeedbackPlayer};
 use kairo_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
 use kairo_core::voice::streaming::SpeechController;
-use kairo_core::voice::tts::{set_espeak_data_dir, PiperEngine, TtsEngine};
+use kairo_core::voice::tts::{set_espeak_data_dir, ElevenLabsEngine, PiperEngine, TtsEngine};
 use kairo_core::voice::wake::TranscriptWakeDetector;
+
+#[cfg(windows)]
+use kairo_core::voice::hotkey::spawn_hotkey_listener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -112,16 +116,16 @@ async fn main() -> Result<()> {
             .context("Failed to open episodic memory")?,
     ));
 
-    // --- TTS ---
-    let speech: Option<Arc<SpeechController>> = if no_tts {
+    // --- TTS + feedback ---
+    let (speech, feedback): (Option<Arc<SpeechController>>, FeedbackPlayer) = if no_tts {
         tracing::info!(
             layer = "voice",
             component = "kairo",
             "--no-tts: speech output disabled"
         );
-        None
+        (None, FeedbackPlayer::disabled())
     } else {
-        init_tts(&config)
+        init_tts_and_feedback(&config)
     };
 
     // --- Orchestrator config ---
@@ -287,12 +291,25 @@ async fn main() -> Result<()> {
         "All layers running. Press Ctrl+C to stop."
     );
 
+    // --- Hotkey (Windows only) ---
+    // Drop guard: _hotkey_handle must stay in scope for the listener thread
+    // to keep running. Dropping it at end of main unregisters the hotkey.
+    #[cfg(windows)]
+    let (_hotkey_handle, mut hotkey_rx) = match spawn_hotkey(&config) {
+        Some((handle, rx)) => (Some(handle), Some(rx)),
+        None => (None, None),
+    };
+    #[cfg(not(windows))]
+    let mut hotkey_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
+
     // --- Main loop ---
     let mut frame_count: u64 = 0;
     let mut recent_frames: Vec<PerceptionFrame> = Vec::new();
     let mut main_shutdown = shutdown_rx.clone();
     let wake_detector = TranscriptWakeDetector::new(config.voice.wake_keyword.clone());
     let mut voice_session: Option<VoiceSession> = None;
+    let mut followup_until: Option<Instant> = None;
+    let mut hotkey_pending: bool = false;
 
     loop {
         tokio::select! {
@@ -356,7 +373,10 @@ async fn main() -> Result<()> {
                     &config,
                     &wake_detector,
                     &mut voice_session,
+                    &mut followup_until,
+                    &mut hotkey_pending,
                     speech.as_ref(),
+                    &feedback,
                 );
 
                 // --force-wake: override triage on the first frame to test the pipeline.
@@ -384,7 +404,7 @@ async fn main() -> Result<()> {
                             } else {
                                 speech.as_ref()
                             };
-                            if let Err(e) = do_wake(
+                            match do_wake(
                                 &frame,
                                 &history,
                                 reason,
@@ -393,13 +413,35 @@ async fn main() -> Result<()> {
                                 &episodic,
                                 wake_speech,
                             ).await {
-                                tracing::error!(
-                                    layer = "orchestrator",
-                                    component = "kairo",
-                                    error = %e,
-                                    "Orchestrator wake failed"
-                                );
-                                println!("[ORCHESTRATOR ERROR: {e}]");
+                                Ok(()) => {
+                                    // Open the conversation follow-up window so the next
+                                    // user utterance can reach the orchestrator without a
+                                    // fresh wake phrase.
+                                    if config.voice.conversation_followup_seconds > 0 {
+                                        followup_until = Some(
+                                            Instant::now()
+                                                + Duration::from_secs(
+                                                    config.voice.conversation_followup_seconds,
+                                                ),
+                                        );
+                                        tracing::debug!(
+                                            layer = "voice",
+                                            component = "kairo",
+                                            seconds = config.voice.conversation_followup_seconds,
+                                            "Follow-up window open"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        layer = "orchestrator",
+                                        component = "kairo",
+                                        error = %e,
+                                        "Orchestrator wake failed"
+                                    );
+                                    println!("[ORCHESTRATOR ERROR: {e}]");
+                                    feedback.play(FeedbackCue::Error);
+                                }
                             }
                         }
                         TriageDecision::Whisper { text } => {
@@ -432,6 +474,15 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+            Some(()) = recv_hotkey(&mut hotkey_rx) => {
+                tracing::info!(
+                    layer = "voice",
+                    component = "hotkey",
+                    "Hotkey pressed — next transcript opens a session"
+                );
+                hotkey_pending = true;
+                feedback.play(FeedbackCue::Listen);
             }
             _ = main_shutdown.changed() => {
                 if *main_shutdown.borrow() {
@@ -614,13 +665,18 @@ async fn do_wake(
 }
 
 /// Updates the post-wake voice session and returns an explicit wake decision
-/// once the spoken command is complete.
+/// once the spoken command is complete. Also manages the conversation
+/// follow-up window and hotkey push-to-talk trigger.
+#[allow(clippy::too_many_arguments)]
 fn update_voice_session(
     frame: &PerceptionFrame,
     config: &KairoConfig,
     wake_detector: &TranscriptWakeDetector,
     voice_session: &mut Option<VoiceSession>,
+    followup_until: &mut Option<Instant>,
+    hotkey_pending: &mut bool,
     speech: Option<&Arc<SpeechController>>,
+    feedback: &FeedbackPlayer,
 ) -> Option<TriageDecision> {
     if !config.voice.enabled {
         return None;
@@ -643,9 +699,36 @@ fn update_voice_session(
         }
     }
 
+    // Expire the follow-up window before we check it.
+    let now = Instant::now();
+    let followup_active = followup_until.is_some_and(|deadline| now < deadline);
+    if !followup_active {
+        *followup_until = None;
+    }
+
     let mut consumed_by_wake = false;
     if voice_session.is_none() {
-        if config.voice.wake_word_enabled {
+        // Hotkey press → skip wake word on the next transcript.
+        if *hotkey_pending {
+            tracing::info!(
+                layer = "voice",
+                component = "hotkey",
+                "Starting voice session via hotkey"
+            );
+            *voice_session = Some(VoiceSession::new(transcript, &audio.language));
+            *hotkey_pending = false;
+            consumed_by_wake = true;
+        } else if followup_active {
+            tracing::info!(
+                layer = "voice",
+                component = "stt",
+                "Starting follow-up voice session without wake word"
+            );
+            *voice_session = Some(VoiceSession::new(transcript, &audio.language));
+            *followup_until = None;
+            feedback.play(FeedbackCue::Listen);
+            consumed_by_wake = true;
+        } else if config.voice.wake_word_enabled {
             if let Some(detection) = wake_detector.detect(transcript) {
                 tracing::info!(
                     layer = "voice",
@@ -658,10 +741,12 @@ fn update_voice_session(
                     &detection.utterance_after_wake,
                     &audio.language,
                 ));
+                feedback.play(FeedbackCue::Wake);
                 consumed_by_wake = true;
             }
         } else {
             *voice_session = Some(VoiceSession::new(transcript, &audio.language));
+            feedback.play(FeedbackCue::Listen);
             consumed_by_wake = true;
         }
     }
@@ -704,10 +789,64 @@ fn update_voice_session(
     None
 }
 
-/// Initialize the TTS pipeline. Returns `None` if TTS is disabled in config
-/// or if any required model file is missing — Kairo degrades to log-only
-/// mode for whisper decisions and orchestrator responses.
-fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
+/// Spawn the global hotkey listener if configured. Returns `None` when
+/// the config disables the hotkey (empty string) or registration fails
+/// (chord already owned by another app) — Kairo logs a warning and
+/// continues without push-to-talk.
+#[cfg(windows)]
+fn spawn_hotkey(
+    config: &KairoConfig,
+) -> Option<(
+    kairo_core::voice::hotkey::HotkeyHandle,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+)> {
+    let spec = config.voice.hotkey.trim();
+    if spec.is_empty() {
+        tracing::info!(
+            layer = "voice",
+            component = "hotkey",
+            "Hotkey disabled in config"
+        );
+        return None;
+    }
+    match spawn_hotkey_listener(spec) {
+        Ok((handle, rx)) => {
+            tracing::info!(
+                layer = "voice",
+                component = "hotkey",
+                spec = %spec,
+                "Hotkey listener started"
+            );
+            Some((handle, rx))
+        }
+        Err(e) => {
+            tracing::warn!(
+                layer = "voice",
+                component = "hotkey",
+                spec = %spec,
+                error = %e,
+                "Hotkey registration failed — push-to-talk disabled"
+            );
+            None
+        }
+    }
+}
+
+/// Poll an optional hotkey channel inside a `tokio::select!` arm. Returning
+/// `None` makes the select branch effectively pend forever, which is what
+/// we want when hotkey is disabled.
+async fn recv_hotkey(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Option<()> {
+    match rx.as_mut() {
+        Some(ch) => ch.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Initialize the TTS pipeline and feedback player together so they share
+/// a single [`PlaybackStream`] — one queue means TTS audio and UI cues
+/// naturally order behind each other. Returns a disabled [`FeedbackPlayer`]
+/// when the audio device is unavailable, so callers don't need to branch.
+fn init_tts_and_feedback(config: &KairoConfig) -> (Option<Arc<SpeechController>>, FeedbackPlayer) {
     let cfg = &config.tts;
     if !cfg.enabled {
         tracing::info!(
@@ -715,7 +854,7 @@ fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
             component = "kairo",
             "TTS disabled in config"
         );
-        return None;
+        return (None, FeedbackPlayer::disabled());
     }
 
     let espeak_dir = expand_home(&cfg.espeak_data_dir);
@@ -730,7 +869,7 @@ fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
                 primary = %cfg.primary,
                 "Primary voice key missing from [tts.voices]; TTS disabled"
             );
-            return None;
+            return (None, FeedbackPlayer::disabled());
         }
     };
 
@@ -745,29 +884,62 @@ fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
             config = %config_path.display(),
             "Piper voice files missing — run scripts/download-models.ps1. TTS disabled."
         );
-        return None;
+        return (None, FeedbackPlayer::disabled());
     }
 
-    let engine_result = PiperEngine::new(
-        &model_path,
-        &config_path,
-        cfg.length_scale,
-        voice_cfg.speaker_id,
-    );
-    let engine: Arc<dyn TtsEngine> = match engine_result {
-        Ok(e) => Arc::new(e),
-        Err(e) => {
-            tracing::error!(
+    let engine: Arc<dyn TtsEngine> = match cfg.engine.as_str() {
+        "elevenlabs" => {
+            tracing::warn!(
                 layer = "voice",
                 component = "kairo",
-                error = %e,
-                "Piper engine init failed; TTS disabled"
+                "tts.engine = \"elevenlabs\" is a Phase 5 extension point \
+                 (stub). Falling back to Piper."
             );
-            return None;
+            let _stub = ElevenLabsEngine::new(
+                cfg.elevenlabs.voice_id.clone(),
+                cfg.elevenlabs.model_id.clone(),
+            );
+            match PiperEngine::new(
+                &model_path,
+                &config_path,
+                cfg.length_scale,
+                voice_cfg.speaker_id,
+            ) {
+                Ok(e) => Arc::new(e),
+                Err(e) => {
+                    tracing::error!(
+                        layer = "voice",
+                        component = "kairo",
+                        error = %e,
+                        "Piper fallback init failed; TTS disabled"
+                    );
+                    return (None, FeedbackPlayer::disabled());
+                }
+            }
+        }
+        _ => {
+            // Default: Piper local.
+            match PiperEngine::new(
+                &model_path,
+                &config_path,
+                cfg.length_scale,
+                voice_cfg.speaker_id,
+            ) {
+                Ok(e) => Arc::new(e),
+                Err(e) => {
+                    tracing::error!(
+                        layer = "voice",
+                        component = "kairo",
+                        error = %e,
+                        "Piper engine init failed; TTS disabled"
+                    );
+                    return (None, FeedbackPlayer::disabled());
+                }
+            }
         }
     };
 
-    let playback = match PlaybackStream::open_default() {
+    let playback = match PlaybackStream::open_default_with_volume(config.voice.volume) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             tracing::error!(
@@ -776,17 +948,24 @@ fn init_tts(config: &KairoConfig) -> Option<Arc<SpeechController>> {
                 error = %e,
                 "Audio output device unavailable; TTS disabled"
             );
-            return None;
+            return (None, FeedbackPlayer::disabled());
         }
     };
+
+    let feedback = FeedbackPlayer::new(playback.clone(), config.voice.feedback_sounds);
 
     tracing::info!(
         layer = "voice",
         component = "kairo",
         voice = %cfg.primary,
+        volume = config.voice.volume,
+        feedback_sounds = config.voice.feedback_sounds,
         "TTS ready"
     );
-    Some(Arc::new(SpeechController::new(engine, playback)))
+    (
+        Some(Arc::new(SpeechController::new(engine, playback))),
+        feedback,
+    )
 }
 
 /// Expand a leading `~/` to the user's home directory. Returns the path

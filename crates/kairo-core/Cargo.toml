@@ -41,6 +41,10 @@ cpal = "0.17"
 whisper-rs = { version = "0.16", features = ["cuda"] }
 rubato = "2"
 
+# Voice pipeline (Phase 5) uses the local Piper CLI as a subprocess. Keeping
+# Piper out of the Rust dependency graph avoids ort/ndarray ABI conflicts with
+# kairo-vision.
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
     "Win32_Foundation",

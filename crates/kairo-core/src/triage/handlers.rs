@@ -57,14 +57,18 @@ fn handle_remember(summary: &str) -> Result<()> {
 
 /// Whisper: speak a short sentence via local TTS.
 ///
-/// Phase 2: prints a placeholder. Real TTS integration is Phase 5.
+/// Live TTS is owned by the `kairo` binary (see `src/bin/kairo.rs` — it
+/// holds the [`crate::voice::streaming::SpeechController`] and intercepts
+/// the [`TriageDecision::Whisper`] branch before calling
+/// [`handle_decision`]). This function is the fallback path for callers
+/// that don't plumb a speech controller — tests and bare-mode binaries.
 fn handle_whisper(text: &str) -> Result<()> {
     info!(
         layer = "triage",
         component = "handler",
         decision = "whisper",
         text = %text,
-        "TTS placeholder"
+        "Whisper decision (no SpeechController on this path — logged only)"
     );
     println!("[would say via TTS: {text}]");
     Ok(())

@@ -177,19 +177,36 @@ pub struct VoiceConfig {
     pub language_detection_enabled: bool,
     /// Language used when STT language is unknown or unsupported.
     pub default_language: String,
+    /// Master playback gain [0.0, 1.0]. Applied in the cpal fill callback so
+    /// the config change takes effect on the next audio buffer.
+    pub volume: f32,
+    /// Play short audio cues (chime on wake, click on active-listen, double-beep
+    /// on error) when the voice state transitions. Disable for pure silence.
+    pub feedback_sounds: bool,
+    /// Global hotkey for toggle-listen (empty string disables the hotkey).
+    /// Modifier chord in the form "Ctrl+Shift+K" / "Alt+F12" / "Win+Space".
+    pub hotkey: String,
+    /// After Kairo finishes speaking, keep the voice session alive this many
+    /// seconds so the user can ask a follow-up without re-triggering the wake
+    /// word. `0` disables conversation mode.
+    pub conversation_followup_seconds: u64,
 }
 
 /// Configuration for the text-to-speech pipeline.
 ///
 /// Kairo supports multiple Piper voices — typically one per language.
-/// The language-routing logic (Phase 5.4) picks a voice based on the
-/// detected speech language. For Phase 5.1 only the primary voice is used.
+/// The language-routing logic picks a voice based on the detected speech
+/// language. ElevenLabs is an optional cloud plugin, disabled by default
+/// per the ROADMAP's local-first stance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Whether TTS is enabled at all. When `false`, whisper triage
     /// decisions and orchestrator responses are logged but not spoken.
     pub enabled: bool,
+    /// Which TTS engine to use. `"piper"` (default, local) or `"elevenlabs"`
+    /// (cloud plugin, requires API key).
+    pub engine: String,
     /// Directory holding the espeak-ng dictionary files required by
     /// Piper's phonemizer. Must exist at runtime.
     pub espeak_data_dir: String,
@@ -202,10 +219,12 @@ pub struct TtsConfig {
     /// Piper `length_scale` parameter; `None` uses the voice's native
     /// value. Values below 1.0 speed up speech, above 1.0 slow it down.
     pub length_scale: Option<f32>,
+    /// ElevenLabs streaming cloud TTS (optional plugin backend).
+    pub elevenlabs: ElevenLabsConfig,
 }
 
 /// A single Piper voice entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TtsVoiceConfig {
     /// Absolute path to the `.onnx` model file.
@@ -215,6 +234,40 @@ pub struct TtsVoiceConfig {
     /// Optional speaker id for multi-speaker models. `None` for
     /// single-speaker voices like `en_US-lessac-medium`.
     pub speaker_id: Option<i64>,
+}
+
+/// ElevenLabs streaming TTS configuration (optional cloud plugin).
+///
+/// Phase 5 is local-first: Piper is the only supported production backend.
+/// This struct defines the config surface so the cloud plugin can be wired
+/// up in a later minor release without breaking user configs in the
+/// interim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ElevenLabsConfig {
+    /// User-provided ElevenLabs API key. Empty string means the backend
+    /// is disabled regardless of `tts.engine`.
+    pub api_key: String,
+    /// ElevenLabs voice ID (see https://elevenlabs.io/app/voice-library).
+    pub voice_id: String,
+    /// Model ID — `eleven_turbo_v2_5` (fastest) is the default target.
+    pub model_id: String,
+    /// Voice stability [0.0, 1.0]. Higher = more predictable prosody.
+    pub stability: f32,
+    /// Similarity boost [0.0, 1.0]. Higher = closer to reference voice.
+    pub similarity_boost: f32,
+}
+
+impl Default for ElevenLabsConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            voice_id: String::new(),
+            model_id: "eleven_turbo_v2_5".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+        }
+    }
 }
 
 // --- Defaults ---
@@ -355,6 +408,10 @@ impl Default for VoiceConfig {
             ambient_mute_enabled: true,
             language_detection_enabled: true,
             default_language: "en".to_string(),
+            volume: 0.8,
+            feedback_sounds: true,
+            hotkey: "Ctrl+Shift+K".to_string(),
+            conversation_followup_seconds: 5,
         }
     }
 }
@@ -395,6 +452,7 @@ impl Default for TtsConfig {
         );
         Self {
             enabled: true,
+            engine: "piper".to_string(),
             espeak_data_dir: tts_dir
                 .join("espeak-ng-data")
                 .to_string_lossy()
@@ -402,16 +460,7 @@ impl Default for TtsConfig {
             voices,
             primary: "en".to_string(),
             length_scale: None,
-        }
-    }
-}
-
-impl Default for TtsVoiceConfig {
-    fn default() -> Self {
-        Self {
-            model_path: String::new(),
-            config_path: String::new(),
-            speaker_id: None,
+            elevenlabs: ElevenLabsConfig::default(),
         }
     }
 }

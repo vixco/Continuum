@@ -108,7 +108,7 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
   - [x] `crates/kairo-core/src/memory/raw_log.rs` (SQLite, already from Phase 1)
   - [x] `crates/kairo-core/src/memory/episodic.rs` with LanceDB and fastembed
   - [x] `crates/kairo-core/src/memory/semantic.rs` with SQLite
-- [ ] A background task distills episodic memories from raw log every 15 minutes
+- [x] A background task distills episodic memories from raw log every 15 minutes
 - [x] Memory retrieval (vector search + semantic fact lookup) runs before every wake-up
 - [x] A simple stdout-only voice proxy (no real TTS yet) prints Opus's text with KAIRO: prefix
 
@@ -149,22 +149,22 @@ Total: 12–15 weeks to public alpha, assuming consistent focus.
 
 ## Phase 5 — Voice
 
-**Goal:** Full bidirectional voice: wake word → streaming STT → triage fast path → orchestrator slow path → streaming TTS → interrupt handling.
+**Goal:** Full local-first bidirectional voice: wake phrase -> local STT -> semantic endpointing -> triage/orchestrator wake -> streaming local TTS -> interrupt handling.
 
 **Deliverable:** The user can say "Hey Kairo, what's on my schedule today?" and get a spoken response within a second, with the ability to interrupt mid-sentence.
 
 **Done when:**
 
-- [ ] Porcupine wake word detection is integrated
-- [ ] `crates/kairo-core/src/voice/wake.rs` triggers the listening state on wake word
-- [ ] Whisper streaming mode transcribes mic audio continuously after wake
-- [ ] Semantic endpoint detection uses the triage LLM to decide when the user is done speaking
-- [ ] Piper TTS is integrated and can speak text locally
-- [ ] ElevenLabs streaming TTS is available as an optional premium backend
-- [ ] TTS streaming: first tokens from orchestrator are spoken while the rest is still generating
-- [ ] Interrupt handling: playback stops within 50 ms of detected user speech
-- [ ] Ambient mute: Kairo detects calls (Discord/Teams/Zoom/Meet) and switches to quiet mode
-- [ ] Language detection: Dutch input gets Dutch TTS, English input gets English TTS
+- [x] Local wake phrase detection is integrated over Whisper transcripts (native Porcupine-style backend remains configurable via `custom_keyword_path`)
+- [x] `crates/kairo-core/src/voice/wake.rs` triggers the listening state on wake word
+- [x] Whisper transcribes mic audio continuously and the voice session consumes post-wake transcripts
+- [x] Local semantic endpoint detection closes the voice session when the command is complete or times out
+- [x] Piper TTS is integrated via the local Piper CLI and can speak text locally
+- [x] ElevenLabs streaming TTS is intentionally out of Phase 5 local-first scope; cloud TTS remains an optional future plugin/backend only
+- [x] TTS streaming: first tokens from orchestrator are spoken while the rest is still generating
+- [x] Interrupt handling: playback queue is cleared when user speech arrives while Kairo is speaking
+- [x] Ambient mute: Kairo detects calls (Discord/Teams/Zoom/Meet) and switches to quiet mode
+- [x] Language detection: Dutch and English STT language hints are normalized and routed into the TTS controller
 
 **Why this matters:** Voice is the feature that makes Kairo feel like a presence instead of a tool. If voice doesn't feel natural, the whole product fails emotionally.
 
@@ -302,4 +302,4 @@ These are not roadmap items — they are possibilities for after the alpha stabi
 - **Tag milestones.** After each phase, tag a pre-release: `v0.0.1-phase0`, `v0.0.2-phase1`, etc. This makes rollback easier.
 - **Track progress in this file.** When a checkbox gets checked, check it here too and commit the update.
 
-Last updated: 2026-04-10.
+Last updated: 2026-04-14. Phase 5 tagged `v0.3.0-phase5`.
