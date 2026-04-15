@@ -1,0 +1,82 @@
+# Perception
+
+The perception layer is Kairo's senses. It runs 24/7, captures what you're seeing and hearing, and emits a stream of `PerceptionFrame` objects that the rest of the system consumes.
+
+## What gets captured
+
+### Vision
+
+- **Source:** your primary monitor, via the Windows GDI/BitBlt API through the `xcap` crate. No yellow "this app is capturing" border.
+- **Cadence:** one screenshot every 3 seconds by default (configurable — `screen.interval_secs`).
+- **Resolution:** downscaled to 1280×720 before the vision model sees it.
+- **Model:** SmolVLM-256M via ONNX Runtime. Produces a short natural-language description of the screen.
+
+### Audio
+
+- **Source:** your default microphone, captured continuously via `cpal`.
+- **VAD:** energy-based voice-activity detection — silence doesn't get transcribed.
+- **Model:** whisper.cpp `medium` by default. Produces text + language tag.
+- **Wake phrase matching** happens on the transcript, not on raw audio.
+
+### Context
+
+- **Foreground window** title + process name, polled once per second.
+- **Idle time** (time since last mouse / keyboard input).
+- **Call state** — detects Discord, Teams, Zoom, Meet, Slack calls by process inspection.
+
+## The `PerceptionFrame` object
+
+Every few seconds these three senses are combined into a single frame:
+
+```typescript
+{
+  id: "frame_...",
+  timestamp: "2026-04-15T10:23:45+02:00",
+  screen: { description: "Kairo dashboard, Home tab", screenshot_path: "..." },
+  audio:  { transcript: "hey kairo what's on my calendar", language: "en" },
+  context: {
+    foreground_app: "kairo-desktop.exe",
+    idle_seconds: 0,
+    call_active: false
+  },
+  salience: 0.75
+}
+```
+
+## Salience
+
+Each frame gets a **salience score** between 0 and 1, computed by a handful of heuristics:
+
+- Visible error (red highlights, exception traces) → boost
+- Audio transcript contains a wake phrase → large boost
+- Foreground window changed → small boost
+- Long idle time → penalty (you're not there, why process this)
+
+Frames below the configurable `frame.salience_threshold` (default 0.10) don't get sent to triage — Kairo still stores them in the raw log, but the 8B model stays quiet.
+
+## Privacy
+
+- **Screenshots** can optionally be saved to disk (`screen.save_screenshots`). By default they are, but **only for you** — they live at `~/.kairo/memory/screenshots/` and are never uploaded anywhere.
+- **Audio** is never saved — only the transcripts are stored.
+- **Deny list**: the perception layer respects the foreground-app deny list in `~/.kairo/config/default-permissions.toml`. If you're in a password manager or an app you've blocked, the vision and audio layers pause.
+- **You can pause perception entirely** with the Pause button in the dashboard topbar or the tray menu.
+
+## Where to look in the dashboard
+
+- **Home tab** — the latest frame, its description, its salience, and the running frame count.
+- **Memory tab → Raw log** — every frame Kairo has captured, with search.
+- **Logs tab** — lower-level trace output from the perception loop if you want to debug something.
+
+## Debug
+
+To see the perception stream live in the terminal:
+
+```powershell
+cargo run --release --bin kairo-perception
+```
+
+and with triage decisions attached:
+
+```powershell
+cargo run --release --bin kairo-perception -- --triage
+```

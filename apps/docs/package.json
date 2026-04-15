@@ -1,0 +1,23 @@
+{
+  "name": "kairo-docs",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "export": "next build"
+  },
+  "dependencies": {
+    "next": "^15.3.3",
+    "nextra": "^3.3.0",
+    "nextra-theme-docs": "^3.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "typescript": "^5.7"
+  }
+}

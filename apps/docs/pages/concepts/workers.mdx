@@ -1,0 +1,63 @@
+# Workers
+
+When the orchestrator has a task too big to do inline — "fix small bugs in my GitHub repo", "summarise this 200-page PDF", "reorganize my Downloads folder" — it spawns a **worker**. A worker is another headless Claude Code session, running in its own working directory, reporting progress back to the orchestrator.
+
+## The worker pool
+
+- **Max concurrent:** 3 by default, capped at 10. Configured at `workers.max_concurrent`.
+- **Priority:** `user_requested` > `orchestrator_spawned` > `scheduled`.
+- **Failure streak:** if 3 workers fail within 10 minutes, the pool refuses new spawns until an operator intervenes.
+
+The orchestrator asks the pool to spawn a worker via the `mcp__kairo__workers_spawn_worker` MCP tool. The tool writes a JSON intent file to `~/.kairo-dev/worker-intents/`; the main Kairo runtime picks it up on its next tick, spawns the supervisor, and writes live status snapshots back to `~/.kairo-dev/workers/<id>.json`.
+
+## Model selection
+
+Each worker task has a `model_tier`:
+
+- `"power"` → always Claude Opus 4.6
+- `"budget"` → always Claude Sonnet 4.6
+- `"auto"` → Kairo picks based on task keywords:
+  - Opus: refactor, architect, debug-complex, migration
+  - Sonnet: rename, format, summary, boilerplate
+  - Tie: Opus
+
+Your top-level `workers.mode` config (`auto`, `budget`, `power`) overrides the tier the orchestrator requested. Set it to `"budget"` if you're cost-conscious; set to `"power"` if you want Opus for everything.
+
+## What a worker sees
+
+Each worker gets:
+
+- Its own working directory (by default the Kairo state dir; the orchestrator can override when it spawns)
+- A prompt composed from `prompts/worker-system.md` + any matched skill content for the task
+- A narrow tool allowlist (no `workers_*` — workers don't recursively spawn Kairo workers, though they *can* use Claude Code's built-in `Task` tool to spawn sub-agents)
+- An explicit wall-clock timeout (default 30 minutes)
+
+Workers do not have the Kairo `repair_*` tools, the orchestrator's write-side memory tools, or the `workers_*` spawning tools.
+
+## Watching workers live
+
+The **Home tab** polls `list_workers` every 750 ms and shows:
+
+- A status dot (queued / running / finished / failed)
+- A progress bar if the worker emitted `Progress` events
+- The model tier it's using and the cost-so-far
+- A click-through modal with full streaming output, the model-choice reason, and cancel / dismiss buttons
+
+## Writing a worker that works
+
+If you're writing a skill that spawns a worker, give it:
+
+1. **A narrow task.** "Fix bug in `src/auth.ts`" is good. "Fix all the bugs in the repo" is not.
+2. **A clear success criterion.** The worker prompt should describe exactly what "done" looks like.
+3. **A short report format.** The orchestrator reads the worker's terminal report and summarises it to you. A worker that ends with "here's a 2000-word essay about what I did" is harder to summarise than one that ends with a bulleted list.
+4. **Sensible refusal rules.** Tell the worker what to do if the task is out of scope. The default is "stop and report why you couldn't proceed".
+
+## Idempotency and safety
+
+Workers can do real damage if you let them. Kairo's defaults:
+
+- **No writes outside allowlisted folders.** The `fs_*` tools enforce the permission config from `~/.kairo/config/default-permissions.toml`.
+- **No shell.** Kairo's MCP server does not expose a shell tool. Workers can still use Claude Code's built-in Bash tool — but that in turn respects Claude Code's permission system.
+- **No destructive ops without confirmation.** The orchestrator prompt explicitly disallows `rm -rf`, `git push --force`, database drops, etc. without user sign-off at wake time.
+
+If you want stricter constraints, edit `config/default-permissions.toml` or your per-project `.kairo/permissions.toml`.

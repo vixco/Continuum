@@ -57,6 +57,19 @@ use kairo_core::voice::hotkey::spawn_hotkey_listener;
 async fn main() -> Result<()> {
     // Flags.
     let args: Vec<String> = std::env::args().collect();
+
+    // `kairo setup` — idempotent first-run / repair pass. Short-circuits
+    // before any runtime bring-up so it's safe to run on a fresh install
+    // even when models aren't downloaded yet.
+    if args.get(1).map(|s| s.as_str()) == Some("setup") {
+        return run_setup_command().await;
+    }
+    // `kairo --version` — prints version and exits.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("kairo {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let force_wake = args.iter().any(|a| a == "--force-wake");
     let reset_audio = args.iter().any(|a| a == "--reset-audio");
     let no_tts = args.iter().any(|a| a == "--no-tts");
@@ -1490,4 +1503,129 @@ fn truncate(s: &str, max_len: usize) -> String {
         cut -= 1;
     }
     format!("{}...", &s[..cut])
+}
+
+// ---- `kairo setup` subcommand ---------------------------------------------
+
+/// Prereq / model / diagnostic check. Prints a status report and exits 0 if
+/// everything is OK, 1 otherwise. Designed to be safe to run repeatedly.
+async fn run_setup_command() -> Result<()> {
+    println!("kairo setup — checking install and runtime prerequisites");
+    println!();
+
+    let dev_dir = kairo_dev_dir();
+    let mut all_ok = true;
+
+    // 1. Claude Code CLI.
+    print!("  [..] Claude Code CLI .................. ");
+    let _ = std::io::stdout().flush();
+    match tokio::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            println!("OK ({v})");
+        }
+        _ => {
+            println!("MISSING");
+            println!("       -> npm install -g @anthropic-ai/claude-code && claude login");
+            all_ok = false;
+        }
+    }
+
+    // 2. Data directory structure.
+    for sd in &["config", "models", "logs", "memory", "backups", "bin"] {
+        let p = dev_dir.join(sd);
+        if !p.exists() {
+            if let Err(e) = std::fs::create_dir_all(&p) {
+                println!("  [FAIL] Could not create {}: {}", p.display(), e);
+                all_ok = false;
+            } else {
+                println!("  [OK]   Created {}", p.display());
+            }
+        }
+    }
+
+    // 3. Vision model.
+    let vision = dev_dir
+        .join("models")
+        .join("vision")
+        .join("vision_encoder.onnx");
+    report_file("Vision model (SmolVLM-256M)", &vision, &mut all_ok);
+
+    // 4. Triage model (8B preferred, 4B fallback).
+    let triage_8b = dev_dir
+        .join("models")
+        .join("triage")
+        .join("qwen3-8b-q4_k_m.gguf");
+    let triage_4b = dev_dir
+        .join("models")
+        .join("triage")
+        .join("qwen3-4b-q4_k_m.gguf");
+    if triage_8b.exists() {
+        println!("  [OK]   Triage model ..................... Qwen 3 8B");
+    } else if triage_4b.exists() {
+        println!("  [WARN] Triage model ..................... Qwen 3 4B fallback");
+        println!("       -> 8B recommended; run scripts/download-models.ps1 to fetch");
+    } else {
+        println!("  [FAIL] Triage model ..................... MISSING");
+        println!("       -> scripts/download-models.ps1");
+        all_ok = false;
+    }
+
+    // 5. Whisper STT.
+    let whisper = dev_dir
+        .join("models")
+        .join("stt")
+        .join("whisper-medium.bin");
+    report_file("Whisper STT (medium)", &whisper, &mut all_ok);
+
+    // 6. Piper TTS.
+    let piper_env = std::env::var_os("KAIRO_PIPER_BIN").map(PathBuf::from);
+    let piper_default = dev_dir.join("bin").join("piper").join("piper.exe");
+    let piper = piper_env.unwrap_or(piper_default);
+    if piper.exists() {
+        println!(
+            "  [OK]   Piper TTS .......................... {}",
+            piper.display()
+        );
+    } else {
+        println!("  [FAIL] Piper TTS .......................... MISSING");
+        println!("       -> scripts/download-models.ps1 installs it under ~/.kairo-dev/bin/piper/");
+        all_ok = false;
+    }
+
+    // 7. Config file.
+    let config_path = dev_dir.join("config.toml");
+    if config_path.exists() {
+        println!(
+            "  [OK]   Config ............................ {}",
+            config_path.display()
+        );
+    } else {
+        println!("  [INFO] Config file not found. Kairo will seed defaults on first launch.");
+    }
+
+    println!();
+    if all_ok {
+        println!("kairo setup: all required components present. You're ready to run 'kairo'.");
+        Ok(())
+    } else {
+        println!("kairo setup: some components are missing (see above).");
+        std::process::exit(1);
+    }
+}
+
+fn report_file(label: &str, path: &std::path::Path, all_ok: &mut bool) {
+    if path.exists() {
+        let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let mb = bytes / 1_048_576;
+        println!("  [OK]   {label} ({mb} MB)");
+    } else {
+        println!("  [FAIL] {label} MISSING");
+        println!("       -> scripts/download-models.ps1");
+        *all_ok = false;
+    }
 }

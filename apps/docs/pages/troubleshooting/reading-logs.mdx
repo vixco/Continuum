@@ -1,0 +1,69 @@
+# Reading the logs
+
+## Where they live
+
+`~/.kairo/logs/` — per-component log files, rotated daily:
+
+- `perception.log` — senses layer
+- `triage.log` — triage layer
+- `orchestrator.log` — Opus wakes, stream events, costs
+- `workers.log` — worker supervisor + pool
+- `voice.log` — wake detection, STT, TTS, playback
+- `memory.log` — raw log writes, episodic distillation, semantic writes
+- `mcp.log` — Kairo MCP server requests and responses
+- `repair.log` — repair agent sessions
+
+## Format
+
+Structured JSON events via `tracing`. Each line is a self-contained record:
+
+```json
+{
+  "timestamp": "2026-04-15T10:23:45.123Z",
+  "level": "INFO",
+  "layer": "triage",
+  "component": "decision_loop",
+  "message": "triage decision",
+  "decision": "wake_orchestrator",
+  "reason": "visible error for 12s on idle rust file",
+  "frame_id": "frame_7k3l..."
+}
+```
+
+## Reading from the dashboard
+
+Logs tab → filter by level, layer, component, free-text. Click any entry to expand its structured fields.
+
+## Reading from PowerShell
+
+```powershell
+# Tail the orchestrator log
+Get-Content -Path "$env:USERPROFILE\.kairo\logs\orchestrator.log" -Wait -Tail 50
+
+# Find the last 5 errors across all logs
+Get-ChildItem "$env:USERPROFILE\.kairo\logs\*.log" | ForEach-Object {
+    Select-String -Path $_.FullName -Pattern '"level":"ERROR"' | Select-Object -Last 5
+}
+```
+
+## What to look for
+
+- **`"level":"ERROR"` or `"WARN"`** — anything surprising recently?
+- **`"component":"<x>"`** — narrow to the layer you suspect.
+- **Session IDs** — orchestrator wakes and workers have a `session_id` you can trace across files.
+
+## Noise reduction
+
+Set an env filter before launching Kairo:
+
+```powershell
+$env:RUST_LOG = "info,kairo_core::senses::vision=warn,kairo_mcp=debug"
+kairo
+```
+
+## Sharing logs with a bug report
+
+Please:
+1. Reproduce the bug.
+2. Copy only the relevant component's last ~50 lines.
+3. Redact anything sensitive — Kairo never phones home, but log lines can still contain things you didn't intend to share (foreground window titles, clipboard snippets, etc.).

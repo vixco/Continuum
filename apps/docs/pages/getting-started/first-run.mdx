@@ -1,0 +1,91 @@
+# First run
+
+The first time you launch Kairo after installation, the dashboard opens an eight-step onboarding wizard. It's designed to take about ten minutes end-to-end, most of which is model downloads running in the background.
+
+You can rerun the wizard at any time by deleting `~/.kairo/config/onboarding-complete` and relaunching Kairo.
+
+## Step 1 — Welcome
+
+A two-sentence summary of what Kairo does and a "Let's set you up" button. Nothing to configure here.
+
+## Step 2 — Claude Code check
+
+Kairo verifies that the `claude` CLI is installed and authenticated.
+
+- **If Claude Code is missing**, the wizard shows the install command and a "Check again" button. Open a new terminal, run `npm install -g @anthropic-ai/claude-code`, then click "Check again".
+- **If not logged in**, the wizard shows `claude login` and waits. Run it, complete the browser flow, and click "Check again".
+- **If both OK**, a green checkmark, and you proceed.
+
+## Step 3 — Model downloads
+
+Kairo needs four sets of models:
+
+| Model | Purpose | Size |
+|---|---|---|
+| SmolVLM-256M | Vision (screen description) | ~500 MB |
+| Qwen 3 8B Q4_K_M | Triage (the local decision LLM) | ~4.5 GB |
+| Whisper medium | Speech-to-text | ~1.5 GB |
+| Piper voices | Text-to-speech | ~150 MB |
+
+The wizard runs the downloads in the background with a per-model progress bar. If you already have models at `~/.kairo-dev/models/` from a previous install, the wizard will skip them.
+
+If an NVIDIA GPU is detected, Kairo enables GPU acceleration for triage and vision automatically — no extra download.
+
+## Step 4 — Voice setup
+
+- **Wake word:** a toggle and a sensitivity slider. The default wake phrase is "hey kairo". You can disable wake-word listening entirely and use the `Ctrl+Shift+K` hotkey instead.
+- **Voice selection:** preview each Piper voice, pick the one you want Kairo to speak in.
+- **Language:** Dutch, English, or both. Note that English is the only voice that sounds natural at the moment — see [Known issues](https://github.com/PrincNL/kairo-ai/blob/main/KNOWN_ISSUES.md).
+- **Microphone:** dropdown of input devices with a test button.
+- **Speaker:** dropdown of output devices with a test button.
+
+## Step 5 — Permissions
+
+This is where you decide which parts of your filesystem Kairo can see and act on.
+
+- **Folder access:** the default gives the home directory read-only and a single projects folder read-write. Add / remove folders as you like.
+- **Blocked paths:** a static list Kairo will never touch (`.ssh`, `.aws`, `.gnupg`, credentials stores, browser profile dirs, etc.).
+- **Tool permissions:** a summary of the permission tiers (`read`, `write`, `notify`, `web`, `worker`). The default profile is "assist mode" — workers are allowed but require confirmation for writes outside your chosen projects folder.
+
+If the default looks right, click "I'll use defaults" and move on.
+
+## Step 6 — Personal info (optional)
+
+Anything you enter here gets written to the semantic memory store so the orchestrator can use it later.
+
+- **Name** — how Kairo addresses you
+- **Timezone** — auto-detected, editable
+- **Language preference** — what Kairo should default to when it writes text
+
+All fields are skippable. You can change them later from the Memory tab.
+
+## Step 7 — Diagnostics
+
+Kairo runs a full system check:
+
+- Claude Code CLI responds and is authenticated
+- Vision model loads and describes a test image
+- Triage model loads and processes a test frame
+- Whisper loads and transcribes a test audio clip
+- TTS synthesizes and plays a test phrase
+- Microphone captures audio
+- Screen capture takes a screenshot
+- Memory database reads and writes
+
+Each check shows a green tick, a spinner, or a red cross with an error message. If anything fails, the wizard offers "Fix with repair agent" which spawns a Claude Code session to diagnose and repair, or "Show manual instructions" with the relevant runbook link.
+
+Don't skip this step — it's the single best way to catch install problems before they become confusing runtime failures.
+
+## Step 8 — Done
+
+The wizard writes `~/.kairo/config/onboarding-complete` (a tiny marker file — nothing is uploaded anywhere) and shows a summary.
+
+Click "Start Kairo", the dashboard minimises to the tray, and the runtime starts.
+
+## Tips for your first hour
+
+- **Say "hey kairo, hello"** — the simplest end-to-end test. You should hear a spoken response within 1–2 seconds.
+- **Use the `Ctrl+Shift+K` hotkey** to talk without the wake word.
+- **Click the tray icon** to re-open the dashboard any time.
+- **Right-click the tray icon** for quick actions: pause, resume, mute, unmute, quit.
+- **Watch the Home tab** while you work — you'll see triage decisions stream in as Kairo perceives your screen.

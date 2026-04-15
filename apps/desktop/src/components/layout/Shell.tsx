@@ -29,6 +29,7 @@ import { VoiceTab } from "@/components/tabs/VoiceTab";
 import { AutomationsTab } from "@/components/tabs/AutomationsTab";
 import { LogsTab } from "@/components/tabs/LogsTab";
 import { HealthTab } from "@/components/tabs/HealthTab";
+import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
 
 type TabId =
   | "home"
@@ -54,13 +55,28 @@ const TABS: Array<{ id: TabId; label: string; icon: typeof Activity }> = [
 export function Shell() {
   const [tab, setTab] = useState<TabId>("home");
   const [now, setNow] = useState(() => new Date());
+  const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null);
   const voice = useStore((s) => s.state.voice);
   const system = useStore((s) => s.state.system);
   const orchestrator = useStore((s) => s.state.orchestrator);
   const paused = system.paused;
+  const version = system.version;
 
   useEffect(() => {
     void bootstrapStore();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const complete = await invoke<boolean>("is_onboarding_complete");
+        setOnboardingNeeded(!complete);
+      } catch {
+        // Running outside Tauri or command not yet wired — skip wizard.
+        setOnboardingNeeded(false);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -93,6 +109,10 @@ export function Shell() {
 
   const effectiveMode = orchestrator.active ? "thinking" : voice.mode;
 
+  if (onboardingNeeded) {
+    return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />;
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar active={tab} onSelect={setTab} />
@@ -102,6 +122,7 @@ export function Shell() {
           mode={effectiveMode}
           paused={paused}
           voiceMuted={voice.muted}
+          version={version}
           onTogglePause={() => kairo.setPaused(!paused)}
           onToggleVoice={() => kairo.setVoiceMuted(!voice.muted)}
         />
@@ -180,6 +201,7 @@ function Topbar({
   mode,
   paused,
   voiceMuted,
+  version,
   onTogglePause,
   onToggleVoice,
 }: {
@@ -187,6 +209,7 @@ function Topbar({
   mode: import("@/lib/types").VoiceMode;
   paused: boolean;
   voiceMuted: boolean;
+  version: string;
   onTogglePause: () => void;
   onToggleVoice: () => void;
 }) {
@@ -211,6 +234,9 @@ function Topbar({
         <span className="text-sm text-ink">{statusText}</span>
       </div>
       <div className="flex items-center gap-2">
+        <span className="kairo-subtle font-mono text-ink-dim" title={`Kairo ${version}`}>
+          v{version}
+        </span>
         <span className="kairo-subtle font-mono">
           {now.toLocaleTimeString(undefined, { hour12: false })}
         </span>

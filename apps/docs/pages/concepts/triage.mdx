@@ -1,0 +1,66 @@
+# Triage
+
+Triage is Kairo's gate-keeper. A small local LLM reads each salient perception frame and decides whether to act, to store, to whisper a suggestion, or to wake Claude Opus 4.6.
+
+## The five decisions
+
+- **`ignore`** — nothing here worth spending compute on. Default for 80%+ of frames.
+- **`remember`** — worth storing in episodic memory for later retrieval, but don't speak.
+- **`whisper`** — something Kairo might want to mention, but softly. Queued to the voice layer at low priority.
+- **`execute_simple`** — do a narrowly-allowed local action (mute, toggle, launch an app) without waking Opus.
+- **`wake_orchestrator`** — this needs reasoning. Call Opus via Claude Code.
+
+Each decision comes with a short reason string the dashboard shows in the Home tab's triage panel.
+
+## The model
+
+Default: **Qwen 3 8B** quantised to Q4_K_M (~4.5 GB), run through llama.cpp's Rust bindings. Accuracy on the hand-labeled benchmark: **19/20 (95%)**, P50 latency ~964 ms, P95 ~1.1 s.
+
+The 8B model is the recommendation for any machine with a GPU or 16+ GB of RAM. If you're on a 6 GB VRAM card or CPU-only, switch to Qwen 3 4B (~2.5 GB) — it loses about 5% accuracy on boundary cases but runs noticeably faster on weak hardware.
+
+All models are GGUF format and live under `~/.kairo/models/triage/`. You can swap in any GGUF model that supports grammar-constrained generation — see [Configuration → Models](/configuration/models).
+
+## Grammar-constrained JSON output
+
+Small LLMs are unreliable at structured output. Kairo uses llama.cpp's **GBNF grammar** support to force the model to produce valid triage JSON every time. The grammar is at `prompts/triage-grammar.gbnf` and looks roughly like:
+
+```
+root ::= "{" ws "\"decision\"" ws ":" ws decision ws
+  "," ws "\"reason\"" ws ":" ws string
+  (...)
+  "}"
+decision ::= "\"ignore\"" | "\"remember\"" | "\"whisper\"" | "\"execute_simple\"" | "\"wake_orchestrator\""
+```
+
+If the model produces nonsense, Kairo falls back: prompt-only retry, then default to `Ignore`. Three consecutive failures raise a health alert so the repair agent can kick in.
+
+## The signal reliability hierarchy
+
+The triage system prompt tells the model which signals to trust:
+
+1. **Wake phrase in audio** — highest priority. If the transcript contains "hey kairo" or similar, always wake.
+2. **Foreground process name** — reliable. "Discord.exe" means you're probably in a conversation; "devenv.exe" means coding.
+3. **Audio transcript semantics** — reliable if the language tag is right.
+4. **Visible errors** — moderate. Boost toward `wake_orchestrator` but gated on idle time (so compile-in-progress errors don't false-positive).
+5. **Vision description** — lowest reliability. SmolVLM-256M hallucinates on dense UI. Treat it as corroborating evidence only.
+
+## Benchmarking
+
+Kairo ships with a 20-frame benchmark harness:
+
+```powershell
+cargo run --release --bin kairo-triage-bench
+```
+
+It loads each labelled frame from `benchmarks/triage-frames.jsonl`, runs triage, and reports:
+
+- Accuracy (overall + per-decision-class)
+- P50 and P95 latency
+
+Use this if you want to tune the prompt, swap the model, or change the grammar — you'll know immediately whether you helped or hurt.
+
+## Limits
+
+- **Non-English reasoning is untested.** The benchmark is English + Dutch only. Non-Latin scripts will produce surprises.
+- **The boundary between `remember` and `wake_orchestrator`** is fuzzy by design. Kairo errs on the side of waking when there's a visible error that's been there for a while.
+- **`execute_simple` is allowlisted.** Only `launch_app`, `show_notification`, and `toggle_mute` are permitted without Opus in the loop.

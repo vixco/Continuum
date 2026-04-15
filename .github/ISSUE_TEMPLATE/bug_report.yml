@@ -1,0 +1,118 @@
+name: Bug report
+description: Something in Kairo is broken or behaves incorrectly.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. A good report saves everyone time — please fill in as much as you can.
+
+        Before filing: search [existing issues](https://github.com/PrincNL/kairo-ai/issues?q=is%3Aissue) in case someone already reported this.
+
+  - type: input
+    id: kairo-version
+    attributes:
+      label: Kairo version
+      description: Run `kairo --version` or check the dashboard topbar.
+      placeholder: "0.1.0-alpha.1"
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: e.g. "Windows 11 Pro 23H2" or "Windows 10 22H2 build 19045".
+      placeholder: "Windows 11 Pro 23H2"
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code CLI version
+      description: Run `claude --version`.
+      placeholder: "@anthropic-ai/claude-code@2.1.100"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install Kairo?
+      options:
+        - GitHub release (installer script)
+        - Built from source
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component is affected?
+      description: If you're not sure, pick "Other / not sure".
+      options:
+        - Senses (perception, vision, audio)
+        - Triage (local LLM decisions)
+        - Orchestrator (Claude Code wake-ups)
+        - Workers
+        - Voice (wake word, STT, TTS, playback)
+        - Memory (episodic / semantic)
+        - Dashboard (Tauri UI)
+        - MCP tools
+        - Installer / setup
+        - Repair agent / self-healing
+        - Skills
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. Screenshots welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The more specific the better. "Sometimes it just breaks" is hard to act on.
+      placeholder: |
+        1. Launch Kairo
+        2. Say "hey kairo"
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste the last ~50 lines of `~/.kairo/logs/<component>.log` or copy from the dashboard Logs tab.
+        Please redact anything sensitive before pasting. Kairo never phones home, but log lines may contain things you didn't intend to share.
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I tried restarting Kairo and the bug reproduces.
+          required: true
+        - label: I redacted secrets, credentials, and personal data from the logs.
+          required: true
