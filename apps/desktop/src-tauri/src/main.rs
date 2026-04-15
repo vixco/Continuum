@@ -39,6 +39,19 @@ pub struct AppState {
 }
 
 fn main() {
+    // Build a Tokio runtime and enter its context for the rest of `main`.
+    // Tauri's Builder::setup() callback is NOT guaranteed to run inside a
+    // Tokio context (despite Tauri using tokio internally via
+    // tauri::async_runtime), so calls like health::spawn_poller — which
+    // do `tokio::spawn` — panic with "no reactor running" unless we hold
+    // an EnterGuard on this thread. The guard lives until the end of
+    // main(), which spans the entire Tauri run() blocking call.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    let _tokio_guard = tokio_rt.enter();
+
     let runtime = KairoRuntime::init().expect("initialise Kairo runtime");
     let log_layer = BufferLayer::new(runtime.logs.clone());
     let filter = EnvFilter::try_from_default_env()
@@ -57,18 +70,19 @@ fn main() {
     let health = kairo_core::health::HealthRegistry::new();
     components::register_default(&health, &runtime);
 
+    let dev_dir = runtime.dev_dir();
+    let backups_dir = dev_dir
+        .parent()
+        .map(|p| p.join(".kairo-backups"))
+        .unwrap_or_else(|| dev_dir.join(".kairo-backups"));
+
+    // Background pollers — the EnterGuard above means tokio::spawn works here.
     kairo_core::health::spawn_poller(
         health.clone(),
         runtime.state.clone(),
         30,
         runtime.shutdown_receiver(),
     );
-
-    let dev_dir = runtime.dev_dir();
-    let backups_dir = dev_dir
-        .parent()
-        .map(|p| p.join(".kairo-backups"))
-        .unwrap_or_else(|| dev_dir.join(".kairo-backups"));
 
     kairo_core::health::backup::spawn_nightly(
         dev_dir.clone(),
@@ -78,13 +92,13 @@ fn main() {
         runtime.shutdown_receiver(),
         {
             let state = runtime.state.clone();
-            let backups_dir = backups_dir.clone();
+            let bd = backups_dir.clone();
             move |_res| {
                 let state = state.clone();
-                let backups_dir = backups_dir.clone();
+                let bd = bd.clone();
                 tokio::spawn(async move {
-                    let latest = kairo_core::health::backup::latest_backup_ts(&backups_dir);
-                    let count = kairo_core::health::backup::count_backups(&backups_dir);
+                    let latest = kairo_core::health::backup::latest_backup_ts(&bd);
+                    let count = kairo_core::health::backup::count_backups(&bd);
                     state.set_backup_status(latest, count).await;
                 });
             }
