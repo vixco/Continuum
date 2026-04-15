@@ -1,0 +1,55 @@
+name: Skill request
+description: Propose a new bundled skill or a workflow Kairo should know how to handle.
+title: "[skill]: "
+labels: ["skill", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Skills are `SKILL.md` files in `skills/` that tell the orchestrator how to handle a specific workflow.
+        See the [skills docs](../../docs/skills.md) and [the five bundled skills](../../skills) for examples.
+
+  - type: input
+    id: skill-name
+    attributes:
+      label: Proposed skill name
+      description: Kebab-case identifier (e.g. `email-draft`, `daily-briefing`).
+    validations:
+      required: true
+
+  - type: textarea
+    id: when-triggers
+    attributes:
+      label: When should this skill trigger?
+      description: Describe the user-visible signal that should surface this skill. The triage layer reads this to decide when to suggest it.
+      placeholder: "When the user says 'summarize this meeting' or a Zoom/Teams call ended within the last 5 minutes."
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-does
+    attributes:
+      label: What should the skill do?
+      description: The high-level procedure the orchestrator should follow once this skill is active.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tools-needed
+    attributes:
+      label: What tools does it need?
+      description: List the MCP tools or Claude Code built-ins the skill would call. If any of them don't exist yet, flag that.
+
+  - type: textarea
+    id: refusal
+    attributes:
+      label: What's out of scope?
+      description: Explicit limits keep skills focused. What should Kairo *not* do when this skill is active?
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Implementation
+      options:
+        - label: I'm willing to write the `SKILL.md` and open a PR.
+        - label: I'd like someone else to write it.

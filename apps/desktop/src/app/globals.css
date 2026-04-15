@@ -55,4 +55,13 @@
   .kairo-label {
     @apply uppercase tracking-wider text-[10px] font-semibold text-ink-dim;
   }
+  .kairo-code {
+    @apply rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-xs text-ink;
+  }
+  .kairo-button-primary {
+    @apply rounded-md bg-accent-purple px-3 py-1.5 text-sm text-white transition-opacity hover:opacity-90 disabled:opacity-40;
+  }
+  .kairo-error {
+    @apply rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400;
+  }
 }

@@ -1,0 +1,79 @@
+# Building from source
+
+## Prerequisites
+
+Run `.\scripts\dev-setup.ps1` first — it checks everything.
+
+- **Rust stable** (pinned via `rust-toolchain.toml`), with `rustup`
+- **Node.js 20+** and **pnpm 9+**
+- **Claude Code CLI** (`npm install -g @anthropic-ai/claude-code`) with active login
+- **CMake + Ninja** — `winget install Kitware.CMake`, `choco install ninja`
+- **LLVM / libclang** — required by `whisper-rs` bindgen. Set `LIBCLANG_PATH` to `<llvm>\bin`
+- **protoc** — required by `lancedb`. Set `PROTOC` env var
+- **MSVC Build Tools** — Windows SDK headers
+- **sccache** (recommended) — dropped at `~/.cargo/bin/sccache.exe`
+
+## Build commands
+
+```bash
+# Runtime binary — RELEASE ONLY (debug crashes on Windows)
+cargo run --release --bin kairo
+
+# Dashboard — debug is fine
+cd apps/desktop
+pnpm install
+pnpm tauri dev
+
+# Library tests
+cargo test -p kairo-core
+
+# Specific example
+cargo run --release --example voice_test -p kairo-core
+
+# Everything
+cargo build --release
+```
+
+## Why the main binary is release-only
+
+`llama-cpp-sys-2` compiles its C++ wrappers via `cc::Build`, which picks `/MDd` in debug profiles and links against `ucrtbased.dll`. Rust itself uses `/MD` on MSVC regardless of profile. The resulting binary mixes CRTs and crashes during whisper model load. See [CLAUDE.md build workflow](https://github.com/vixco/kairo-ai/blob/main/CLAUDE.md#build-workflow) for the long story.
+
+The `kairo-desktop` app gates out llama-cpp-sys-2 via `kairo-core` `default-features = false`, so it builds fine in debug.
+
+## First build is slow
+
+Expect ~10 minutes on a warm machine for a clean release build. Subsequent incremental builds are seconds. `sccache` makes cross-branch rebuilds near-instant for the native parts.
+
+## Environment variables
+
+Set these permanently (User > Environment Variables) or per-shell before building:
+
+```powershell
+$env:LIBCLANG_PATH  = "C:\LLVM\bin"       # bindgen for whisper-rs
+$env:CMAKE_GENERATOR = "Ninja"             # faster than NMake
+$env:ORT_DYLIB_PATH = "<onnxruntime>\lib\onnxruntime.dll"
+$env:PROTOC = "C:\protoc\bin\protoc.exe"
+```
+
+## Building a release bundle locally
+
+```powershell
+cd apps/desktop
+pnpm install
+pnpm tauri build          # produces MSI under src-tauri/target/release/bundle/msi/
+```
+
+## Running tests
+
+```bash
+cargo test --workspace                                    # all crates
+cargo test -p kairo-core -- --skip matches_whisper_k     # skip known-failing
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Launch helpers
+
+- `scripts\dev-setup.ps1` — prerequisite check
+- `scripts\download-models.ps1` — one-shot model download to `~/.kairo-dev/models/`
+- `scripts\bump-version.ps1 -NewVersion 0.1.0-alpha.N` — version bump across all files

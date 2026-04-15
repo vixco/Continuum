@@ -38,7 +38,10 @@ async fn intent_file_to_running_snapshot_e2e() {
     let id = new_worker_id();
     write_intent(
         tmp.path(),
-        &WorkerIntent::spawn(id.clone(), WorkerSpec::new("integration test task", tmp.path())),
+        &WorkerIntent::spawn(
+            id.clone(),
+            WorkerSpec::new("integration test task", tmp.path()),
+        ),
     )
     .unwrap();
 

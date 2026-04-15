@@ -1,0 +1,34 @@
+# No telemetry policy
+
+**Kairo does not send telemetry. Ever.**
+
+This is not a marketing promise — it is a hard architectural rule enforced in [CLAUDE.md](https://github.com/vixco/kairo-ai/blob/main/CLAUDE.md):
+
+> **Never phone home.** Kairo does not send telemetry, crash reports, or usage data to any server that is not the Anthropic API (via Claude Code) or optionally ElevenLabs if the user has enabled premium TTS. Every new network call requires justification in the PR description.
+
+What this means in practice:
+
+- No usage metrics.
+- No crash reports uploaded anywhere.
+- No "help improve Kairo" dialogs.
+- No phone-home update checks (the alpha has no auto-update at all).
+- No analytics on the docs site beyond what GitHub Pages itself logs.
+- No Kairo account, no sign-in, no "cloud sync".
+
+## How to verify
+
+1. **Code review.** `crates/kairo-core` is ~15 kLOC. Grep for `reqwest`, `ureq`, `hyper`, `curl`. The only outbound HTTP calls are in:
+   - `crates/kairo-mcp/src/tools/web.rs` — the `web_fetch` tool, user-invoked
+   - `crates/kairo-core/src/memory/episodic.rs` — fastembed model download from HuggingFace at first run
+   - `scripts/download-models.ps1` — model downloads
+   - `crates/kairo-core/src/orchestrator/spawn.rs` — spawns the `claude` CLI (which in turn calls Anthropic)
+
+2. **Runtime.** Fire up Wireshark or Process Monitor and watch Kairo run. Outside of wake events, you will see zero outbound traffic.
+
+## What about crash dumps?
+
+When Kairo crashes, it writes a stack trace to `~/.kairo/logs/` and nothing else. There is no collection step. If you file a bug, you copy the log and paste it manually. That's a feature — we don't want the responsibility of storing user data.
+
+## If this ever changes
+
+Any PR that adds a new network call must justify it in the PR description. The maintainer's default answer is "no". Exceptions so far: Anthropic API via Claude Code (orchestrator / workers), HuggingFace (model downloads), user-triggered `web_fetch`.

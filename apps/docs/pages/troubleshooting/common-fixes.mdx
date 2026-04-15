@@ -1,0 +1,65 @@
+# Common fixes
+
+## Kairo doesn't hear "hey kairo"
+
+Whisper `small` mishears "Kairo" (not in vocab). Confirm you're on `whisper-medium`:
+
+```toml
+[audio]
+whisper_model_path = "~/.kairo/models/stt/whisper-medium.bin"
+```
+
+Then lower the match threshold:
+
+```toml
+[voice]
+wake_sensitivity = 0.4
+```
+
+## TTS is silent
+
+1. Dashboard → Health tab. Is `tts` green?
+2. If `espeak-ng-data` is missing: `scripts\download-models.ps1` re-downloads it.
+3. Env var: `$env:KAIRO_PIPER_BIN` should point to `piper.exe`.
+4. Check `~/.kairo/logs/voice.log` for Piper subprocess errors.
+
+## Orchestrator fails to wake
+
+1. `claude --version` — is Claude Code on PATH?
+2. `claude login` — are you authenticated?
+3. Check `~/.kairo/logs/orchestrator.log` for the last spawn attempt. Likely culprits:
+   - `--model claude-opus-4-6` rejected → your subscription doesn't include Opus on this plan.
+   - `ANTHROPIC_API_KEY` missing → you probably need `claude login` instead of API key auth.
+
+## Models missing or corrupt
+
+```powershell
+scripts\download-models.ps1
+```
+
+The script is idempotent and skips files that already exist with valid sizes. Anything below 1 MB gets treated as a broken download and re-fetched.
+
+## High CPU / slow triage
+
+1. Dashboard Brain tab: is triage running on GPU (`gpu_layers = 999`) or CPU?
+2. If you're on a weak CPU, switch to the 4B fallback:
+   ```toml
+   [triage]
+   model_path = "~/.kairo/models/triage/qwen3-4b-q4_k_m.gguf"
+   ```
+
+## Dashboard won't open
+
+1. `Get-Process kairo-desktop` — is it already running? It hides to tray, not exits, on close.
+2. Right-click the tray icon → Open.
+3. If no tray icon: `taskkill /IM kairo-desktop.exe /F`, relaunch.
+
+## "Error: rate limit" from Opus
+
+Kairo parses the `rate_limit_event` stream event and shows it in the Health tab. If you hit a limit, wake attempts are queued with exponential backoff. Wait out the window (the event includes `resetsAt`).
+
+If you hit the rate limit repeatedly, your triage threshold is too loose. Raise `frame.salience_threshold` from `0.10` to `0.20`.
+
+## SmartScreen warns on first launch
+
+Kairo binaries aren't code-signed in the alpha. Click "More info" → "Run anyway". See [release.md](https://github.com/vixco/kairo-ai/blob/main/docs/release.md) for the signing roadmap.

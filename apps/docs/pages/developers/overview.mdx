@@ -1,0 +1,55 @@
+# Developer overview
+
+Kairo is a Cargo workspace plus a pnpm workspace.
+
+## Crate layout
+
+```
+crates/
+├── kairo-core/      orchestration runtime — senses, triage, orchestrator, workers, memory, voice, health
+├── kairo-mcp/       MCP server exposing Windows capabilities to Claude Code
+├── kairo-llm/       llama.cpp wrapper for local LLM inference
+└── kairo-vision/    ONNX Runtime wrapper for local vision models
+apps/
+├── desktop/         Tauri 2 + Next.js 15 dashboard
+└── docs/            Nextra docs site (this site)
+```
+
+## Reading order
+
+If you've never touched the codebase before, read in this order:
+
+1. **[CLAUDE.md](https://github.com/vixco/kairo-ai/blob/main/CLAUDE.md)** — coding standards, non-negotiables, build workflow.
+2. **[ARCHITECTURE.md](https://github.com/vixco/kairo-ai/blob/main/ARCHITECTURE.md)** — the full technical blueprint.
+3. **[SOUL.md](https://github.com/vixco/kairo-ai/blob/main/SOUL.md)** — Kairo's personality, reflected in the orchestrator prompt.
+4. **[ROADMAP.md](https://github.com/vixco/kairo-ai/blob/main/ROADMAP.md)** — phase history and what's next.
+
+## Where to start contributing
+
+- **Bundled skills** (`skills/`) — lowest-effort, highest-visibility change.
+- **MCP tools** (`crates/kairo-mcp/src/tools/`) — add new capabilities.
+- **Dashboard** (`apps/desktop/src/`) — polish, new tabs, new views.
+- **Perception** (`crates/kairo-core/src/senses/`) — the hardware-close code.
+- **Self-healing** (`crates/kairo-core/src/health/`) — more checks, better repair recipes.
+
+## Key invariants
+
+1. **Data flows up, commands flow down.** Senses → triage → orchestrator → workers. A worker never triggers the orchestrator; the orchestrator never touches the senses directly.
+2. **Local models are optional.** If a model is missing, the degraded mode must still work. See [graceful degradation in KNOWN_ISSUES.md](https://github.com/vixco/kairo-ai/blob/main/KNOWN_ISSUES.md).
+3. **`kairo.exe` is release-only** on the runtime path. `llama-cpp-sys-2` + debug + Windows = crash in `ucrtbased`. See [CLAUDE.md build workflow](https://github.com/vixco/kairo-ai/blob/main/CLAUDE.md#build-workflow).
+4. **MCP tool surface is stable.** Tools can be added, but tool signatures can't change without a version bump — downstream Claude Code sessions rely on them.
+
+## Tests
+
+```bash
+cargo test --workspace
+cargo test -p kairo-core                    # single crate
+cargo test -p kairo-core -- triage          # matching "triage"
+```
+
+UI tests: none yet. The dashboard relies on type-level correctness + manual QA.
+
+## Benchmarks
+
+- `cargo run --release --bin kairo-triage-bench` — triage accuracy + latency
+- `cargo run --release --example voice_latency_bench -p kairo-core` — voice pipeline latency
