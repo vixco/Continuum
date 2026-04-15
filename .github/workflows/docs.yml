@@ -48,7 +48,13 @@ jobs:
           NEXT_PUBLIC_BASE_PATH: /kairo-ai
 
       - name: Setup Pages
+        # `enablement: true` creates the Pages site on first run if it isn't
+        # already configured, so the initial deploy doesn't require manual
+        # repo-settings clicks. Requires `pages: write` permission (already
+        # set below).
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
