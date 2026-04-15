@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -62,9 +62,8 @@ jobs:
       - name: Build kairo-mcp.exe (release)
         run: cargo build --release --bin kairo-mcp
 
-      - name: Install frontend deps
+      - name: Install frontend deps (pnpm workspace root)
         run: pnpm install --frozen-lockfile
-        working-directory: apps/desktop
 
       - name: Build Tauri desktop app (release, bundles MSI)
         run: pnpm tauri build

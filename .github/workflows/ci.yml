@@ -101,7 +101,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -114,9 +114,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-desktop-
 
-      - name: Install frontend dependencies
+      - name: Install frontend dependencies (pnpm workspace root)
         run: pnpm install --frozen-lockfile
-        working-directory: apps/desktop
 
       - name: Build frontend
         run: pnpm build
@@ -144,11 +143,10 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: apps/docs/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install dependencies
+      - name: Install dependencies (pnpm workspace root)
         run: pnpm install --frozen-lockfile
-        working-directory: apps/docs
 
       - name: Build docs site
         run: pnpm build
