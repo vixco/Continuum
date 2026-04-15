@@ -1,0 +1,6 @@
+export default {
+  models: "Models",
+  permissions: "Permissions",
+  "voice-settings": "Voice settings",
+  "all-options": "All config options",
+};

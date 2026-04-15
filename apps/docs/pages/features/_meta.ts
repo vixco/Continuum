@@ -1,0 +1,8 @@
+export default {
+  voice: "Voice",
+  memory: "Memory",
+  skills: "Skills",
+  dashboard: "Dashboard",
+  automations: "Automations",
+  "self-healing": "Self-healing",
+};
