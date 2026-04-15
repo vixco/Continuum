@@ -1,6 +1,6 @@
-{
-  "overview": "Overview",
+export default {
+  overview: "Overview",
   "building-from-source": "Building from source",
   "writing-skills": "Writing skills",
-  "writing-mcp-tools": "Writing MCP tools"
-}
+  "writing-mcp-tools": "Writing MCP tools",
+};

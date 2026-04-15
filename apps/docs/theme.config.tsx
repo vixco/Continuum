@@ -47,13 +47,6 @@ const config: DocsThemeConfig = {
   nextThemes: {
     defaultTheme: "dark",
   },
-  primaryHue: 280,
-  primarySaturation: 60,
-  useNextSeoProps() {
-    return {
-      titleTemplate: "%s — Kairo docs",
-    };
-  },
 };
 
 export default config;
