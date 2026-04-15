@@ -4,6 +4,44 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] — 2026-04-15
+
+First public alpha. Phase 9 (polish + alpha release) complete. Every phase from the roadmap (0 through 9) is done.
+
+### Added — Phase 9 polish + alpha release
+
+- **Real installer** (`scripts/install.ps1`): end-to-end Windows installer — checks Windows version (10 1903+ / 11), checks Node.js 18+, Claude Code CLI, auth status, creates `~/.kairo/` data directory layout (config, models, logs, memory, backups, bin, worker-intents, workers, repair-intents), downloads the release binary from GitHub (or builds from source with `-FromSource`), runs `scripts/download-models.ps1`, adds a Start Menu shortcut, and optional `-DesktopShortcut` / `-AutoStart` flags. Idempotent — rerunning upgrades / repairs without losing user data.
+- **Version bump tooling** (`scripts/bump-version.ps1`): one-shot version update across `Cargo.toml`, `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and the dashboard's `DEFAULT_STATE.system.version`. Dry-run support.
+- **Code-signing placeholder** (`scripts/sign-release.ps1`): `signtool`-based signing scaffolding gated on `KAIRO_SIGN_THUMBPRINT`. No-op in its absence — alpha ships unsigned.
+- **Release runbook** (`docs/release.md`): pre-release checklist, tagging steps, GitHub release workflow, rollback procedure, code-signing plan.
+- **Known-issues doc** (`KNOWN_ISSUES.md`): documented alpha-grade rough edges by category (platform, installer, voice, triage, orchestrator, workers, dashboard, self-healing, memory, skills, MCP tools).
+- **README rewrite**: alpha status badges, real install instructions, updated project-status table with all phase tags, tech-stack refresh (SmolVLM-256M, Qwen 3 8B, Piper, fastembed, LanceDB), screenshot section, known-issues callout.
+- **CONTRIBUTING rewrite**: opened for external PRs — code of conduct, dev environment, PR workflow (conventional commits, changelog, architecture updates), coding standards summary (Rust + TypeScript), guidance on writing skills and MCP tools.
+- **GitHub templates**: issue templates for bug reports, feature requests, and skill requests (`.github/ISSUE_TEMPLATE/*.yml` with structured forms); `config.yml` pointing to docs and discussions; `pull_request_template.md` with the verification checklist.
+- **CI/CD**: `.github/workflows/release.yml` builds Windows release artifacts (MSI + portable zip) on `v*` tag push and drafts a GitHub release; `.github/workflows/ci.yml` split into parallel `quick-check` (fmt + clippy) and `full-test` jobs with cargo + pnpm caching; `.github/workflows/docs.yml` builds and deploys the docs site to GitHub Pages on push to `main` under `apps/docs/`.
+- **Docs site scaffold** (`apps/docs/`): Nextra 3 on Next.js 15 with a dark theme matching the dashboard; sidebar navigation covering Getting Started, Core Concepts, Features, Configuration, Privacy & Security, Troubleshooting, and For Developers; deploys to GitHub Pages via the docs workflow.
+- **User-facing documentation** in `apps/docs/pages/`: Installation, First run, Quick start, How it works, Perception, Triage, Orchestrator, Workers, Voice, Memory, Skills, Dashboard, Automations, Self-healing, Models config, Permissions, Voice settings, all config options reference, Data residency, No-telemetry policy, Troubleshooting index, Common fixes, Reading logs, Resetting Kairo, Architecture link, Contributing link, Building from source, Writing skills, Writing MCP tools.
+- **Onboarding wizard** in the Tauri app: eight-step first-run flow (Welcome → Claude Code check → Model downloads → Voice setup → Permissions → Personal info → Diagnostics → Done) gated on the absence of `~/.kairo/config/onboarding-complete`. The wizard runs inline in the dashboard shell, uses the existing dark palette and UI primitives, and marks the run complete with a single file write.
+- **Onboarding Tauri commands** (`apps/desktop/src-tauri/src/commands.rs`): `check_claude_cli`, `check_claude_auth`, `list_audio_input_devices`, `list_audio_output_devices`, `download_model` (wraps `scripts/download-models.ps1`), `run_diagnostics` (returns a structured report of vision / triage / STT / TTS / mic / screen / memory check results), `is_onboarding_complete`, `complete_onboarding`.
+- **`kairo setup` CLI subcommand** (`crates/kairo-core/src/bin/kairo.rs`): runs the same prereq checks as the installer, downloads missing models, runs a full diagnostic pass, and prints a structured status report. Safe to run at any time, not just first-run.
+- **Graceful degradation**: each senses/voice subsystem now logs a clear warning and registers a health component with `status = degraded` when a required artefact is missing (vision model → `ComponentStatus::Degraded` with reason "vision model not found, run kairo setup"; triage model → same, fallback to passing all frames to the orchestrator is disabled with a clear explanation; TTS → text-only fallback; mic → hotkey-only activation; Claude Code → dashboard still works for memory browsing and config, but wake attempts fail fast with an actionable error).
+- **Error message audit**: every missing-model, missing-claude, missing-config, and missing-permission error now names the exact remedy. Examples: "Qwen 3 8B not found at `<path>`. Run: kairo setup" and "Claude Code not installed. Run: npm install -g @anthropic-ai/claude-code && claude login".
+- **First-run memory seeding**: on a fresh install, the runtime seeds `user.timezone`, `user.language`, `user.os`, `kairo.version`, and `kairo.install_date` into the semantic memory store so the orchestrator has a sensible baseline from the first wake.
+- **Version display in the dashboard topbar**: `system.version` is surfaced as `v<version>` next to the clock, readable from the `KairoRuntime::version()` constant.
+
+### Changed
+
+- Version bumped to `0.1.0-alpha.1` across `Cargo.toml` (workspace), `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and the dashboard's `DEFAULT_STATE.system.version`.
+- `scripts/dev-setup.ps1` output references the new install flow.
+- `config/default-models.toml`: defaults audited for a 16 GB-RAM, GPU-optional Windows machine. GPU auto-detection is on by default; Piper English voice is the only enabled TTS voice (Dutch voice commented out with an opt-in path).
+
+### Fixed
+
+- Installer now waits for the user to confirm Claude Code login before continuing; previously it only printed a warning.
+- `scripts/download-models.ps1` respects `$env:KAIRO_MODELS_DIR` so the installer and onboarding wizard can redirect it to `~/.kairo/models/` instead of the dev-dir default.
+
+## Pre-alpha history (phases 0–8)
+
 ### Added — Phase 8 workers + skills
 
 - **Worker pool** (`crates/kairo-core/src/workers/pool.rs`): queue with priority ordering (user_requested > orchestrator_spawned > scheduled), concurrency cap (`max_concurrent`, default 3, max 10), failure-streak refusal, per-worker snapshot publishing, and dashboard/MCP/audit hooks. Cancellation signals propagate from queued and running workers; pool shutdown gracefully cancels everything.

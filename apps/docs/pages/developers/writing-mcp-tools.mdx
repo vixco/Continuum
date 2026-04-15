@@ -1,0 +1,86 @@
+# Writing MCP tools
+
+MCP tools are how the orchestrator and workers **do** things — read files, take screenshots, set memory facts, fetch URLs, spawn workers. They live in `crates/kairo-mcp/src/tools/`.
+
+## Anatomy of a tool
+
+Every tool follows the same six-step recipe:
+
+1. **Define the input schema** as a Rust struct:
+
+   ```rust
+   use schemars::JsonSchema;
+   use serde::{Deserialize, Serialize};
+
+   #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+   pub struct FsReadFileInput {
+       /// Absolute path to the file to read.
+       pub path: String,
+   }
+   ```
+
+2. **Define the handler** as an async function returning `Result<ToolResult>`:
+
+   ```rust
+   pub async fn fs_read_file(
+       state: &ServerState,
+       input: FsReadFileInput,
+   ) -> Result<ToolResult> {
+       allowlist::ensure_path_allowed(&input.path, state)?;
+       let bytes = tokio::fs::read(&input.path).await.map_err(|e| {
+           anyhow!("read_file: {} ({})", input.path, e)
+       })?;
+       // ... 100 KB cap, UTF-8 check, truncation prefix
+       Ok(ToolResult::text(text))
+   }
+   ```
+
+3. **Register the tool** in `crates/kairo-mcp/src/main.rs` via the rmcp builder. Name format: `mcp__kairo__<namespace>_<verb>`.
+
+4. **Add a permission entry** in `config/default-permissions.toml`.
+
+5. **Document the tool** in `docs/mcp-tools.md` with a JSON example and the security model.
+
+6. **Write tests** — at minimum one happy-path and every denial path.
+
+## Security model
+
+Before your tool does anything non-trivial, check:
+
+- **Path allowlist** for fs / memory / config tools (`allowlist::ensure_path_allowed`).
+- **Reserved prefixes** for memory writes (`system.*`, `kairo.*` — only Kairo itself can set these).
+- **Value limits** — truncate strings, cap file sizes, clamp counts.
+- **Public IP only** for `web_fetch` (`private_ip::is_public`).
+- **Audit-log the call** — every tool fires a background tokio task that writes a `ToolCall` event to episodic memory with sanitised args + a result summary.
+
+## Test template
+
+```rust
+#[tokio::test]
+async fn read_file_respects_allowlist() {
+    let state = test_server_state().await;
+    let denied = fs_read_file(&state, FsReadFileInput {
+        path: "C:/Windows/System32/drivers/etc/hosts".into()
+    }).await;
+    assert!(denied.is_err());
+
+    let ok = fs_read_file(&state, FsReadFileInput {
+        path: allowed_test_path(),
+    }).await.unwrap();
+    assert!(!ok.text().is_empty());
+}
+```
+
+For protocol-level coverage, see `crates/kairo-mcp/tests/protocol.rs` — it spawns the binary, drives JSON-RPC initialize → tools/list → tools/call over stdio, and asserts correctness end-to-end.
+
+## Don't write these tools
+
+Some categories of tools are explicit non-goals:
+
+- **`shell_*` / arbitrary command execution.** Non-negotiable. Workers get shell via Claude Code's built-in Bash, which has its own allowlist.
+- **Tools that modify security permissions, SSO tokens, or browser credentials.** Filesystem deny list catches these at a lower layer anyway.
+- **Tools that auto-send messages** (Slack, email, Discord) without confirmation. The orchestrator prompt already requires confirmation for outgoing messages; tools should preserve that assumption.
+
+## Adding a new tool namespace
+
+If you're adding a whole family of tools (say, `calendar_*`), create `crates/kairo-mcp/src/tools/calendar.rs`, register the namespace in `main.rs`, and add a "Calendar tools" section to `docs/mcp-tools.md`. Follow the naming convention `mcp__kairo__<namespace>_<verb>`.

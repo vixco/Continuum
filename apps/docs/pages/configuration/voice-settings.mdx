@@ -1,0 +1,67 @@
+# Voice settings
+
+Full reference for the `[voice]`, `[audio]`, and `[tts]` blocks in `~/.kairo/config/default-models.toml`.
+
+## `[voice]`
+
+```toml
+[voice]
+enabled = true
+wake_word_enabled = true
+wake_keyword = "hey kairo"
+wake_sensitivity = 0.5                  # 0.0–1.0; higher = stricter match
+custom_keyword_path = ""                # Porcupine .ppn, optional
+listen_timeout_ms = 12000
+endpoint_silence_ms = 700
+min_utterance_chars = 3
+barge_in_enabled = true
+ambient_mute_enabled = true
+language_detection_enabled = false
+default_language = "en"
+volume = 0.8                            # master playback gain, 0.0–1.0
+feedback_sounds = true
+hotkey = "Ctrl+Shift+K"
+conversation_followup_seconds = 5
+```
+
+## `[audio]`
+
+```toml
+[audio]
+enabled = true
+whisper_model_path = ""                 # blank = search ~/.kairo/models/stt
+whisper_language = "auto"               # or "en", "nl"
+vad_threshold = 0.005                   # energy VAD; lower = more sensitive
+silence_duration_ms = 800               # min silence to end a whisper segment
+max_segment_secs = 8
+device_name = ""                        # blank = default input device
+device_index = null
+```
+
+## `[tts]`
+
+```toml
+[tts]
+enabled = true
+engine = "piper"                        # or "elevenlabs" (stubbed)
+espeak_data_dir = ""                    # blank = ~/.kairo/models/tts/espeak-ng-data
+primary = "en"
+length_scale = null                     # speech speed; null = Piper default
+
+[tts.voices]
+en = "en_US-lessac-medium"
+# nl = "nl_NL-mls-medium"  # uncomment to enable Dutch — quality warning applies
+
+[tts.elevenlabs]
+api_key = ""
+voice_id = ""
+model_id = "eleven_turbo_v2_5"
+stability = 0.5
+similarity_boost = 0.75
+```
+
+## Where overrides apply
+
+- **Dashboard sliders / dropdowns** write back to this file atomically.
+- **Env var `KAIRO_PIPER_BIN`** overrides the Piper binary search path.
+- **Env var `KAIRO_MODELS_DIR`** overrides the model-search root.

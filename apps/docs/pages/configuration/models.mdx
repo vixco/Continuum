@@ -1,0 +1,75 @@
+# Models
+
+All model config lives at `~/.kairo/config/default-models.toml`. Edit it directly or use the dashboard Brain tab.
+
+## Vision
+
+```toml
+[vision]
+name = "SmolVLM-256M"
+model_path = ""                # blank = search ~/.kairo/models/vision
+gpu_enabled = false            # auto-detected at runtime; explicit true forces ONNX-GPU
+input_width = 384
+input_height = 384
+```
+
+To swap: drop a new ONNX vision model into `~/.kairo/models/vision/` and point `model_path` at it. The model must implement the `VisionModel` trait — see `crates/kairo-vision` for the interface.
+
+## Triage
+
+```toml
+[triage]
+model_path = "~/.kairo/models/triage/qwen3-8b-q4_k_m.gguf"
+gpu_layers = 999               # max; 0 for CPU-only
+grammar_path = "prompts/triage-grammar.gbnf"
+max_retries = 3
+```
+
+Any GGUF model that supports grammar-constrained generation works. The triage prompt (`prompts/triage-system.md`) is tuned for Qwen 3; switching to a different family may need prompt tweaks.
+
+## Orchestrator
+
+```toml
+[orchestrator]
+model = "claude-opus-4-6"      # or "claude-sonnet-4-6"
+max_context_tokens = 4000
+claude_binary = ""             # blank = search PATH
+mcp_config_path = ""           # auto-generated per wake
+```
+
+## Workers
+
+```toml
+[workers]
+mode = "auto"                  # "auto" | "budget" | "power"
+budget_model = "claude-sonnet-4-6"
+power_model = "claude-opus-4-6"
+max_concurrent = 3
+default_timeout_secs = 1800
+```
+
+## STT and TTS
+
+```toml
+[audio]
+whisper_model_path = "~/.kairo/models/stt/whisper-medium.bin"
+whisper_language = "auto"      # or "en", "nl", etc.
+
+[tts]
+engine = "piper"
+primary = "en"
+voices = { en = "en_US-lessac-medium" }
+```
+
+## GPU detection
+
+Kairo auto-detects NVIDIA CUDA at startup. If found, triage runs on GPU (`gpu_layers = 999`) and vision runs on ONNX Runtime's CUDA provider. Override with explicit config values if you want CPU-only for debugging.
+
+## Where models live
+
+Default search order:
+
+1. Explicit `model_path` in config
+2. `$KAIRO_MODELS_DIR` (set by the installer)
+3. `~/.kairo/models/`
+4. `~/.kairo-dev/models/` (for developer builds)

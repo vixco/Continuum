@@ -1,0 +1,105 @@
+# All config options reference
+
+Every setting Kairo reads, grouped by section. File: `~/.kairo/config/default-models.toml`.
+
+## `[vision]`
+| Key | Type | Default | Purpose |
+|---|---|---|---|
+| `name` | string | `"SmolVLM-256M"` | human-facing label |
+| `model_path` | string | blank | search `~/.kairo/models/vision` if blank |
+| `gpu_enabled` | bool | auto | force ONNX-GPU |
+| `input_width` | int | 384 | vision input W |
+| `input_height` | int | 384 | vision input H |
+
+## `[screen]`
+| Key | Type | Default |
+|---|---|---|
+| `interval_secs` | int | 3 |
+| `capture_width` | int | 1280 |
+| `capture_height` | int | 720 |
+| `save_screenshots` | bool | true |
+
+## `[audio]`
+See [Voice settings](/configuration/voice-settings).
+
+## `[context]`
+| Key | Type | Default |
+|---|---|---|
+| `poll_interval_secs` | int | 1 |
+
+## `[frame]`
+| Key | Type | Default |
+|---|---|---|
+| `interval_secs` | int | 3 |
+| `salience_threshold` | float | 0.10 |
+
+## `[storage]`
+| Key | Type | Default |
+|---|---|---|
+| `db_path` | string | blank |
+| `screenshots_dir` | string | blank |
+| `retention_days` | int | 30 |
+
+## `[memory]`
+| Key | Type | Default |
+|---|---|---|
+| `distillation_enabled` | bool | true |
+| `distillation_interval_minutes` | int | 15 |
+| `distillation_lookback_minutes` | int | 20 |
+| `distillation_min_salience` | float | 0.35 |
+| `distillation_batch_size` | int | 100 |
+
+## `[voice]`
+See [Voice settings](/configuration/voice-settings).
+
+## `[tts]` and `[tts.voices]` and `[tts.elevenlabs]`
+See [Voice settings](/configuration/voice-settings).
+
+## `[orchestrator]`
+See [Models](/configuration/models).
+
+## `[workers]`
+| Key | Type | Default |
+|---|---|---|
+| `mode` | string | `"auto"` |
+| `budget_model` | string | `"claude-sonnet-4-6"` |
+| `power_model` | string | `"claude-opus-4-6"` |
+| `max_concurrent` | int | 3 |
+| `default_timeout_secs` | int | 1800 |
+| `default_allowed_tools` | string | blank |
+| `status_refresh_ms` | int | 500 |
+| `failure_streak_limit` | int | 3 |
+| `failure_window_secs` | int | 600 |
+
+## `[skills]`
+| Key | Type | Default |
+|---|---|---|
+| `enabled` | bool | true |
+| `dir` | string | `"skills"` |
+| `hot_reload` | bool | true |
+| `token_budget` | int | 2000 |
+| `disabled` | list | `[]` |
+
+## `[mcp.fs]`
+| Key | Type | Default |
+|---|---|---|
+| `extra_paths` | list | `[]` |
+
+## `[triage]`
+| Key | Type | Default |
+|---|---|---|
+| `model_path` | string | blank |
+| `gpu_layers` | int | 999 |
+| `grammar_path` | string | `"prompts/triage-grammar.gbnf"` |
+| `max_retries` | int | 3 |
+
+## Environment variables
+
+| Var | Purpose |
+|---|---|
+| `KAIRO_MODELS_DIR` | override models root |
+| `KAIRO_PIPER_BIN` | override Piper binary path |
+| `KAIRO_DATA_DIR` | override `~/.kairo` root |
+| `KAIRO_MCP_BIN` | explicit `kairo-mcp.exe` path |
+| `KAIRO_WORKER_DRY_RUN` | set to `1` for worker transcript simulation |
+| `ANTHROPIC_API_KEY` | passed through to Claude Code |

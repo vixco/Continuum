@@ -1,0 +1,39 @@
+# Automations
+
+Automations are scheduled tasks — one-shot or recurring — that spawn a worker at the scheduled time.
+
+## Example uses
+
+- **"Daily briefing at 8:00"** — fires the `daily-briefing` skill with a worker that reads overnight episodic memory, recent emails (if you've wired email MCP tools), and your calendar, then delivers a spoken summary.
+- **"Weekly tidy-up on Sundays at 22:00"** — fires the `file-organizer` skill against your Downloads folder.
+- **"Remind me tomorrow at 14:00 to send the invoice"** — a one-shot reminder that pops a notification and optionally opens a draft in your email client.
+
+## Shape of an automation
+
+```json
+{
+  "id": "a_...",
+  "name": "Daily briefing",
+  "enabled": true,
+  "schedule": {
+    "type": "cron",
+    "expression": "0 8 * * *",
+    "timezone": "Europe/Amsterdam"
+  },
+  "task": "Give me the daily briefing",
+  "skill": "daily-briefing",
+  "model_tier": "auto"
+}
+```
+
+One-shot automations use a `fireAt` ISO timestamp instead of a cron expression.
+
+## Managing automations
+
+Dashboard → Automations tab. You can create, edit, delete, toggle, and run-now from the UI. Under the hood they're stored in `~/.kairo/automations.json` (atomic writes via `.tmp` + rename).
+
+## When scheduled runs fire
+
+Automations fire **only while Kairo is running**. If your machine is off at the scheduled time, the run is skipped — Kairo does not keep a persistent cron daemon.
+
+If you want rock-solid scheduling, pair automations with Windows Task Scheduler calling `kairo setup --start` (future work; today, launch Kairo at login).

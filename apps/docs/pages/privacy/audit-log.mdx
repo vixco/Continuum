@@ -1,0 +1,40 @@
+# The audit log
+
+Every tool call the orchestrator (or a worker) makes is logged to Kairo's episodic memory as a `ToolCall` event. This is the **audit log**. Open it from the dashboard Memory tab → Episodic, or inspect it directly in `~/.kairo/memory/episodic/`.
+
+## What each entry contains
+
+- **Timestamp** (ISO-8601 with tz)
+- **Tool name** (e.g. `mcp__kairo__fs_read_file`)
+- **Sanitised arguments** — keys matching `/password|secret|token|apikey|auth/i` are redacted, strings longer than 500 chars are truncated
+- **Result summary** — ≤200 chars, designed so you can scan for "what did Kairo actually do"
+- **Session id** — ties back to the specific Opus wake or worker that made the call
+- **Importance score** (0.4 for tool calls by default, higher for worker terminal states)
+
+## What the audit log is for
+
+- **Trust.** You can verify exactly what tools got called during any wake.
+- **Debugging.** When something didn't happen the way you expected, scrub the audit log for the relevant session.
+- **Forensics.** If Kairo did something unexpected — the audit log is your primary evidence.
+- **Training memory.** Episodic memory is what the orchestrator retrieves on future wakes. Tool-call history is part of that retrieval.
+
+## What it is NOT
+
+- **Not a command log.** Kairo does not log keystrokes, mouse movement, or any input you didn't willingly route through a tool.
+- **Not a screenshot index.** Screenshots are in the raw log, not the audit log.
+- **Not a security boundary.** The audit log is evidence *after* the fact. It does not stop a tool from being called — permissions do.
+
+## Exporting
+
+The LanceDB files under `~/.kairo/memory/episodic/` are self-describing Apache Arrow. You can read them with any Arrow-capable client (DuckDB, Polars, pandas via `pyarrow`).
+
+```python
+# Example with pyarrow
+import pyarrow.dataset as ds
+dataset = ds.dataset("~/.kairo/memory/episodic/", format="lance")
+table = dataset.to_table()
+```
+
+## Deleting
+
+Individual episodes can be deleted from the dashboard or via the `delete_episodic` Tauri command. A full wipe goes through Memory tab → "Wipe memory".
