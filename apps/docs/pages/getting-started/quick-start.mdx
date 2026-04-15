@@ -1,0 +1,49 @@
+# Quick start
+
+Five things to try in your first ten minutes with Kairo.
+
+## 1. Say "hey kairo" and ask a trivial question
+
+```
+hey kairo, what's on my screen right now?
+```
+
+This verifies wake-word detection, the full voice pipeline, the orchestrator wake-up, and the vision layer all work. Expect a spoken reply in about 1–2 seconds.
+
+## 2. Delegate a small task
+
+```
+hey kairo, summarise the README file in my current project
+```
+
+Behind the scenes this wakes the orchestrator, which spawns a Claude Code worker in your project directory. Watch the Home tab's "Active workers" panel — you'll see the worker's output stream in real time.
+
+## 3. Remember something
+
+```
+hey kairo, remember that I prefer TypeScript over JavaScript and Tailwind over CSS modules
+```
+
+This writes to the semantic memory store. The next time the orchestrator wakes, it'll retrieve these preferences as part of its context. Verify it landed by opening the Memory tab → Semantic facts.
+
+## 4. Use the hotkey
+
+Press `Ctrl+Shift+K` anywhere on your system. This is the "push-to-talk" shortcut — it skips the wake word and starts a listening session immediately. Useful when Kairo is in a noisy environment or when you've muted the wake word.
+
+## 5. Watch perception and triage
+
+Open the Home tab and let Kairo observe you for a few minutes. You'll see:
+
+- Perception frames — screenshots + audio transcripts + context (foreground window, idle time)
+- Triage decisions — `ignore` / `remember` / `whisper` / `execute_simple` / `wake_orchestrator`
+- The occasional Opus wake-up when triage decides something matters
+
+This is the "cognitive presence" part. Kairo is always watching; it's just quiet unless there's a reason not to be.
+
+## Where to go next
+
+- [How it works](/concepts/how-it-works) — the four layers explained non-technically
+- [Voice](/features/voice) — wake word, TTS, barge-in, conversation mode
+- [Memory](/features/memory) — what Kairo remembers and how to manage it
+- [Skills](/features/skills) — pre-built workflows the orchestrator can use
+- [Troubleshooting](/troubleshooting) — if anything above doesn't work

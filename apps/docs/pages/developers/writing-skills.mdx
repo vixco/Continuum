@@ -1,0 +1,91 @@
+# Writing skills
+
+A skill is a `SKILL.md` file the orchestrator picks up at wake time to handle a specific workflow. See [Features → Skills](/features/skills) for the user perspective.
+
+## Where skills live
+
+- `skills/<name>/SKILL.md` — **bundled skills** (shipped in the repo)
+- `~/.kairo/skills/<name>/SKILL.md` — **user skills** (installed locally)
+
+Both locations are scanned at startup. Bundled skills are hot-reloaded; user skills currently need a restart to reload.
+
+## Frontmatter
+
+```yaml
+---
+name: my-skill                 # required; kebab-case; [a-zA-Z0-9_-]+
+description: One-line purpose  # required; shown in the triage prompt
+triggers:                       # list of substring matches; inline OR list form
+  - "trigger one"
+  - "trigger two"
+source: bundled | user          # optional; set by the loader
+manual_only: false              # optional; if true, only fires when explicitly requested
+---
+```
+
+The `triggers` list is substring-matched against:
+
+- the wake text
+- the foreground app name
+- the recent audio transcript
+- a set of tags the orchestrator sees
+
+Multiple hits compound the skill's match score. Top-ranked skills are loaded into the orchestrator prompt until the skill token budget (`skills.token_budget`, default 2000) is full.
+
+## Body
+
+The body is Markdown, injected after the base orchestrator prompt. Write as if briefing a careful colleague.
+
+Good skills have:
+
+1. **A narrow, explicit procedure** — numbered steps, concrete tool calls.
+2. **An output format** — "reply as a bulleted list grouped by severity", or "return a JSON object with fields X / Y / Z".
+3. **Refusal rules** — "if the task is out of scope, stop and say why", "don't apply fixes without confirmation".
+4. **Examples** — one good example of input + expected output is worth 500 words of prose.
+
+## Example
+
+```markdown
+---
+name: morning-briefing
+description: Spoken morning briefing drawn from memory, calendar, and overnight worker activity
+triggers:
+  - "briefing"
+  - "morning briefing"
+  - "what's on today"
+---
+
+# Morning briefing
+
+When active, the orchestrator should:
+
+1. Read `kairo.daily_briefing_time` from semantic memory. If the current time is not within 3 hours of it, decline.
+2. Use `memory_query_episodic` to retrieve the top 10 events from the last 24h.
+3. Use `workers_worker_list` to find overnight worker outcomes.
+4. Use `system_current_time` to anchor relative phrases ("yesterday", "this morning").
+5. Compose a 60–90 second spoken briefing in this format:
+   - Opening: one-sentence mood check tied to the weather or last-night sleep if known
+   - Highlights: 3–5 bullets from overnight activity
+   - Today: up to 3 items from the user's calendar (if calendar tool present) or known meetings from memory
+   - Closing: one-sentence suggestion of what to do first
+
+## Refusal
+If the user asks for a briefing mid-afternoon, decline and suggest "status" instead.
+If episodic memory is empty (new install), decline and suggest letting Kairo run for a day first.
+```
+
+## Installing from a URL
+
+Dashboard → Tools → "Install skill from URL". Kairo runs `git clone --depth 1 <url> <tmp>`, validates the `SKILL.md`, and moves it to `~/.kairo/skills/`.
+
+## Disabling
+
+Dashboard → Tools → toggle the skill off. Persisted at `skills.disabled`.
+
+## Testing
+
+```bash
+cargo run --release --example skill_match_demo -p kairo-core -- "your wake reason here"
+```
+
+Lists matched skills + their scores for a given wake context. Useful for checking trigger collisions before committing.

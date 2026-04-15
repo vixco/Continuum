@@ -19,6 +19,7 @@
 mod commands;
 mod components;
 mod events;
+mod onboarding;
 mod runtime_bridge;
 mod tray;
 
@@ -149,6 +150,14 @@ fn main() {
             commands::get_worker,
             commands::cancel_worker,
             commands::dismiss_worker,
+            onboarding::check_claude_cli,
+            onboarding::check_claude_auth,
+            onboarding::list_audio_input_devices,
+            onboarding::list_audio_output_devices,
+            onboarding::download_model,
+            onboarding::run_diagnostics,
+            onboarding::is_onboarding_complete,
+            onboarding::complete_onboarding,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

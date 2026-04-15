@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Docs
+    url: https://princnl.github.io/kairo-ai
+    about: Read the user-facing docs before filing an issue.
+  - name: Discussions
+    url: https://github.com/PrincNL/kairo-ai/discussions
+    about: For questions, ideas, or design conversations that aren't bugs or feature requests.

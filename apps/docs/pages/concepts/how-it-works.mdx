@@ -1,0 +1,57 @@
+# How Kairo works
+
+Kairo has a **four-layer cognitive architecture**. Each layer runs at a different speed and cost. Together they give you something that acts a lot like a thoughtful assistant: fast reflexes when they matter, slow deliberation when they don't, and a very strong sense of when to stay silent.
+
+```
+Layer 1 — SENSES        (local, always on)           vision + audio + context
+Layer 2 — TRIAGE        (local 8B LLM)               does this matter?
+Layer 3 — ORCHESTRATOR  (Claude Opus 4.6 via CLI)    plan, decide, delegate
+Layer 4 — WORKERS       (Claude Opus or Sonnet)      go do the thing
+```
+
+## The three things people get wrong about Kairo
+
+1. **"It's just a chatbot with a wake word."** No. A chatbot is reactive; Kairo is ambient. It runs continuously, observing, forming memories, and only speaking when triage decides the moment warrants it.
+2. **"It sends everything to Claude."** No. 95%+ of your perception data never leaves your machine. Only when triage decides to wake the orchestrator does a small, relevant context window get sent to Opus.
+3. **"It scrapes my Claude subscription."** No. Kairo drives the official `claude` CLI that Anthropic ships and supports. Your subscription, your account, your auth tokens — they never leave the CLI.
+
+## How a single wake-up unfolds
+
+Take "hey kairo, what's on my calendar today?" as an example:
+
+1. **Senses (Layer 1)** captures your wake-word audio via the continuously-running whisper transcript.
+2. The voice session opens, captures the rest of your sentence, detects the endpoint, and hands the transcript to the triage layer.
+3. **Triage (Layer 2)** — Qwen 3 8B — reads the transcript plus the last few perception frames and decides: `wake_orchestrator` (with `suggested_skill: daily-briefing`).
+4. **The orchestrator (Layer 3)** — Claude Opus 4.6 — wakes up. Kairo spawns `claude -p --output-format stream-json` as a subprocess with:
+   - Your wake context (current frame + relevant memories + the triage decision)
+   - The orchestrator system prompt (Kairo's personality, rules, and the matched skill's content)
+   - The MCP server with 16+ Windows-specific tools
+5. **Opus thinks.** For a simple question, it answers directly. For something that needs calendar access, it calls an MCP tool. For something long-running like "fix small bugs in my GitHub project", it spawns a worker.
+6. **Text streams back** in real time. Kairo pipes the `text_delta` events directly into the TTS queue — by the time Opus has finished the first sentence, you're already hearing it.
+7. **The result is remembered.** The wake context, Opus's response, and any tool calls are written to episodic memory for next time.
+
+This whole cycle takes 1–2 seconds for fast-path queries, 3–5 seconds for ones that need tool calls, and can take minutes for worker-backed tasks.
+
+## Why four layers and not two
+
+You could imagine a simpler design: just send every perception frame to Opus and let it decide. This would be catastrophic:
+
+- **Cost.** At ~30 frames per minute, that's ~43,000 frames a day. Even at pennies per call, that's hundreds of dollars a month per user.
+- **Latency.** Opus is slow relative to local models. A decision loop that wakes Opus every second would feel laggy.
+- **Context.** Opus doesn't remember across calls; every frame would need a full context replay.
+
+Triage solves all three. A small local LLM can process a frame in ~1 second, costs nothing, and correctly classifies 95% of frames as "ignore". Opus only wakes for the remaining 5%.
+
+## Why use Claude Code and not the Anthropic API
+
+1. **Legal.** The `claude` CLI uses your existing subscription. No token scraping.
+2. **Stable.** Claude Code is an officially supported product Anthropic ships and maintains. The stream-json event surface is documented. When the API changes, Claude Code absorbs the change and Kairo keeps working.
+3. **Capable.** Claude Code already does file editing, shell access, tool calling, session management. Reusing it means we don't reinvent these pieces in Kairo.
+4. **Composable.** Workers are just more Claude Code sessions. The architecture scales from one session to many.
+
+## The next pages
+
+- [Perception](/concepts/perception) — what exactly Kairo sees and hears
+- [Triage](/concepts/triage) — how the local LLM decides what matters
+- [The orchestrator](/concepts/orchestrator) — when and why Opus wakes up
+- [Workers](/concepts/workers) — how Kairo delegates long-running work

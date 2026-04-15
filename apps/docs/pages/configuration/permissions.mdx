@@ -1,0 +1,54 @@
+# Permissions
+
+Kairo's permission model is about **filesystem access** and **tool access**. Config lives at `~/.kairo/config/default-permissions.toml`.
+
+## Filesystem allowlist
+
+```toml
+[fs]
+extra_paths = [
+  "C:\\Users\\you\\projects",   # read-write
+]
+
+read_only_paths = [
+  "C:\\Users\\you"              # read-only
+]
+```
+
+Plus a hardcoded deny list Kairo never touches:
+
+- `.ssh`, `.aws`, `.gnupg`, `.docker` directories
+- Browser profile directories (`User Data`, `Profiles`)
+- `node_modules`, `target` (too noisy)
+- Anywhere matching `*.pem`, `*.key`, `id_rsa*`, `.env*`, `*.kdbx`
+
+## Tool tiers
+
+Each MCP tool has a default permission tier:
+
+| Tier | Tools | Default |
+|---|---|---|
+| `read` | `fs_read_file`, `fs_list_dir`, `memory_query_*`, `memory_get_fact`, `system_*`, `web_fetch` | allow |
+| `write` | `memory_set_fact` | allow within allowlist |
+| `notify` | `system_notification` | allow, rate-limited |
+| `worker` | `workers_spawn_worker`, `workers_*` | allow, queue-gated |
+| `repair` | `repair_*` | allow only from repair agent context |
+
+Override per-tool in `default-permissions.toml`:
+
+```toml
+[tools]
+"mcp__kairo__system_notification" = "deny"   # no toasts, ever
+```
+
+## Confirmation prompts
+
+For destructive or irreversible actions (file writes outside allowlist, worker spawns with broad tool allowlists, rolling back config), the orchestrator is instructed to ask the user via voice / notification before proceeding. This is prompt-level behavior, not enforced at the tool layer, so treat it as a gentle default — not a guarantee.
+
+## Worker allowlist
+
+Each worker spec includes an `allowed_tools` CSV. If blank, the worker inherits the narrow default: `Read,Grep,Glob,Edit,fs_read_file,fs_list_dir`. The orchestrator can widen per task.
+
+## Audit trail
+
+Every MCP tool call writes an episodic event with kind `tool_call`, sanitised args (passwords, secrets, tokens redacted; strings >500 chars truncated), and a ≤200-char result summary. Browse it in Memory tab → Episodic.
