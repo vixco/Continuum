@@ -19,6 +19,9 @@
 //!   click, error beep).
 //! - [`hotkey`] — global keyboard shortcut for push-to-talk / toggle
 //!   listening (Windows only).
+//! - [`intent`] — file-based push-to-talk intents from the dashboard process.
+//!   Pure serde/std; available without the `runtime` feature so the Tauri
+//!   crate can write intents.
 //! - [`health`] — component-level health checks used by the repair agent.
 //!
 //! ## Architectural placement
@@ -28,12 +31,21 @@
 //! (STT, wake word) feeds the existing perception + triage pipeline.
 //! Nothing here speaks to the MCP server directly.
 
+pub mod intent;
+
+#[cfg(feature = "runtime")]
 pub mod health;
-#[cfg(windows)]
+#[cfg(all(feature = "runtime", windows))]
 pub mod hotkey;
+#[cfg(feature = "runtime")]
 pub mod playback;
+#[cfg(feature = "runtime")]
 pub mod sounds;
+#[cfg(feature = "runtime")]
 pub mod streaming;
+#[cfg(feature = "runtime")]
 pub mod stt;
+#[cfg(feature = "runtime")]
 pub mod tts;
+#[cfg(feature = "runtime")]
 pub mod wake;

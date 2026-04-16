@@ -14,6 +14,7 @@ import {
 import { useStore } from "@/lib/store";
 import { kairo } from "@/lib/tauri";
 import { Button, Card, StatusOrb } from "@/components/ui/primitives";
+import { PushToTalkButton } from "@/components/PushToTalkButton";
 import type { RecentAction, VoiceMode, WorkerSnapshot } from "@/lib/types";
 
 const ACTIVE_STATUSES = new Set(["queued", "starting", "running", "pending"]);
@@ -81,6 +82,7 @@ export function HomeTab() {
             )}
           </p>
         </div>
+        <PushToTalkButton mode={voiceMode} />
         <ScreenshotThumb path={state.perception.last_screenshot_path} />
       </section>
 

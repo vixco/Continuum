@@ -1,6 +1,6 @@
 "use client";
 
-import { Volume2 } from "lucide-react";
+import { Info, Volume2 } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { kairo } from "@/lib/tauri";
@@ -18,16 +18,23 @@ export function VoiceTab() {
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
 
+  const voiceOptions =
+    Object.keys(config.tts.voices).length > 0
+      ? Object.keys(config.tts.voices).map((k) => ({ value: k, label: k }))
+      : [{ value: config.tts.primary || "en", label: config.tts.primary || "en" }];
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
+      <RestartNotice />
+
       <Card
         title="Voice status"
         subtitle={`mode: ${voice.mode}${voice.muted ? " (muted)" : ""}`}
       >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Info label="Volume" value={`${Math.round(voice.volume * 100)}%`} />
-          <Info label="TTS queue" value={String(voice.tts_queue_len)} />
-          <Info
+          <Stat label="Volume" value={`${Math.round(voice.volume * 100)}%`} />
+          <Stat label="TTS queue" value={String(voice.tts_queue_len)} />
+          <Stat
             label="Ambient mute"
             value={
               voice.ambient_mute_active
@@ -51,25 +58,20 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.wake_word_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag(
-                "wake_word_enabled",
-                v,
-              );
+              const cfg = await kairo.updateVoiceFlag("wake_word_enabled", v);
               setConfig(cfg);
             }}
             label="Wake word enabled"
           />
-          <Slider
-            label="Wake sensitivity"
-            value={config.voice.wake_sensitivity}
-            onChange={() => {}}
-            min={0}
-            max={1}
-            step={0.05}
-          />
+          {/* `wake_sensitivity` is currently not consumed by the wake-word
+              detector (transcript-based phonetic match has no threshold).
+              Hidden until that field is actually wired into the matcher. */}
         </div>
         <div className="mt-4 text-sm text-ink-muted">
           Hotkey: <Kbd>{config.voice.hotkey || "unset"}</Kbd>
+          <span className="ml-2 text-xs text-ink-dim">
+            (rebind via config.toml — UI rebind komt later)
+          </span>
         </div>
       </Card>
 
@@ -82,15 +84,19 @@ export function VoiceTab() {
               { value: "piper", label: "Piper (local)" },
               { value: "elevenlabs", label: "ElevenLabs (cloud plugin)" },
             ]}
-            onChange={() => {}}
+            onChange={async (v) => {
+              const cfg = await kairo.updateTtsEngine(v);
+              setConfig(cfg);
+            }}
           />
           <Select
             label="Primary voice"
             value={config.tts.primary}
-            options={Object.keys(config.tts.voices).length > 0
-              ? Object.keys(config.tts.voices).map((k) => ({ value: k, label: k }))
-              : [{ value: "en", label: "en" }]}
-            onChange={() => {}}
+            options={voiceOptions}
+            onChange={async (v) => {
+              const cfg = await kairo.updateTtsPrimaryVoice(v);
+              setConfig(cfg);
+            }}
           />
           <Slider
             label="Volume"
@@ -104,7 +110,10 @@ export function VoiceTab() {
           <Slider
             label="Length scale (speed)"
             value={config.tts.length_scale ?? 1}
-            onChange={() => {}}
+            onChange={async (v) => {
+              const cfg = await kairo.updateTtsLengthScale(v);
+              setConfig(cfg);
+            }}
             min={0.7}
             max={1.4}
             step={0.05}
@@ -166,7 +175,32 @@ export function VoiceTab() {
   );
 }
 
-function Info({ label, value }: { label: string; value: string }) {
+/**
+ * Banner that warns the user voice settings only take effect on the next
+ * daemon start. The daemon currently loads its config once at boot and does
+ * not watch `config.toml` for changes — making the dashboard's slider/select
+ * changes "save now, apply on restart". Honest UX beats silent no-op.
+ */
+function RestartNotice() {
+  return (
+    <div className="flex items-start gap-3 rounded-md border border-state-warn/40 bg-state-warn/10 p-3 text-sm">
+      <Info size={16} className="mt-0.5 shrink-0 text-state-warn" />
+      <div>
+        <div className="font-medium text-ink">
+          Voice-instellingen worden pas toegepast bij de volgende start van
+          Kairo.
+        </div>
+        <div className="mt-0.5 text-xs text-ink-muted">
+          Wijzigingen hier worden opgeslagen, maar de daemon leest de config
+          alleen bij opstart. Sluit en herstart Kairo om ze actief te maken.
+          (Live hot-reload komt in een latere update.)
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <div className="text-[11px] uppercase tracking-wider text-ink-dim">
