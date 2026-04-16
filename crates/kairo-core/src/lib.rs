@@ -37,5 +37,7 @@ pub mod workers;
 pub mod memory;
 #[cfg(feature = "runtime")]
 pub mod orchestrator;
-#[cfg(feature = "runtime")]
+// `voice` itself is always compiled — the intent submodule is pure
+// serde/std and the desktop crate calls into it. Heavy submodules
+// (TTS, STT, playback, etc.) are gated inside `voice/mod.rs`.
 pub mod voice;

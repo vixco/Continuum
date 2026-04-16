@@ -4,6 +4,24 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+### Added — Push-to-talk + Voice tab UX honesty
+
+- **Push-to-talk button on the Home tab** (`apps/desktop/src/components/PushToTalkButton.tsx`): a big round mic button next to the status orb, gives users a one-click alternative to the wake word and the `Ctrl+Shift+K` global hotkey. Three visual states (idle, pressed, listening) with optimistic local feedback so the click feels instant even though the daemon's `state.voice.mode` lags up to 2 s behind via the state poller. Disabled while Kairo is thinking or speaking.
+- **Voice intent file protocol** (`crates/kairo-core/src/voice/intent.rs`): mirror of `workers::intent` — atomic write via `.tmp` + rename, drain on each daemon tick (250 ms), `.bad` rename for unparseable files, and a 30-second TTL that silently drops stale intents so a crash can't fire a spurious listen on next launch. `TalkNow` is the only variant for now; `serde(tag = "kind")` keeps the on-disk schema open for future `Cancel`/`Mute` intents. 4 unit tests cover write/drain roundtrip, bad-JSON rename, stale drop, and ensure-dir-on-missing.
+- **`talk_now` Tauri command** + frontend wrapper `kairo.talkNow()`: dashboard writes the intent file via the new helper; daemon picks it up in the same select arm style as the existing `recv_hotkey` (`drain_voice_intents_tick` helper in `crates/kairo-core/src/bin/kairo.rs`).
+- **Voice tab wired stub handlers**: the four `onChange={() => {}}` no-ops in `VoiceTab.tsx` (engine select, primary voice select, length-scale slider, wake-sensitivity slider) now call real Tauri commands that persist to `config.toml`. Four new commands shipped: `update_tts_engine` (validates `piper`/`elevenlabs`), `update_tts_primary_voice` (rejects empty), `update_tts_length_scale` (clamped 0.5–2.0), `update_wake_sensitivity` (clamped 0–1).
+- **Restart-required notice on the Voice tab**: a yellow info banner makes it explicit that voice settings are saved-now-applied-on-restart. The daemon currently loads its config once at boot and does not watch `config.toml`; that's a known limitation earning a separate hot-reload phase. The banner lives in `RestartNotice` at the top of `VoiceTab`.
+
+### Changed
+
+- `crates/kairo-core/src/lib.rs` + `crates/kairo-core/src/voice/mod.rs`: `voice` module is now always compiled. Heavy submodules (TTS, STT, playback, streaming, wake, sounds, hotkey, health) stay gated behind the `runtime` feature; the new `intent` submodule is pure serde/std and is reachable from the desktop crate without pulling llama-cpp/whisper into its build.
+- `apps/desktop/src/components/tabs/VoiceTab.tsx`: `wake_sensitivity` slider hidden — the field exists in `KairoConfig` but no daemon code consumes it (transcript-based phonetic wake match has no threshold). Tracked as a known limitation rather than a misleading slider. Hotkey display gains a small "rebind via config.toml — UI rebind komt later" caption to set expectations.
+- `apps/desktop/src/components/tabs/HomeTab.tsx`: the orb-headline-screenshot row now has the PTT button between the headline and the screenshot thumbnail, so orb + button form one visual cluster.
+
+### Fixed
+
+- Dashboard's voice-flag toggles still only persist to `config.toml` (daemon restart needed to take effect), but they no longer pretend otherwise — see the new restart banner. Live hot-reload is intentionally out of scope for this change.
+
 ## [0.1.0-alpha.1] — 2026-04-15
 
 First public alpha. Phase 9 (polish + alpha release) complete. Every phase from the roadmap (0 through 9) is done.
