@@ -121,6 +121,15 @@ export const kairo = {
     invoke<void>("rollback_config", { date }),
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
+  talkNow: () => invoke<void>("talk_now"),
+  updateWakeSensitivity: (value: number) =>
+    invoke<KairoConfig>("update_wake_sensitivity", { value }, DEFAULT_CONFIG),
+  updateTtsLengthScale: (value: number) =>
+    invoke<KairoConfig>("update_tts_length_scale", { value }, DEFAULT_CONFIG),
+  updateTtsEngine: (engine: string) =>
+    invoke<KairoConfig>("update_tts_engine", { engine }, DEFAULT_CONFIG),
+  updateTtsPrimaryVoice: (voice: string) =>
+    invoke<KairoConfig>("update_tts_primary_voice", { voice }, DEFAULT_CONFIG),
   quit: () => invoke<void>("quit_app"),
   listSkills: () => invoke<Skill[]>("list_skills", undefined, []),
   saveSkill: (input: SaveSkillInput) =>
