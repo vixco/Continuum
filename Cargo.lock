@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "kairo-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -4376,7 +4376,7 @@ dependencies = [
 
 [[package]]
 name = "kairo-desktop"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4398,7 +4398,7 @@ dependencies = [
 
 [[package]]
 name = "kairo-llm"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "kairo-mcp"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4439,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "kairo-vision"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",

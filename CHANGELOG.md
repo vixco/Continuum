@@ -4,6 +4,8 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] — 2026-04-18
+
 ### Security + reliability hardening (post-alpha.1 audit)
 
 A full audit of the alpha.1 build surfaced a mix of actual bugs, architectural drift, and drop-the-next-alpha blockers. This block is the remediation pass.
