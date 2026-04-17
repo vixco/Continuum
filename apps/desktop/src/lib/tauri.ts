@@ -241,7 +241,7 @@ export const DEFAULT_STATE: KairoState = {
     stt_loaded: false,
     orchestrator_ready: false,
     paused: false,
-    version: "0.1.0-alpha.1",
+    version: "0.1.0-alpha.2",
   },
   recent_actions: [],
 };
