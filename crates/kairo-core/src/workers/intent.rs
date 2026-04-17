@@ -204,7 +204,7 @@ pub fn list_snapshots(data_dir: &Path) -> Result<Vec<WorkerSnapshot>> {
             }
         }
     }
-    out.sort_by(|a, b| b.queued_at.cmp(&a.queued_at));
+    out.sort_by_key(|s| std::cmp::Reverse(s.queued_at));
     Ok(out)
 }
 
