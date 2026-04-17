@@ -4,6 +4,50 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+### Security + reliability hardening (post-alpha.1 audit)
+
+A full audit of the alpha.1 build surfaced a mix of actual bugs, architectural drift, and drop-the-next-alpha blockers. This block is the remediation pass.
+
+**Orchestrator / correctness**
+
+- **`orchestrator/spawn.rs`**: wake invocation now includes `--input-format stream-json`. Without it the CLI was reading our stream-json user message on stdin as a plain text prompt — it happened to work because of CLI leniency, but broke on newer CLI versions. The worker supervisor + repair agent already passed this flag; they're now consistent.
+- **`orchestrator/wake_context.rs`**: `format_frame_oneline` no longer byte-slices screen descriptions / transcripts to `[..57]` / `[..27]`. A Dutch window title with an `é`, a Japanese app name, or an emoji in a transcript would have panicked the senses loop on its first frame. Added `truncate_on_char_boundary` helper + UTF-8 regression tests (`β`, `😀`).
+- **`senses/audio/full.rs`**: whisper transcription now returns the actually-detected BCP-47 language instead of the literal string `"auto"`. TTS voice routing (`PiperVoiceBank::choose_voice`) can therefore pick a matching Piper voice for Dutch / German / … instead of silently falling back to the English primary.
+- **`orchestrator/spawn.rs`**: `mcp-config.json` is now written with a per-wake nonce (`<pid>-<counter>-<epoch>`), so two wakes firing in the same millisecond (triage + hotkey) cannot clobber each other's MCP config. Added `kill_on_drop(true)` on the wake Command so cancelled wakes don't orphan the claude subprocess.
+- **`bin/kairo.rs`**: in-flight wakes now race against the shutdown watch channel via `tokio::select!`. On Ctrl-C the wake future is dropped, `kill_on_drop` fires, and the claude subprocess is reaped before the runtime exits.
+
+**Non-negotiables compliance**
+
+- **`config/default-permissions.toml`**: completely rewritten to match the 21 registered MCP tools. The previous file still listed aspirational `perception_*` / `voice_*` / `windows_*` tools and, critically, a `[shell]` block — Kairo never exposes a shell tool by design (`CLAUDE.md` rule 1/4). Shell tools removed; `repair_*` tools moved to `blocked` tier (unlocked only inside an active repair session); `workers_spawn_worker` + `workers_worker_cancel` moved to `session-approved`.
+- **`memory/episodic.rs`**: fastembed (BGE-small) model cache is now pinned to a Kairo-owned directory (`KAIRO_EMBEDDINGS_CACHE_DIR` / `KAIRO_MODELS_DIR` / `~/.kairo/models/embeddings`). The unified model-download script pre-stages it; if the model is missing at startup Kairo logs a loud warning before falling back to HuggingFace. A new `KAIRO_OFFLINE=1` env var hard-refuses the download, so air-gapped installs never emit an unexpected network request.
+- **`orchestrator`, `triage`**: added `[orchestrator]` + `[triage]` sections in `KairoConfig` with `model_id`, `wake_timeout_secs`, `bare_mode`, `context_size`, `max_tokens`, `temperature`, `gpu_layers`, `latency_warn_ms`, `model_path`. The three binaries (`kairo`, `kairo-perception`, `kairo-triage-bench`) + `health/repair.rs` all read from config instead of hardcoded `"claude-opus-4-6"` / `qwen3-8b-q4_k_m.gguf` constants. Swapping the orchestrator model is now a one-line config edit (per non-negotiable #3).
+
+**Security**
+
+- **`kairo-mcp/src/tools/web.rs`**: closed the SSRF TOCTOU window. Previously we resolved DNS to verify public-IP, then let reqwest re-resolve during connect — a DNS-rebinding attacker could return public-then-private and bypass the check. Now the resolved `SocketAddr` list is pinned on a per-call `reqwest::Client` via `resolve_to_addrs`; reqwest cannot dial anything except the IPs we verified.
+- **`apps/desktop/src-tauri/src/commands.rs`**: `save_skill` / `delete_skill` / `install_skill_from_url` now run `validate_skill_name` (rejects `..`, `/`, `\`, empty, overlong, illegal chars) before touching the skills root. `install_skill_from_url` additionally enforces a host allowlist (`github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org`, `git.sr.ht`) via a real URL parse, uses `tokio::process::Command` so blocking `git clone` doesn't stall a Tauri worker, and passes `--` to git so a crafted URL starting with `--` cannot be interpreted as a flag.
+- **`apps/desktop/src-tauri/tauri.conf.json`**: `"csp": null` replaced with a restrictive Content Security Policy (self + ipc/asset + unsafe-inline only for styles). A compromised webview asset can no longer inline an external script.
+
+**Reliability**
+
+- **`health/repair.rs`**: the repair-agent claude subprocess is now wrapped in a 30-minute `tokio::time::timeout`. A hung Opus session would otherwise pin `repair_running = true` forever and block future repair runs.
+- **`voice/tts.rs`**: Piper synthesis is bounded by a 30 s `wait_child_with_timeout`. A stuck phonemizer used to freeze the TTS worker thread permanently; now it kills the child and returns a clear engine-stuck error.
+- **`voice/streaming.rs`**: the speech-job mpsc is now `sync_channel(32)` with `try_send`. An unbounded queue could previously balloon behind a hung Piper; the bounded channel drops utterances (with a structured warning) instead.
+- **`kairo-mcp/src/tools/repair.rs`**: intent filenames include a monotonic nonce so two intents queued in the same millisecond don't silently overwrite each other.
+- **`voice/streaming.rs::find_sentence_end`**: URL-scheme colons (`https://`, `ftp://`, `ws://`, `file://`) — including "See: https://…" patterns — no longer trigger a sentence split. Piper was rendering `https` as its own utterance whenever the orchestrator spoke a URL.
+
+**Dashboard**
+
+- **`apps/desktop/src-tauri/src/runtime_bridge.rs`**: the local `RuntimeSnapshot` struct is replaced with the one from `kairo_core::runtime_publish`, so the dashboard reads every field the runtime writes (incl. new `frame_count` / `wake_count` / `last_update`). Malformed `state.json` is surfaced to the frontend via a `kairo:runtime_error` Tauri event (once per error streak) instead of silently showing stale flags.
+- **`apps/desktop/package.json`**: added missing `eslint`, `eslint-config-next`, `prettier`, and `prettier-plugin-tailwindcss` dev-deps; `typecheck` + `format` scripts; Node engines constraint. `.eslintrc.json` + `.prettierrc.json` added. CI now runs dashboard typecheck + lint (format is continue-on-error for one cycle while the migration lands).
+
+**Architecture + docs**
+
+- **`ARCHITECTURE.md`**: triage default model updated from Qwen 3 4B to the shipped Qwen 3 8B; orchestrator allowed-tools list fixed to `mcp__kairo__*` (no `Bash`/`Task`/`Read`); wake-word section rewritten to describe the actual whisper-transcript matcher (Porcupine was only ever prototyped); the MCP tool section is split into "Shipped in v0.1.0-alpha" (the 21 real tools) and "Planned (not yet shipped)" with a note that `mcp__kairo__shell_*` is a permanent non-goal.
+- **`.github/workflows/ci.yml`**: dashboard `typecheck` + `lint` + `format` steps added; dashboard build uses `@kairo/desktop` pnpm workspace name.
+- **`.github/workflows/release.yml`**: now generates and uploads `SHA256SUMS.txt` alongside the ZIP + MSI. `scripts/install.ps1` verifies the ZIP against it and hard-fails on mismatch.
+- **`SECURITY.md`** + **`CODE_OF_CONDUCT.md`** added: vuln disclosure workflow (private advisories + email), response timeline, scope notes; Contributor Covenant 2.1.
+
 ### Added — Push-to-talk + Voice tab UX honesty
 
 - **Push-to-talk button on the Home tab** (`apps/desktop/src/components/PushToTalkButton.tsx`): a big round mic button next to the status orb, gives users a one-click alternative to the wake word and the `Ctrl+Shift+K` global hotkey. Three visual states (idle, pressed, listening) with optimistic local feedback so the click feels instant even though the daemon's `state.voice.mode` lags up to 2 s behind via the state poller. Disabled while Kairo is thinking or speaking.

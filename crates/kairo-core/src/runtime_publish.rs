@@ -12,20 +12,35 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-#[derive(Debug, Clone, Default, Serialize)]
+/// The shared shape the runtime writes and the dashboard reads. This is
+/// the single source of truth for the state.json contract — both the
+/// `kairo` binary and the `kairo-desktop` bridge serialise against this
+/// struct. Any new runtime telemetry field goes here, not in a parallel
+/// definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
+    #[serde(default)]
     pub triage_model_loaded: bool,
+    #[serde(default)]
     pub vision_model_loaded: bool,
+    #[serde(default)]
     pub tts_loaded: bool,
+    #[serde(default)]
     pub stt_loaded: bool,
+    #[serde(default)]
     pub orchestrator_ready: bool,
+    #[serde(default)]
     pub voice_mode: Option<String>,
+    #[serde(default)]
     pub partial_transcript: Option<String>,
+    #[serde(default)]
     pub frame_count: u64,
+    #[serde(default)]
     pub wake_count: u64,
+    #[serde(default)]
     pub last_update: String,
 }
 

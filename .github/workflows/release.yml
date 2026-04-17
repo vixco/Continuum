@@ -69,7 +69,7 @@ jobs:
         run: cargo build --release --bin kairo-mcp
 
       - name: Install frontend deps (pnpm workspace root)
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build Tauri desktop app (release, bundles MSI)
         run: pnpm tauri build
@@ -116,6 +116,27 @@ jobs:
         run: |
           .\scripts\sign-release.ps1 -ArtifactDir "target\release" -Thumbprint $env:KAIRO_SIGN_THUMBPRINT
 
+      - name: Generate SHA256 checksums
+        id: checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zip = "kairo-$version-windows-x64.zip"
+          $lines = @()
+          if (Test-Path $zip) {
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            $lines += "$hash  $zip"
+          }
+          if ("${{ steps.msi.outputs.msi_path }}") {
+            $msi = "${{ steps.msi.outputs.msi_path }}"
+            if (Test-Path $msi) {
+              $hash = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLower()
+              $lines += "$hash  $(Split-Path -Leaf $msi)"
+            }
+          }
+          $lines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
+          Get-Content "SHA256SUMS.txt"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -123,6 +144,7 @@ jobs:
           path: |
             kairo-${{ steps.version.outputs.version }}-windows-x64.zip
             ${{ steps.msi.outputs.msi_path }}
+            SHA256SUMS.txt
 
       - name: Create or update draft GitHub release
         uses: softprops/action-gh-release@v2
@@ -135,6 +157,7 @@ jobs:
           files: |
             kairo-${{ steps.version.outputs.version }}-windows-x64.zip
             ${{ steps.msi.outputs.msi_path }}
+            SHA256SUMS.txt
           body: |
             ## Kairo ${{ steps.version.outputs.tag }}
 

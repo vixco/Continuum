@@ -200,8 +200,16 @@ fn queue_intent(
 ) -> anyhow::Result<IntentResponse> {
     let intents_dir = data_dir.join("repair-intents");
     std::fs::create_dir_all(&intents_dir)?;
+    // Millisecond precision + short nonce — the orchestrator can legitimately
+    // fire two intents within the same millisecond, and a collision would
+    // silently overwrite the earlier one.
     let ts = Utc::now().format("%Y%m%dT%H%M%S%3f").to_string();
-    let filename = format!("{ts}-{kind}.json");
+    let nonce = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static INTENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+        INTENT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    };
+    let filename = format!("{ts}-{kind}-{nonce:06x}.json");
     let path = intents_dir.join(&filename);
     let payload = serde_json::json!({
         "kind": kind,

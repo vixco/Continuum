@@ -479,6 +479,92 @@ fn skills_root(app: &AppState) -> std::path::PathBuf {
     app.runtime.dev_dir().join(&cfg.skills.dir)
 }
 
+/// Reject skill names the JS layer could craft to escape `skills_root`.
+///
+/// Allowed: non-empty ASCII-ish identifier with `-`/`_` separators. No path
+/// separators, no traversal segments, no absolute paths, no NUL bytes.
+/// Runs on every `save_skill` / `delete_skill` / `install_skill_from_url`.
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("skill name must not be empty".into());
+    }
+    if trimmed.len() > 120 {
+        return Err("skill name is too long (max 120 chars)".into());
+    }
+    if trimmed != name {
+        return Err("skill name must not have leading or trailing whitespace".into());
+    }
+    if name == "." || name == ".." {
+        return Err("skill name cannot be '.' or '..'".into());
+    }
+    for ch in name.chars() {
+        let ok = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ' ');
+        if !ok {
+            return Err(format!(
+                "skill name contains an illegal character: {:?}",
+                ch
+            ));
+        }
+    }
+    if name.contains("..") {
+        return Err("skill name may not contain '..'".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("skill name may not contain path separators".into());
+    }
+    Ok(())
+}
+
+/// Allowlist of hosts we accept for `install_skill_from_url` so a compromised
+/// or crafted URL can't have the Tauri process clone from an arbitrary
+/// server. Keep tight — add hosts on request rather than pre-emptively.
+const SKILL_CLONE_HOST_ALLOWLIST: &[&str] = &[
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "codeberg.org",
+    "git.sr.ht",
+];
+
+/// Validate and normalise a skill-install URL. Returns the URL to pass to
+/// `git clone` on success; an error message otherwise.
+fn validate_clone_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("URL must not be empty".into());
+    }
+
+    // SSH-style `git@host:org/repo(.git)` — pull the host out by hand, the
+    // rest gets handed to git verbatim.
+    if let Some(rest) = trimmed.strip_prefix("git@") {
+        let (host, _path) = rest
+            .split_once(':')
+            .ok_or_else(|| "malformed git@ URL — expected git@host:path".to_string())?;
+        if !SKILL_CLONE_HOST_ALLOWLIST.contains(&host) {
+            return Err(format!(
+                "host '{host}' is not in the skill-install allowlist"
+            ));
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    // Everything else must parse as HTTPS.
+    let parsed = url::Url::parse(trimmed).map_err(|e| format!("invalid URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("only https:// or git@ URLs are allowed".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    if !SKILL_CLONE_HOST_ALLOWLIST.contains(&host) {
+        return Err(format!(
+            "host '{host}' is not in the skill-install allowlist"
+        ));
+    }
+    Ok(parsed.to_string())
+}
+
 #[tauri::command]
 pub async fn list_skills(app: State<'_, Arc<AppState>>) -> Result<Vec<SkillView>, String> {
     let root = skills_root(&app);
@@ -508,6 +594,7 @@ pub async fn save_skill(
     app: State<'_, Arc<AppState>>,
     input: SaveSkillInput,
 ) -> Result<SkillView, String> {
+    validate_skill_name(&input.name)?;
     let root = skills_root(&app);
     let fm = SkillFrontmatter {
         name: input.name,
@@ -531,6 +618,7 @@ pub async fn save_skill(
 
 #[tauri::command]
 pub async fn delete_skill(app: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
+    validate_skill_name(&name)?;
     let root = skills_root(&app);
     skills::delete_skill(&root, &name).map_err(|e| e.to_string())
 }
@@ -561,22 +649,18 @@ pub async fn install_skill_from_url(
     app: State<'_, Arc<AppState>>,
     url: String,
 ) -> Result<SkillView, String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Err("URL must not be empty".into());
-    }
-    if !trimmed.starts_with("https://") && !trimmed.starts_with("git@") {
-        return Err("Only https:// or git@ URLs are allowed".into());
-    }
+    let clone_url = validate_clone_url(&url)?;
     let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let clone_target = tmp.path().join("skill");
-    let status = std::process::Command::new("git")
+    let status = tokio::process::Command::new("git")
         .arg("clone")
         .arg("--depth")
         .arg("1")
-        .arg(trimmed)
+        .arg("--")
+        .arg(&clone_url)
         .arg(&clone_target)
         .status()
+        .await
         .map_err(|e| format!("failed to invoke git: {e}"))?;
     if !status.success() {
         return Err("git clone exited with a non-zero status".into());
@@ -586,6 +670,7 @@ pub async fn install_skill_from_url(
         return Err("cloned repo does not contain a SKILL.md at its root".into());
     }
     let parsed = skills::parse_skill_file(&skill_md).map_err(|e| e.to_string())?;
+    validate_skill_name(&parsed.frontmatter.name)?;
     let fm = SkillFrontmatter {
         source: Some("third-party".into()),
         ..parsed.frontmatter

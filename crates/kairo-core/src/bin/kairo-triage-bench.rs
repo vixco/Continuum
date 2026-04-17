@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
-use kairo_core::config::kairo_dev_dir;
+use kairo_core::config::{kairo_dev_dir, load_config};
 use kairo_core::senses::types::PerceptionFrame;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 
@@ -49,11 +49,13 @@ async fn main() -> Result<()> {
     println!("Kairo Triage Benchmark");
     println!("======================\n");
 
+    // Load config so bench honours the same triage knobs as the runtime.
+    let dev_dir = kairo_dev_dir();
+    let cfg_path = dev_dir.join("config.toml");
+    let kcfg = load_config(&cfg_path).unwrap_or_default();
+
     // Locate model.
-    let model_path = kairo_dev_dir()
-        .join("models")
-        .join("triage")
-        .join("qwen3-8b-q4_k_m.gguf");
+    let model_path = kcfg.triage.resolve_model_path(&dev_dir);
 
     if !model_path.exists() {
         eprintln!(
@@ -107,12 +109,12 @@ async fn main() -> Result<()> {
 
     let config = TriageConfig {
         model_path: model_path.to_string_lossy().into_owned(),
-        context_size: 2048, // Triage prompts are short, save memory
+        context_size: kcfg.triage.context_size,
         n_threads,
-        gpu_layers: 999,
-        max_tokens: 256, // Qwen 3 thinking tokens (~100-150) + JSON (~50)
-        temperature: 0.0,
-        latency_warn_ms: 2000,
+        gpu_layers: kcfg.triage.gpu_layers,
+        max_tokens: kcfg.triage.max_tokens,
+        temperature: kcfg.triage.temperature,
+        latency_warn_ms: kcfg.triage.latency_warn_ms,
     };
 
     println!("Loading model...");

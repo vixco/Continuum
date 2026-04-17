@@ -14,49 +14,54 @@
 //! breaks, and the dashboard falls back to `Unknown`/`Degrading` statuses.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde::Deserialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use kairo_core::runtime::KairoRuntime;
+use kairo_core::runtime_publish::RuntimeSnapshot;
 use kairo_core::state::{StateHandle, VoiceMode};
-
-/// The JSON shape the `kairo` runtime writes.
-#[derive(Debug, Default, Deserialize)]
-struct RuntimeSnapshot {
-    #[serde(default)]
-    triage_model_loaded: bool,
-    #[serde(default)]
-    vision_model_loaded: bool,
-    #[serde(default)]
-    tts_loaded: bool,
-    #[serde(default)]
-    stt_loaded: bool,
-    #[serde(default)]
-    orchestrator_ready: bool,
-    #[serde(default)]
-    voice_mode: Option<String>,
-    #[serde(default)]
-    partial_transcript: Option<String>,
-}
 
 /// Spawn a ticker that reads `~/.kairo-dev/state.json` every 2 seconds
 /// and pushes the flags into the state store. Harmless when the file
-/// doesn't exist.
-pub fn spawn_ipc_listener(runtime: KairoRuntime, _app: AppHandle) {
+/// doesn't exist; parse errors are emitted as a `kairo:runtime_error`
+/// event so the dashboard can surface "state.json is corrupt" rather than
+/// silently showing stale flags.
+pub fn spawn_ipc_listener(runtime: KairoRuntime, app: AppHandle) {
     let path = runtime.dev_dir().join("state.json");
     let state = runtime.state.clone();
+    // One-shot latch so we don't spam the frontend on every tick while the
+    // runtime is writing a malformed file.
+    let last_was_err = std::sync::Arc::new(AtomicBool::new(false));
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             ticker.tick().await;
-            if let Err(e) = tick_once(&path, &state).await {
-                tracing::trace!(
-                    layer = "dashboard",
-                    component = "runtime_bridge",
-                    error = %e,
-                    "runtime state.json read failed"
-                );
+            match tick_once(&path, &state).await {
+                Ok(()) => {
+                    if last_was_err.swap(false, Ordering::AcqRel) {
+                        let _ = app.emit("kairo:runtime_error", serde_json::Value::Null);
+                    }
+                }
+                Err(e) => {
+                    // Only emit once per error streak — Tauri IPC is cheap
+                    // but the UI should only toast once.
+                    if !last_was_err.swap(true, Ordering::AcqRel) {
+                        let _ = app.emit(
+                            "kairo:runtime_error",
+                            serde_json::json!({
+                                "path": path.display().to_string(),
+                                "error": e.to_string(),
+                            }),
+                        );
+                    }
+                    tracing::debug!(
+                        layer = "dashboard",
+                        component = "runtime_bridge",
+                        error = %e,
+                        "runtime state.json read failed"
+                    );
+                }
             }
         }
     });

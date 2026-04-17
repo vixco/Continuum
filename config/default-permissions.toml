@@ -1,72 +1,62 @@
 # Kairo MCP tool permission tiers
 #
 # Tiers:
-#   auto            — can be called without confirmation
+#   auto             — can be called without confirmation
 #   session-approved — requires confirmation once per session, then allowed
-#   always-confirm  — requires confirmation on every call
-#   blocked         — cannot be called unless explicitly enabled by user
+#   always-confirm   — requires confirmation on every call
+#   blocked          — cannot be called unless explicitly enabled by user
 #
-# Override in ~/.kairo/permissions.toml
+# Override in ~/.kairo/permissions.toml or ~/.kairo-dev/permissions.toml.
+#
+# The tool names below MUST match the handlers registered in
+# `crates/kairo-mcp/src/server.rs`. When you add, rename, or remove a tool
+# there, update this file in the same commit (non-negotiable #7 — MCP tool
+# schemas are a public contract, bump a version if they shift).
 
 # --- Memory tools ---
+# Read-only semantic / episodic queries are safe; writes require confirmation
+# to prevent the orchestrator from silently overriding user-stated facts.
 [memory]
-memory_query = "auto"
-memory_write = "auto"
-memory_fact_get = "auto"
-memory_fact_set = "session-approved"
-memory_recent = "auto"
+memory_query_episodic = "auto"
+memory_list_facts     = "auto"
+memory_get_fact       = "auto"
+memory_set_fact       = "session-approved"
 
-# --- Perception tools ---
-[perception]
-perception_current = "auto"
-perception_screenshot = "auto"
-perception_transcribe = "auto"
+# --- System info tools ---
+# All read-only. Clipboard read can leak secrets, so gate it once per session.
+[system]
+system_current_time   = "auto"
+system_active_window  = "auto"
+system_clipboard_get  = "session-approved"
+system_notification   = "auto"
 
-# --- Voice tools ---
-[voice]
-voice_speak = "auto"
-voice_listen = "auto"
+# --- Filesystem tools (read-only, path-allowlisted) ---
+[fs]
+fs_read_file = "auto"
+fs_list_dir  = "auto"
 
-# --- Windows tools ---
-[windows]
-windows_list_apps = "auto"
-windows_focus_app = "session-approved"
-windows_launch = "session-approved"
-windows_close_app = "always-confirm"
-windows_ui_click = "always-confirm"
-windows_ui_type = "always-confirm"
-windows_clipboard_get = "session-approved"
-windows_clipboard_set = "session-approved"
-windows_notification = "auto"
+# --- Web fetch (GET only, public-IP only, no redirects) ---
+[web]
+web_fetch = "auto"
 
-# --- Shell tools ---
-[shell]
-shell_run = "session-approved"
-shell_run_elevated = "always-confirm"
-shell_background = "session-approved"
+# --- Repair tools (REPAIR AGENT ONLY) ---
+# All destructive / state-mutating. Blocked by default; the repair agent
+# runtime flips these to `session-approved` for the duration of an active
+# repair session spawned via the Health tab's "Run repair" button.
+[repair]
+repair_restart_component = "blocked"
+repair_reinstall_model   = "blocked"
+repair_rollback_config   = "blocked"
+repair_test_component    = "blocked"
+repair_escalate          = "blocked"
 
 # --- Worker tools ---
+# Spawning workers costs real money (Claude Code API usage) and runs
+# arbitrary code in worker cwd, so spawn/cancel require confirmation.
+# Status / wait / list are passive lookups → auto.
 [workers]
-spawn_worker = "session-approved"
-worker_status = "auto"
-worker_cancel = "session-approved"
-
-# --- Schedule tools ---
-[schedule]
-schedule_once = "session-approved"
-schedule_recurring = "always-confirm"
-schedule_list = "auto"
-schedule_cancel = "session-approved"
-
-# --- System tools ---
-[system]
-system_health = "auto"
-system_config_get = "auto"
-system_config_set = "always-confirm"
-
-# --- Blocked by default ---
-[blocked]
-# These require explicit user opt-in
-modify_kairo_installation = "blocked"
-access_credential_stores = "blocked"
-access_password_managers = "blocked"
+workers_spawn_worker  = "session-approved"
+workers_worker_status = "auto"
+workers_worker_wait   = "auto"
+workers_worker_list   = "auto"
+workers_worker_cancel = "session-approved"

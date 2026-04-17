@@ -111,12 +111,61 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Loads the embedding model. First call downloads the model if needed.
+    /// Loads the embedding model from the Kairo model cache.
+    ///
+    /// Resolution order for the cache directory:
+    /// 1. `KAIRO_EMBEDDINGS_CACHE_DIR` — explicit override
+    /// 2. `KAIRO_MODELS_DIR/embeddings` — unified Kairo model root
+    /// 3. `~/.kairo/models/embeddings`
+    /// 4. `~/.kairo-dev/models/embeddings` (dev tree)
+    ///
+    /// If the model is not present on disk, behaviour is controlled by
+    /// `KAIRO_OFFLINE`:
+    ///   - unset / false → download from HuggingFace and log a warning
+    ///     (non-negotiable #2 lets us reach Anthropic / ElevenLabs; model
+    ///     downloads are not telemetry, but still an explicit network
+    ///     egress — so we surface it loudly)
+    ///   - set to `1` / `true` → refuse to download, return a hard error
+    ///     asking the user to run `scripts/download-models.ps1`
     pub fn new() -> Result<Self> {
         use fastembed::TextEmbedding;
 
+        let cache_dir = resolve_embeddings_cache_dir();
+        std::fs::create_dir_all(&cache_dir).with_context(|| {
+            format!(
+                "Failed to create embeddings cache dir: {}",
+                cache_dir.display()
+            )
+        })?;
+
+        let model_present = embedding_model_is_present(&cache_dir);
+        let offline = std::env::var("KAIRO_OFFLINE")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false);
+
+        if !model_present {
+            if offline {
+                anyhow::bail!(
+                    "Embedding model 'BGESmallENV15Q' not found at {cache}. \
+                     KAIRO_OFFLINE is set, so Kairo will not download it. \
+                     Run `scripts/download-models.ps1` (or unset KAIRO_OFFLINE) \
+                     to pre-stage the model.",
+                    cache = cache_dir.display()
+                );
+            }
+            warn!(
+                layer = "memory",
+                component = "episodic",
+                cache_dir = %cache_dir.display(),
+                "BGESmallENV15Q not present — downloading from HuggingFace on first use. \
+                 Pre-stage via `scripts/download-models.ps1` to avoid this network call."
+            );
+        }
+
         let options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15Q)
-            .with_show_download_progress(true);
+            .with_cache_dir(cache_dir.clone())
+            .with_show_download_progress(!model_present);
         let model = TextEmbedding::try_new(options)
             .context("Failed to load BGESmallENV15Q embedding model")?;
 
@@ -125,6 +174,8 @@ impl Embedder {
             component = "episodic",
             model = "BGESmallENV15Q",
             dim = EMBEDDING_DIM,
+            cache_dir = %cache_dir.display(),
+            pre_staged = model_present,
             "Embedding model loaded"
         );
 
@@ -150,6 +201,70 @@ impl Embedder {
             .embed(texts, None)
             .context("Failed to generate batch embeddings")
     }
+}
+
+/// Resolve where the embedding model cache lives on disk. See [`Embedder::new`]
+/// for the full resolution order.
+fn resolve_embeddings_cache_dir() -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("KAIRO_EMBEDDINGS_CACHE_DIR") {
+        return std::path::PathBuf::from(v);
+    }
+    if let Ok(models) = std::env::var("KAIRO_MODELS_DIR") {
+        return std::path::PathBuf::from(models).join("embeddings");
+    }
+    if let Some(home) = dirs::home_dir() {
+        let prod = home.join(".kairo").join("models").join("embeddings");
+        if prod.exists() {
+            return prod;
+        }
+        return home.join(".kairo-dev").join("models").join("embeddings");
+    }
+    std::path::PathBuf::from(".kairo-embeddings")
+}
+
+/// Heuristic check for whether fastembed has already unpacked BGESmallENV15Q
+/// into the given cache directory. fastembed's on-disk layout is a
+/// `models--<org>--<name>/snapshots/<hash>/model.onnx` tree under the cache
+/// dir; any `model.onnx` under a `BGE`-flavoured directory counts.
+fn embedding_model_is_present(cache_dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !(name.contains("bge") || name.contains("embeddings")) {
+            continue;
+        }
+        if has_onnx(&entry.path(), 4) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_onnx(dir: &std::path::Path, depth: usize) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.eq_ignore_ascii_case("onnx"))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        } else if path.is_dir() && has_onnx(&path, depth - 1) {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

@@ -23,3 +23,4 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 kairo-core = { path = "../../../crates/kairo-core", default-features = false }
 tempfile = "3"
+url = "2"

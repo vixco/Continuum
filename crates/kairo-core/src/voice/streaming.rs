@@ -30,6 +30,12 @@ use std::time::Duration;
 use crate::voice::playback::PlaybackStream;
 use crate::voice::tts::TtsEngine;
 
+/// Capacity of the synthesis-job channel. A hung Piper subprocess plus a
+/// chatty orchestrator could otherwise balloon this queue without bound;
+/// 32 is plenty for normal streaming (one sentence per beat) while keeping
+/// memory pressure trivial if the worker stalls.
+const SPEECH_QUEUE_CAPACITY: usize = 32;
+
 /// A job for the synthesis worker thread.
 enum SpeechJob {
     /// Synthesise this sentence and push it to playback.
@@ -47,7 +53,7 @@ enum SpeechJob {
 /// Cloneable via `Arc` — holds the engine, playback stream, and sentence
 /// buffer, and forwards synthesis requests to a single worker thread.
 pub struct SpeechController {
-    tx: mpsc::Sender<SpeechJob>,
+    tx: mpsc::SyncSender<SpeechJob>,
     pending: Arc<AtomicUsize>,
     generation: Arc<AtomicU64>,
     buffer: Mutex<String>,
@@ -61,7 +67,7 @@ impl SpeechController {
     /// Spawns the synthesis worker thread immediately; it lives until the
     /// controller is dropped.
     pub fn new(engine: Arc<dyn TtsEngine>, playback: Arc<PlaybackStream>) -> Self {
-        let (tx, rx) = mpsc::channel::<SpeechJob>();
+        let (tx, rx) = mpsc::sync_channel::<SpeechJob>(SPEECH_QUEUE_CAPACITY);
         let pending = Arc::new(AtomicUsize::new(0));
         let generation = Arc::new(AtomicU64::new(0));
 
@@ -69,7 +75,7 @@ impl SpeechController {
         let worker_playback = playback.clone();
         let worker_pending = pending.clone();
         let worker_generation = generation.clone();
-        let worker = thread::Builder::new()
+        let worker = match thread::Builder::new()
             .name("kairo-tts-worker".into())
             .spawn(move || {
                 worker_loop(
@@ -79,8 +85,27 @@ impl SpeechController {
                     worker_generation,
                     rx,
                 )
-            })
-            .expect("failed to spawn TTS worker thread");
+            }) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(
+                    layer = "voice",
+                    component = "streaming",
+                    error = %e,
+                    "Failed to spawn TTS worker thread — speech controller will silently drop utterances"
+                );
+                // Return a disabled controller: the worker handle is None so
+                // Drop does nothing, and `enqueue` fails fast on a closed rx.
+                return Self {
+                    tx,
+                    pending,
+                    generation,
+                    buffer: Mutex::new(String::new()),
+                    playback,
+                    worker: Mutex::new(None),
+                };
+            }
+        };
 
         Self {
             tx,
@@ -203,21 +228,36 @@ impl SpeechController {
             language: language.map(str::to_string),
             generation: self.generation.load(Ordering::Acquire),
         };
-        if self.tx.send(job).is_err() {
-            // Worker died — we must not leave `pending` inflated.
-            self.pending.fetch_sub(1, Ordering::AcqRel);
-            tracing::warn!(
-                layer = "voice",
-                component = "streaming",
-                "TTS worker channel closed, dropping utterance"
-            );
+        // Non-blocking send: if the worker is backlogged beyond
+        // SPEECH_QUEUE_CAPACITY we'd rather drop the utterance than stall
+        // the orchestrator stream waiting for Piper to catch up.
+        match self.tx.try_send(job) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+                tracing::warn!(
+                    layer = "voice",
+                    component = "streaming",
+                    capacity = SPEECH_QUEUE_CAPACITY,
+                    "TTS queue full — dropping utterance (Piper may be stuck)"
+                );
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                // Worker died — we must not leave `pending` inflated.
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+                tracing::warn!(
+                    layer = "voice",
+                    component = "streaming",
+                    "TTS worker channel closed, dropping utterance"
+                );
+            }
         }
     }
 }
 
 impl Drop for SpeechController {
     fn drop(&mut self) {
-        let _ = self.tx.send(SpeechJob::Shutdown);
+        let _ = self.tx.try_send(SpeechJob::Shutdown);
         if let Ok(mut slot) = self.worker.lock() {
             if let Some(handle) = slot.take() {
                 let _ = handle.join();
@@ -235,6 +275,8 @@ fn worker_loop(
     generation: Arc<AtomicU64>,
     rx: mpsc::Receiver<SpeechJob>,
 ) {
+    // Note: `rx` is the receiver half of `sync_channel(SPEECH_QUEUE_CAPACITY)`
+    // — receiver API is identical between `channel` and `sync_channel`.
     tracing::debug!(
         layer = "voice",
         component = "streaming",
@@ -308,6 +350,13 @@ pub(crate) fn find_sentence_end(s: &str) -> Option<usize> {
                 if is_terminator(c) {
                     continue;
                 }
+                // Don't split `:` when it's part of a URL scheme
+                // (`http://`, `ftp://`, `ws://`, …). Without this guard,
+                // "See: https://x" would render "https" as its own
+                // utterance — Piper can't pronounce `:/` either way.
+                if b == b':' && is_url_scheme_colon(bytes, i) {
+                    continue;
+                }
                 if c.is_ascii_whitespace() {
                     return Some(i + 1);
                 }
@@ -317,6 +366,38 @@ pub(crate) fn find_sentence_end(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Returns true when the `:` at byte index `i` looks like a URL scheme
+/// separator rather than an English colon. Two heuristics:
+///
+/// 1. Immediately followed by `//` (as in `https://…`)
+/// 2. Followed by whitespace and then `http`/`https`/`ftp`/`ws`/`file`
+///    within a short window — covers the common "See: https://x" case
+///    where the colon formally ends a clause but the following content
+///    is entirely a URL that shouldn't be clipped off.
+fn is_url_scheme_colon(bytes: &[u8], i: usize) -> bool {
+    if bytes.get(i + 1..i + 3) == Some(b"//") {
+        return true;
+    }
+    // Lookahead: skip any whitespace, then check for a known URL scheme.
+    let mut j = i + 1;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+        if j - i > 4 {
+            break;
+        }
+    }
+    let tail = &bytes[j..bytes.len().min(j + 8)];
+    const PREFIXES: &[&[u8]] = &[
+        b"http://",
+        b"https://",
+        b"ftp://",
+        b"ws://",
+        b"wss://",
+        b"file://",
+    ];
+    PREFIXES.iter().any(|p| tail.starts_with(p))
 }
 
 fn truncate_for_log(s: &str) -> String {
@@ -395,9 +476,29 @@ mod tests {
 
     #[test]
     fn sentence_end_colon_in_address_still_splits() {
-        // We accept that "https://" etc. would split — orchestrator
-        // rarely speaks URLs; if it matters, wrap them.
+        // Plain "label:" still splits — the URL guard is precise, not broad.
         assert_eq!(find_sentence_end("See: next line"), Some(4));
+    }
+
+    #[test]
+    fn sentence_end_does_not_split_https_scheme_colon() {
+        // The colon in `https://` must not end a sentence — Piper can't
+        // pronounce `:/` and "https" would otherwise be spoken alone.
+        assert_eq!(find_sentence_end("Go to https://example.com now"), None);
+        assert_eq!(
+            find_sentence_end("Go to https://example.com now."),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn sentence_end_does_not_split_label_before_url() {
+        // "See: https://…" — the colon after "See" is followed by whitespace
+        // and then a URL, so it's part of the URL phrase, not a sentence
+        // terminator. Wait for the next real terminator (the final `.`).
+        assert_eq!(find_sentence_end("See: https://example.com"), None);
+        let s = "See: https://example.com, the docs.";
+        assert_eq!(find_sentence_end(s), Some(s.len()));
     }
 
     #[test]

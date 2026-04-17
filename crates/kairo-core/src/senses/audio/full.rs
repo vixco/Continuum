@@ -1064,9 +1064,18 @@ impl AudioWatcher {
             // parse token-level probabilities.
             let confidence = if transcript.is_empty() { 0.0 } else { 0.7 };
 
-            // Detect language from whisper state. The language is set during
-            // inference when "auto" is used.
-            let language = "auto".to_string();
+            // Detect language from whisper state. When the caller asked for
+            // "auto", whisper fills in the detected language id during
+            // inference; otherwise we trust the requested language so voice
+            // routing downstream always has a concrete ISO-639-1 code.
+            let language = if language == "auto" {
+                let id = state.full_lang_id();
+                whisper_rs::get_lang_str(id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "en".to_string())
+            } else {
+                language.clone()
+            };
 
             Ok(AudioObservation {
                 transcript,
