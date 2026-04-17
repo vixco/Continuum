@@ -18,12 +18,22 @@
 //! synthesis time (typically 150–400 ms on CPU for a short greeting).
 
 use std::collections::HashMap;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+/// Hard wall-clock ceiling for a single Piper synthesis call. Normal spoken
+/// sentences take 150–800 ms on CPU; anything past this is a hung phonemizer
+/// or a stuck ONNX session and the child should be killed rather than
+/// permanently blocking the TTS worker thread.
+const PIPER_SYNTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often to poll for child exit while waiting inside the timeout window.
+const PIPER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A single synthesised utterance: mono f32 PCM at a known sample rate.
 #[derive(Debug, Clone)]
@@ -241,16 +251,23 @@ impl TtsEngine for PiperEngine {
             )
         })?;
 
-        {
-            let stdin = child.stdin.as_mut().context("Failed to open Piper stdin")?;
-            stdin
-                .write_all(text.as_bytes())
-                .context("Failed to write text to Piper stdin")?;
+        // Write the text; if that fails, reap the orphaned child before
+        // returning — otherwise a stuck Piper would leave zombies.
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(text.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!("Failed to write text to Piper stdin: {e}"));
+            }
+            // Closing stdin signals end-of-input to Piper.
+            drop(stdin);
         }
 
-        let output = child
-            .wait_with_output()
-            .context("Failed to wait for Piper process")?;
+        let output = wait_child_with_timeout(&mut child, PIPER_SYNTH_TIMEOUT).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            e
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("Piper synthesis failed: {stderr}");
@@ -289,6 +306,51 @@ impl TtsEngine for PiperEngine {
 
     fn name(&self) -> &'static str {
         "piper"
+    }
+}
+
+/// Poll the child until it exits or `timeout` elapses, then return its full
+/// stdout/stderr the same shape `wait_with_output` would have. On timeout
+/// the child is killed and `Err` is returned so the caller can propagate
+/// an "engine stuck" diagnostic without sacrificing the TTS worker thread.
+fn wait_child_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let deadline = Instant::now() + timeout;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+
+    loop {
+        match child.try_wait().context("Failed to poll Piper process")? {
+            Some(status) => {
+                // Child exited; drain any remaining pipe data.
+                if let Some(mut s) = stdout.take() {
+                    let _ = s.read_to_end(&mut stdout_buf);
+                }
+                if let Some(mut s) = stderr.take() {
+                    let _ = s.read_to_end(&mut stderr_buf);
+                }
+                return Ok(std::process::Output {
+                    status,
+                    stdout: stdout_buf,
+                    stderr: stderr_buf,
+                });
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "Piper synthesis exceeded {} s timeout — killed",
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(PIPER_POLL_INTERVAL);
+            }
+        }
     }
 }
 

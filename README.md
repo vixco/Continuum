@@ -107,13 +107,18 @@ These are not mockups. They are what a properly implemented four-layer agent arc
 
 ## Install (alpha)
 
+> ⚠️ **This is an unsigned alpha.** Windows SmartScreen and your AV will ask you to confirm on first launch. Binaries are published with SHA256 checksums you can verify yourself (see below) — code signing lands in a later milestone.
+
+### Five-minute install (most people)
+
 **Prerequisites**
 
 - Windows 10 (build 1903+) or Windows 11
-- [Node.js 18+](https://nodejs.org)
+- [Node.js 20+](https://nodejs.org) (needed for the Claude Code CLI)
 - A Claude subscription (Max recommended) via [Claude Code](https://code.claude.com)
-- 16 GB RAM recommended (8 GB workable with the Qwen 3 4B triage fallback)
+- 16 GB RAM recommended (10 GB workable with the Qwen 3 4B triage fallback)
 - Optional but recommended: NVIDIA GPU with 6+ GB VRAM for faster triage and vision
+- ~10 GB free disk for the model bundle (vision + triage + whisper + Piper + espeak data)
 
 **One-liner install**
 
@@ -121,19 +126,36 @@ These are not mockups. They are what a properly implemented four-layer agent arc
 irm https://raw.githubusercontent.com/vixco/kairo-ai/main/scripts/install.ps1 | iex
 ```
 
-The installer will:
+The installer walks through seven steps and is idempotent — if anything fails you can re-run it safely:
 
-1. Check your Windows version and prerequisites
+1. Verify Windows version and dependencies (Node, Claude Code CLI)
 2. Install the Claude Code CLI if missing (`npm install -g @anthropic-ai/claude-code`)
-3. Guide you through `claude login` if you aren't signed in
-4. Download the release binary to `%LOCALAPPDATA%\Kairo`
-5. Create the `~/.kairo/` data directory
-6. Download the default models (~6.5 GB)
-7. Register a Start Menu shortcut
+3. Prompt you to `claude login` if you aren't signed in
+4. Download the latest release ZIP from GitHub Releases to `%LOCALAPPDATA%\Kairo`
+5. Verify SHA256 against `SHA256SUMS.txt` from the release
+6. Create `~/.kairo/` and run `scripts/download-models.ps1` to pre-stage all ML models (no implicit network calls at runtime)
+7. Register a Start Menu shortcut and optional auto-start entry
 
-Launch Kairo from the Start Menu, and the dashboard will walk you through the one-time onboarding wizard.
+Launch Kairo from the Start Menu, and the dashboard's onboarding wizard finishes the configuration.
 
-**Alternative: install from source**
+### Download + verify manually
+
+If you prefer to download the release artifacts yourself, grab both files from the latest release under <https://github.com/vixco/kairo-ai/releases>:
+
+- `kairo-<version>-windows-x64.zip` — the portable bundle
+- `SHA256SUMS.txt` — the checksum file that ships with every tagged release
+
+Then verify:
+
+```powershell
+# In the directory where you downloaded both files
+Get-FileHash kairo-*.zip -Algorithm SHA256 | Format-List
+Get-Content SHA256SUMS.txt
+```
+
+The two hashes must match. If they don't, **do not run the binary**; open an issue with the tag name and your OS/Claude-CLI versions.
+
+### Install from source (developers)
 
 ```powershell
 git clone https://github.com/vixco/kairo-ai.git
@@ -141,16 +163,16 @@ cd kairo-ai
 .\scripts\install.ps1 -FromSource
 ```
 
-Source builds need the Rust toolchain, CMake, Ninja, LLVM, and protoc. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full dev-setup guide.
+Source builds need the Rust toolchain, CMake, Ninja, LLVM, and protoc. See [CONTRIBUTING.md](./CONTRIBUTING.md) and `.cargo/config.toml` for the full dev-setup guide; `scripts/dev-setup.ps1` automates the prerequisites.
 
-**Try the Phase 0 smoke test only (no install required)**
+### Try the Phase 0 smoke test (no install)
 
 ```powershell
 # Prerequisites: Rust toolchain + Claude Code CLI, both on PATH
 cargo run --example hello_world -p kairo-core
 ```
 
-Spawns Claude Code in headless mode, sends "What is 2+2?", prints the streamed response with cost and timing.
+Spawns Claude Code in headless mode, sends "What is 2+2?", prints the streamed response with cost and timing. This is the fastest way to confirm your Claude CLI is wired up before committing to the full install.
 
 ## Core principles
 

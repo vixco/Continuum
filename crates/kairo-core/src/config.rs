@@ -37,6 +37,51 @@ pub struct KairoConfig {
     pub workers: WorkersConfig,
     /// Skills system configuration (Phase 8).
     pub skills: SkillsConfig,
+    /// Orchestrator (Claude Opus) subprocess configuration.
+    pub orchestrator: OrchestratorSection,
+    /// Triage (local LLM) runtime configuration.
+    pub triage: TriageSection,
+}
+
+/// Configuration for the orchestrator (Claude Opus via CLI subprocess).
+///
+/// Every field is user-overridable via `config.toml` — per non-negotiable #3,
+/// there are no hardcoded model IDs or timeouts anywhere else in the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrchestratorSection {
+    /// Model ID passed to `claude --model`. Must be a currently-supported
+    /// Claude Code model (e.g. `claude-opus-4-6`, `claude-sonnet-4-6`).
+    pub model_id: String,
+    /// Wall-clock timeout for a single wake cycle, in seconds. If the
+    /// orchestrator doesn't emit a `result` event within this window the
+    /// child process is killed and the wake is marked failed.
+    pub wake_timeout_secs: u64,
+    /// If true, pass `--bare` to Claude Code (skip hooks / plugins).
+    /// Defaults to `false` so the user's normal Claude Code configuration
+    /// applies; set to `true` for deterministic, reproducible wakes.
+    pub bare_mode: bool,
+}
+
+/// Runtime knobs for the local triage LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TriageSection {
+    /// Path to the `.gguf` triage model. Empty string means "use default
+    /// location" (`<dev_dir>/models/triage/<default_file>`).
+    pub model_path: String,
+    /// llama.cpp context size in tokens. 2048 is generous for frame
+    /// descriptions; keep low to minimise KV cache pressure.
+    pub context_size: u32,
+    /// Maximum tokens per triage response.
+    pub max_tokens: u32,
+    /// Sampling temperature. 0.0 is deterministic and fine for triage —
+    /// we want a stable yes/no on each frame.
+    pub temperature: f32,
+    /// Layers to offload to GPU. `999` means "all available"; 0 is CPU-only.
+    pub gpu_layers: u32,
+    /// Log a warning when a triage decision exceeds this latency, in ms.
+    pub latency_warn_ms: u64,
 }
 
 /// Configuration for the local vision model.
@@ -379,7 +424,49 @@ impl Default for KairoConfig {
             tts: TtsConfig::default(),
             workers: WorkersConfig::default(),
             skills: SkillsConfig::default(),
+            orchestrator: OrchestratorSection::default(),
+            triage: TriageSection::default(),
         }
+    }
+}
+
+impl Default for OrchestratorSection {
+    fn default() -> Self {
+        Self {
+            model_id: "claude-opus-4-6".to_string(),
+            wake_timeout_secs: 60,
+            bare_mode: false,
+        }
+    }
+}
+
+impl Default for TriageSection {
+    fn default() -> Self {
+        Self {
+            // Empty means "derive from dev_dir" at load time.
+            model_path: String::new(),
+            context_size: 2048,
+            max_tokens: 256,
+            temperature: 0.0,
+            gpu_layers: 999,
+            latency_warn_ms: 2000,
+        }
+    }
+}
+
+impl TriageSection {
+    /// Resolve the effective `.gguf` path, filling in the default under
+    /// `dev_dir/models/triage/qwen3-8b-q4_k_m.gguf` when the config value
+    /// is empty. Callers pass the current `dev_dir`; this avoids baking a
+    /// user-specific path into the serialised defaults.
+    pub fn resolve_model_path(&self, dev_dir: &Path) -> PathBuf {
+        if !self.model_path.is_empty() {
+            return PathBuf::from(&self.model_path);
+        }
+        dev_dir
+            .join("models")
+            .join("triage")
+            .join("qwen3-8b-q4_k_m.gguf")
     }
 }
 

@@ -254,10 +254,43 @@ if ($FromSource) {
             Write-Host "    -> Fall back to: .\scripts\install.ps1 -FromSource" -ForegroundColor Yellow
             exit 1
         }
+        $sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
 
         $tmpZip = Join-Path $env:TEMP "kairo-release.zip"
         Write-Info "Downloading $($asset.name) (~$([math]::Round($asset.size / 1MB)) MB)..."
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpZip
+
+        # Verify SHA256 if the release ships a SHA256SUMS.txt (all releases
+        # from v0.1.0-alpha.2 onward). If the file is missing (older alpha)
+        # we warn rather than abort so existing install flows don't break.
+        if ($sumsAsset) {
+            $tmpSums = Join-Path $env:TEMP "kairo-SHA256SUMS.txt"
+            Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $tmpSums
+            $expected = $null
+            foreach ($line in Get-Content $tmpSums) {
+                $parts = $line -split '\s+', 2
+                if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $asset.name) {
+                    $expected = $parts[0].ToLower()
+                    break
+                }
+            }
+            Remove-Item $tmpSums -Force
+            if (-not $expected) {
+                Write-Err "SHA256SUMS.txt did not list $($asset.name). Refusing to install an unverified binary."
+                Remove-Item $tmpZip -Force
+                exit 1
+            }
+            $actual = (Get-FileHash $tmpZip -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expected) {
+                Write-Err "Checksum mismatch! expected $expected, got $actual"
+                Write-Err "Do NOT run the downloaded binary. Report via SECURITY.md."
+                Remove-Item $tmpZip -Force
+                exit 1
+            }
+            Write-Ok "SHA256 verified ($($expected.Substring(0,12))...)"
+        } else {
+            Write-Warn "Release is missing SHA256SUMS.txt — skipping integrity check."
+        }
 
         Write-Info "Extracting to $InstallDir..."
         Expand-Archive -Path $tmpZip -DestinationPath $InstallDir -Force

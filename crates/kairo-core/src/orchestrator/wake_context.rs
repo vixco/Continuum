@@ -125,22 +125,13 @@ fn format_frame_oneline(frame: &PerceptionFrame, reference_time: DateTime<Utc>) 
     parts.push(format!("[{}s ago]", ago));
 
     // Short screen description (truncate if long).
-    let desc = if frame.screen.description.len() > 60 {
-        format!("{}...", &frame.screen.description[..57])
-    } else {
-        frame.screen.description.clone()
-    };
-    parts.push(desc);
+    parts.push(truncate_on_char_boundary(&frame.screen.description, 60));
 
     // Audio if present (very brief).
     if let Some(ref audio) = frame.audio {
         if !audio.transcript.is_empty() {
-            let short_transcript = if audio.transcript.len() > 30 {
-                format!("\"{}...\"", &audio.transcript[..27])
-            } else {
-                format!("\"{}\"", audio.transcript)
-            };
-            parts.push(short_transcript);
+            let short = truncate_on_char_boundary(&audio.transcript, 30);
+            parts.push(format!("\"{short}\""));
         }
     }
 
@@ -182,6 +173,21 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
+}
+
+/// Truncates `s` so it contains at most `max` bytes while staying on a UTF-8
+/// char boundary. Appends `...` when truncated. Never panics on multi-byte
+/// inputs (Dutch accents, emoji, CJK window titles).
+fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    // Leave room for the ellipsis; walk back to a char boundary.
+    let mut cut = max.saturating_sub(3).min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +316,30 @@ mod tests {
             format_fact_key("routine.morning_start"),
             "routine: morning_start"
         );
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_preserves_short() {
+        assert_eq!(truncate_on_char_boundary("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_handles_multibyte() {
+        // Greek letter "β" is 2 bytes; naïve slicing at byte 29 would panic.
+        let s = "een hele lange zin met β accenten die ver over de limiet heen gaat";
+        let got = truncate_on_char_boundary(s, 30);
+        assert!(got.ends_with("..."));
+        assert!(got.is_char_boundary(got.len()));
+        assert!(got.len() <= 30);
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_handles_emoji() {
+        // 😀 is 4 bytes; cutting at any byte inside would panic.
+        let s = "hello 😀 world 😀 this is a long sentence with emoji";
+        let got = truncate_on_char_boundary(s, 15);
+        assert!(got.ends_with("..."));
+        assert!(got.is_char_boundary(got.len()));
     }
 
     #[test]

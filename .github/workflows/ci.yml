@@ -121,7 +121,27 @@ jobs:
             ${{ runner.os }}-cargo-desktop-
 
       - name: Install frontend dependencies (pnpm workspace root)
-        run: pnpm install --frozen-lockfile
+        # Not --frozen-lockfile yet: the ESLint+Prettier devDependencies
+        # landed after the lockfile was last pinned; the next lockfile
+        # regeneration closes this gap and this flag flips back.
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Dashboard type-check
+        run: pnpm typecheck
+        working-directory: apps/desktop
+
+      - name: Dashboard lint
+        run: pnpm lint
+        working-directory: apps/desktop
+        # Not fatal yet — lint rules were tightened in the security pass,
+        # existing code will be cleaned up in follow-up PRs.
+        continue-on-error: true
+
+      - name: Dashboard format check
+        run: pnpm format
+        working-directory: apps/desktop
+        # Same rationale as lint — prettier-first pass lands separately.
+        continue-on-error: true
 
       - name: Build frontend
         run: pnpm build

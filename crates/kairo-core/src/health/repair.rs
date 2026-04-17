@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -28,6 +29,13 @@ use tokio::process::Command;
 use crate::config::KairoConfig;
 use crate::logs::{LogBuffer, LogEntry, LogFilter};
 use crate::state::{ComponentHealth, StateHandle};
+
+/// Hard wall-clock ceiling for a single repair-agent run. A stuck or runaway
+/// Claude Opus session shouldn't block future repairs or leave
+/// `repair_running` pinned forever. 30 minutes is generous for a complex
+/// investigation but finite; the next tick after this fires kills the
+/// subprocess and marks the run failed.
+const REPAIR_HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Input for a repair run.
 pub struct RepairInput<'a> {
@@ -102,7 +110,7 @@ where
         .arg("--verbose")
         .arg("--include-partial-messages")
         .arg("--model")
-        .arg("claude-opus-4-6")
+        .arg(&input.config.orchestrator.model_id)
         .arg("--append-system-prompt-file")
         .arg(&prompt_path)
         .current_dir(input.repo_root)
@@ -179,14 +187,51 @@ where
         }
     });
 
-    let status = child.wait().await.context("wait for claude")?;
+    // Cap the repair run: a hung claude subprocess would otherwise pin
+    // `repair_running=true` forever, blocking future repairs. Kill on expiry.
+    let wait_result = tokio::time::timeout(REPAIR_HARD_TIMEOUT, child.wait()).await;
+    let status_opt = match wait_result {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => {
+            tracing::warn!(
+                layer = "health",
+                component = "repair",
+                error = %e,
+                "claude subprocess wait failed"
+            );
+            None
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                layer = "health",
+                component = "repair",
+                timeout_secs = REPAIR_HARD_TIMEOUT.as_secs(),
+                "Repair-agent subprocess exceeded hard timeout — killing"
+            );
+            if let Err(e) = child.kill().await {
+                tracing::warn!(
+                    layer = "health",
+                    component = "repair",
+                    error = %e,
+                    "Failed to kill stuck claude subprocess"
+                );
+            }
+            (on_event)(RepairEvent::Error {
+                message: format!(
+                    "repair run exceeded {} minute hard timeout and was killed",
+                    REPAIR_HARD_TIMEOUT.as_secs() / 60
+                ),
+            });
+            None
+        }
+    };
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 
     state_clone.set_repair_running(false).await;
     (on_event)(RepairEvent::Finished {
         ts: Utc::now(),
-        success: status.success(),
+        success: status_opt.map(|s| s.success()).unwrap_or(false),
         cost_usd: None,
     });
     Ok(())

@@ -15,7 +15,7 @@
 //! Not intended for API interaction — this is for fetching references, docs,
 //! and quick lookups. No POST/PUT/DELETE is offered by design.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
@@ -64,6 +64,11 @@ pub enum WebFetchError {
 }
 
 /// Performs a guarded HTTP GET against the given URL.
+///
+/// The `client` argument is a template — we rebuild a per-call client that
+/// pins the host to a pre-verified public `SocketAddr`, so reqwest cannot
+/// re-resolve DNS between our safety check and its connect() and dial a
+/// different (e.g. private) IP (DNS rebinding / TOCTOU).
 pub async fn fetch(client: &Client, url_str: &str) -> Result<WebFetchResponse, WebFetchError> {
     let url = Url::parse(url_str).map_err(|e| WebFetchError::InvalidUrl(e.to_string()))?;
 
@@ -77,27 +82,52 @@ pub async fn fetch(client: &Client, url_str: &str) -> Result<WebFetchResponse, W
         .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
 
     // Resolve host (whether literal IP or DNS name) and verify every address
-    // is publicly routable BEFORE dialing.
-    let addrs = tokio::time::timeout(
+    // is publicly routable BEFORE dialing. Collect into a Vec so we own the
+    // resolved addresses for the remainder of the call — reqwest will be
+    // told to use these exact addresses rather than re-resolving DNS.
+    let resolved: Vec<SocketAddr> = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::net::lookup_host((host.as_str(), port)),
     )
     .await
     .map_err(|_| WebFetchError::DnsFailed("resolution timed out".into()))?
-    .map_err(|e| WebFetchError::DnsFailed(e.to_string()))?;
+    .map_err(|e| WebFetchError::DnsFailed(e.to_string()))?
+    .collect();
 
-    let mut had_any = false;
-    for a in addrs {
-        had_any = true;
+    if resolved.is_empty() {
+        return Err(WebFetchError::DnsFailed("no addresses resolved".into()));
+    }
+    for a in &resolved {
         if !is_public_ip(&a.ip()) {
             return Err(WebFetchError::PrivateAddress(a.ip().to_string()));
         }
     }
-    if !had_any {
-        return Err(WebFetchError::DnsFailed("no addresses resolved".into()));
-    }
 
-    let resp = client
+    // Rebuild the client with the verified addresses pinned for this host.
+    // reqwest's ClientBuilder::resolve_to_addrs bypasses the system resolver
+    // entirely for `host` — closing the TOCTOU window between our public-IP
+    // check and the actual TCP connect.
+    let user_agent = client
+        .get(url.clone())
+        .build()
+        .ok()
+        .and_then(|r| {
+            r.headers()
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok().map(String::from))
+        })
+        .unwrap_or_else(|| concat!("kairo-mcp/", env!("CARGO_PKG_VERSION")).to_string());
+
+    let pinned = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(user_agent)
+        .resolve_to_addrs(&host, &resolved)
+        .build()
+        .map_err(|e| WebFetchError::HttpFailed(e.to_string()))?;
+
+    let resp = pinned
         .get(url.clone())
         .send()
         .await

@@ -129,6 +129,7 @@ pub async fn wake_orchestrator(
     let mut cmd = tokio::process::Command::new("claude");
     cmd.arg("--print");
     cmd.arg("--output-format").arg("stream-json");
+    cmd.arg("--input-format").arg("stream-json");
     cmd.arg("--verbose");
     cmd.arg("--include-partial-messages");
     cmd.arg("--model").arg(&config.model);
@@ -173,6 +174,10 @@ pub async fn wake_orchestrator(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // If this task is cancelled (e.g. shutdown signal dropped the future)
+    // tokio will still try to kill the child rather than leak it as an
+    // orphan.
+    cmd.kill_on_drop(true);
 
     // Spawn.
     let mut child = cmd.spawn().map_err(|e| {
@@ -364,28 +369,52 @@ fn resolve_mcp_binary(config: &OrchestratorConfig) -> Result<PathBuf> {
 }
 
 /// Writes an mcp-config.json pointing at the given kairo-mcp binary and
-/// returns its path. Re-written on every wake so changes to `mcp_data_dir`
-/// or `mcp_server_path` take effect immediately.
+/// returns its path. A unique suffix is appended per call so parallel wakes
+/// cannot clobber each other's config file (e.g. a triage-triggered wake
+/// landing at the same millisecond as a hotkey wake).
 fn write_mcp_config(config: &OrchestratorConfig, mcp_bin: &std::path::Path) -> Result<PathBuf> {
-    let config_path = config
+    let base_dir = config
         .mcp_config_path
-        .clone()
-        .or_else(|| {
-            config
-                .mcp_data_dir
-                .as_ref()
-                .map(|d| d.join("mcp-config.json"))
-        })
-        .or_else(|| dirs::home_dir().map(|h| h.join(".kairo-dev").join("mcp-config.json")))
-        .context("Could not determine path for mcp-config.json")?;
+        .as_ref()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .or_else(|| config.mcp_data_dir.clone())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".kairo-dev")))
+        .context("Could not determine directory for mcp-config.json")?;
+
+    std::fs::create_dir_all(&base_dir).with_context(|| {
+        format!(
+            "Failed to create MCP config parent dir: {}",
+            base_dir.display()
+        )
+    })?;
+
+    // Unique-per-wake filename: pid + monotonic counter + epoch nanos. No
+    // cryptographic randomness needed — we just need distinct names for
+    // concurrent wakes from the same process.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WAKE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let n = WAKE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        format!("{pid:x}-{n:x}-{nanos:x}")
+    };
+    let filename = if let Some(explicit) = config.mcp_config_path.as_ref() {
+        let stem = explicit
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mcp-config");
+        format!("{stem}-{suffix}.json")
+    } else {
+        format!("mcp-config-{suffix}.json")
+    };
+    let config_path = base_dir.join(filename);
 
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create MCP config parent dir: {}",
-                parent.display()
-            )
-        })?;
+        std::fs::create_dir_all(parent).ok();
     }
 
     let env_block = if let Some(dir) = &config.mcp_data_dir {

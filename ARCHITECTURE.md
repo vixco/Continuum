@@ -205,11 +205,11 @@ Only frames above a threshold (default 0.15) reach the triage layer. Everything 
 
 The triage layer is a small local LLM (3–4B parameters) that reads every salient perception frame and decides what to do. It is the gatekeeper that decides whether to spend money on Opus or not.
 
-**Default model:** Qwen 3 4B (Q4_K_M quantization, ~2.5 GB RAM, 30–35 tokens/sec CPU, 150+ GPU).
+**Default model:** Qwen 3 8B (Q4_K_M quantization, ~5 GB RAM, 15–20 tokens/sec CPU, 80+ GPU). Benchmarked at 95% accuracy on our perception-frame decision set; the 4B variant tops out around 82% on the same bench, and the extra RAM turned out to be worth it for the gatekeeper layer.
 
-Qwen 3 has a "thinking" mode that **must be disabled** for triage use. The triage prompt includes a `/no_think` tag in the system message to suppress chain-of-thought reasoning, which would add latency and tokens unnecessary for a classification task.
+Qwen 3 has a "thinking" mode that is intentionally **enabled** for triage — the short chain-of-thought is what lifts the 8B model to 95%. The triage grammar filters the thinking block out of the emitted JSON so the runtime only sees the final decision. Turning thinking off drops accuracy without saving meaningful latency at this size.
 
-**Low-RAM alternative:** Qwen 2.5 3B Instruct (Q4_K_M, ~1.9 GB) for systems with ≤4 GB available RAM. Slightly weaker Dutch comprehension and JSON instruction following, but faster at ~40 tokens/sec CPU.
+**Low-RAM alternative:** Qwen 3 4B (Q4_K_M, ~2.5 GB) for systems with ≤6 GB available RAM; 30–35 tokens/sec on CPU but ~13 percentage points less accurate on the same triage benchmark. Qwen 2.5 3B Instruct is still loadable for legacy setups but not recommended.
 
 **Other alternatives:**
 - Gemma 3 4B (good Dutch, weaker at strict JSON grammar compliance)
@@ -287,9 +287,13 @@ claude \
   --include-partial-messages \
   --model claude-opus-4-6 \
   --append-system-prompt-file ~/.kairo/orchestrator-prompt.md \
-  --mcp-config ~/.kairo/mcp-servers.json \
-  --allowedTools "Read,Write,Edit,Bash,Task,mcp__kairo__*"
+  --mcp-config ~/.kairo-dev/mcp-config-<nonce>.json \
+  --strict-mcp-config \
+  --allowedTools "mcp__kairo__*" \
+  --permission-mode default
 ```
+
+The allowed-tools list is intentionally restricted to the Kairo MCP namespace — the orchestrator has **no access to `Bash`, `Read`, `Write`, `Edit`, or `Task`**. Every file read, code edit, and shell-adjacent action flows through an explicit Kairo MCP tool so it can be audited, permission-gated, and mocked during repair. Workers (Layer 4) get a broader allowlist that includes the Claude Code built-ins; orchestrators do not. The MCP config file name carries a per-wake nonce so parallel wakes cannot clobber each other's config. The model ID, wake timeout, and bare-mode flag come from `[orchestrator]` in `config.toml` — none of these are hardcoded in the runtime (non-negotiable #3).
 
 Kairo writes a single JSON message to the orchestrator's stdin:
 
@@ -358,65 +362,58 @@ The dashboard exposes a `max_concurrent_workers` setting (default 3, max 10). Wo
 
 This is the heart of what makes Kairo more than a Claude Code wrapper. Kairo ships with a bundled **MCP server** written in Rust using the [rmcp](https://github.com/modelcontextprotocol/rust-sdk) crate. The orchestrator and workers get this MCP server registered automatically via the `--mcp-config` flag.
 
-The Kairo MCP server exposes the following tool namespaces:
+The Kairo MCP server exposes these tools. Permission tiers are defined in `config/default-permissions.toml` and overridable via `~/.kairo/permissions.toml`.
 
-### `mcp__kairo__memory`
+### Shipped in v0.1.0-alpha
 
-- `memory_query(query: string, limit: int)` — semantic search over episodic memory, returns top results
-- `memory_write(content: string, tags: string[], importance: float)` — store something new
-- `memory_fact_get(key: string)` — read a semantic fact
-- `memory_fact_set(key: string, value: string)` — write a semantic fact
-- `memory_recent(minutes: int)` — get raw log for last N minutes
+These are registered by `crates/kairo-mcp/src/server.rs` today; CI keeps the list below in sync with `config/default-permissions.toml` via an integration test that loads both and diffs them.
 
-### `mcp__kairo__perception`
+**Memory (`mcp__kairo__memory_*`)**
+- `memory_query_episodic(query, limit?)` — vector search over episodic memory
+- `memory_list_facts(prefix?, limit?)` — list semantic facts by dotted key prefix
+- `memory_get_fact(key)` — fetch one semantic fact
+- `memory_set_fact(key, value, source?)` — upsert a semantic fact (confidence clamped by source)
 
-- `perception_current()` — get the latest perception frame
-- `perception_screenshot()` — force a fresh screenshot and return it as an image
-- `perception_transcribe(seconds: int)` — transcribe the last N seconds of audio
+**System (`mcp__kairo__system_*`)**
+- `system_current_time()` — local wall-clock + tz + epoch ms
+- `system_active_window()` — foreground window title + process name
+- `system_clipboard_get()` — best-effort clipboard read (text only)
+- `system_notification(title, body)` — Windows toast, rate-limited to 1 / 10 s per session
 
-### `mcp__kairo__voice`
+**Filesystem (`mcp__kairo__fs_*`, read-only, path-allowlisted)**
+- `fs_read_file(path)` — up to 100 KB UTF-8 text; paths must fall inside Kairo data dir, `project.*.dir` facts, or `[mcp.fs].extra_paths`
+- `fs_list_dir(path)` — up to 500 entries with kind / size / mtime
 
-- `voice_speak(text: string, interrupt: bool)` — speak text via TTS, optionally interrupt current speech
-- `voice_listen(timeout_seconds: int)` — actively listen for user input and return transcription
+**Web**
+- `web_fetch(url)` — HTTP GET only, public-IP enforcement with DNS pinning (no rebinding), 5 s timeout, 50 KB cap, no redirects
 
-### `mcp__kairo__windows`
+**Repair (`mcp__kairo__repair_*`, blocked by default, unlocked inside a repair session)**
+- `repair_restart_component(component)` — queue a restart intent
+- `repair_reinstall_model(component)` — queue a model reinstall intent
+- `repair_rollback_config(date)` — restore a dated config backup
+- `repair_test_component(component)` — quick health sanity check
+- `repair_escalate(message)` — post a user-visible red banner on the Health tab
 
-- `windows_list_apps()` — list all open windows with titles and PIDs
-- `windows_focus_app(pid: int)` — bring a window to foreground
-- `windows_launch(path: string, args: string[])` — launch an application
-- `windows_close_app(pid: int)` — close an application
-- `windows_ui_click(element_ref: string)` — click a UI element by accessibility reference
-- `windows_ui_type(text: string)` — type text into the active window
-- `windows_clipboard_get()` — read clipboard
-- `windows_clipboard_set(content: string)` — write clipboard
-- `windows_notification(title: string, body: string)` — post a system notification
+**Workers (`mcp__kairo__workers_*`)**
+- `workers_spawn_worker(task, cwd, model?, tools?)` — queue a worker spawn intent
+- `workers_worker_status(worker_id)` — snapshot
+- `workers_worker_wait(worker_id, timeout_secs?)` — block until terminal state
+- `workers_worker_list(status?, limit?)` — recent snapshots
+- `workers_worker_cancel(worker_id)` — queue a cancellation intent
 
-### `mcp__kairo__shell`
+### Planned (not yet shipped)
 
-- `shell_run(command: string, cwd: string, elevated: bool)` — run a PowerShell or cmd command
-  - `elevated: true` requires explicit user confirmation unless pre-approved for that session
-- `shell_background(command: string, cwd: string)` — run a long-running command in the background
+These tool namespaces are reserved by the architecture but **not exposed in the alpha**. The MCP server does not register handlers for them; adding one requires updating this section, `config/default-permissions.toml`, and the server in the same PR. A missing handler would return a protocol-level "unknown tool" error — no silent fallback.
 
-### `mcp__kairo__workers`
+- **`mcp__kairo__perception_*`** — live frame / screenshot / transcription reads for the orchestrator (currently, the orchestrator sees the trigger frame embedded in the wake context; this namespace would expose on-demand reads)
+- **`mcp__kairo__voice_*`** — programmatic TTS (`voice_speak`) and push-to-listen (`voice_listen`)
+- **`mcp__kairo__windows_*`** — focus, launch, close, UI automation (ui_click / ui_type), clipboard_set
+- **`mcp__kairo__schedule_*`** — cron-style scheduled wakes
+- **`mcp__kairo__system_config_*`** — dynamic config read / write
 
-- `spawn_worker(task: string, cwd: string, model: string, tools: string[])` — spawn a new Claude Code worker
-- `worker_status(worker_id: string)` — get current status of a worker
-- `worker_cancel(worker_id: string)` — stop a worker
+**Deliberately excluded, no `mcp__kairo__shell_*` namespace ever.** Shell execution inside Kairo's permission boundary is a non-goal — workers that need a shell go through Claude Code's built-in `Bash` tool, which is gated by Kairo Core's worker-pool permission model rather than by Kairo's MCP server.
 
-### `mcp__kairo__schedule`
-
-- `schedule_once(when: datetime, task: string)` — schedule a one-shot wake-up
-- `schedule_recurring(cron: string, task: string)` — schedule a recurring task
-- `schedule_list()` — list all scheduled tasks
-- `schedule_cancel(id: string)` — cancel a scheduled task
-
-### `mcp__kairo__system`
-
-- `system_health()` — get current component statuses
-- `system_config_get(key: string)` — read a config value
-- `system_config_set(key: string, value: any)` — write a config value (may require confirmation)
-
-Every tool has a strict permission model. Destructive operations (shell commands, file deletes, elevated operations, config changes) require either a pre-approved allowlist rule or live user confirmation via the dashboard.
+Every tool has a strict permission model. Destructive operations (repair intents, worker spawns, filesystem writes that aren't yet shipped) require either a pre-approved allowlist rule or live user confirmation via the dashboard.
 
 ---
 
@@ -545,7 +542,7 @@ Wake word detected  ──▶  Start streaming transcription (whisper.cpp)
 
 ### Wake word
 
-Picovoice Porcupine runs continuously on CPU with ~1% usage. Default wake word is "Hey Kairo" (custom-trained). Users can train their own or disable wake word entirely (always-listening mode where the triage LLM decides whether speech is addressed to Kairo).
+Wake detection runs on the continuous whisper transcript stream — the same whisper-medium pipeline that drives STT is the wake gate. A small `TranscriptWakeDetector` scans each new transcript fragment for "hey kairo" (configurable via `voice.wake_keyword`) with a narrow edit-distance tolerance tuned for the failure modes we see in practice (e.g. whisper hears "hey cairo" on short clips). No separate wake-word model ships — Porcupine was prototyped but dropped to keep the model-download footprint smaller and avoid a second audio-inference pipeline competing with whisper for the microphone. Users can disable the wake gate entirely (`voice.wake_word_enabled = false`), in which case every transcript is offered to triage and the LLM decides whether it's addressed to Kairo.
 
 ### TTS options
 

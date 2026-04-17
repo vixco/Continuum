@@ -147,10 +147,10 @@ async fn main() -> Result<()> {
     // --- Orchestrator config ---
     let prompt_path = find_system_prompt(&dev_dir);
     let orch_config = OrchestratorConfig {
-        model: "claude-opus-4-6".to_string(),
+        model: config.orchestrator.model_id.clone(),
         system_prompt_path: prompt_path,
-        timeout_secs: 60,
-        bare_mode: false,
+        timeout_secs: config.orchestrator.wake_timeout_secs,
+        bare_mode: config.orchestrator.bare_mode,
         // Phase 4: enable MCP tools. Data dir is the same ~/.kairo-dev/
         // the main runtime uses, so the MCP server reads/writes the same
         // semantic + episodic stores.
@@ -370,10 +370,7 @@ async fn main() -> Result<()> {
 
     // --- Triage ---
     let triage: Option<TriageLayer> = {
-        let model_path = dev_dir
-            .join("models")
-            .join("triage")
-            .join("qwen3-8b-q4_k_m.gguf");
+        let model_path = config.triage.resolve_model_path(&dev_dir);
 
         if !model_path.exists() {
             tracing::error!(
@@ -397,12 +394,12 @@ async fn main() -> Result<()> {
 
             let triage_config = TriageConfig {
                 model_path: model_path.to_string_lossy().into_owned(),
-                context_size: 2048,
+                context_size: config.triage.context_size,
                 n_threads,
-                gpu_layers: 999,
-                max_tokens: 256,
-                temperature: 0.0,
-                latency_warn_ms: 2000,
+                gpu_layers: config.triage.gpu_layers,
+                max_tokens: config.triage.max_tokens,
+                temperature: config.triage.temperature,
+                latency_warn_ms: config.triage.latency_warn_ms,
             };
 
             match TriageLayer::new(triage_config) {
@@ -687,22 +684,55 @@ async fn main() -> Result<()> {
                                 let suggested_skill_clone = suggested_skill.clone();
                                 let skill_budget = config.skills.token_budget;
                                 let dev_dir_clone = dev_dir.clone();
+                                let mut wake_shutdown = shutdown_rx.clone();
 
                                 tokio::spawn(async move {
-                                    let result = do_wake(
-                                        &frame_clone,
-                                        &history,
-                                        &reason_clone,
-                                        &orch_cfg_clone,
-                                        &semantic_clone,
-                                        &episodic_clone,
-                                        wake_speech_opt.as_ref(),
-                                        &skill_loader_clone,
-                                        suggested_skill_clone.as_deref(),
-                                        skill_budget,
-                                        &dev_dir_clone,
-                                    )
-                                    .await;
+                                    // Race the wake against the runtime's shutdown
+                                    // signal: on Ctrl-C we abort the in-flight
+                                    // wake so the claude subprocess is killed
+                                    // (via kill_on_drop on the tokio Command)
+                                    // rather than orphaned.
+                                    let result = tokio::select! {
+                                        r = do_wake(
+                                            &frame_clone,
+                                            &history,
+                                            &reason_clone,
+                                            &orch_cfg_clone,
+                                            &semantic_clone,
+                                            &episodic_clone,
+                                            wake_speech_opt.as_ref(),
+                                            &skill_loader_clone,
+                                            suggested_skill_clone.as_deref(),
+                                            skill_budget,
+                                            &dev_dir_clone,
+                                        ) => r,
+                                        _ = wake_shutdown.changed() => {
+                                            if *wake_shutdown.borrow() {
+                                                tracing::info!(
+                                                    layer = "orchestrator",
+                                                    component = "kairo",
+                                                    "Shutdown received — aborting in-flight wake"
+                                                );
+                                                Ok(())
+                                            } else {
+                                                // Spurious change (sender still 'false') — continue waiting.
+                                                do_wake(
+                                                    &frame_clone,
+                                                    &history,
+                                                    &reason_clone,
+                                                    &orch_cfg_clone,
+                                                    &semantic_clone,
+                                                    &episodic_clone,
+                                                    wake_speech_opt.as_ref(),
+                                                    &skill_loader_clone,
+                                                    suggested_skill_clone.as_deref(),
+                                                    skill_budget,
+                                                    &dev_dir_clone,
+                                                )
+                                                .await
+                                            }
+                                        }
+                                    };
 
                                     match result {
                                         Ok(()) => {
