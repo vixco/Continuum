@@ -30,22 +30,26 @@ export function Card({
   return (
     <div
       className={clsx(
-        "rounded-lg border border-bg-border bg-bg-surface",
-        dense ? "p-3" : "p-4",
+        "rounded-xl border border-bg-border bg-bg-surface shadow-sm",
+        dense ? "p-4" : "p-5",
         className,
       )}
     >
       {(title || actions) && (
-        <div className="mb-3 flex items-start justify-between gap-2">
-          <div>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="min-w-0">
             {title && (
-              <div className="text-sm font-medium text-ink">{title}</div>
+              <div className="text-[13px] font-semibold uppercase tracking-wide text-ink-muted">
+                {title}
+              </div>
             )}
             {subtitle && (
-              <div className="mt-0.5 text-xs text-ink-muted">{subtitle}</div>
+              <div className="mt-1 text-xs text-ink-dim">{subtitle}</div>
             )}
           </div>
-          {actions && <div className="flex items-center gap-1">{actions}</div>}
+          {actions && (
+            <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
+          )}
         </div>
       )}
       {children}
@@ -113,17 +117,18 @@ export function Button({
     <button
       {...props}
       className={clsx(
-        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-colors",
+        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-all",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40",
         "disabled:cursor-not-allowed disabled:opacity-50",
         size === "sm" && "px-2.5 py-1 text-xs",
         size === "md" && "px-3 py-1.5 text-sm",
         size === "lg" && "px-4 py-2 text-sm",
         variant === "default" &&
-          "border-bg-border bg-bg-elevated text-ink hover:bg-bg-hover",
+          "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-purple bg-accent-purple text-white hover:bg-accent-purple-dim",
+          "border-accent-purple bg-accent-purple text-white shadow-sm shadow-accent-purple/30 hover:bg-accent-purple-dim hover:border-accent-purple-dim",
         variant === "danger" &&
-          "border-state-error bg-state-error/20 text-state-error hover:bg-state-error/30",
+          "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&
           "border-transparent bg-transparent text-ink-muted hover:bg-bg-hover hover:text-ink",
         className,
@@ -148,7 +153,7 @@ export function Toggle({
   disabled?: boolean;
 }) {
   return (
-    <label className="inline-flex items-center gap-2.5 cursor-pointer">
+    <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
       <button
         type="button"
         role="switch"
@@ -156,17 +161,17 @@ export function Toggle({
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={clsx(
-          "relative h-5 w-9 rounded-full border transition-colors",
+          "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors",
           "disabled:cursor-not-allowed disabled:opacity-50",
           checked
             ? "bg-accent-purple border-accent-purple"
-            : "bg-bg-elevated border-bg-border",
+            : "bg-bg-elevated border-bg-border hover:border-bg-hover",
         )}
       >
         <span
           className={clsx(
-            "absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white transition-transform",
-            checked ? "translate-x-[18px]" : "translate-x-0.5",
+            "block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150",
+            checked ? "translate-x-4" : "translate-x-0",
           )}
         />
       </button>
@@ -196,12 +201,13 @@ export function Slider({
   format?: (v: number) => string;
   disabled?: boolean;
 }) {
+  const fillPct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   return (
     <div className="w-full">
       {label && (
-        <div className="mb-1 flex items-center justify-between text-xs text-ink-muted">
+        <div className="mb-1.5 flex items-center justify-between text-xs text-ink-muted">
           <span>{label}</span>
-          <span className="font-mono text-ink">
+          <span className="font-mono tabular-nums text-ink">
             {format ? format(value) : value.toFixed(2)}
           </span>
         </div>
@@ -214,7 +220,8 @@ export function Slider({
         step={step}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full h-1 appearance-none rounded-full bg-bg-elevated accent-accent-purple disabled:opacity-50"
+        style={{ ["--kairo-range-fill" as string]: `${fillPct}%` }}
+        className="kairo-range block w-full"
       />
     </div>
   );
@@ -237,13 +244,17 @@ export function Select<T extends string>({
   return (
     <label className="block">
       {label && (
-        <span className="mb-1 block text-xs text-ink-muted">{label}</span>
+        <span className="mb-1.5 block text-xs text-ink-muted">{label}</span>
       )}
       <select
         {...props}
         value={value}
         onChange={(e) => onChange(e.target.value as T)}
-        className="w-full rounded-md border border-bg-border bg-bg-elevated px-2.5 py-1.5 text-sm text-ink focus:border-accent-purple focus:outline-none"
+        className={clsx(
+          "kairo-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
+          "transition-colors hover:border-bg-hover",
+          "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
+        )}
       >
         {options.map((opt) => (
           <option key={opt.value} value={opt.value}>
@@ -275,8 +286,10 @@ export function SearchInput({
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       className={clsx(
-        "w-full rounded-md border border-bg-border bg-bg-elevated px-2.5 py-1.5 text-sm",
-        "text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none",
+        "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
+        "text-ink placeholder:text-ink-dim transition-colors",
+        "hover:border-bg-hover",
+        "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
         className,
       )}
     />
@@ -301,8 +314,10 @@ export function TextInput({
       placeholder={placeholder}
       {...props}
       className={clsx(
-        "w-full rounded-md border border-bg-border bg-bg-elevated px-2.5 py-1.5 text-sm",
-        "text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none",
+        "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
+        "text-ink placeholder:text-ink-dim transition-colors",
+        "hover:border-bg-hover",
+        "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
         props.className,
       )}
     />

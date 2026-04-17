@@ -70,6 +70,13 @@ impl HealthResult {
             latency_ms,
         }
     }
+    pub fn unknown(msg: impl Into<String>, latency_ms: u64) -> Self {
+        Self {
+            status: ComponentStatus::Unknown,
+            message: Some(msg.into()),
+            latency_ms,
+        }
+    }
 }
 
 /// Registered check with its rolling stats.

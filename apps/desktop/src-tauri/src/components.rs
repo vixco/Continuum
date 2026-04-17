@@ -7,7 +7,7 @@
 //! and the Health tab displays `Unknown` for subsystems whose owner
 //! process hasn't published yet.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,14 +18,45 @@ use kairo_core::health::{HealthCheck, HealthRegistry, HealthResult};
 use kairo_core::runtime::KairoRuntime;
 use kairo_core::state::StateHandle;
 
+/// Directory where kairo-desktop.exe was started from. Used by checks that
+/// need to find sibling files (kairo-mcp.exe, prompts/, skills/) that the
+/// installer places next to the binaries.
+fn install_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+}
+
+/// True if `kairo.exe` has touched `~/.kairo-dev/state.json` recently.
+/// Used to avoid screaming "Degrading" across every model/voice/orchestrator
+/// probe when the runtime simply isn't running (the common case for dashboard-only
+/// installs).
+fn runtime_alive(dev_dir: &Path) -> bool {
+    let state_path = dev_dir.join("state.json");
+    let Ok(meta) = std::fs::metadata(&state_path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age.as_secs() < 10)
+        .unwrap_or(false)
+}
+
 pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
     let state = Arc::new(RwLock::new(runtime.state.clone()));
     let cfg = Arc::new(runtime.config_snapshot());
     let dev_dir = runtime.dev_dir();
 
+    registry.register(RuntimeCheck {
+        dev_dir: dev_dir.clone(),
+    });
     registry.register(VisionCheck {
         state: state.clone(),
         cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
     });
     registry.register(TriageCheck {
         state: state.clone(),
@@ -33,14 +64,17 @@ pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
     });
     registry.register(OrchestratorCheck {
         state: state.clone(),
+        dev_dir: dev_dir.clone(),
     });
     registry.register(VoiceTtsCheck {
         state: state.clone(),
         cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
     });
     registry.register(VoiceSttCheck {
         state: state.clone(),
         cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
     });
     registry.register(MemoryCheck {
         state: state.clone(),
@@ -49,6 +83,7 @@ pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
     registry.register(McpCheck {});
     registry.register(ContextCheck {
         state: state.clone(),
+        dev_dir: dev_dir.clone(),
     });
     registry.register(WorkersCheck {
         dev_dir: dev_dir.clone(),
@@ -63,9 +98,40 @@ async fn snap(state: &Arc<RwLock<StateHandle>>) -> kairo_core::state::KairoState
     state.read().await.snapshot().await
 }
 
+/// Heartbeat: is the headless `kairo.exe` runtime currently alive?
+/// Everything else downgrades to Unknown when this is offline, because
+/// the state snapshot the dashboard reads is stale / default.
+struct RuntimeCheck {
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for RuntimeCheck {
+    fn name(&self) -> &str {
+        "runtime"
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some(
+            "Start the Kairo runtime: launch `kairo.exe` (it lives next to kairo-desktop.exe)."
+                .into(),
+        )
+    }
+    async fn probe(&self) -> HealthResult {
+        if runtime_alive(&self.dev_dir) {
+            HealthResult::healthy(1)
+        } else {
+            HealthResult::unknown(
+                "runtime process is not publishing state — start kairo.exe",
+                1,
+            )
+        }
+    }
+}
+
 struct VisionCheck {
     state: Arc<RwLock<StateHandle>>,
     cfg: Arc<KairoConfig>,
+    dev_dir: PathBuf,
 }
 
 #[async_trait]
@@ -80,11 +146,14 @@ impl HealthCheck for VisionCheck {
         Some("Re-run scripts/download-models.ps1 to reinstall SmolVLM.".into())
     }
     async fn probe(&self) -> HealthResult {
-        let snap = snap(&self.state).await;
         let model_path = PathBuf::from(&self.cfg.vision.model_path);
         if !model_path.exists() {
             return HealthResult::error("vision model missing on disk", 1);
         }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
+        let snap = snap(&self.state).await;
         if snap.system.vision_model_loaded {
             HealthResult::healthy(1)
         } else {
@@ -118,6 +187,9 @@ impl HealthCheck for TriageCheck {
         if !model_path.exists() {
             return HealthResult::error("triage GGUF missing on disk", 1);
         }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
         let snap = snap(&self.state).await;
         if snap.system.triage_model_loaded {
             HealthResult::healthy(1)
@@ -129,6 +201,7 @@ impl HealthCheck for TriageCheck {
 
 struct OrchestratorCheck {
     state: Arc<RwLock<StateHandle>>,
+    dev_dir: PathBuf,
 }
 
 #[async_trait]
@@ -140,6 +213,9 @@ impl HealthCheck for OrchestratorCheck {
         Some("Install the Claude Code CLI (`claude --version`) or re-run setup.".into())
     }
     async fn probe(&self) -> HealthResult {
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
         let snap = snap(&self.state).await;
         if snap.system.orchestrator_ready {
             HealthResult::healthy(1)
@@ -159,6 +235,7 @@ impl HealthCheck for OrchestratorCheck {
 struct VoiceTtsCheck {
     state: Arc<RwLock<StateHandle>>,
     cfg: Arc<KairoConfig>,
+    dev_dir: PathBuf,
 }
 
 #[async_trait]
@@ -179,6 +256,9 @@ impl HealthCheck for VoiceTtsCheck {
         if !PathBuf::from(&primary.model_path).exists() {
             return HealthResult::error("Piper model file missing", 1);
         }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
         let snap = snap(&self.state).await;
         if snap.system.tts_loaded {
             HealthResult::healthy(1)
@@ -191,6 +271,7 @@ impl HealthCheck for VoiceTtsCheck {
 struct VoiceSttCheck {
     state: Arc<RwLock<StateHandle>>,
     cfg: Arc<KairoConfig>,
+    dev_dir: PathBuf,
 }
 
 #[async_trait]
@@ -207,6 +288,9 @@ impl HealthCheck for VoiceSttCheck {
         }
         if !PathBuf::from(&self.cfg.audio.whisper_model_path).exists() {
             return HealthResult::error("whisper model file missing", 1);
+        }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
         }
         let snap = snap(&self.state).await;
         if snap.system.stt_loaded {
@@ -232,6 +316,9 @@ impl HealthCheck for MemoryCheck {
         if !raw.exists() {
             return HealthResult::degrading("raw log DB not yet created", 1);
         }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
         let snap = snap(&self.state).await;
         if snap.memory.raw_log_rows == 0 && snap.memory.episodic_count == 0 {
             HealthResult::degrading("memory has no rows yet", 1)
@@ -253,17 +340,28 @@ impl HealthCheck for McpCheck {
     }
     async fn probe(&self) -> HealthResult {
         // kairo-mcp is spawned on demand by the orchestrator. Presence of
-        // the binary on disk is the best boot-time signal available.
-        let candidates = [
-            "target/release/kairo-mcp.exe",
-            "target/release/kairo-mcp",
-            "target/debug/kairo-mcp.exe",
-            "target/debug/kairo-mcp",
-        ];
-        if candidates.iter().any(|p| PathBuf::from(p).exists()) {
+        // the binary on disk is the best boot-time signal available. Check
+        // both packaged installs (next to kairo-desktop.exe) and local dev
+        // layouts (target/release/... from a repo cwd).
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = install_dir() {
+            candidates.push(dir.join("kairo-mcp.exe"));
+            candidates.push(dir.join("kairo-mcp"));
+        }
+        candidates.extend(
+            [
+                "target/release/kairo-mcp.exe",
+                "target/release/kairo-mcp",
+                "target/debug/kairo-mcp.exe",
+                "target/debug/kairo-mcp",
+            ]
+            .iter()
+            .map(PathBuf::from),
+        );
+        if candidates.iter().any(|p| p.exists()) {
             HealthResult::healthy(1)
         } else {
-            HealthResult::degrading("kairo-mcp binary not built yet", 1)
+            HealthResult::degrading("kairo-mcp binary not found", 1)
         }
     }
 }
@@ -338,15 +436,19 @@ impl HealthCheck for SkillsCheck {
         if !self.cfg.skills.enabled {
             return HealthResult::healthy(1);
         }
-        let root = std::path::PathBuf::from(&self.cfg.skills.dir);
-        let root = if root.is_absolute() {
-            root
+        let configured = std::path::PathBuf::from(&self.cfg.skills.dir);
+        let root = if configured.is_absolute() && configured.exists() {
+            configured
         } else {
+            // Try in order: cwd-relative, install-dir-relative (next to the
+            // exe — covers packaged installs), dev-dir-relative.
+            let rel = &self.cfg.skills.dir;
             std::env::current_dir()
-                .map(|cwd| cwd.join(&self.cfg.skills.dir))
                 .ok()
+                .map(|cwd| cwd.join(rel))
                 .filter(|p| p.exists())
-                .unwrap_or_else(|| self.dev_dir.join(&self.cfg.skills.dir))
+                .or_else(|| install_dir().map(|d| d.join(rel)).filter(|p| p.exists()))
+                .unwrap_or_else(|| self.dev_dir.join(rel))
         };
         let loader = kairo_core::skills::SkillLoader::new(&root);
         if let Err(e) = loader.reload() {
@@ -370,6 +472,7 @@ impl HealthCheck for SkillsCheck {
 
 struct ContextCheck {
     state: Arc<RwLock<StateHandle>>,
+    dev_dir: PathBuf,
 }
 
 #[async_trait]
@@ -378,6 +481,9 @@ impl HealthCheck for ContextCheck {
         "context_watcher"
     }
     async fn probe(&self) -> HealthResult {
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
         let snap = snap(&self.state).await;
         if let Some(ts) = snap.perception.last_frame_ts {
             let age = chrono::Utc::now().signed_duration_since(ts).num_seconds();

@@ -575,3 +575,59 @@ pub async fn dismiss_worker(app: State<'_, Arc<AppState>>, id: String) -> Result
     let dev = app.runtime.dev_dir();
     worker_intent::delete_snapshot(&dev, &id).map_err(|e| e.to_string())
 }
+
+/// State of the headless `kairo.exe` runtime from the dashboard's point of view.
+#[derive(Serialize)]
+pub struct RuntimeStatus {
+    pub alive: bool,
+    pub state_path: String,
+    pub binary_path: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<RuntimeStatus, String> {
+    let dev_dir = app.runtime.dev_dir();
+    let state_path = dev_dir.join("state.json");
+    let alive = std::fs::metadata(&state_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|age| age.as_secs() < 10)
+        .unwrap_or(false);
+    Ok(RuntimeStatus {
+        alive,
+        state_path: state_path.to_string_lossy().into_owned(),
+        binary_path: locate_runtime_binary().map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
+#[tauri::command]
+pub async fn start_runtime() -> Result<(), String> {
+    let Some(bin) = locate_runtime_binary() else {
+        return Err(
+            "kairo.exe not found next to kairo-desktop.exe — install may be incomplete".to_string(),
+        );
+    };
+    // Set cwd to the install dir so the runtime can find its sibling
+    // `prompts/`, `skills/` and `config/` folders via relative paths.
+    let working_dir = bin
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::process::Command::new(&bin)
+        .current_dir(&working_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to spawn {}: {}", bin.display(), e))
+}
+
+fn locate_runtime_binary() -> Option<std::path::PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for name in ["kairo.exe", "kairo"] {
+        let p = exe_dir.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}

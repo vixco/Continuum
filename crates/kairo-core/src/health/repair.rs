@@ -321,18 +321,27 @@ fn which_claude() -> PathBuf {
 }
 
 fn find_prompt(repo_root: &Path, dev_dir: &Path) -> Result<PathBuf> {
-    let candidates = [
+    let mut candidates: Vec<PathBuf> = vec![
         dev_dir.join("repair-agent-system.md"),
         repo_root.join("prompts").join("repair-agent-system.md"),
         Path::new("prompts/repair-agent-system.md").to_path_buf(),
     ];
+    // Also try next to the running executable — covers packaged installs
+    // where `prompts/` is bundled alongside kairo-desktop.exe and the cwd
+    // is wherever the user launched from.
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        candidates.push(exe_dir.join("prompts").join("repair-agent-system.md"));
+    }
     for p in candidates.iter() {
         if p.exists() {
             return Ok(p.clone());
         }
     }
     anyhow::bail!(
-        "repair-agent-system.md not found in {}, {} or cwd",
+        "repair-agent-system.md not found in {}, {}, cwd, or install dir",
         dev_dir.display(),
         repo_root.display()
     )
