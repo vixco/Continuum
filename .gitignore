@@ -2,6 +2,11 @@
 target/
 *.pdb
 
+# Per-machine cargo overrides (target-dir, toolchain paths, etc). The
+# committed .cargo/config.toml has sensible defaults; copy it to
+# .cargo/config.local.toml and edit there if you need local-only tweaks.
+.cargo/config.local.toml
+
 # Node
 node_modules/
 .next/
