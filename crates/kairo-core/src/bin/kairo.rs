@@ -42,6 +42,7 @@ use kairo_core::skills::{MatchContext, SkillLoader, SkillMatcher};
 use kairo_core::triage::handlers::handle_decision;
 use kairo_core::triage::llm::{TriageConfig, TriageLayer};
 use kairo_core::triage::TriageDecision;
+use kairo_core::voice::intent::{self as voice_intent, VoiceIntent};
 use kairo_core::voice::playback::PlaybackStream;
 use kairo_core::voice::sounds::{FeedbackCue, FeedbackPlayer};
 use kairo_core::voice::streaming::SpeechController;
@@ -485,6 +486,21 @@ async fn main() -> Result<()> {
     #[cfg(not(windows))]
     let mut hotkey_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
 
+    // --- Dashboard push-to-talk intents ---
+    // Dashboard-process writes TalkNow intents to `~/.kairo-dev/voice-intents/`;
+    // we drain them here and treat each as equivalent to a hotkey press.
+    if let Err(e) = voice_intent::ensure_intents_dir(&dev_dir) {
+        tracing::warn!(
+            layer = "voice",
+            component = "intent",
+            error = %e,
+            "Failed to create voice-intents dir; push-to-talk from dashboard will be ignored"
+        );
+    }
+    let mut voice_intent_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    // Skip the first immediate tick so we don't drain before the loop even starts.
+    voice_intent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // --- Main loop ---
     let mut frame_count: u64 = 0;
     let mut recent_frames: Vec<PerceptionFrame> = Vec::new();
@@ -777,6 +793,9 @@ async fn main() -> Result<()> {
                 );
                 hotkey_pending = true;
                 feedback.play(FeedbackCue::Listen);
+            }
+            _ = voice_intent_tick.tick() => {
+                drain_voice_intents_tick(&dev_dir, &mut hotkey_pending, &feedback);
             }
             _ = main_shutdown.changed() => {
                 if *main_shutdown.borrow() {
@@ -1251,6 +1270,50 @@ async fn recv_hotkey(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<()>>) 
     match rx.as_mut() {
         Some(ch) => ch.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Drain dashboard push-to-talk intents and apply the same effect as a
+/// hotkey press. Multiple intents in the same tick collapse into one
+/// listen-trigger because `hotkey_pending` is a boolean — we only play
+/// the feedback cue once per drain to avoid stutter when several clicks
+/// arrive in flight.
+fn drain_voice_intents_tick(
+    dev_dir: &std::path::Path,
+    hotkey_pending: &mut bool,
+    feedback: &FeedbackPlayer,
+) {
+    let intents = match voice_intent::drain_intents(dev_dir) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(
+                layer = "voice",
+                component = "intent",
+                error = %e,
+                "Failed to drain voice intents"
+            );
+            return;
+        }
+    };
+    if intents.is_empty() {
+        return;
+    }
+    let mut had_talk_now = false;
+    for intent in intents {
+        match intent {
+            VoiceIntent::TalkNow { .. } => {
+                had_talk_now = true;
+            }
+        }
+    }
+    if had_talk_now {
+        tracing::info!(
+            layer = "voice",
+            component = "intent",
+            "Push-to-talk intent received — next transcript opens a session"
+        );
+        *hotkey_pending = true;
+        feedback.play(FeedbackCue::Listen);
     }
 }
 

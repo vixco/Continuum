@@ -352,6 +352,72 @@ pub async fn rollback_config(app: State<'_, Arc<AppState>>, date: String) -> Res
         .map_err(|e| e.to_string())
 }
 
+// --- Voice: push-to-talk ---
+
+/// Write a `TalkNow` voice intent for the daemon to pick up. Equivalent to
+/// pressing the configured global hotkey, but works from the dashboard
+/// without requiring the user to leave the app.
+#[tauri::command]
+pub async fn talk_now(app: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let dev_dir = app.runtime.dev_dir();
+    kairo_core::voice::intent::write_intent(
+        &dev_dir,
+        &kairo_core::voice::intent::VoiceIntent::talk_now(),
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+// --- Voice: settings that persist to config (require daemon restart) ---
+
+#[tauri::command]
+pub async fn update_wake_sensitivity(
+    app: State<'_, Arc<AppState>>,
+    value: f32,
+) -> Result<KairoConfig, String> {
+    app.runtime
+        .update_config(|c| c.voice.wake_sensitivity = value.clamp(0.0, 1.0))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_tts_length_scale(
+    app: State<'_, Arc<AppState>>,
+    value: f32,
+) -> Result<KairoConfig, String> {
+    app.runtime
+        .update_config(|c| c.tts.length_scale = Some(value.clamp(0.5, 2.0)))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_tts_engine(
+    app: State<'_, Arc<AppState>>,
+    engine: String,
+) -> Result<KairoConfig, String> {
+    if engine != "piper" && engine != "elevenlabs" {
+        return Err(format!(
+            "Unknown TTS engine '{engine}'; expected 'piper' or 'elevenlabs'"
+        ));
+    }
+    app.runtime
+        .update_config(|c| c.tts.engine = engine.clone())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_tts_primary_voice(
+    app: State<'_, Arc<AppState>>,
+    voice: String,
+) -> Result<KairoConfig, String> {
+    if voice.trim().is_empty() {
+        return Err("Voice name cannot be empty".to_string());
+    }
+    app.runtime
+        .update_config(|c| c.tts.primary = voice.clone())
+        .map_err(|e| e.to_string())
+}
+
 // --- Runtime control ---
 
 #[tauri::command]
