@@ -14,30 +14,47 @@
 #   Set PROTOC env var to the path of protoc.exe
 
 [build]
-# Keep all build artifacts on F: drive (not C:) for performance
-target-dir = "F:/TRYORVIA/kairo-ai/target"
+# `target-dir` is intentionally NOT set here — hardcoding an absolute path
+# breaks CI and any collaborator whose workspace lives elsewhere. Set
+# `CARGO_TARGET_DIR` in your shell (or `.cargo/config.local.toml`, which
+# this file's `include` pulls in) if you want to redirect the build
+# artifacts to a different drive for performance.
 
 # sccache wraps rustc so repeated builds of the same crate+flags are
 # cache hits (near-instant). First build is normal speed, subsequent
 # clean rebuilds across branches are dramatically faster.
 # Install: download the prebuilt Windows binary from
 #   https://github.com/mozilla/sccache/releases → place at ~/.cargo/bin/sccache.exe
-rustc-wrapper = "sccache"
+# Commented out by default because CI installs sccache via its own action
+# and setting the wrapper before that action runs poisons cargo with
+# "program not found" errors. Uncomment locally once sccache is on PATH.
+# rustc-wrapper = "sccache"
 
 [env]
-# LLVM/clang for whisper-rs bindgen. Adjust if LLVM is installed elsewhere.
+# All absolute-path env vars below default to `force = false`, which means
+# a value set in the caller's shell / CI environment wins. The config
+# values below are defaults tuned for the maintainer's local setup; CI
+# and collaborators override them by exporting the variable ahead of
+# `cargo`.
+#
+# CI equivalents live in .github/workflows/ci.yml and release.yml.
+
+# LLVM/clang for whisper-rs bindgen. Adjust via `LIBCLANG_PATH` env var if
+# LLVM is installed elsewhere, or remove this entry if LLVM comes from PATH.
 LIBCLANG_PATH = "C:/LLVM/bin"
 
 # sccache also wraps the native C/C++/CUDA compilers invoked by cmake.
 # CMake reads these LAUNCHER variables and transparently prefixes
 # every cl.exe / nvcc call with `sccache`. Dramatically speeds up
 # clean rebuilds of whisper.cpp and llama.cpp (each has ~100 CUDA
-# kernels + hundreds of C++ files).
+# kernels + hundreds of C++ files). Harmless when sccache isn't installed
+# — CMake skips unknown launchers.
 CMAKE_C_COMPILER_LAUNCHER = "sccache"
 CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
 CMAKE_CUDA_COMPILER_LAUNCHER = "sccache"
 
-# Clang + MSVC include paths for bindgen header resolution
+# Clang + MSVC include paths for bindgen header resolution. Override via
+# `BINDGEN_EXTRA_CLANG_ARGS` env var if your MSVC/SDK versions differ.
 BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\""""
 
 # Ninja generator for cmake. Required for CUDA 13.1+ which needs VS 2022
