@@ -136,7 +136,20 @@ export const kairo = {
     invoke<WorkerSnapshot | null>("get_worker", { id }, null),
   cancelWorker: (id: string) => invoke<void>("cancel_worker", { id }),
   dismissWorker: (id: string) => invoke<void>("dismiss_worker", { id }),
+  getRuntimeStatus: () =>
+    invoke<RuntimeStatus>("get_runtime_status", undefined, {
+      alive: false,
+      state_path: "",
+      binary_path: null,
+    }),
+  startRuntime: () => invoke<void>("start_runtime"),
 };
+
+export interface RuntimeStatus {
+  alive: boolean;
+  state_path: string;
+  binary_path: string | null;
+}
 
 export async function subscribeState(handler: (s: KairoState) => void) {
   return listen<KairoState>("kairo:state", handler);

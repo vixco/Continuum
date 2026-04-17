@@ -16,6 +16,9 @@
     background-color: rgb(var(--color-bg));
     color: rgb(var(--color-ink));
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: "cv11", "ss01", "ss03";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     overflow: hidden;
   }
 
@@ -43,11 +46,84 @@
   ::-webkit-scrollbar-thumb:hover {
     background: #3a3a4a;
   }
+
+  /* --- Slider (range input) --- */
+  input[type="range"].kairo-range {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    height: 20px;
+    cursor: pointer;
+  }
+  input[type="range"].kairo-range::-webkit-slider-runnable-track {
+    height: 4px;
+    background: #22222e;
+    border-radius: 999px;
+    background-image: linear-gradient(#7c3aed, #7c3aed);
+    background-size: var(--kairo-range-fill, 0%) 100%;
+    background-repeat: no-repeat;
+  }
+  input[type="range"].kairo-range::-moz-range-track {
+    height: 4px;
+    background: #22222e;
+    border-radius: 999px;
+  }
+  input[type="range"].kairo-range::-moz-range-progress {
+    height: 4px;
+    background: #7c3aed;
+    border-radius: 999px;
+  }
+  input[type="range"].kairo-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    border: 2px solid #7c3aed;
+    margin-top: -5px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    transition: transform 0.1s ease;
+  }
+  input[type="range"].kairo-range::-moz-range-thumb {
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    border: 2px solid #7c3aed;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  input[type="range"].kairo-range:hover::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+  input[type="range"].kairo-range:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* --- Select (custom chevron) --- */
+  select.kairo-select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 12px;
+    padding-right: 2rem;
+  }
+  select.kairo-select::-ms-expand {
+    display: none;
+  }
+  select.kairo-select option {
+    background: #1a1a24;
+    color: #e5e7eb;
+  }
 }
 
 @layer components {
   .kairo-card {
-    @apply rounded-lg border border-bg-border bg-bg-surface p-4;
+    @apply rounded-xl border border-bg-border bg-bg-surface p-5;
   }
   .kairo-subtle {
     @apply text-ink-muted text-sm;

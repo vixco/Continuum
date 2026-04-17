@@ -164,6 +164,8 @@ fn main() {
             commands::get_worker,
             commands::cancel_worker,
             commands::dismiss_worker,
+            commands::get_runtime_status,
+            commands::start_runtime,
             onboarding::check_claude_cli,
             onboarding::check_claude_auth,
             onboarding::list_audio_input_devices,
