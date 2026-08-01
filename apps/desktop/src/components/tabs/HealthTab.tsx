@@ -1,17 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
 import { Archive, RefreshCcw, Wrench } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { kairo } from "@/lib/tauri";
-import {
-  Button,
-  Card,
-  Modal,
-  StatusBadge,
-} from "@/components/ui/primitives";
+import { Button, Card, Modal, StatusBadge } from "@/components/ui/primitives";
 import type { ComponentHealth, RepairEvent } from "@/lib/types";
 
 export function HealthTab() {
@@ -22,13 +17,13 @@ export function HealthTab() {
   const clearRepair = useStore((s) => s.clearRepair);
   const [selected, setSelected] = useState<ComponentHealth | null>(null);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setComponents(await kairo.getHealth());
-  }
+  }, [setComponents]);
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [refresh]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -58,7 +53,7 @@ export function HealthTab() {
                   onClick={() => setSelected(c)}
                   className={clsx(
                     "rounded-md border border-bg-border bg-bg-elevated p-3 text-left transition-colors",
-                    "hover:border-accent-purple hover:bg-bg-hover",
+                    "hover:border-accent-purple hover:bg-bg-hover"
                   )}
                 >
                   <div className="flex items-center justify-between">
@@ -68,13 +63,10 @@ export function HealthTab() {
                     <StatusBadge status={c.status} />
                   </div>
                   <div className="mt-1 text-xs text-ink-muted">
-                    avg {c.avg_response_ms ?? 0} ms · errors (24h){" "}
-                    {c.error_count_24h}
+                    avg {c.avg_response_ms ?? 0} ms · errors (24h) {c.error_count_24h}
                   </div>
                   {c.last_error && (
-                    <div className="mt-1 truncate text-xs text-state-error">
-                      {c.last_error}
-                    </div>
+                    <div className="mt-1 truncate text-xs text-state-error">{c.last_error}</div>
                   )}
                 </button>
               ))}
@@ -103,17 +95,13 @@ export function HealthTab() {
             {health.repair_running ? "Running…" : "Fix issues"}
           </Button>
           <div className="mt-4">
-            <div className="text-[11px] uppercase tracking-wider text-ink-dim">
-              Backup
-            </div>
+            <div className="text-[11px] uppercase tracking-wider text-ink-dim">Backup</div>
             <div className="mt-1 text-sm">
               {health.last_backup_ts
                 ? new Date(health.last_backup_ts).toLocaleString()
                 : "no backup yet"}
             </div>
-            <div className="text-xs text-ink-muted">
-              {health.backups_retained} retained
-            </div>
+            <div className="text-xs text-ink-muted">{health.backups_retained} retained</div>
             <Button
               size="sm"
               variant="ghost"
@@ -133,11 +121,7 @@ export function HealthTab() {
         <RepairStream events={repairEvents} />
       </Card>
 
-      <Modal
-        open={!!selected}
-        onClose={() => setSelected(null)}
-        title={selected?.name ?? ""}
-      >
+      <Modal open={!!selected} onClose={() => setSelected(null)} title={selected?.name ?? ""}>
         {selected && (
           <div className="space-y-3 text-sm">
             <div className="flex items-center gap-2">
@@ -166,9 +150,7 @@ export function HealthTab() {
             {selected.log_path && (
               <div>
                 <div className="kairo-label">Log path</div>
-                <div className="font-mono text-xs text-ink-muted">
-                  {selected.log_path}
-                </div>
+                <div className="font-mono text-xs text-ink-muted">{selected.log_path}</div>
               </div>
             )}
             {selected.recovery_note && (
@@ -198,9 +180,8 @@ export function HealthTab() {
 function RepairStream({ events }: { events: RepairEvent[] }) {
   if (events.length === 0) {
     return (
-      <div className="h-40 flex items-center justify-center text-sm text-ink-dim">
-        No repair events. Click <span className="mx-1 text-ink">Fix issues</span>{" "}
-        to start.
+      <div className="flex h-40 items-center justify-center text-sm text-ink-dim">
+        No repair events. Click <span className="mx-1 text-ink">Fix issues</span> to start.
       </div>
     );
   }

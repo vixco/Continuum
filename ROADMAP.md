@@ -1,315 +1,160 @@
-# Roadmap
+# Continuum roadmap
 
-This is the build plan for Kairo, from empty repo to v1.0. Each phase has a clear goal, a concrete deliverable, and a "done when" checklist. The phases build on each other, so do not skip ahead — a broken foundation breaks everything above it.
+Bron: [Continuum.md](./Continuum.md). Dit document is de uitvoerbare planning; `Continuum.md` blijft de volledige productvisie.
 
-Timelines are rough estimates assuming one focused developer (you + Claude Code) working on this seriously. Adjust as reality dictates.
+## Statuslegenda
 
-## Overview
+- [x] Klaar en lokaal of op de testserver bewezen
+- [ ] Nog te doen
+- **Owner** is eindverantwoordelijk; samenwerken blijft toegestaan
 
-```
-Phase 0  Hello world               — prove Claude Code can be spawned         (2–3 days)
-Phase 1  Perception                 — senses layer produces frames             (1 week)
-Phase 2  Triage                     — local LLM gates decisions                (1 week)
-Phase 3  Orchestrator               — Opus wakes up, speaks, remembers         (1–2 weeks)
-Phase 4  MCP tools                  — Windows capabilities exposed to Claude   (2 weeks)
-Phase 5  Voice                      — full speech pipeline                     (1–2 weeks)
-Phase 6  Dashboard                  — UI for everything                        (2 weeks)
-Phase 7  Self-healing               — repair agent                             (1 week)
-Phase 8  Workers + skills           — multi-agent workflows                    (1–2 weeks)
-Phase 9  Polish + alpha release     — first public version                    (2 weeks)
-```
+## Teamverdeling
 
-Total: 12–15 weeks to public alpha, assuming consistent focus.
+| Persoon | Hoofdverantwoordelijkheid |
+| --- | --- |
+| **Toshan** | Product, UX, Context Model, Main AI, context compiler, modelrouter en demo |
+| **Arda** | Windows service, observers, opslag, permissions, security, installer en performance |
+| **Samen** | Architectuurcontracten, integratietests, releases en gebruikersvalidatie |
 
----
+Deze verdeling is het startpunt. Wissel taken als ervaring of beschikbaarheid daar aanleiding toe geeft, maar houd per taak precies één owner.
 
-## Phase 0 — Hello world
+## Fase 0 — Fundament en productrichting
 
-**Goal:** Prove that a Rust process can spawn `claude` in headless mode, send it a prompt, and parse the streamed JSON response.
+**Doel:** van de Kairo-donor een reproduceerbare, eerlijke Continuum-basis maken.
 
-**Deliverable:** A minimal Rust binary in a scratch crate that runs Claude Code, asks it "what is 2+2", and prints the streamed text response to the terminal in real time.
+### Product en architectuur
 
-**Done when:**
+- [x] **Toshan:** zes doelmockups vertalen naar de Continuum desktop-shell
+- [x] **Toshan:** echte navigatie voor Home, Projects, Memory, Agents, Permissions, Timeline en Settings
+- [x] **Toshan:** echte Handoff ↔ Context Compiler / Launch Pad-flow
+- [x] **Samen:** mockdata duidelijk scheiden van live backendclaims
+- [x] **Samen:** `CONTINUUM_ARCHITECTURE.md` vastleggen als technisch contract
+- [x] **Samen:** donorgrenzen, migratievolgorde en v0.1-acceptatiedemo vastleggen
+- [x] **Samen:** nieuwe `Continuum.md` uit GitHub opnemen als productbron
 
-- [x] Cargo workspace is initialized with `crates/kairo-core` as a library crate
-- [x] `crates/kairo-core/examples/hello_world.rs` spawns `claude --print --output-format stream-json --input-format stream-json --verbose --include-partial-messages`
-- [x] It writes a JSON user message to stdin: `{"type":"user","message":{"role":"user","content":"What is 2+2?"}}`
-- [x] It reads stdout line-by-line, parses each line as JSON, and prints any `text_delta` events
-- [x] It exits cleanly when the `result` event arrives
-- [x] README has a one-paragraph note about how to run it locally
+### Reproduceerbaarheid en kwaliteit
 
-**Why this matters:** Everything else depends on this working reliably. If Claude Code's CLI surface changes, we find out now, not in week 10.
+- [x] **Arda:** pnpm en Rust-toolchain pinnen
+- [x] **Arda:** frozen dependency-install herstellen
+- [x] **Arda:** CI-fouten niet langer verbergen met `continue-on-error`
+- [x] **Arda:** CUDA opt-in maken zodat standaardbuilds draagbaar zijn
+- [x] **Arda:** machine-specifieke Cargo-paden verwijderen
+- [x] **Arda:** provenance- en licentie-audit documenteren
+- [x] **Samen:** frontend typecheck, lint, format en productiebuild op testserver
+- [x] **Samen:** docs-productiebuild op testserver
+- [x] **Samen:** Rust fmt, light Clippy en 98 light tests op testserver
+- [x] **Arda:** volledige Rust workspace Clippy + tests groen maken
+- [ ] **Arda:** Tauri desktopbuild op Windows CI groen bewijzen
+- [ ] **Samen:** gewijzigde blocking CI-workflow pushen en één volledig groene run bewijzen
+- [x] **Samen:** alle zeven tabs plus Ctrl+K-flow headless op de testserver bewijzen
+- [x] **Samen:** zes doelmockups op 1600×1000 zonder overflow of console-errors bewijzen
 
-**What to watch out for:** Claude Code's stream-json format is not fully documented. Be prepared to experiment with the event types and add defensive parsing. The CLI may require `ANTHROPIC_API_KEY` or an active `claude login` session — document this clearly.
+### Release-blockers uit provenance
 
----
+- [x] **Arda:** beschadigde Apache-licentietekst onderzoeken en canoniek herstellen
+- [x] **Arda:** Lessac-stem vervangen door de vanaf nul getrainde Norman-stem
+- [x] **Arda:** Piper/eSpeak-archief op bestandsniveau auditen; 361 bestanden en geen meegeleverde `LICENSE`/`NOTICE`, dus bundling blijft geblokkeerd
+- [x] **Arda:** volledige transitive CycloneDX-SBOM en pnpm-licentierapport genereren en archiveren
 
-## Phase 1 — Perception
+**Fase 0 klaar wanneer:** alle bovenstaande checks zijn afgevinkt, de blocking GitHub CI groen is en de mockupflows op de testserver zonder console-errors werken.
 
-**Goal:** The senses layer produces a continuous stream of `PerceptionFrame` objects from screen, audio, and context.
+## Fase 1 — Observer en live context
 
-**Deliverable:** A running Kairo Core binary that captures screenshots every 3 seconds, runs them through a local vision model, captures audio via VAD and transcribes it with whisper, polls Windows for context, and writes the frames to a SQLite raw log.
+**Resultaat:** Continuum weet wat actief is en kan de laatste werkzaamheden samenvatten.
 
-**Done when:**
+- [ ] **Arda:** Windows background service + auto-start bouwen
+- [ ] **Arda:** actieve app en venstertitel event-driven volgen
+- [ ] **Arda:** filesystem watcher en Git-context bouwen
+- [ ] **Arda:** screenshot change detector met resourcebudget bouwen
+- [ ] **Arda:** append-only eventdatabase implementeren
+- [ ] **Toshan:** projectdetectie en goal-confidence implementeren
+- [ ] **Toshan:** live Context-pagina op echte events aansluiten
+- [ ] **Samen:** privacyfilter vóór opslag en modelcalls testen
 
-- [x] `crates/kairo-vision` wraps SmolVLM-256M via ONNX Runtime with a `describe(image) -> VisionOutput` API (encoder pipeline validated, decoder stubbed for Phase 1.5)
-- [x] `crates/kairo-core/src/senses/vision.rs` captures screenshots via `xcap` (GDI), downscales to 1280×720, and calls the vision crate
-- [x] `crates/kairo-core/src/senses/audio.rs` wraps `whisper.cpp` via `whisper-rs`, captures mic audio with energy VAD, and emits transcripts (behind `audio` feature flag, requires LLVM)
-- [x] `crates/kairo-core/src/senses/context.rs` polls foreground window, idle time, and call state once per second
-- [x] A `PerceptionFrameBuilder` combines the three into frames at a configurable interval
-- [x] Frames are written to `~/.kairo-dev/raw_log.sqlite` with proper indexing
-- [x] The salience heuristic function is implemented and tested (12 unit tests)
-- [x] `cargo run --bin kairo-perception` shows the perception stream live in the terminal
+## Fase 2 — Geheugen
 
-**Why this matters:** Without reliable perception, nothing else can work. This is the foundation of Kairo's uniqueness.
+**Resultaat:** Continuum onthoudt projecten en beslissingen betrouwbaar over meerdere dagen.
 
-**What to watch out for:** Windows screen capture has multiple APIs and they all have quirks. Graphics Capture API is modern but requires Windows 10 1903+. GDI is older but works everywhere. Pick one and document the tradeoff. Also, whisper.cpp with realtime streaming is finicky — test on actual hardware early.
+- [ ] **Arda:** typed entities voor projects, sessions, tasks, decisions en blockers opslaan
+- [ ] **Arda:** SQLite event store + migraties + back-up/restore bouwen
+- [ ] **Toshan:** session summarization en memory candidates bouwen
+- [ ] **Toshan:** confidence, conflict detection en bronverwijzingen toevoegen
+- [ ] **Toshan:** semantisch zoeken en contextrelevantie bouwen
+- [ ] **Arda:** Markdown-vault export/import bouwen
+- [ ] **Toshan:** Memory review-UX en correctieflow bouwen
+- [ ] **Samen:** memory precision- en retentietests uitvoeren
 
----
+## Fase 3 — Twee-modellenarchitectuur
 
-## Phase 2 — Triage
+**Resultaat:** het Context Model verzamelt context; de Main AI voert zware redeneertaken uit.
 
-**Goal:** A small local LLM reads perception frames and outputs triage decisions.
+- [ ] **Toshan:** lokale Context Model-runtime integreren
+- [ ] **Toshan:** Main AI gateway met provider-adapters bouwen
+- [ ] **Toshan:** versioned context package contract implementeren
+- [ ] **Toshan:** modelrouter voor privacy, kosten en kwaliteit bouwen
+- [ ] **Arda:** secrets lokaal en versleuteld beheren
+- [ ] **Arda:** latency-, token- en resourcebudgetten afdwingen
+- [ ] **Samen:** provider contracttests en context-pack evaluaties bouwen
 
-**Deliverable:** The triage layer runs the Qwen 3 8B model via llama.cpp, evaluates each salient perception frame, and produces a JSON decision within 1.5 seconds.
+## Fase 4 — “Ga door”
 
-**Status:** Complete (2026-04-11). 19/20 accuracy (95%), P50 964ms, P95 1143ms.
-
-**Done when:**
-
-- [x] `crates/kairo-llm` wraps `llama.cpp` via `llama-cpp-2` with streaming generation, grammar-constrained JSON, and warmup
-- [x] Model files are downloadable via `scripts/download-models.ps1`, stored in `~/.kairo-dev/models/`
-- [x] `crates/kairo-core/src/triage/mod.rs` implements the decision loop with 3-retry fallback
-- [x] `prompts/triage-system.md` is written and loaded at startup with signal reliability hierarchy
-- [x] The triage layer receives frames from the perception stream via `--triage` flag on kairo-perception
-- [x] `ignore`, `remember`, `whisper`, `execute_simple`, and `wake_orchestrator` decisions are all handled
-- [x] Decision latency is measured and logged; if > 2 seconds, a warning is raised
-- [x] Benchmark harness covers 20 distinct frame scenarios with expected decisions
-
-**Why this matters:** The triage layer is what makes Kairo economically viable. If triage is wrong, Opus gets woken up for nonsense and costs explode.
-
-**What to watch out for:** Small LLMs are unreliable at structured JSON output without heavy prompting. Use llama.cpp's grammar mode or JSON Schema constraints if the model supports it. Test extensively with edge cases — idle screens, foreign language audio, multi-monitor setups, partial transcripts.
-
----
-
-## Phase 3 — Orchestrator
-
-**Goal:** When the triage layer decides to wake up the orchestrator, Kairo Core spawns Claude Code, sends it context, streams the response to a TTS (or stdout for now), and stores the outcome in memory.
-
-**Deliverable:** A full wake-up cycle works end-to-end: user triggers something → perception captures it → triage wakes orchestrator → Opus thinks → response is spoken → memory is updated.
-
-**Done when:**
-
-- [x] `crates/kairo-core/src/orchestrator/mod.rs` implements the full spawn + stream loop
-- [x] `prompts/orchestrator-system.md` is written (compact 400-token operational prompt derived from SOUL.md)
-- [x] The orchestrator receives a wake context (current frame + memory recall + active project)
-- [x] Opus's response is streamed token-by-token and displayed in real time
-- [x] Memory system is implemented:
-  - [x] `crates/kairo-core/src/memory/raw_log.rs` (SQLite, already from Phase 1)
-  - [x] `crates/kairo-core/src/memory/episodic.rs` with LanceDB and fastembed
-  - [x] `crates/kairo-core/src/memory/semantic.rs` with SQLite
-- [x] A background task distills episodic memories from raw log every 15 minutes
-- [x] Memory retrieval (vector search + semantic fact lookup) runs before every wake-up
-- [x] A simple stdout-only voice proxy (no real TTS yet) prints Opus's text with KAIRO: prefix
-
-**Why this matters:** This is the first moment Kairo is actually doing what Kairo is supposed to do. You will feel the system come alive here.
-
-**What to watch out for:** Context window management. Do not dump the full raw log into Opus's context. Keep wake contexts under 4000 tokens. Also: Opus occasionally produces very long responses — be ready to truncate or summarize.
-
----
-
-## Phase 4 — MCP tools
-
-**Goal:** The Kairo MCP server exposes Windows capabilities to Claude Code so the orchestrator can actually *do* things, not just talk about them.
-
-**Deliverable:** `crates/kairo-mcp` runs as a standalone MCP server, registers with Claude Code via `--mcp-config`, and exposes the full tool set described in `ARCHITECTURE.md`.
-
-**Status:** Complete (2026-04-12). 11 tools shipped, 51 tests green, verified end-to-end via claude CLI.
-
-**Done when:**
-
-- [x] `crates/kairo-mcp` is set up with `rmcp` 1.4 crate and compiles as a binary with a `--version` flag
-- [x] Tool implementations for the Phase 4 starter set exist:
-  - [x] `mcp__kairo__memory_query_episodic`, `memory_list_facts`, `memory_get_fact`, `memory_set_fact` (reserved prefix rejection, source-clamped confidence)
-  - [x] `mcp__kairo__system_current_time`, `system_active_window`, `system_clipboard_get`, `system_notification` (toast with 10s rate limit)
-  - [x] `mcp__kairo__fs_read_file`, `fs_list_dir` (100 KB cap, runtime allowlist with hardcoded deny list)
-  - [x] `mcp__kairo__web_fetch` (GET only, 50 KB cap, private-IP block, redirects disabled)
-- [ ] Deferred to later phases: `perception_*` (needs live senses IPC), `voice_*` (Phase 5), `windows_*` write/UI automation, `shell_*` (explicitly excluded per non-negotiables), `workers_*` (Phase 8), `schedule_*` (needs scheduler runtime), `system_config_*`
-- [x] Audit trail: every tool call writes an episodic event with kind `tool_call`, sanitized args, and result summary (fire-and-forget to avoid blocking tool responses)
-- [x] `config/default-models.toml` `[mcp.fs].extra_paths` opt-in for filesystem allowlist expansion
-- [x] One protocol integration test covers initialize + tools/list + one call_tool round trip; per-tool unit tests cover happy + deny paths
-- [x] `docs/mcp-tools.md` documents every tool with schemas and an E2E runbook
-- [x] Orchestrator `spawn.rs` generates `mcp-config.json` per wake, passes `--mcp-config` + `--strict-mcp-config`, sets `allowedTools="mcp__kairo__*"`, flips `--permission-mode` from `plan` to `default`
-
-**Why this matters:** Without tools, Kairo is just a chatbot. Tools are how Kairo takes action in the real world.
-
-**What to watch out for:** Windows UI Automation is genuinely hard — deferred entirely in Phase 4 along with shell execution (explicit non-negotiable). Phase 4 prioritized what's safe and useful: memory access, system info, read-only filesystem, web lookup, and notifications.
-
----
-
-## Phase 5 — Voice
-
-**Goal:** Full local-first bidirectional voice: wake phrase -> local STT -> semantic endpointing -> triage/orchestrator wake -> streaming local TTS -> interrupt handling.
-
-**Deliverable:** The user can say "Hey Kairo, what's on my schedule today?" and get a spoken response within a second, with the ability to interrupt mid-sentence.
-
-**Done when:**
-
-- [x] Local wake phrase detection is integrated over Whisper transcripts (native Porcupine-style backend remains configurable via `custom_keyword_path`)
-- [x] `crates/kairo-core/src/voice/wake.rs` triggers the listening state on wake word
-- [x] Whisper transcribes mic audio continuously and the voice session consumes post-wake transcripts
-- [x] Local semantic endpoint detection closes the voice session when the command is complete or times out
-- [x] Piper TTS is integrated via the local Piper CLI and can speak text locally
-- [x] ElevenLabs streaming TTS is intentionally out of Phase 5 local-first scope; cloud TTS remains an optional future plugin/backend only
-- [x] TTS streaming: first tokens from orchestrator are spoken while the rest is still generating
-- [x] Interrupt handling: playback queue is cleared when user speech arrives while Kairo is speaking
-- [x] Ambient mute: Kairo detects calls (Discord/Teams/Zoom/Meet) and switches to quiet mode
-- [x] Language detection: Dutch and English STT language hints are normalized and routed into the TTS controller
-
-**Why this matters:** Voice is the feature that makes Kairo feel like a presence instead of a tool. If voice doesn't feel natural, the whole product fails emotionally.
-
-**What to watch out for:** Voice latency is the hardest engineering problem in the project. Budget: under 800 ms from end-of-user-speech to start-of-kairo-speech for fast-path queries. Under 1500 ms for orchestrator queries. Measure relentlessly.
-
----
-
-## Phase 6 — Dashboard
-
-**Goal:** The Tauri desktop app is fully functional with all tabs from `ARCHITECTURE.md` implemented.
-
-**Deliverable:** The user can open the dashboard from the tray, see live status, configure every layer, browse memory, manage tools, and tune voice — all without touching config files.
-
-**Status:** Complete (2026-04-14). Tagged `v0.4.0-phase6`. Bundled with Phase 7 self-healing in the same session.
-
-**Done when:**
-
-- [x] `apps/desktop` is a Tauri 2 app with Next.js 15 frontend
-- [x] System tray integration works: left-click opens dashboard, right-click shows menu
-- [x] Home tab shows live perception, active workers, resource usage, recent actions
-- [x] Brain tab shows the 4-layer diagram and allows model selection + testing
-- [x] Memory tab has episodic, semantic, and raw log views with full CRUD
-- [x] Tools tab lists MCP tools and allows install/uninstall
-- [x] Voice tab exposes all voice configuration with preview
-- [x] Automations tab allows creating and managing scheduled tasks
-- [x] Logs tab is searchable and filterable
-- [x] Health tab shows component statuses (with Fix Issues button — Phase 7 merged in)
-- [x] Frontend connects to Kairo Core via Tauri's `emit`/`listen` IPC for live updates
-- [x] Dark mode is the default, styled with a custom dark palette
-
-**Why this matters:** Without a dashboard, Kairo is a backend project. The dashboard is what turns it into a product.
-
-**What to watch out for:** Tauri + Next.js is straightforward but has gotchas around SSR (you want client-side rendering for this). Also: live updates via WebSocket across all tabs creates a lot of surface area for state management bugs. Use Zustand for shared state.
-
----
-
-## Phase 7 — Self-healing
-
-**Goal:** The repair agent can diagnose and fix component failures on demand and on schedule.
-
-**Deliverable:** The "Fix Issues" button in the Health tab spawns a repair agent that reads logs, identifies problems, and applies fixes with user confirmation for destructive actions.
-
-**Status:** Complete (2026-04-14). Merged into `v0.4.0-phase6`.
-
-**Done when:**
-
-- [x] `crates/kairo-core/src/health/repair.rs` implements the repair agent spawning logic
-- [x] `prompts/repair-agent-system.md` is written
-- [x] A dedicated MCP tool set for the repair agent: `repair_restart_component`, `repair_reinstall_model`, `repair_rollback_config`, `repair_test_component`, `repair_escalate`
-- [x] Nightly backup rotation writes snapshots to `~/.kairo-backups/<date>/`
-- [x] Nightly self-diagnose routine checks all components and logs warnings
-- [x] The Health tab shows live repair agent output when a repair is running
-- [x] Voice-activated repair: "Kairo, something isn't right" triggers the repair agent (triage recognises via execute_simple)
-
-**Why this matters:** This is the feature that makes Kairo trustworthy. A system that can't fix itself becomes a maintenance nightmare the moment something goes wrong.
-
-**What to watch out for:** The repair agent needs write access to Kairo's own installation, which is a scary permission. Make sure the backup + rollback is rock solid before enabling destructive repairs.
-
----
-
-## Phase 8 — Workers and skills
-
-**Goal:** The orchestrator can spawn multiple Claude Code workers in parallel, manage their lifecycle, and route tasks to the right model.
-
-**Deliverable:** Complex multi-step workflows work end-to-end. Example: "Kairo, fix the small bugs in my GitHub repo tonight" spawns a worker that reads issues, creates branches, writes commits, and reports back with a briefing.
-
-**Status:** Complete (2026-04-14). Tagged `v0.5.0-phase8`.
-
-**Done when:**
-
-- [x] Worker pool in `crates/kairo-core/src/workers/pool.rs` manages concurrency
-- [x] Workers are spawned via `mcp__kairo__workers_spawn_worker` called by the orchestrator
-- [x] Each worker runs in its own working directory with its own session id
-- [x] Worker model selection honors user's budget/power/auto setting
-- [x] Workers report progress via a status file that the MCP server watches
-- [x] Worker output streams to the Home tab's active workers panel
-- [x] Workers can spawn sub-workers via Claude Code's built-in Task tool (MCP `workers_*` excluded from default worker allowlist)
-- [x] Skills directory (`skills/`) is loaded at startup with hot reload
-- [x] Orchestrator prompt includes dynamic skill content at wake time
-- [x] Five starter skills are implemented:
-  - [x] `skills/daily-briefing/` — spoken morning briefing from memory + overnight worker activity
-  - [x] `skills/code-review/` — structured review of a diff / PR / file
-  - [x] `skills/project-context/` — loads project-specific facts + recent episodic history
-  - [x] `skills/email-draft/` — concise reply / new-message drafts matched to recipient tone
-  - [x] `skills/file-organizer/` — plan-then-apply folder tidying, never deletes
-
-**Why this matters:** Workers are how Kairo does long-running work without blocking the orchestrator. This is also where skills earn their keep.
-
-**What to watch out for:** Process management across many concurrent Claude Code sessions is a resource hog. Cap the default concurrency at 3 and let power users tune it up.
-
----
-
-## Phase 9 — Polish and alpha release
-
-**Goal:** Ship a first public alpha release that other people can install and use without help from the maintainer.
-
-**Deliverable:** A signed Windows installer, a GitHub release, and a public docs site. Someone who has never heard of Kairo can install it, run `kairo setup`, walk through onboarding, and start using it within 15 minutes.
-
-**Status:** Complete (2026-04-15). Tagged `v0.1.0-alpha.1`. Post-alpha release-engineering fixes (Pages site bootstrap, sccache install in CI, pnpm root-lockfile cache, desktop tokio-runtime EnterGuard) landed 2026-04-15/16.
-
-**Done when:**
-
-- [x] Installer (`scripts/install.ps1` or a proper MSI) handles first-run setup
-- [x] Onboarding wizard in the desktop app:
-  - [x] Checks for Claude Code and guides installation if missing
-  - [x] Downloads default models (SmolVLM-256M, Qwen 3 8B, Whisper small, Piper voices)
-  - [x] Asks for wake word preference
-  - [x] Asks for voice selection
-  - [x] Asks for per-folder permissions
-  - [x] Runs a diagnostic to verify everything works
-- [x] Docs site is live (`apps/docs/` built with Nextra 3 + Next.js 15, deployed via `.github/workflows/docs.yml`)
-- [x] All `ARCHITECTURE.md` sections have corresponding user docs
-- [x] CI/CD pipeline builds Windows releases on tag push (`.github/workflows/release.yml`)
-- [x] Code signing scaffolding is in place (`scripts/sign-release.ps1`, gated on `KAIRO_SIGN_THUMBPRINT`; alpha ships unsigned, real cert deferred to first stable)
-- [x] GitHub release v0.1.0-alpha.1 is published with clear known-issues list (`KNOWN_ISSUES.md`)
-- [ ] Discord or Matrix community space is set up *(deferred — not a build deliverable; spin up when there are users to host)*
-- [x] README is updated with proper screenshots and install instructions
-- [x] `CONTRIBUTING.md` is written and open for PRs
-
-**Why this matters:** A project that never ships isn't a project. Getting to alpha forces every remaining rough edge to become visible and fixable.
-
-**What to watch out for:** The gap between "works on my machine" and "works for strangers" is huge. Expect Phase 9 to take longer than you think. Test on a clean Windows VM before every release candidate.
-
----
-
-## Post-1.0 ideas
-
-These are not roadmap items — they are possibilities for after the alpha stabilizes and the community gives feedback.
-
-- **macOS and Linux support.** Currently Kairo is Windows-only because Windows APIs are where the deepest integration lives. A cross-platform version would require reimplementing the Windows-specific MCP tools for each platform.
-- **Mobile companion app.** An iOS/Android app that pairs with the desktop Kairo over Tailscale, letting the user talk to their PC's brain from anywhere.
-- **Memory marketplace.** Users can share pre-built semantic memory packs for specific workflows (e.g. "Next.js developer starter pack").
-- **Shared skills registry.** A community repository of skill files that users can install into their Kairo.
-- **Multi-user mode.** A household with multiple Kairo users on different machines, with shared semantic facts (household calendar, shared grocery list) and private episodic memory.
-- **LLM fine-tuning on personal memory.** An advanced feature where the triage LLM can be fine-tuned on the user's own raw log to get better at predicting salience for that specific person.
-- **Voice cloning.** Train a custom TTS voice that matches something the user chooses — their own voice, a favorite narrator, anything.
-
----
-
-## How to use this roadmap
-
-- **Work phases in order.** Do not start Phase 3 before Phase 2 is stable.
-- **Ship each phase to main.** Don't accumulate a giant branch. Merge small, merge often.
-- **Update `CHANGELOG.md` as you go.** One entry per merged PR under `## [Unreleased]`.
-- **Tag milestones.** After each phase, tag a pre-release: `v0.0.1-phase0`, `v0.0.2-phase1`, etc. This makes rollback easier.
-- **Track progress in this file.** When a checkbox gets checked, check it here too and commit the update.
-
-Last updated: 2026-04-16. Phase 6 (+ Phase 7 merged) tagged `v0.4.0-phase6`. Phase 8 tagged `v0.5.0-phase8`. Phase 9 (alpha release) tagged `v0.1.0-alpha.1` on 2026-04-15. All roadmap phases complete; the only deferred item is the community space (not a code deliverable).
+**Resultaat:** na een pauze kiest Continuum aantoonbaar de juiste onafgemaakte taak en stelt het juiste vervolg voor.
+
+- [ ] **Toshan:** task-state machine en goal tracker bouwen
+- [ ] **Toshan:** unfinished-task detector en continuation resolver bouwen
+- [ ] **Toshan:** planner en verifier bouwen
+- [ ] **Arda:** permission preflight vóór iedere toolcall afdwingen
+- [ ] **Arda:** durable checkpoints en crash recovery bouwen
+- [ ] **Samen:** restart- en continuation-evaluaties met echte projecten uitvoeren
+
+## Fase 5 — Gecontroleerde acties
+
+**Resultaat:** Continuum kan goedgekeurd werk uitvoeren met audit trail en rollback.
+
+- [ ] **Arda:** capability-gebaseerd tool- en permissionsysteem bouwen
+- [ ] **Arda:** file- en terminaltools sandboxen
+- [ ] **Toshan:** browser-, IDE- en code-agent adapters bouwen
+- [ ] **Arda:** append-only auditlog en emergency stop bouwen
+- [ ] **Arda:** rollback voor bestanden, Git en databaseacties bouwen
+- [ ] **Toshan:** approval previews en resultaatverificatie in de UI bouwen
+- [ ] **Samen:** deny-, revoke-, rollback- en secret-redactiontests uitvoeren
+
+## Fase 6 — Desktop control
+
+**Resultaat:** Continuum kan apps zonder directe integratie veilig bedienen.
+
+- [ ] **Arda:** Windows UI Automation adapter bouwen
+- [ ] **Toshan:** browser-DOM adapter bouwen
+- [ ] **Arda:** visuele fallback en mouse/keyboard control bouwen
+- [ ] **Arda:** focus-, coordinate- en stale-screen guards bouwen
+- [ ] **Toshan:** veilige bevestigings- en previewflow ontwerpen
+- [ ] **Samen:** acties in sandbox-apps en misclickscenario’s testen
+
+## Fase 7 — Speech, orb en alpha
+
+**Resultaat:** Continuum voelt als een lokaal-eerst desktopproduct en is klaar voor een kleine alpha.
+
+- [ ] **Toshan:** push-to-talk, STT/TTS-routing en conversational UX bouwen
+- [ ] **Toshan:** orb states en animaties aan runtime-status koppelen
+- [ ] **Arda:** mute-, app-exclusion- en privacycontrols afdwingen
+- [ ] **Arda:** Windows installer, tray, auto-update en uninstall testen
+- [ ] **Samen:** performance-, batterij-, privacy- en safety-evaluaties uitvoeren
+- [ ] **Samen:** de tweedaagse “Just say continue”-demo opnemen
+- [ ] **Samen:** alpha release met bekende beperkingen publiceren
+
+## Eerstvolgende sprint
+
+1. **Samen:** toestemming geven voor push en de blocking Windows CI-run bewijzen.
+2. **Samen:** Phase 0 review; pas daarna Fase 1 starten.
+3. **Arda:** eerste verticale Observer-slice: window event → privacyfilter → event store.
+4. **Toshan:** hetzelfde event live tonen in de Context-pagina.
+
+## Definition of done voor iedere taak
+
+- Code en schema’s volgen `CONTINUUM_ARCHITECTURE.md`.
+- Geen fixture of mock wordt als live functionaliteit gepresenteerd.
+- Unit- en integratietests dekken success, deny en failure paths.
+- Privacyfiltering gebeurt vóór opslag of externe modelcalls.
+- UI-flow is met keyboard en op 1600×1000 gevalideerd.
+- Buildsucces, runtimebewijs en live-integratiebewijs worden apart gerapporteerd.
+- Documentatie en deze roadmap worden in dezelfde wijziging bijgewerkt.

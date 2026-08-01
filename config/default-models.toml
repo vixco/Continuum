@@ -140,9 +140,9 @@ primary = "en"
 # length_scale = 1.0
 
 [tts.voices.en]
-model_path  = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx"
-config_path = "~/.kairo-dev/models/tts/en_US-lessac-medium.onnx.json"
-# en_US-lessac-medium is single-speaker - leave unset.
+model_path  = "~/.kairo-dev/models/tts/en_US-norman-medium.onnx"
+config_path = "~/.kairo-dev/models/tts/en_US-norman-medium.onnx.json"
+# en_US-norman-medium is single-speaker - leave unset.
 # speaker_id = 0
 
 # Dutch voice disabled by default - nl_NL-mls-medium produces low-

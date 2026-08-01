@@ -281,7 +281,7 @@ pub struct TtsVoiceConfig {
     /// Absolute path to the `.onnx.json` config sidecar.
     pub config_path: String,
     /// Optional speaker id for multi-speaker models. `None` for
-    /// single-speaker voices like `en_US-lessac-medium`.
+    /// single-speaker voices like `en_US-norman-medium`.
     pub speaker_id: Option<i64>,
 }
 
@@ -619,11 +619,11 @@ impl Default for TtsConfig {
             "en".to_string(),
             TtsVoiceConfig {
                 model_path: tts_dir
-                    .join("en_US-lessac-medium.onnx")
+                    .join("en_US-norman-medium.onnx")
                     .to_string_lossy()
                     .into_owned(),
                 config_path: tts_dir
-                    .join("en_US-lessac-medium.onnx.json")
+                    .join("en_US-norman-medium.onnx.json")
                     .to_string_lossy()
                     .into_owned(),
                 speaker_id: None,

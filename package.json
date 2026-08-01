@@ -1,8 +1,15 @@
 {
   "name": "kairo-ai",
   "private": true,
+  "packageManager": "pnpm@10.11.1",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "pnpm --filter desktop dev",
-    "build": "pnpm --filter desktop build"
+    "build": "pnpm run build:desktop && pnpm run build:docs",
+    "build:desktop": "pnpm --filter @kairo/desktop build",
+    "build:docs": "pnpm --filter kairo-docs build",
+    "typecheck": "pnpm --filter @kairo/desktop typecheck"
   }
 }

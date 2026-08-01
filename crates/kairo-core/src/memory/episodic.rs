@@ -107,7 +107,13 @@ pub struct EpisodicSearchResult {
 ///
 /// Uses BGESmallENV15Q (66 MB, 384 dimensions) by default.
 pub struct Embedder {
-    model: fastembed::TextEmbedding,
+    backend: EmbedderBackend,
+}
+
+enum EmbedderBackend {
+    Real(Box<fastembed::TextEmbedding>),
+    #[cfg(test)]
+    Deterministic,
 }
 
 impl Embedder {
@@ -179,28 +185,72 @@ impl Embedder {
             "Embedding model loaded"
         );
 
-        Ok(Self { model })
+        Ok(Self {
+            backend: EmbedderBackend::Real(Box::new(model)),
+        })
+    }
+
+    #[cfg(test)]
+    fn deterministic() -> Self {
+        Self {
+            backend: EmbedderBackend::Deterministic,
+        }
     }
 
     /// Generates an embedding for a single text.
     pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>> {
-        let embeddings = self
-            .model
-            .embed(vec![text.to_string()], None)
-            .context("Failed to generate embedding")?;
-
-        embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Embedding model returned no results"))
+        match &mut self.backend {
+            EmbedderBackend::Real(model) => model
+                .embed(vec![text.to_string()], None)
+                .context("Failed to generate embedding")?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("Embedding model returned no results")),
+            #[cfg(test)]
+            EmbedderBackend::Deterministic => Ok(deterministic_test_embedding(text)),
+        }
     }
 
     /// Generates embeddings for multiple texts in a batch.
     pub fn embed_batch(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        self.model
-            .embed(texts, None)
-            .context("Failed to generate batch embeddings")
+        match &mut self.backend {
+            EmbedderBackend::Real(model) => model
+                .embed(texts, None)
+                .context("Failed to generate batch embeddings"),
+            #[cfg(test)]
+            EmbedderBackend::Deterministic => Ok(texts
+                .iter()
+                .map(|text| deterministic_test_embedding(text))
+                .collect()),
+        }
     }
+}
+
+#[cfg(test)]
+fn deterministic_test_embedding(text: &str) -> Vec<f32> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut embedding = vec![0.0; EMBEDDING_DIM];
+    for token in text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        let mut hasher = DefaultHasher::new();
+        token.to_lowercase().hash(&mut hasher);
+        embedding[hasher.finish() as usize % EMBEDDING_DIM] += 1.0;
+    }
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if norm > 0.0 {
+        for value in &mut embedding {
+            *value /= norm;
+        }
+    }
+    embedding
 }
 
 /// Resolve where the embedding model cache lives on disk. See [`Embedder::new`]
@@ -287,6 +337,10 @@ impl EpisodicStore {
     ///
     /// Also initializes the embedding model (first call may download ~66 MB).
     pub async fn open(db_dir: &str) -> Result<Self> {
+        Self::open_with_embedder(db_dir, Embedder::new()?).await
+    }
+
+    async fn open_with_embedder(db_dir: &str, embedder: Embedder) -> Result<Self> {
         // Ensure the directory exists.
         if !db_dir.starts_with("memory://") {
             std::fs::create_dir_all(db_dir)
@@ -297,8 +351,6 @@ impl EpisodicStore {
             .execute()
             .await
             .with_context(|| format!("Failed to connect to LanceDB at {db_dir}"))?;
-
-        let embedder = Embedder::new()?;
 
         let mut store = Self {
             db,
@@ -324,6 +376,11 @@ impl EpisodicStore {
         }
 
         Ok(store)
+    }
+
+    #[cfg(test)]
+    async fn open_for_test(db_dir: &str) -> Result<Self> {
+        Self::open_with_embedder(db_dir, Embedder::deterministic()).await
     }
 
     /// Returns the Arrow schema for the episodic events table.
@@ -665,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embedder_produces_correct_dimension() {
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::deterministic();
         let embedding = embedder.embed_one("test text").unwrap();
         assert_eq!(embedding.len(), EMBEDDING_DIM);
     }
@@ -675,7 +732,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().to_str().unwrap();
 
-        let mut store = EpisodicStore::open(db_path).await.unwrap();
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
         assert_eq!(store.event_count().await.unwrap(), 0);
 
         let event = make_event("User was debugging triage layer", EventKind::Remember);
@@ -689,7 +746,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().to_str().unwrap();
 
-        let mut store = EpisodicStore::open(db_path).await.unwrap();
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
 
         // Insert some events.
         store
@@ -737,7 +794,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().to_str().unwrap();
 
-        let mut store = EpisodicStore::open(db_path).await.unwrap();
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
 
         for i in 0..5 {
             let mut event = make_event(&format!("Event number {i}"), EventKind::Remember);
@@ -758,7 +815,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().to_str().unwrap();
 
-        let mut store = EpisodicStore::open(db_path).await.unwrap();
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
         let results = store.search_similar("anything", 5).await.unwrap();
         assert!(results.is_empty());
     }

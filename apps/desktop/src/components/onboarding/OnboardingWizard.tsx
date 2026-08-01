@@ -37,14 +37,7 @@ import { clsx } from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 
 type StepId =
-  | "welcome"
-  | "claude"
-  | "models"
-  | "voice"
-  | "permissions"
-  | "personal"
-  | "diagnostics"
-  | "done";
+  "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
 
 const STEPS: Array<{ id: StepId; label: string; icon: typeof Sparkles }> = [
   { id: "welcome", label: "Welcome", icon: Sparkles },
@@ -73,7 +66,7 @@ export interface OnboardingPayload {
 const DEFAULT_PAYLOAD: OnboardingPayload = {
   wake_word_enabled: true,
   wake_sensitivity: 0.5,
-  primary_voice: "en_US-lessac-medium",
+  primary_voice: "en_US-norman-medium",
   permissions: "default",
   extra_paths: [],
   language: "en",
@@ -109,12 +102,8 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
           {step === "claude" && <ClaudeStep onNext={goNext} />}
           {step === "models" && <ModelsStep onNext={goNext} />}
           {step === "voice" && <VoiceStep payload={payload} setPayload={setPayload} />}
-          {step === "permissions" && (
-            <PermissionsStep payload={payload} setPayload={setPayload} />
-          )}
-          {step === "personal" && (
-            <PersonalStep payload={payload} setPayload={setPayload} />
-          )}
+          {step === "permissions" && <PermissionsStep payload={payload} setPayload={setPayload} />}
+          {step === "personal" && <PersonalStep payload={payload} setPayload={setPayload} />}
           {step === "diagnostics" && <DiagnosticsStep />}
           {step === "done" && <DoneStep onStart={finish} />}
         </div>
@@ -153,7 +142,7 @@ function WizardHeader({ idx }: { idx: number }) {
               "h-1.5 w-8 rounded-full transition-colors",
               i < idx && "bg-accent-purple",
               i === idx && "bg-accent-purple",
-              i > idx && "bg-bg-border",
+              i > idx && "bg-bg-border"
             )}
           />
         ))}
@@ -182,7 +171,7 @@ function WizardFooter({
         onClick={onBack}
         className={clsx(
           "inline-flex items-center gap-1.5 rounded-md border border-bg-border px-3 py-1.5 text-sm",
-          canBack ? "hover:bg-bg-hover" : "cursor-not-allowed opacity-40",
+          canBack ? "hover:bg-bg-hover" : "cursor-not-allowed opacity-40"
         )}
       >
         <ChevronLeft size={14} /> Back
@@ -206,14 +195,14 @@ function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer title="Welcome to Kairo">
       <p className="text-ink-muted">
-        Kairo is an ambient AI assistant for Windows. It sees what you see, hears what
-        you hear, remembers what matters, and acts only when the moment is right —
-        powered by Claude Code and small local models.
+        Kairo is an ambient AI assistant for Windows. It sees what you see, hears what you hear,
+        remembers what matters, and acts only when the moment is right — powered by Claude Code and
+        small local models.
       </p>
       <p className="text-ink-muted">
-        This wizard takes about ten minutes. Most of that is a one-time model download
-        that runs in the background while you configure the rest. You can rerun it
-        later with <code className="kairo-code">kairo setup</code>.
+        This wizard takes about ten minutes. Most of that is a one-time model download that runs in
+        the background while you configure the rest. You can rerun it later with{" "}
+        <code className="kairo-code">kairo setup</code>.
       </p>
       <div className="kairo-card">
         <h3 className="font-semibold">Before we start</h3>
@@ -236,19 +225,19 @@ interface ClaudeCheckResult {
 }
 
 function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
-  const [state, setState] = useState<"idle" | "checking" | "ok" | "missing" | "unauth">(
-    "idle",
-  );
+  const [state, setState] = useState<"idle" | "checking" | "ok" | "missing" | "unauth">("idle");
   const [result, setResult] = useState<ClaudeCheckResult | null>(null);
 
   const runCheck = async () => {
     setState("checking");
     try {
-      const cli = await invoke<{ installed: boolean; version: string | null; error: string | null }>(
-        "check_claude_cli",
-      );
+      const cli = await invoke<{
+        installed: boolean;
+        version: string | null;
+        error: string | null;
+      }>("check_claude_cli");
       const auth = await invoke<{ authenticated: boolean; error: string | null }>(
-        "check_claude_auth",
+        "check_claude_auth"
       );
       const combined: ClaudeCheckResult = {
         installed: cli.installed,
@@ -278,21 +267,19 @@ function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer title="Claude Code check">
       <p className="text-ink-muted">
-        Kairo drives the official <code className="kairo-code">claude</code> CLI as a
-        subprocess. Let&apos;s make sure it&apos;s installed and signed in.
+        Kairo drives the official <code className="kairo-code">claude</code> CLI as a subprocess.
+        Let&apos;s make sure it&apos;s installed and signed in.
       </p>
 
       <div className="kairo-card">
         <StatusRow
           label="Claude Code CLI installed"
-          state={
-            state === "checking"
-              ? "pending"
-              : result?.installed
-              ? "ok"
-              : "fail"
+          state={state === "checking" ? "pending" : result?.installed ? "ok" : "fail"}
+          detail={
+            result?.installed
+              ? (result?.version ?? "")
+              : "Run npm install -g @anthropic-ai/claude-code"
           }
-          detail={result?.installed ? result?.version ?? "" : "Run npm install -g @anthropic-ai/claude-code"}
         />
         <StatusRow
           label="Logged in"
@@ -300,10 +287,10 @@ function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
             state === "checking"
               ? "pending"
               : result?.authenticated
-              ? "ok"
-              : result?.installed
-              ? "fail"
-              : "pending"
+                ? "ok"
+                : result?.installed
+                  ? "fail"
+                  : "pending"
           }
           detail={result?.authenticated ? "OK" : "Run 'claude login' in a separate terminal"}
         />
@@ -396,7 +383,7 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
         const event = await import("@tauri-apps/api/event");
         unsubscribe = await event.listen<{ model: string; percent: number }>(
           "kairo:onboarding:progress",
-          (e) => setProgress((p) => ({ ...p, [e.payload.model]: e.payload.percent })),
+          (e) => setProgress((p) => ({ ...p, [e.payload.model]: e.payload.percent }))
         );
       } catch {
         // Running outside Tauri — no live progress, which is fine.
@@ -408,9 +395,8 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer title="Download models">
       <p className="text-ink-muted">
-        Kairo needs four sets of models to work. If you&apos;ve installed Kairo before,
-        existing models under <code className="kairo-code">~/.kairo/models</code> will
-        be reused.
+        Kairo needs four sets of models to work. If you&apos;ve installed Kairo before, existing
+        models under <code className="kairo-code">~/.kairo/models</code> will be reused.
       </p>
 
       <div className="kairo-card space-y-2">
@@ -424,10 +410,7 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
               <span className="flex-1 text-xs text-ink-muted">{m.purpose}</span>
               <div className="h-1.5 w-32 overflow-hidden rounded-full bg-bg-border">
                 <div
-                  className={clsx(
-                    "h-full",
-                    done ? "bg-green-500" : "bg-accent-purple",
-                  )}
+                  className={clsx("h-full", done ? "bg-green-500" : "bg-accent-purple")}
                   style={{ width: `${pct}%` }}
                 />
               </div>
@@ -444,11 +427,7 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
       </div>
 
       <div className="flex gap-3">
-        <button
-          onClick={downloadAll}
-          disabled={running}
-          className="kairo-button-primary"
-        >
+        <button onClick={downloadAll} disabled={running} className="kairo-button-primary">
           {running ? "Downloading..." : "Download all"}
         </button>
         <span className="text-xs text-ink-dim">
@@ -492,16 +471,15 @@ function VoiceStep({
           <div>
             <p className="font-medium">Wake word</p>
             <p className="text-xs text-ink-muted">
-              Default phrase: &quot;hey kairo&quot;. You can always use Ctrl+Shift+K as a push-to-talk.
+              Default phrase: &quot;hey kairo&quot;. You can always use Ctrl+Shift+K as a
+              push-to-talk.
             </p>
           </div>
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
               checked={payload.wake_word_enabled}
-              onChange={(e) =>
-                setPayload({ ...payload, wake_word_enabled: e.target.checked })
-              }
+              onChange={(e) => setPayload({ ...payload, wake_word_enabled: e.target.checked })}
             />
             <span className="text-sm">Enable</span>
           </label>
@@ -515,13 +493,12 @@ function VoiceStep({
             max={1}
             step={0.05}
             value={payload.wake_sensitivity}
-            onChange={(e) =>
-              setPayload({ ...payload, wake_sensitivity: Number(e.target.value) })
-            }
+            onChange={(e) => setPayload({ ...payload, wake_sensitivity: Number(e.target.value) })}
             className="mt-1 w-full"
           />
           <p className="text-xs text-ink-dim">
-            Higher = stricter (fewer false positives, more missed wakes). Current: {payload.wake_sensitivity.toFixed(2)}
+            Higher = stricter (fewer false positives, more missed wakes). Current:{" "}
+            {payload.wake_sensitivity.toFixed(2)}
           </p>
         </div>
 
@@ -540,7 +517,8 @@ function VoiceStep({
             ))}
           </div>
           <p className="text-xs text-ink-dim">
-            Whisper handles input in any language. Output is English by default — Dutch TTS voice is available but lower quality.
+            Whisper handles input in any language. Output is English by default — Dutch TTS voice is
+            available but lower quality.
           </p>
         </div>
       </div>
@@ -611,9 +589,9 @@ function PermissionsStep({
   return (
     <StepContainer title="Permissions">
       <p className="text-ink-muted">
-        Decide where Kairo can read and write. By default, it has read-only access to
-        your home directory and read-write in a projects folder you pick. Secrets,
-        SSH keys, and browser profiles are always blocked.
+        Decide where Kairo can read and write. By default, it has read-only access to your home
+        directory and read-write in a projects folder you pick. Secrets, SSH keys, and browser
+        profiles are always blocked.
       </p>
 
       <div className="kairo-card">
@@ -717,9 +695,8 @@ function PersonalStep({
   return (
     <StepContainer title="A little about you">
       <p className="text-ink-muted">
-        Anything you enter here gets written to Kairo&apos;s semantic memory so the
-        orchestrator can use it. Everything is optional and editable later from the
-        Memory tab.
+        Anything you enter here gets written to Kairo&apos;s semantic memory so the orchestrator can
+        use it. Everything is optional and editable later from the Memory tab.
       </p>
 
       <div className="kairo-card space-y-3">
@@ -776,7 +753,7 @@ function DiagnosticsStep() {
   const [running, setRunning] = useState(false);
   const allPass = useMemo(
     () => checks.every((c) => c.status === "ok" || c.status === "skip"),
-    [checks],
+    [checks]
   );
 
   const run = async () => {
@@ -791,7 +768,7 @@ function DiagnosticsStep() {
           ...c,
           status: "fail" as const,
           detail: String(err),
-        })),
+        }))
       );
     } finally {
       setRunning(false);
@@ -805,8 +782,8 @@ function DiagnosticsStep() {
   return (
     <StepContainer title="Diagnostics">
       <p className="text-ink-muted">
-        One last check that everything is wired up correctly. If anything fails, you
-        can retry or let the repair agent attempt a fix.
+        One last check that everything is wired up correctly. If anything fails, you can retry or
+        let the repair agent attempt a fix.
       </p>
 
       <div className="kairo-card space-y-1">
@@ -852,15 +829,19 @@ function DoneStep({ onStart: _onStart }: { onStart: () => void }) {
       <div className="kairo-card space-y-2 text-sm text-ink-muted">
         <p className="font-medium text-ink">A few things to try first:</p>
         <ul className="list-disc space-y-1 pl-5">
-          <li>Say <em>&quot;hey kairo, hello&quot;</em> — simplest end-to-end test.</li>
-          <li>Press <code className="kairo-code">Ctrl+Shift+K</code> to talk without the wake word.</li>
+          <li>
+            Say <em>&quot;hey kairo, hello&quot;</em> — simplest end-to-end test.
+          </li>
+          <li>
+            Press <code className="kairo-code">Ctrl+Shift+K</code> to talk without the wake word.
+          </li>
           <li>Left-click the tray icon to open this dashboard again.</li>
           <li>Right-click the tray icon for pause / mute / quit.</li>
         </ul>
       </div>
       <p className="text-xs text-ink-dim">
-        Found something wrong? Head to the Health tab and click &quot;Fix Issues&quot; — the
-        repair agent will diagnose and try to fix it.
+        Found something wrong? Head to the Health tab and click &quot;Fix Issues&quot; — the repair
+        agent will diagnose and try to fix it.
       </p>
     </StepContainer>
   );
@@ -868,13 +849,7 @@ function DoneStep({ onStart: _onStart }: { onStart: () => void }) {
 
 // ---- Helpers ---------------------------------------------------------------
 
-function StepContainer({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function StepContainer({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
       <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>

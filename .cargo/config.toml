@@ -31,31 +31,10 @@
 # rustc-wrapper = "sccache"
 
 [env]
-# All absolute-path env vars below default to `force = false`, which means
-# a value set in the caller's shell / CI environment wins. The config
-# values below are defaults tuned for the maintainer's local setup; CI
-# and collaborators override them by exporting the variable ahead of
-# `cargo`.
-#
-# CI equivalents live in .github/workflows/ci.yml and release.yml.
-
-# LLVM/clang for whisper-rs bindgen. Adjust via `LIBCLANG_PATH` env var if
-# LLVM is installed elsewhere, or remove this entry if LLVM comes from PATH.
-LIBCLANG_PATH = "C:/LLVM/bin"
-
-# sccache also wraps the native C/C++/CUDA compilers invoked by cmake.
-# CMake reads these LAUNCHER variables and transparently prefixes
-# every cl.exe / nvcc call with `sccache`. Dramatically speeds up
-# clean rebuilds of whisper.cpp and llama.cpp (each has ~100 CUDA
-# kernels + hundreds of C++ files). Harmless when sccache isn't installed
-# — CMake skips unknown launchers.
-CMAKE_C_COMPILER_LAUNCHER = "sccache"
-CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
-CMAKE_CUDA_COMPILER_LAUNCHER = "sccache"
-
-# Clang + MSVC include paths for bindgen header resolution. Override via
-# `BINDGEN_EXTRA_CLANG_ARGS` env var if your MSVC/SDK versions differ.
-BINDGEN_EXTRA_CLANG_ARGS = """-IC:/LLVM/lib/clang/18/include -I\"C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/include\" -I\"C:/Program Files (x86)/Windows Kits/10/Include/10.0.19041.0/ucrt\""""
+# Native dependency locations are intentionally not committed here. Absolute
+# maintainer paths make Cargo configuration non-portable and can shadow values
+# installed by CI. `scripts/dev-setup.ps1` reports the exact variables needed
+# by a local machine; CI sets them explicitly in its workflow.
 
 # Ninja generator for cmake. Required for CUDA 13.1+ which needs VS 2022
 # integration that VS 2019 BuildTools doesn't have. Ninja calls nvcc directly.
@@ -88,9 +67,3 @@ CMAKE_GENERATOR = "Ninja"
 # `cargo run` without --release.
 CMAKE_BUILD_TYPE = "Release"
 DEBUG = "false"
-
-# ONNX Runtime library path for ort load-dynamic feature
-ORT_DYLIB_PATH = "C:/onnxruntime/onnxruntime.dll"
-
-# Protocol Buffers compiler for lance-encoding (via lancedb)
-PROTOC = "C:/Users/games/.kairo-dev/tools/protoc/bin/protoc.exe"

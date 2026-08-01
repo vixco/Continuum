@@ -41,7 +41,7 @@ export function MemoryTab() {
               "border-b-2 px-3 py-2 text-sm capitalize transition-colors",
               sub === t
                 ? "border-accent-purple text-ink"
-                : "border-transparent text-ink-muted hover:text-ink",
+                : "border-transparent text-ink-muted hover:text-ink"
             )}
           >
             {t === "raw" ? "Raw log" : t}
@@ -59,12 +59,8 @@ export function MemoryTab() {
 function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wider text-ink-dim">
-        {label}
-      </div>
-      <div className="mt-1 font-mono text-2xl text-ink">
-        {value.toLocaleString()}
-      </div>
+      <div className="text-[11px] uppercase tracking-wider text-ink-dim">{label}</div>
+      <div className="mt-1 font-mono text-2xl text-ink">{value.toLocaleString()}</div>
     </div>
   );
 }
@@ -104,16 +100,10 @@ function EpisodicPanel() {
   }
 
   return (
-    <Card
-      title="Episodic memories"
-      subtitle="vector-searchable summaries of past events"
-    >
+    <Card title="Episodic memories" subtitle="vector-searchable summaries of past events">
       <div className="mb-3 flex items-center gap-2">
         <div className="relative flex-1">
-          <Search
-            size={14}
-            className="pointer-events-none absolute left-2.5 top-2 text-ink-dim"
-          />
+          <Search size={14} className="pointer-events-none absolute left-2.5 top-2 text-ink-dim" />
           <SearchInput
             value={query}
             onChange={setQuery}
@@ -133,10 +123,7 @@ function EpisodicPanel() {
       ) : (
         <ul className="space-y-2">
           {results.map((r, idx) => (
-            <li
-              key={idx}
-              className="rounded-md border border-bg-border bg-bg-elevated p-3 text-sm"
-            >
+            <li key={idx} className="rounded-md border border-bg-border bg-bg-elevated p-3 text-sm">
               {JSON.stringify(r)}
             </li>
           ))}
@@ -180,16 +167,8 @@ function SemanticPanel() {
     <>
       <Card title="Semantic facts" subtitle="long-term key/value memory">
         <div className="mb-4 grid grid-cols-[1fr,2fr,auto] gap-2">
-          <TextInput
-            value={newKey}
-            onChange={setNewKey}
-            placeholder="namespace.key"
-          />
-          <TextInput
-            value={newValue}
-            onChange={setNewValue}
-            placeholder="value"
-          />
+          <TextInput value={newKey} onChange={setNewKey} placeholder="namespace.key" />
+          <TextInput value={newValue} onChange={setNewValue} placeholder="value" />
           <Button onClick={addFact} variant="primary">
             Add
           </Button>
@@ -210,13 +189,8 @@ function SemanticPanel() {
                 <table className="w-full text-sm">
                   <tbody>
                     {items.map((f) => (
-                      <tr
-                        key={f.key}
-                        className="border-b border-bg-border last:border-none"
-                      >
-                        <td className="py-1.5 pr-3 font-mono text-xs text-ink-muted">
-                          {f.key}
-                        </td>
+                      <tr key={f.key} className="border-b border-bg-border last:border-none">
+                        <td className="py-1.5 pr-3 font-mono text-xs text-ink-muted">{f.key}</td>
                         <td className="py-1.5 pr-3 text-ink">{f.value}</td>
                         <td className="w-20 py-1.5 text-right">
                           <button
@@ -239,21 +213,15 @@ function SemanticPanel() {
         )}
       </Card>
 
-      <Card
-        title="Danger zone"
-        subtitle="deletes every raw, episodic and semantic memory"
-      >
+      <Card title="Danger zone" subtitle="deletes every raw, episodic and semantic memory">
         <div className="flex items-center justify-between rounded-md border border-state-error/30 bg-state-error/5 p-3">
           <div className="flex items-start gap-2 text-sm">
-            <AlertTriangle
-              size={14}
-              className="mt-0.5 shrink-0 text-state-error"
-            />
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-state-error" />
             <div>
               <div className="font-medium">Wipe all memory</div>
               <div className="text-xs text-ink-muted">
-                This cannot be undone. Semantic facts you rely on (routine, user,
-                project) will be gone.
+                This cannot be undone. Semantic facts you rely on (routine, user, project) will be
+                gone.
               </div>
             </div>
           </div>
@@ -291,15 +259,11 @@ function SemanticPanel() {
         }
       >
         <p className="text-sm">
-          Type <span className="font-mono text-state-error">DELETE</span> to
-          confirm the wipe. This action is irreversible.
+          Type <span className="font-mono text-state-error">DELETE</span> to confirm the wipe. This
+          action is irreversible.
         </p>
         <div className="mt-3">
-          <TextInput
-            value={wipeInput}
-            onChange={setWipeInput}
-            placeholder="DELETE"
-          />
+          <TextInput value={wipeInput} onChange={setWipeInput} placeholder="DELETE" />
         </div>
       </Modal>
     </>

@@ -1069,7 +1069,7 @@ impl AudioWatcher {
             // inference; otherwise we trust the requested language so voice
             // routing downstream always has a concrete ISO-639-1 code.
             let language = if language == "auto" {
-                let id = state.full_lang_id();
+                let id = state.full_lang_id_from_state();
                 whisper_rs::get_lang_str(id)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "en".to_string())

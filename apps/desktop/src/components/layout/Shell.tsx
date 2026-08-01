@@ -3,356 +3,270 @@
 import { useEffect, useState } from "react";
 import { clsx } from "clsx";
 import {
-  Activity,
-  Brain,
-  Database,
-  Wrench,
-  AudioLines,
-  Clock,
-  FileText,
-  HeartPulse,
-  Power,
-  Pause,
-  Play,
-  MicOff,
-  Mic,
-  ZapOff,
-  PlayCircle,
+  Bell,
+  Bot,
+  Boxes,
+  CircleHelp,
+  Clock3,
+  FolderGit2,
+  Home,
+  LayoutGrid,
+  LockKeyhole,
+  Maximize2,
+  MemoryStick,
+  MessageSquareShare,
+  Minus,
+  Search,
+  Settings,
+  X,
 } from "lucide-react";
 
-import { bootstrapStore, useStore } from "@/lib/store";
-import { kairo, listen } from "@/lib/tauri";
-import type { RuntimeStatus } from "@/lib/tauri";
-import { StatusOrb } from "@/components/ui/primitives";
-import { HomeTab } from "@/components/tabs/HomeTab";
-import { BrainTab } from "@/components/tabs/BrainTab";
-import { MemoryTab } from "@/components/tabs/MemoryTab";
-import { ToolsTab } from "@/components/tabs/ToolsTab";
-import { VoiceTab } from "@/components/tabs/VoiceTab";
-import { AutomationsTab } from "@/components/tabs/AutomationsTab";
-import { LogsTab } from "@/components/tabs/LogsTab";
-import { HealthTab } from "@/components/tabs/HealthTab";
-import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
+import {
+  AgentsScreen,
+  HomeScreen,
+  MemoryScreen,
+  PermissionsScreen,
+  ProjectsScreen,
+  SettingsScreen,
+  TimelineScreen,
+} from "@/components/continuum/screens";
+import { Dot } from "@/components/continuum/ui";
 
-type TabId =
-  | "home"
-  | "brain"
-  | "memory"
-  | "tools"
-  | "voice"
-  | "automations"
-  | "logs"
-  | "health";
+type TabId = "home" | "projects" | "memory" | "agents" | "permissions" | "timeline" | "settings";
 
-const TABS: Array<{ id: TabId; label: string; icon: typeof Activity }> = [
-  { id: "home", label: "Home", icon: Activity },
-  { id: "brain", label: "Brain", icon: Brain },
-  { id: "memory", label: "Memory", icon: Database },
-  { id: "tools", label: "Tools", icon: Wrench },
-  { id: "voice", label: "Voice", icon: AudioLines },
-  { id: "automations", label: "Automations", icon: Clock },
-  { id: "logs", label: "Logs", icon: FileText },
-  { id: "health", label: "Health", icon: HeartPulse },
+const NAV: Array<{ id: TabId; label: string; icon: typeof Home }> = [
+  { id: "home", label: "Home", icon: Home },
+  { id: "projects", label: "Projects", icon: FolderGit2 },
+  { id: "memory", label: "Memory", icon: MemoryStick },
+  { id: "agents", label: "Agents", icon: Bot },
+  { id: "permissions", label: "Permissions", icon: LockKeyhole },
+  { id: "timeline", label: "Timeline", icon: Clock3 },
+  { id: "settings", label: "Settings", icon: Settings },
 ];
 
 export function Shell() {
   const [tab, setTab] = useState<TabId>("home");
-  const [now, setNow] = useState(() => new Date());
-  const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
-  const [startingRuntime, setStartingRuntime] = useState(false);
-  const voice = useStore((s) => s.state.voice);
-  const system = useStore((s) => s.state.system);
-  const orchestrator = useStore((s) => s.state.orchestrator);
-  const paused = system.paused;
-  const version = system.version;
+  const [agentMode, setAgentMode] = useState<"handoff" | "launch">("handoff");
+  const [commandOpen, setCommandOpen] = useState(false);
 
   useEffect(() => {
-    void bootstrapStore();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const complete = await invoke<boolean>("is_onboarding_complete");
-        setOnboardingNeeded(!complete);
-      } catch {
-        // Running outside Tauri or command not yet wired — skip wizard.
-        setOnboardingNeeded(false);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
       }
-    })();
-  }, []);
-
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const s = await kairo.getRuntimeStatus();
-        if (!cancelled) setRuntimeStatus(s);
-      } catch {
-        /* running outside Tauri — ignore */
-      }
+      if (event.key === "Escape") setCommandOpen(false);
     };
-    void poll();
-    const id = window.setInterval(poll, 3000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const onStartRuntime = async () => {
-    setStartingRuntime(true);
-    try {
-      await kairo.startRuntime();
-    } catch (e) {
-      console.error("start_runtime failed", e);
-      alert(`Could not start the Kairo runtime:\n${e}`);
-    } finally {
-      setStartingRuntime(false);
-    }
+  const navigate = (next: string) => {
+    if (NAV.some((item) => item.id === next)) setTab(next as TabId);
   };
 
-  useEffect(() => {
-    let unsub: (() => void) | undefined;
-    (async () => {
-      unsub = await listen<{ action: string }>("kairo:control", (evt) => {
-        switch (evt.action) {
-          case "pause":
-            void kairo.setPaused(true);
-            break;
-          case "resume":
-            void kairo.setPaused(false);
-            break;
-          case "voice-on":
-            void kairo.setVoiceMuted(false);
-            break;
-          case "voice-off":
-            void kairo.setVoiceMuted(true);
-            break;
-        }
-      });
-    })();
-    return () => unsub?.();
-  }, []);
-
-  const effectiveMode = orchestrator.active ? "thinking" : voice.mode;
-
-  if (onboardingNeeded) {
-    return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />;
-  }
-
-  const currentTab = TABS.find((t) => t.id === tab);
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg">
-      <Sidebar active={tab} onSelect={setTab} />
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <Topbar
-          now={now}
-          mode={effectiveMode}
-          paused={paused}
-          voiceMuted={voice.muted}
-          version={version}
-          onTogglePause={() => kairo.setPaused(!paused)}
-          onToggleVoice={() => kairo.setVoiceMuted(!voice.muted)}
-        />
-        {runtimeStatus && !runtimeStatus.alive && (
-          <div className="flex items-center justify-between gap-4 border-b border-amber-500/30 bg-amber-500/10 px-6 py-2.5 text-amber-200">
-            <div className="flex items-center gap-2.5 text-sm">
-              <ZapOff size={16} className="shrink-0" />
-              <span>
-                <span className="font-medium">Kairo runtime is offline.</span>{" "}
-                <span className="text-amber-200/70">
-                  Perception, triage, voice and the orchestrator are paused until you start it.
-                </span>
-              </span>
-            </div>
-            <button
-              onClick={onStartRuntime}
-              disabled={startingRuntime || !runtimeStatus.binary_path}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-amber-400/40 bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:cursor-not-allowed disabled:opacity-50"
-              title={runtimeStatus.binary_path ?? "kairo.exe not found"}
-            >
-              <PlayCircle size={14} />
-              {startingRuntime ? "Starting\u2026" : "Start runtime"}
-            </button>
-          </div>
-        )}
-        <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-6xl px-8 py-6">
-            {currentTab && (
-              <div className="mb-6 flex items-center gap-3">
-                <currentTab.icon size={20} className="text-accent-purple" />
-                <h1 className="text-xl font-semibold tracking-tight text-ink">
-                  {currentTab.label}
-                </h1>
-              </div>
+    <div className="continuum-window">
+      <WindowBar />
+      <div className="continuum-body">
+        <Sidebar active={tab} onSelect={setTab} onCommand={() => setCommandOpen(true)} />
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+          <GlobalBar />
+          <main
+            className={clsx(
+              "continuum-main",
+              `continuum-main-${tab}`,
+              tab === "agents" && `continuum-main-agents-${agentMode}`
             )}
-            {tab === "home" && <HomeTab />}
-            {tab === "brain" && <BrainTab />}
-            {tab === "memory" && <MemoryTab />}
-            {tab === "tools" && <ToolsTab />}
-            {tab === "voice" && <VoiceTab />}
-            {tab === "automations" && <AutomationsTab />}
-            {tab === "logs" && <LogsTab />}
-            {tab === "health" && <HealthTab />}
-          </div>
-        </main>
+          >
+            {tab === "home" && <HomeScreen onNavigate={navigate} />}
+            {tab === "projects" && <ProjectsScreen />}
+            {tab === "memory" && <MemoryScreen />}
+            {tab === "agents" && <AgentsScreen mode={agentMode} setMode={setAgentMode} />}
+            {tab === "permissions" && <PermissionsScreen />}
+            {tab === "timeline" && <TimelineScreen />}
+            {tab === "settings" && <SettingsScreen />}
+          </main>
+        </div>
+      </div>
+      <StatusBar />
+      {commandOpen && (
+        <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={navigate} />
+      )}
+    </div>
+  );
+}
+
+function ContinuumMark({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className="flex items-center gap-2.5 font-medium text-white">
+      <span className="continuum-mark">
+        <Boxes size={17} />
+      </span>
+      {!compact && <span>Continuum</span>}
+    </div>
+  );
+}
+
+function WindowBar() {
+  return (
+    <div className="continuum-windowbar">
+      <ContinuumMark />
+      <div className="ml-auto flex h-full items-center">
+        <button aria-label="Minimize" className="window-control">
+          <Minus size={14} />
+        </button>
+        <button aria-label="Maximize" className="window-control">
+          <Maximize2 size={12} />
+        </button>
+        <button aria-label="Close" className="window-control hover:bg-red-500/70">
+          <X size={14} />
+        </button>
       </div>
     </div>
+  );
+}
+
+function GlobalBar() {
+  return (
+    <header className="continuum-globalbar">
+      <div className="ml-auto flex items-center gap-1.5">
+        <button aria-label="Search" className="icon-button">
+          <Search size={18} />
+        </button>
+        <button aria-label="Notifications" className="icon-button relative">
+          <Bell size={17} />
+          <span className="notification-badge">3</span>
+        </button>
+        <button aria-label="Help" className="icon-button">
+          <CircleHelp size={17} />
+        </button>
+        <button aria-label="Profile" className="continuum-avatar">
+          TS
+          <span />
+        </button>
+      </div>
+    </header>
   );
 }
 
 function Sidebar({
   active,
   onSelect,
+  onCommand,
 }: {
   active: TabId;
-  onSelect: (id: TabId) => void;
+  onSelect: (tab: TabId) => void;
+  onCommand: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   return (
-    <nav
-      className={clsx(
-        "flex flex-col border-r border-bg-border bg-bg-surface transition-[width] duration-200",
-        expanded ? "w-52" : "w-16",
-      )}
-      onMouseEnter={() => setExpanded(true)}
-      onMouseLeave={() => setExpanded(false)}
-    >
-      <div className="flex h-14 items-center justify-center border-b border-bg-border">
-        <span className="font-semibold tracking-tight text-base">
-          K
-          <span className="text-accent-purple">AI</span>
-          {expanded && <span>ro</span>}
-        </span>
+    <aside className="continuum-sidebar">
+      <div className="flex h-16 items-center justify-between px-5">
+        <span className="text-[16px] font-semibold text-white">Continuum</span>
+        <LayoutGrid size={16} className="text-white/65" />
       </div>
-      <div className="flex-1 space-y-0.5 px-2 py-3">
-        {TABS.map(({ id, label, icon: Icon }) => (
+      <nav className="space-y-1 px-3" aria-label="Main navigation">
+        {NAV.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => onSelect(id)}
-            title={!expanded ? label : undefined}
-            className={clsx(
-              "group flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-              active === id
-                ? "bg-accent-purple/15 text-ink"
-                : "text-ink-muted hover:bg-bg-hover hover:text-ink",
-            )}
+            aria-current={active === id ? "page" : undefined}
+            className={clsx("continuum-nav-item", active === id && "is-active")}
           >
-            <Icon
-              size={16}
-              strokeWidth={2}
-              className={clsx(
-                "shrink-0 transition-colors",
-                active === id ? "text-accent-purple" : "text-ink-dim group-hover:text-ink-muted",
-              )}
-            />
-            {expanded && <span className="truncate">{label}</span>}
+            <Icon size={17} strokeWidth={1.8} />
+            <span>{label}</span>
           </button>
         ))}
-      </div>
-      <div className="border-t border-bg-border p-2">
-        <button
-          className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-xs text-ink-dim transition-colors hover:bg-bg-hover hover:text-ink"
-          onClick={() => kairo.quit()}
-        >
-          <Power size={14} className="shrink-0" />
-          {expanded && <span>Quit</span>}
+        {active === "settings" && (
+          <div className="continuum-settings-nav" aria-label="Settings sections">
+            {["Integrations & Models", "General", "Security", "Billing", "About"].map(
+              (label, index) => (
+                <button key={label} className={clsx(index === 0 && "is-active")}>
+                  {label}
+                </button>
+              )
+            )}
+          </div>
+        )}
+      </nav>
+      <div className="mt-auto p-4">
+        <button onClick={onCommand} className="continuum-command-button">
+          <MessageSquareShare size={16} className="text-amber-400" />
+          <span>Ask Continuum</span>
+          <kbd>Ctrl + K</kbd>
         </button>
+        <div className="mt-5 border-t border-white/[.06] pt-5">
+          <button className="flex w-full items-center gap-3 rounded-lg p-1.5 text-left hover:bg-white/[.03]">
+            <span className="continuum-avatar h-9 w-9">
+              TS
+              <span />
+            </span>
+            <span className="min-w-0 flex-1">
+              <b className="block truncate text-[11px] text-white/85">Toshan Soekar</b>
+              <small className="block truncate text-[9px] text-white/35">
+                toshan@continuum.app
+              </small>
+            </span>
+            <span className="text-amber-400">⌄</span>
+          </button>
+        </div>
       </div>
-    </nav>
+    </aside>
   );
 }
 
-function Topbar({
-  now,
-  mode,
-  paused,
-  voiceMuted,
-  version,
-  onTogglePause,
-  onToggleVoice,
-}: {
-  now: Date;
-  mode: import("@/lib/types").VoiceMode;
-  paused: boolean;
-  voiceMuted: boolean;
-  version: string;
-  onTogglePause: () => void;
-  onToggleVoice: () => void;
-}) {
-  const statusText = paused
-    ? "paused"
-    : mode === "idle"
-    ? "idle"
-    : mode === "listening"
-    ? "listening…"
-    : mode === "thinking"
-    ? "thinking…"
-    : mode === "speaking"
-    ? "speaking…"
-    : mode === "muted"
-    ? "muted"
-    : mode;
-
+function StatusBar() {
   return (
-    <header className="flex h-14 items-center justify-between border-b border-bg-border bg-bg-surface/60 px-6 backdrop-blur">
-      <div className="flex items-center gap-2.5">
-        <StatusOrb mode={paused ? "idle" : mode} size="sm" />
-        <span className="text-sm font-medium text-ink">{statusText}</span>
+    <footer className="continuum-statusbar">
+      <div className="flex items-center gap-2">
+        <Dot /> <span>Local mode</span>
       </div>
-      <div className="flex items-center gap-3">
-        <span
-          className="font-mono text-xs text-ink-dim"
-          title={`Kairo ${version}`}
-        >
-          v{version}
-        </span>
-        <span className="font-mono text-xs tabular-nums text-ink-muted">
-          {now.toLocaleTimeString(undefined, { hour12: false })}
-        </span>
-        <div className="h-5 w-px bg-bg-border" />
-        <button
-          onClick={onTogglePause}
-          className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elevated px-2.5 py-1.5 text-xs text-ink transition-colors hover:border-bg-hover hover:bg-bg-hover"
-        >
-          {paused ? (
-            <>
-              <Play size={12} /> Resume
-            </>
-          ) : (
-            <>
-              <Pause size={12} /> Pause
-            </>
-          )}
-        </button>
-        <button
-          onClick={onToggleVoice}
-          className={clsx(
-            "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors",
-            voiceMuted
-              ? "border-state-warn/40 bg-state-warn/10 text-state-warn hover:bg-state-warn/20"
-              : "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
-          )}
-        >
-          {voiceMuted ? (
-            <>
-              <MicOff size={12} /> Unmute
-            </>
-          ) : (
-            <>
-              <Mic size={12} /> Mute
-            </>
-          )}
-        </button>
+      <div className="h-4 w-px bg-white/[.07]" />
+      <div className="flex items-center gap-2 text-emerald-400/80">
+        ✓ <span className="text-white/45">All systems operational</span>
       </div>
-    </header>
+      <div className="ml-auto flex items-center gap-2">
+        <Dot />
+        <span>Context auto-saves</span>
+      </div>
+    </footer>
+  );
+}
+
+function CommandPalette({
+  onClose,
+  onNavigate,
+}: {
+  onClose: () => void;
+  onNavigate: (tab: string) => void;
+}) {
+  return (
+    <div className="command-scrim" role="dialog" aria-modal="true" aria-label="Ask Continuum">
+      <div className="command-palette">
+        <div className="flex items-center gap-3 border-b border-white/[.07] px-4">
+          <Search size={18} className="text-amber-400" />
+          <input
+            autoFocus
+            placeholder="Ask Continuum or jump to a page..."
+            className="h-14 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/30"
+          />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="p-2">
+          {NAV.slice(0, 6).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => {
+                onNavigate(id);
+                onClose();
+              }}
+              className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-[12px] text-white/65 hover:bg-amber-500/[.08] hover:text-white"
+            >
+              <Icon size={15} className="text-amber-400" /> Open {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

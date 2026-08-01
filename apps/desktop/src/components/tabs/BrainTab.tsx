@@ -43,9 +43,7 @@ export function BrainTab() {
           <Select
             label="Model"
             value={config.vision.name}
-            onChange={(v) =>
-              setConfig({ ...config, vision: { ...config.vision, name: v } })
-            }
+            onChange={(v) => setConfig({ ...config, vision: { ...config.vision, name: v } })}
             options={[
               { value: "SmolVLM-256M", label: "SmolVLM-256M (default)" },
               { value: "Moondream2", label: "Moondream2" },
@@ -66,21 +64,14 @@ export function BrainTab() {
             format={(v) => `${Math.round(v)}s`}
           />
         </div>
-        <ResourceRow
-          loaded={system.vision_model_loaded}
-          label="Vision model"
-        />
+        <ResourceRow loaded={system.vision_model_loaded} label="Vision model" />
       </Card>
 
       <Card
         title="Layer 2 — Triage"
         subtitle="Local LLM gatekeeper"
         actions={
-          <Button
-            size="sm"
-            onClick={() => testLayer("triage")}
-            disabled={testing === "triage"}
-          >
+          <Button size="sm" onClick={() => testLayer("triage")} disabled={testing === "triage"}>
             <Filter size={12} />
             {testing === "triage" ? "Running…" : "Test triage"}
           </Button>
@@ -143,10 +134,7 @@ export function BrainTab() {
             format={(v) => `${Math.round(v)} tokens`}
           />
         </div>
-        <ResourceRow
-          loaded={system.orchestrator_ready}
-          label="Claude CLI reachable"
-        />
+        <ResourceRow loaded={system.orchestrator_ready} label="Claude CLI reachable" />
       </Card>
 
       <Card
@@ -209,14 +197,12 @@ function LayerDiagram() {
             <div
               className={clsx(
                 "flex h-16 items-center justify-center rounded-md bg-gradient-to-br font-medium text-white",
-                item.colour,
+                item.colour
               )}
             >
               {item.label}
             </div>
-            {idx < items.length - 1 && (
-              <div className="mx-auto mt-1 h-px w-8 bg-ink-dim" />
-            )}
+            {idx < items.length - 1 && <div className="mx-auto mt-1 h-px w-8 bg-ink-dim" />}
           </div>
         ))}
       </div>
@@ -224,13 +210,7 @@ function LayerDiagram() {
   );
 }
 
-function ResourceRow({
-  loaded,
-  label,
-}: {
-  loaded: boolean;
-  label: string;
-}) {
+function ResourceRow({ loaded, label }: { loaded: boolean; label: string }) {
   return (
     <div className="mt-4 flex items-center gap-4 border-t border-bg-border pt-3 text-xs text-ink-muted">
       <Toggle checked={loaded} onChange={() => {}} label={label} disabled />

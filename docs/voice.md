@@ -138,7 +138,7 @@ prints a summary at the end. Files land at:
 | Artifact | Path |
 |---|---|
 | Piper binary | `~/.kairo-dev/bin/piper/piper.exe` |
-| Piper EN voice | `~/.kairo-dev/models/tts/en_US-lessac-medium.onnx` (+ `.json`) |
+| Piper EN voice | `~/.kairo-dev/models/tts/en_US-norman-medium.onnx` (+ `.json`) |
 | Piper NL voice | `~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx` (+ `.json`) |
 | espeak-ng-data | `~/.kairo-dev/models/tts/espeak-ng-data/` |
 | Whisper small | `~/.kairo-dev/models/stt/whisper-small.bin` |

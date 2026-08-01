@@ -4,14 +4,7 @@ import { Info, Volume2 } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { kairo } from "@/lib/tauri";
-import {
-  Button,
-  Card,
-  Kbd,
-  Select,
-  Slider,
-  Toggle,
-} from "@/components/ui/primitives";
+import { Button, Card, Kbd, Select, Slider, Toggle } from "@/components/ui/primitives";
 
 export function VoiceTab() {
   const voice = useStore((s) => s.state.voice);
@@ -27,20 +20,13 @@ export function VoiceTab() {
     <div className="mx-auto max-w-5xl space-y-6">
       <RestartNotice />
 
-      <Card
-        title="Voice status"
-        subtitle={`mode: ${voice.mode}${voice.muted ? " (muted)" : ""}`}
-      >
+      <Card title="Voice status" subtitle={`mode: ${voice.mode}${voice.muted ? " (muted)" : ""}`}>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <Stat label="Volume" value={`${Math.round(voice.volume * 100)}%`} />
           <Stat label="TTS queue" value={String(voice.tts_queue_len)} />
           <Stat
             label="Ambient mute"
-            value={
-              voice.ambient_mute_active
-                ? `yes (${voice.detected_call_app ?? "call"})`
-                : "no"
-            }
+            value={voice.ambient_mute_active ? `yes (${voice.detected_call_app ?? "call"})` : "no"}
           />
         </div>
         {voice.partial_transcript && (
@@ -142,10 +128,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.ambient_mute_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag(
-                "ambient_mute_enabled",
-                v,
-              );
+              const cfg = await kairo.updateVoiceFlag("ambient_mute_enabled", v);
               setConfig(cfg);
             }}
             label="Mute during calls"
@@ -161,10 +144,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.language_detection_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag(
-                "language_detection_enabled",
-                v,
-              );
+              const cfg = await kairo.updateVoiceFlag("language_detection_enabled", v);
               setConfig(cfg);
             }}
             label="Auto-switch voice by detected language"
@@ -187,13 +167,12 @@ function RestartNotice() {
       <Info size={16} className="mt-0.5 shrink-0 text-state-warn" />
       <div>
         <div className="font-medium text-ink">
-          Voice-instellingen worden pas toegepast bij de volgende start van
-          Kairo.
+          Voice-instellingen worden pas toegepast bij de volgende start van Kairo.
         </div>
         <div className="mt-0.5 text-xs text-ink-muted">
-          Wijzigingen hier worden opgeslagen, maar de daemon leest de config
-          alleen bij opstart. Sluit en herstart Kairo om ze actief te maken.
-          (Live hot-reload komt in een latere update.)
+          Wijzigingen hier worden opgeslagen, maar de daemon leest de config alleen bij opstart.
+          Sluit en herstart Kairo om ze actief te maken. (Live hot-reload komt in een latere
+          update.)
         </div>
       </div>
     </div>
@@ -203,9 +182,7 @@ function RestartNotice() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wider text-ink-dim">
-        {label}
-      </div>
+      <div className="text-[11px] uppercase tracking-wider text-ink-dim">{label}</div>
       <div className="mt-1 text-sm text-ink">{value}</div>
     </div>
   );

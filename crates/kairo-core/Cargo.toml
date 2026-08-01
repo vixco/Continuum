@@ -25,6 +25,8 @@ runtime = [
     "dep:rubato",
     "dep:futures",
 ]
+cuda = ["runtime", "kairo-llm/cuda", "whisper-rs/cuda"]
+vulkan = ["runtime", "kairo-llm/vulkan"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -55,7 +57,7 @@ arrow-array = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 futures = { version = "0.3", optional = true }
 cpal = { version = "0.17", optional = true }
-whisper-rs = { version = "0.16", features = ["cuda"], optional = true }
+whisper-rs = { version = "0.16", optional = true }
 rubato = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]

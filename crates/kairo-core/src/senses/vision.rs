@@ -235,6 +235,17 @@ impl VisionWatcher {
                 break;
             }
 
+            // Do not start an expensive screen capture when nobody can
+            // receive the observation anymore.
+            if tx.is_closed() {
+                tracing::warn!(
+                    layer = "senses",
+                    component = "vision",
+                    "Observation channel closed, stopping vision watcher"
+                );
+                break;
+            }
+
             match self.capture_and_describe(cached.as_ref()).await {
                 Ok((observation, hash)) => {
                     cached = Some((hash, observation.clone()));

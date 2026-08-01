@@ -21,7 +21,7 @@ Last updated: 2026-04-15.
 ## Voice
 
 - **Whisper `small` mishears "Kairo".** It isn't in the vocab and tends to hallucinate "Cairo", "Hey Cairo", "kayo" variants, or split it across words. `medium` is the default for a reason. If you downgrade to `small`, expect missed wake-word detections.
-- **Dutch Piper voice is barely intelligible.** The `nl_NL-mls-medium` voice ships with noticeable artifacts. The default config disables it; English (`en_US-lessac-medium`) is the only shipped voice that sounds natural. Multilingual output is waiting on better small Piper voices.
+- **Dutch Piper voice is barely intelligible.** The `nl_NL-mls-medium` voice ships with noticeable artifacts. The default config disables it; English (`en_US-norman-medium`) is the current default. Multilingual output is waiting on better small Piper voices.
 - **ElevenLabs TTS is stubbed.** The config and backend selector are in place; the actual streaming client is a Phase 5 extension point that returns an error. Setting `tts.engine = "elevenlabs"` logs a warning and falls back to Piper.
 - **There is a known failing test**, `matches_whisper_k_to_c_homophone`, that asserts `"hey cairo"` should match the `"hey kairo"` wake phrase. It's being left failing on purpose: the wake matcher is intentionally strict to avoid false positives from Discord voice traffic. Ignore for now.
 - **Global hotkey is Windows-only.** `Ctrl+Shift+K` push-to-talk uses `RegisterHotKey` — there is no cross-platform abstraction yet.

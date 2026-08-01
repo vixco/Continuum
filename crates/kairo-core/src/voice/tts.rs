@@ -183,7 +183,7 @@ struct AudioSection {
 impl PiperEngine {
     /// Load a Piper voice from its ONNX model + JSON config paths.
     ///
-    /// * `model_path` — `.onnx` file, e.g. `en_US-lessac-medium.onnx`.
+    /// * `model_path` — `.onnx` file, e.g. `en_US-norman-medium.onnx`.
     /// * `config_path` — matching `.onnx.json` sidecar. Sample rate is read
     ///   from this file so the playback resampler can be configured before
     ///   the first synthesis.
@@ -263,11 +263,11 @@ impl TtsEngine for PiperEngine {
             drop(stdin);
         }
 
-        let output = wait_child_with_timeout(&mut child, PIPER_SYNTH_TIMEOUT).map_err(|e| {
-            let _ = child.kill();
-            let _ = child.wait();
-            e
-        })?;
+        let output =
+            wait_child_with_timeout(&mut child, PIPER_SYNTH_TIMEOUT).inspect_err(|_| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("Piper synthesis failed: {stderr}");

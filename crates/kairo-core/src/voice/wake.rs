@@ -94,12 +94,13 @@ impl TranscriptWakeDetector {
 ///
 /// Rule set (kept deliberately small):
 ///  - Every `k` → `c` (handles "kairo"→"cairo", "kyle"→"cyle")
+///  - A leading `hey ` → `ei ` (observed Whisper transcription)
 ///  - Adds the unchanged keyword first so primary spelling wins ties.
 ///
 /// Future: drop in a fuzzy matcher (Jaro-Winkler) with a confidence
 /// threshold if more variants are needed.
 pub fn expand_variants(normalized_keyword: &str) -> Vec<String> {
-    let mut out = Vec::with_capacity(2);
+    let mut out = Vec::with_capacity(4);
     if normalized_keyword.is_empty() {
         return out;
     }
@@ -107,6 +108,14 @@ pub fn expand_variants(normalized_keyword: &str) -> Vec<String> {
     let k_to_c = normalized_keyword.replace('k', "c");
     if k_to_c != normalized_keyword {
         out.push(k_to_c);
+    }
+    if let Some(rest) = normalized_keyword.strip_prefix("hey ") {
+        let ei_variant = format!("ei {rest}");
+        out.push(ei_variant.clone());
+        let ei_k_to_c = ei_variant.replace('k', "c");
+        if ei_k_to_c != ei_variant {
+            out.push(ei_k_to_c);
+        }
     }
     out
 }
@@ -154,7 +163,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "tracked in KNOWN_ISSUES.md — wake matcher is intentionally strict to avoid Discord voice false positives; needs a fuzzy 'hey' prefix matcher"]
     fn matches_whisper_k_to_c_homophone() {
         // Whisper-small transcribes "Hey Kairo" as "Ei, Cairo!" (PT) or
         // "Hey Cairo!" (EN). Both should still fire the wake detector.
@@ -183,13 +191,21 @@ mod tests {
     #[test]
     fn expand_variants_produces_k_and_c_versions() {
         let v = expand_variants("hey kairo");
-        assert_eq!(v, vec!["hey kairo".to_string(), "hey cairo".to_string()]);
+        assert_eq!(
+            v,
+            vec![
+                "hey kairo".to_string(),
+                "hey cairo".to_string(),
+                "ei kairo".to_string(),
+                "ei cairo".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn expand_variants_only_original_when_no_k() {
+    fn expand_variants_keeps_hey_to_ei_without_k() {
         let v = expand_variants("hey jarvis");
-        assert_eq!(v, vec!["hey jarvis".to_string()]);
+        assert_eq!(v, vec!["hey jarvis".to_string(), "ei jarvis".to_string()]);
     }
 
     #[test]

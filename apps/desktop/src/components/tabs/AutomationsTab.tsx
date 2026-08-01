@@ -95,18 +95,11 @@ export function AutomationsTab() {
             </thead>
             <tbody>
               {items.map((a) => (
-                <tr
-                  key={a.id}
-                  className="border-t border-bg-border"
-                >
+                <tr key={a.id} className="border-t border-bg-border">
                   <td className="py-2 pr-3 text-ink">{a.task}</td>
-                  <td className="py-2 pr-3 font-mono text-xs text-ink-muted">
-                    {a.schedule}
-                  </td>
+                  <td className="py-2 pr-3 font-mono text-xs text-ink-muted">{a.schedule}</td>
                   <td className="py-2 pr-3 text-xs text-ink-muted">
-                    {a.last_run
-                      ? new Date(a.last_run).toLocaleString()
-                      : "never"}
+                    {a.last_run ? new Date(a.last_run).toLocaleString() : "never"}
                   </td>
                   <td className="py-2 text-center">
                     <Toggle
@@ -172,9 +165,7 @@ export function AutomationsTab() {
               { value: "recurring", label: "Recurring (cron)" },
               { value: "one_shot", label: "One-shot" },
             ]}
-            onChange={(v) =>
-              setDraft({ ...draft, kind: v as typeof draft.kind })
-            }
+            onChange={(v) => setDraft({ ...draft, kind: v as typeof draft.kind })}
           />
           <label className="block">
             <span className="mb-1 block text-xs text-ink-muted">
@@ -183,11 +174,7 @@ export function AutomationsTab() {
             <TextInput
               value={draft.schedule}
               onChange={(v) => setDraft({ ...draft, schedule: v })}
-              placeholder={
-                draft.kind === "recurring"
-                  ? "0 8 * * *"
-                  : "2026-04-14T10:00:00Z"
-              }
+              placeholder={draft.kind === "recurring" ? "0 8 * * *" : "2026-04-14T10:00:00Z"}
             />
           </label>
           <Toggle

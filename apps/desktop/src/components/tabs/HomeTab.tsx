@@ -2,14 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import {
-  AlertCircle,
-  MessagesSquare,
-  Sparkles,
-  Users,
-  Wallet,
-  X,
-} from "lucide-react";
+import { AlertCircle, MessagesSquare, Sparkles, Users, Wallet, X } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { kairo } from "@/lib/tauri";
@@ -24,11 +17,12 @@ export function HomeTab() {
   const voiceMode: VoiceMode = state.voice.muted
     ? "muted"
     : state.orchestrator.active
-    ? "thinking"
-    : state.voice.mode;
+      ? "thinking"
+      : state.voice.mode;
 
   const [workers, setWorkers] = useState<WorkerSnapshot[]>([]);
   const [selected, setSelected] = useState<WorkerSnapshot | null>(null);
+  const selectedId = selected?.id;
 
   useEffect(() => {
     let cancelled = false;
@@ -37,8 +31,8 @@ export function HomeTab() {
         const list = await kairo.listWorkers(50);
         if (!cancelled) {
           setWorkers(list);
-          if (selected) {
-            const match = list.find((w) => w.id === selected.id) ?? null;
+          if (selectedId) {
+            const match = list.find((w) => w.id === selectedId) ?? null;
             setSelected(match);
           }
         }
@@ -52,13 +46,11 @@ export function HomeTab() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [selected?.id]);
+  }, [selectedId]);
 
   const active = workers.filter((w) => ACTIVE_STATUSES.has(w.status));
   const completed = workers.filter((w) => !ACTIVE_STATUSES.has(w.status)).slice(0, 5);
-  const totalCost = workers
-    .map((w) => w.cost_usd ?? 0)
-    .reduce((a, b) => a + b, 0);
+  const totalCost = workers.map((w) => w.cost_usd ?? 0).reduce((a, b) => a + b, 0);
 
   return (
     <div className="mx-auto grid max-w-6xl grid-cols-12 gap-6">
@@ -69,8 +61,7 @@ export function HomeTab() {
             {statusHeadline(voiceMode, state.orchestrator.last_wake_reason)}
           </h1>
           <p className="mt-1 text-sm text-ink-muted">
-            {state.perception.last_description ||
-              "Waiting for the first perception frame…"}
+            {state.perception.last_description || "Waiting for the first perception frame…"}
           </p>
           <p className="mt-1 text-xs text-ink-dim">
             App: {state.perception.last_foreground_app || "–"} · salience{" "}
@@ -94,14 +85,11 @@ export function HomeTab() {
       />
 
       <section className="col-span-12 md:col-span-7">
-        <Card
-          title="Workers"
-          subtitle={`${active.length} running · ${completed.length} recent`}
-        >
+        <Card title="Workers" subtitle={`${active.length} running · ${completed.length} recent`}>
           {active.length === 0 && completed.length === 0 ? (
             <div className="py-6 text-center text-sm text-ink-dim">
-              No workers yet. The orchestrator will spawn them when a task
-              needs more than a few tool calls.
+              No workers yet. The orchestrator will spawn them when a task needs more than a few
+              tool calls.
             </div>
           ) : (
             <ul className="space-y-3">
@@ -134,8 +122,8 @@ export function HomeTab() {
             state.voice.partial_transcript
               ? "hearing…"
               : state.voice.ambient_mute_active
-              ? `muted during ${state.voice.detected_call_app ?? "call"}`
-              : "listening in the background"
+                ? `muted during ${state.voice.detected_call_app ?? "call"}`
+                : "listening in the background"
           }
         >
           <Waveform listening={voiceMode === "listening"} />
@@ -153,9 +141,7 @@ export function HomeTab() {
         <RecentTimeline actions={state.recent_actions} />
       </section>
 
-      {selected && (
-        <WorkerDetail worker={selected} onClose={() => setSelected(null)} />
-      )}
+      {selected && <WorkerDetail worker={selected} onClose={() => setSelected(null)} />}
     </div>
   );
 }
@@ -184,7 +170,11 @@ function WorkerRow({
         </span>
         <span className="flex items-center gap-2 text-xs text-ink-muted">
           <span>{worker.model.replace("claude-", "")}</span>
-          <span>{worker.elapsed_ms < 1000 ? `${worker.elapsed_ms}ms` : `${Math.floor(worker.elapsed_ms / 1000)}s`}</span>
+          <span>
+            {worker.elapsed_ms < 1000
+              ? `${worker.elapsed_ms}ms`
+              : `${Math.floor(worker.elapsed_ms / 1000)}s`}
+          </span>
           <Button
             size="sm"
             variant="ghost"
@@ -198,28 +188,17 @@ function WorkerRow({
         </span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-elevated">
-        <div
-          className="h-full bg-accent-purple"
-          style={{ width: `${progressPct}%` }}
-        />
+        <div className="h-full bg-accent-purple" style={{ width: `${progressPct}%` }} />
       </div>
       <div className="mt-1 flex items-center justify-between text-[11px] text-ink-dim">
         <span className="truncate">{worker.last_line || worker.status}</span>
-        {worker.cost_usd != null && (
-          <span>${worker.cost_usd.toFixed(4)}</span>
-        )}
+        {worker.cost_usd != null && <span>${worker.cost_usd.toFixed(4)}</span>}
       </div>
     </li>
   );
 }
 
-function WorkerDetail({
-  worker,
-  onClose,
-}: {
-  worker: WorkerSnapshot;
-  onClose: () => void;
-}) {
+function WorkerDetail({ worker, onClose }: { worker: WorkerSnapshot; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6">
       <div className="max-h-[80vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-bg-border bg-bg-surface p-6 shadow-xl">
@@ -234,34 +213,29 @@ function WorkerDetail({
               <span>{worker.priority}</span>
             </div>
             <h2 className="mt-2 text-base font-medium text-ink">{worker.task}</h2>
-            <p className="mt-1 text-xs text-ink-dim font-mono">{worker.cwd}</p>
+            <p className="mt-1 font-mono text-xs text-ink-dim">{worker.cwd}</p>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-ink-dim hover:text-ink"
-          >
+          <button onClick={onClose} className="rounded p-1 text-ink-dim hover:text-ink">
             <X size={16} />
           </button>
         </div>
 
         <dl className="mb-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
           <Stat label="Elapsed" value={`${Math.floor(worker.elapsed_ms / 100) / 10}s`} />
-          <Stat label="Cost" value={worker.cost_usd != null ? `$${worker.cost_usd.toFixed(4)}` : "—"} />
+          <Stat
+            label="Cost"
+            value={worker.cost_usd != null ? `$${worker.cost_usd.toFixed(4)}` : "—"}
+          />
           <Stat label="Tool calls" value={worker.tool_calls.toString()} />
           <Stat label="Session" value={worker.session_id?.slice(0, 8) ?? "—"} />
         </dl>
 
         {worker.skills.length > 0 && (
           <div className="mb-4">
-            <div className="text-xs uppercase tracking-wider text-ink-dim">
-              Active skills
-            </div>
+            <div className="text-xs uppercase tracking-wider text-ink-dim">Active skills</div>
             <div className="mt-1 flex flex-wrap gap-1">
               {worker.skills.map((s) => (
-                <span
-                  key={s}
-                  className="rounded bg-bg-elevated px-2 py-0.5 text-xs text-ink"
-                >
+                <span key={s} className="rounded bg-bg-elevated px-2 py-0.5 text-xs text-ink">
                   {s}
                 </span>
               ))}
@@ -269,9 +243,7 @@ function WorkerDetail({
           </div>
         )}
 
-        <div className="mb-2 text-xs uppercase tracking-wider text-ink-dim">
-          Live output
-        </div>
+        <div className="mb-2 text-xs uppercase tracking-wider text-ink-dim">Live output</div>
         <pre className="max-h-96 overflow-y-auto rounded-md border border-bg-border bg-bg-elevated p-3 font-mono text-xs text-ink">
           {worker.result || worker.last_line || "(no output yet)"}
         </pre>
@@ -286,11 +258,7 @@ function WorkerDetail({
         <div className="mt-4 flex items-center justify-between text-xs text-ink-dim">
           <span>Model chose because: {worker.model_reason}</span>
           {ACTIVE_STATUSES.has(worker.status) ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => kairo.cancelWorker(worker.id)}
-            >
+            <Button size="sm" variant="ghost" onClick={() => kairo.cancelWorker(worker.id)}>
               Cancel worker
             </Button>
           ) : (
@@ -314,9 +282,7 @@ function WorkerDetail({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-ink-dim">
-        {label}
-      </div>
+      <div className="text-[10px] uppercase tracking-wider text-ink-dim">{label}</div>
       <div className="font-mono text-ink">{value}</div>
     </div>
   );
@@ -327,12 +293,12 @@ function StatusDot({ status }: { status: string }) {
     status === "running" || status === "starting"
       ? "bg-accent-purple"
       : status === "queued" || status === "pending"
-      ? "bg-accent-blue"
-      : status === "completed"
-      ? "bg-state-healthy"
-      : status === "failed" || status === "timed_out"
-      ? "bg-state-error"
-      : "bg-ink-dim";
+        ? "bg-accent-blue"
+        : status === "completed"
+          ? "bg-state-healthy"
+          : status === "failed" || status === "timed_out"
+            ? "bg-state-error"
+            : "bg-ink-dim";
   return <span className={clsx("h-2 w-2 shrink-0 rounded-full", color)} />;
 }
 
@@ -373,10 +339,7 @@ function Stats({
   return (
     <section className="col-span-12 grid grid-cols-2 gap-4 md:grid-cols-4">
       {items.map(({ label, value, icon: Icon }) => (
-        <div
-          key={label}
-          className="rounded-lg border border-bg-border bg-bg-surface p-4"
-        >
+        <div key={label} className="rounded-lg border border-bg-border bg-bg-surface p-4">
           <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-dim">
             <Icon size={12} />
             {label}
@@ -419,7 +382,7 @@ function Waveform({ listening }: { listening: boolean }) {
             key={i}
             className={clsx(
               "w-1 rounded-sm transition-[height] duration-300",
-              listening ? "bg-accent-blue" : "bg-bg-elevated",
+              listening ? "bg-accent-blue" : "bg-bg-elevated"
             )}
             style={{ height: `${h}%` }}
           />
@@ -434,8 +397,7 @@ function RecentTimeline({ actions }: { actions: RecentAction[] }) {
     return (
       <Card title="Recent actions">
         <div className="py-6 text-center text-sm text-ink-dim">
-          Nothing yet — perception frames will appear here as the triage layer
-          evaluates them.
+          Nothing yet — perception frames will appear here as the triage layer evaluates them.
         </div>
       </Card>
     );
@@ -444,13 +406,10 @@ function RecentTimeline({ actions }: { actions: RecentAction[] }) {
     <Card title="Recent actions" subtitle={`last ${actions.length} events`}>
       <ul className="max-h-72 space-y-1.5 overflow-y-auto">
         {actions.map((a, idx) => (
-          <li
-            key={`${a.ts}-${idx}`}
-            className="flex items-start justify-between gap-4 text-sm"
-          >
-            <div className="flex items-start gap-2 min-w-0">
+          <li key={`${a.ts}-${idx}`} className="flex items-start justify-between gap-4 text-sm">
+            <div className="flex min-w-0 items-start gap-2">
               <KindDot kind={a.kind} />
-              <span className="text-ink truncate">{a.summary}</span>
+              <span className="truncate text-ink">{a.summary}</span>
             </div>
             <span className="shrink-0 font-mono text-[11px] text-ink-dim">
               {new Date(a.ts).toLocaleTimeString(undefined, { hour12: false })}
@@ -467,15 +426,13 @@ function KindDot({ kind }: { kind: RecentAction["kind"] }) {
     kind === "wake"
       ? "bg-accent-purple"
       : kind === "triage"
-      ? "bg-accent-blue"
-      : kind === "repair"
-      ? "bg-state-warn"
-      : kind === "voice"
-      ? "bg-state-healthy"
-      : "bg-ink-dim";
-  return (
-    <span className={clsx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", color)} />
-  );
+        ? "bg-accent-blue"
+        : kind === "repair"
+          ? "bg-state-warn"
+          : kind === "voice"
+            ? "bg-state-healthy"
+            : "bg-ink-dim";
+  return <span className={clsx("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", color)} />;
 }
 
 function humanDuration(secs: number): string {
