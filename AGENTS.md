@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## Continuum transition directive
+
+This repository is being migrated from Kairo into Continuum. Read
+`CONTINUUM_ARCHITECTURE.md` before making changes. For product scope, domain
+model, permissions, agent adapters, and UI direction, that document overrides
+the older Kairo-specific pitch and roadmap in `ARCHITECTURE.md` and
+`ROADMAP.md`. Existing `kairo-*` names remain temporarily as compatibility
+boundaries; do not perform broad mechanical renames without a migration plan.
+
+The approved Continuum desktop reference uses fixture data during Phase 0, but
+its navigation and interaction states are real. Do not describe fixture data
+as live runtime proof.
+
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Who you are in this repo
@@ -150,7 +163,10 @@ cmd.stderr(Stdio::piped());
 Then write a JSON user message to stdin:
 
 ```json
-{"type":"user","message":{"role":"user","content":"<the wake context>"}}
+{
+  "type": "user",
+  "message": { "role": "user", "content": "<the wake context>" }
+}
 ```
 
 And read newline-delimited JSON events from stdout, parsing each one into a strongly-typed event enum in `kairo-core/src/orchestrator/events.rs`. The key event types you will see are (verified against CLI v2.1.100):
@@ -187,7 +203,7 @@ async fn test_memory_query_returns_top_results() {
         "query": "SimCharts debugging",
         "limit": 3
     })).await.unwrap();
-    
+
     assert!(result.content.len() <= 3);
     assert!(result.is_success());
 }

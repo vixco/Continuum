@@ -1,2 +1,6 @@
 packages:
   - "apps/*"
+
+# Run package scripts with pnpm's cross-platform shell instead of inheriting a
+# machine-specific npm script-shell configuration.
+shellEmulator: true

@@ -50,8 +50,13 @@ const EXPECTED_TOOLS: &[&str] = &[
 ];
 
 fn mcp_bin() -> std::path::PathBuf {
-    // tests are run by cargo; the binary lives in target/debug or target/release
-    // one directory up from CARGO_MANIFEST_DIR.
+    // Cargo exposes the exact binary path to integration tests. This also
+    // honors custom CARGO_TARGET_DIR values used by CI and remote test hosts.
+    if let Some(path) = option_env!("CARGO_BIN_EXE_kairo-mcp") {
+        return std::path::PathBuf::from(path);
+    }
+
+    // Fallback for direct execution outside Cargo.
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest
         .parent()

@@ -225,23 +225,24 @@ Download-Model `
 # holds sample_rate, speaker table, inference params -- Kairo reads sample_rate
 # from it at engine init, so both files are required together.
 #
-# MIT-licensed; source: rhasspy/piper-voices on HuggingFace.
+# Voice repository: MIT. Dataset-specific terms still apply; English Norman
+# was trained from scratch from public-domain LibriVox recordings.
 
-Write-Host "`n--- Piper TTS (English -- en_US-lessac-medium) ---" -ForegroundColor Cyan
+Write-Host "`n--- Piper TTS (English -- en_US-norman-medium) ---" -ForegroundColor Cyan
 
 $TtsDir = Join-Path $ModelsBase "tts"
-$PiperBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+$PiperBase = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 
 Download-Model `
-    -Name "Piper EN voice (lessac-medium)" `
-    -Url "$PiperBase/en/en_US/lessac/medium/en_US-lessac-medium.onnx" `
-    -OutPath (Join-Path $TtsDir "en_US-lessac-medium.onnx") `
+    -Name "Piper EN voice (norman-medium)" `
+    -Url "$PiperBase/en/en_US/norman/medium/en_US-norman-medium.onnx" `
+    -OutPath (Join-Path $TtsDir "en_US-norman-medium.onnx") `
     -ExpectedSizeMB "63"
 
 Download-Sidecar `
     -Name "Piper EN config" `
-    -Url "$PiperBase/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" `
-    -OutPath (Join-Path $TtsDir "en_US-lessac-medium.onnx.json")
+    -Url "$PiperBase/en/en_US/norman/medium/en_US-norman-medium.onnx.json" `
+    -OutPath (Join-Path $TtsDir "en_US-norman-medium.onnx.json")
 
 Write-Host "`n--- Piper TTS (Dutch -- nl_NL-mls-medium) ---" -ForegroundColor Cyan
 
@@ -359,7 +360,7 @@ $critical = @(
     @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf"), $MinValidSize),
     @("Whisper medium",         (Join-Path $ModelsBase "stt\whisper-medium.bin"),  $MinValidSize),
     @("Whisper small (fallback)", (Join-Path $ModelsBase "stt\whisper-small.bin"), $MinValidSize),
-    @("Piper EN voice",         (Join-Path $TtsDir "en_US-lessac-medium.onnx"),    $MinValidSize),
+    @("Piper EN voice",         (Join-Path $TtsDir "en_US-norman-medium.onnx"),    $MinValidSize),
     @("Piper NL voice",         (Join-Path $TtsDir "nl_NL-mls-medium.onnx"),       $MinValidSize),
     @("Piper binary",           $PiperExe,                                         100000),
     @("espeak-ng-data",         (Join-Path $EspeakDir "phontab"),                  1)

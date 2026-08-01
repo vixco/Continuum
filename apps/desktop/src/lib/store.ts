@@ -14,13 +14,7 @@ import {
   subscribeRepair,
   subscribeState,
 } from "./tauri";
-import type {
-  ComponentHealth,
-  KairoConfig,
-  KairoState,
-  LogEntry,
-  RepairEvent,
-} from "./types";
+import type { ComponentHealth, KairoConfig, KairoState, LogEntry, RepairEvent } from "./types";
 
 interface Store {
   state: KairoState;
@@ -58,8 +52,7 @@ export const useStore = create<Store>((set) => ({
       return { logs: next };
     }),
   setLogs: (entries) => set({ logs: entries }),
-  pushRepair: (entry) =>
-    set((s) => ({ repairEvents: [...s.repairEvents, entry] })),
+  pushRepair: (entry) => set((s) => ({ repairEvents: [...s.repairEvents, entry] })),
   clearRepair: () => set({ repairEvents: [] }),
   setBootstrapped: (b) => set({ bootstrapped: b }),
 }));

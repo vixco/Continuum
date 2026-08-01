@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Compiler version validated against the committed Cargo.lock.
+  RUST_VERSION: "1.94.0"
   # Always land cargo artifacts under `target/` relative to the workspace.
   # Overrides the committed .cargo/config.toml hint when needed.
   CARGO_TARGET_DIR: target
@@ -23,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt
 
@@ -37,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
 
@@ -67,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
 
@@ -93,6 +95,18 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify native build prerequisites
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          cmake --version
+          ninja --version
+          protoc --version
+          if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
+            throw "libclang.dll was not found under LIBCLANG_PATH=$env:LIBCLANG_PATH"
+          }
+
       - name: Cache cargo artifacts
         uses: actions/cache@v4
         with:
@@ -100,9 +114,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-full-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-full-
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-
             ${{ runner.os }}-cargo-registry-
 
       - name: Clippy (full workspace)
@@ -110,9 +124,6 @@ jobs:
         # and lancedb build scripts. The toolchain install steps above
         # are required or this fails during bindgen.
         run: cargo clippy --workspace --all-targets -- -D warnings
-        continue-on-error: true
-        # Temporarily advisory while the toolchain install path stabilises.
-        # Flip to blocking once it's been green for a few runs.
 
   full-test:
     name: Full test suite
@@ -122,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Configure LLVM for bindgen
         shell: pwsh
@@ -143,6 +154,18 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify native build prerequisites
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          cmake --version
+          ninja --version
+          protoc --version
+          if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
+            throw "libclang.dll was not found under LIBCLANG_PATH=$env:LIBCLANG_PATH"
+          }
+
       - name: Cache cargo artifacts
         uses: actions/cache@v4
         with:
@@ -150,22 +173,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-full-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-full-
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-
             ${{ runner.os }}-cargo-registry-
 
       # Light tests: the lib test path for kairo-core without runtime. Fast,
       # covers the UTF-8 / sentence-split / config / permissions code that
       # doesn't need a native toolchain.
       - name: Run tests (light path)
-        run: cargo test -p kairo-core --no-default-features --lib -- --skip matches_whisper_k_to_c_homophone
+        run: cargo test -p kairo-core --no-default-features --lib
 
       - name: Run tests (full workspace)
-        # Skip the known-failing matches_whisper_k_to_c_homophone test (see KNOWN_ISSUES.md).
-        run: cargo test --workspace -- --skip matches_whisper_k_to_c_homophone
-        continue-on-error: true
-        # Advisory until the full toolchain install path is proven green.
+        run: cargo test --workspace
 
   build-desktop:
     name: Build desktop
@@ -175,12 +195,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.11.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -196,15 +216,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/desktop/src-tauri/target
-          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-desktop-
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
 
       - name: Install frontend dependencies (pnpm workspace root)
-        # Not --frozen-lockfile yet: the ESLint+Prettier devDependencies
-        # landed after the lockfile was last pinned; the next lockfile
-        # regeneration closes this gap and this flag flips back.
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Dashboard type-check
         run: pnpm typecheck
@@ -213,15 +230,10 @@ jobs:
       - name: Dashboard lint
         run: pnpm lint
         working-directory: apps/desktop
-        # Not fatal yet — lint rules were tightened in the security pass,
-        # existing code will be cleaned up in follow-up PRs.
-        continue-on-error: true
 
       - name: Dashboard format check
         run: pnpm format
         working-directory: apps/desktop
-        # Same rationale as lint — prettier-first pass lands separately.
-        continue-on-error: true
 
       - name: Build frontend
         run: pnpm build
@@ -243,7 +255,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.11.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -253,7 +265,7 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies (pnpm workspace root)
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build docs site
         run: pnpm build

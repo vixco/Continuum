@@ -65,10 +65,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>, fallback?:
   return api.invoke<T>(cmd, args);
 }
 
-export async function listen<T>(
-  event: string,
-  handler: (payload: T) => void,
-): Promise<() => void> {
+export async function listen<T>(event: string, handler: (payload: T) => void): Promise<() => void> {
   const api = await loadApi();
   if (!api) return () => {};
   return api.listen<T>(event, (e) => handler(e.payload));
@@ -98,27 +95,22 @@ export const kairo = {
     invoke<unknown[]>("search_episodic", { query, limit }, []),
   deleteEpisodic: (id: string) => invoke<void>("delete_episodic", { id }),
   listSemantic: () => invoke<SemanticFact[]>("list_semantic", undefined, []),
-  setSemantic: (key: string, value: string) =>
-    invoke<void>("set_semantic", { key, value }),
+  setSemantic: (key: string, value: string) => invoke<void>("set_semantic", { key, value }),
   deleteSemantic: (key: string) => invoke<void>("delete_semantic", { key }),
   wipeMemory: (confirm: string) => invoke<void>("wipe_memory", { confirm }),
   listAutomations: () => invoke<Automation[]>("list_automations", undefined, []),
-  createAutomation: (input: AutomationInput) =>
-    invoke<Automation>("create_automation", { input }),
+  createAutomation: (input: AutomationInput) => invoke<Automation>("create_automation", { input }),
   updateAutomation: (id: string, input: AutomationInput) =>
     invoke<Automation>("update_automation", { id, input }),
-  deleteAutomation: (id: string) =>
-    invoke<void>("delete_automation", { id }),
+  deleteAutomation: (id: string) => invoke<void>("delete_automation", { id }),
   toggleAutomation: (id: string, enabled: boolean) =>
     invoke<void>("toggle_automation", { id, enabled }),
   getHealth: () => invoke<ComponentHealth[]>("get_health", undefined, []),
-  triggerRepair: (reason?: string) =>
-    invoke<void>("trigger_repair", { reason }),
+  triggerRepair: (reason?: string) => invoke<void>("trigger_repair", { reason }),
   restartComponent: (name: string) =>
     invoke<ComponentHealth | null>("restart_component", { name }, null),
   runBackupNow: () => invoke<string>("run_backup_now"),
-  rollbackConfig: (date: string) =>
-    invoke<void>("rollback_config", { date }),
+  rollbackConfig: (date: string) => invoke<void>("rollback_config", { date }),
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   talkNow: () => invoke<void>("talk_now"),
@@ -132,17 +124,13 @@ export const kairo = {
     invoke<KairoConfig>("update_tts_primary_voice", { voice }, DEFAULT_CONFIG),
   quit: () => invoke<void>("quit_app"),
   listSkills: () => invoke<Skill[]>("list_skills", undefined, []),
-  saveSkill: (input: SaveSkillInput) =>
-    invoke<Skill>("save_skill", { input }),
+  saveSkill: (input: SaveSkillInput) => invoke<Skill>("save_skill", { input }),
   deleteSkill: (name: string) => invoke<void>("delete_skill", { name }),
   toggleSkill: (name: string, enabled: boolean) =>
     invoke<KairoConfig>("toggle_skill", { name, enabled }),
-  installSkillFromUrl: (url: string) =>
-    invoke<Skill>("install_skill_from_url", { url }),
-  listWorkers: (limit?: number) =>
-    invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
-  getWorker: (id: string) =>
-    invoke<WorkerSnapshot | null>("get_worker", { id }, null),
+  installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
+  listWorkers: (limit?: number) => invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
+  getWorker: (id: string) => invoke<WorkerSnapshot | null>("get_worker", { id }, null),
   cancelWorker: (id: string) => invoke<void>("cancel_worker", { id }),
   dismissWorker: (id: string) => invoke<void>("dismiss_worker", { id }),
   getRuntimeStatus: () =>

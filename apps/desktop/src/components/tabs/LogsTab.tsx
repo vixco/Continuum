@@ -5,13 +5,7 @@ import { clsx } from "clsx";
 import { Download } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import {
-  Button,
-  Card,
-  SearchInput,
-  Select,
-  Toggle,
-} from "@/components/ui/primitives";
+import { Button, Card, SearchInput, Select, Toggle } from "@/components/ui/primitives";
 import type { LogEntry } from "@/lib/types";
 
 const LEVELS = [
@@ -87,11 +81,7 @@ export function LogsTab() {
         subtitle={`${filtered.length} / ${logs.length} entries (buffer cap ${logLimit.toLocaleString()})`}
         actions={
           <>
-            <Toggle
-              checked={autoScroll}
-              onChange={setAutoScroll}
-              label="Auto-scroll"
-            />
+            <Toggle checked={autoScroll} onChange={setAutoScroll} label="Auto-scroll" />
             <Button size="sm" variant="ghost" onClick={exportLogs}>
               <Download size={12} /> Export
             </Button>
@@ -109,7 +99,7 @@ export function LogsTab() {
         </div>
         <div
           className={clsx(
-            "h-[520px] overflow-y-auto rounded-md border border-bg-border bg-black/40 p-3 font-mono text-[12px] leading-[1.5]",
+            "h-[520px] overflow-y-auto rounded-md border border-bg-border bg-black/40 p-3 font-mono text-[12px] leading-[1.5]"
           )}
         >
           {filtered.length === 0 ? (
@@ -141,9 +131,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
       </span>
       <span className="text-ink">{entry.message}</span>
       {entry.fields.length > 0 && (
-        <span className="text-ink-dim">
-          {entry.fields.map(([k, v]) => `${k}=${v}`).join(" ")}
-        </span>
+        <span className="text-ink-dim">{entry.fields.map(([k, v]) => `${k}=${v}`).join(" ")}</span>
       )}
     </div>
   );

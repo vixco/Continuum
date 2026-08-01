@@ -19,7 +19,11 @@ const MCP_NAMESPACES: Array<{
   {
     namespace: "memory",
     tools: [
-      { name: "memory_query_episodic", description: "Vector search past events", permission: "auto" },
+      {
+        name: "memory_query_episodic",
+        description: "Vector search past events",
+        permission: "auto",
+      },
       { name: "memory_list_facts", description: "List semantic facts", permission: "auto" },
       { name: "memory_get_fact", description: "Fetch a single fact", permission: "auto" },
       { name: "memory_set_fact", description: "Write/update a fact", permission: "auto" },
@@ -44,15 +48,31 @@ const MCP_NAMESPACES: Array<{
   {
     namespace: "web",
     tools: [
-      { name: "web_fetch", description: "HTTP GET, 50 KB cap, public IPs only", permission: "session" },
+      {
+        name: "web_fetch",
+        description: "HTTP GET, 50 KB cap, public IPs only",
+        permission: "session",
+      },
     ],
   },
   {
     namespace: "workers",
     tools: [
-      { name: "workers_spawn_worker", description: "Queue a new Claude Code worker", permission: "session" },
-      { name: "workers_worker_status", description: "Poll a worker's snapshot", permission: "auto" },
-      { name: "workers_worker_wait", description: "Block until terminal state", permission: "auto" },
+      {
+        name: "workers_spawn_worker",
+        description: "Queue a new Claude Code worker",
+        permission: "session",
+      },
+      {
+        name: "workers_worker_status",
+        description: "Poll a worker's snapshot",
+        permission: "auto",
+      },
+      {
+        name: "workers_worker_wait",
+        description: "Block until terminal state",
+        permission: "auto",
+      },
       { name: "workers_worker_cancel", description: "Stop a worker", permission: "session" },
       { name: "workers_worker_list", description: "List recent workers", permission: "auto" },
     ],
@@ -92,8 +112,7 @@ export function ToolsTab() {
   }
 
   async function handleDelete(skill: Skill) {
-    if (!confirm(`Delete skill '${skill.name}'? This removes the directory on disk.`))
-      return;
+    if (!confirm(`Delete skill '${skill.name}'? This removes the directory on disk.`)) return;
     try {
       await kairo.deleteSkill(skill.name);
       await refresh();
@@ -187,8 +206,8 @@ export function ToolsTab() {
           <div className="py-6 text-center text-sm text-ink-dim">Loading skills…</div>
         ) : skills.length === 0 ? (
           <div className="py-6 text-center text-sm text-ink-dim">
-            No skills installed yet. Drop a `&lt;name&gt;/SKILL.md` under `skills/` or click
-            New skill.
+            No skills installed yet. Drop a `&lt;name&gt;/SKILL.md` under `skills/` or click New
+            skill.
           </div>
         ) : (
           <ul className="divide-y divide-bg-border">
@@ -197,7 +216,7 @@ export function ToolsTab() {
                 key={s.name}
                 className="flex flex-col gap-2 py-3 text-sm sm:flex-row sm:items-center"
               >
-                <div className="flex-1 min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 text-ink">
                     <span>{s.name}</span>
                     {s.source && <SourceBadge source={s.source} />}
@@ -228,11 +247,7 @@ export function ToolsTab() {
       </Card>
 
       {editing && (
-        <SkillEditor
-          initial={editing}
-          onCancel={() => setEditing(null)}
-          onSave={handleSave}
-        />
+        <SkillEditor initial={editing} onCancel={() => setEditing(null)} onSave={handleSave} />
       )}
     </div>
   );
@@ -326,13 +341,9 @@ function SourceBadge({ source }: { source: string }) {
     source === "bundled"
       ? "bg-accent-blue/20 text-accent-blue"
       : source === "third-party"
-      ? "bg-state-warn/20 text-state-warn"
-      : "bg-bg-elevated text-ink-muted";
-  return (
-    <span className={clsx("rounded px-1.5 py-0.5 text-[10px]", color)}>
-      {source}
-    </span>
-  );
+        ? "bg-state-warn/20 text-state-warn"
+        : "bg-bg-elevated text-ink-muted";
+  return <span className={clsx("rounded px-1.5 py-0.5 text-[10px]", color)}>{source}</span>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -362,10 +373,7 @@ function Namespace({
         <span className="font-mono text-sm text-ink">{ns.namespace}</span>
         <span className="flex items-center gap-2 text-xs text-ink-muted">
           {ns.tools.length} tools
-          <ChevronDown
-            size={14}
-            className={clsx("transition-transform", open && "rotate-180")}
-          />
+          <ChevronDown size={14} className={clsx("transition-transform", open && "rotate-180")} />
         </span>
       </button>
       {open && (
@@ -376,12 +384,8 @@ function Namespace({
               className="flex items-center justify-between gap-4 px-3 py-2 text-sm"
             >
               <div className="min-w-0">
-                <div className="truncate font-mono text-xs text-ink">
-                  {tool.name}
-                </div>
-                <div className="truncate text-xs text-ink-muted">
-                  {tool.description}
-                </div>
+                <div className="truncate font-mono text-xs text-ink">{tool.name}</div>
+                <div className="truncate text-xs text-ink-muted">{tool.description}</div>
               </div>
               <Select
                 value={tool.permission}

@@ -5,22 +5,11 @@
 //   crates/kairo-core/src/automations.rs
 //   crates/kairo-core/src/health/repair.rs
 
-export type VoiceMode =
-  | "idle"
-  | "listening"
-  | "thinking"
-  | "speaking"
-  | "muted"
-  | "error";
+export type VoiceMode = "idle" | "listening" | "thinking" | "speaking" | "muted" | "error";
 
 export type ComponentStatus = "healthy" | "degrading" | "error" | "unknown";
 
-export type RecentActionKind =
-  | "triage"
-  | "wake"
-  | "worker"
-  | "voice"
-  | "repair";
+export type RecentActionKind = "triage" | "wake" | "worker" | "voice" | "repair";
 
 export interface PerceptionState {
   last_frame_id: string | null;
@@ -305,10 +294,7 @@ export interface KairoConfig {
     enabled: boolean;
     engine: string;
     espeak_data_dir: string;
-    voices: Record<
-      string,
-      { model_path: string; config_path: string; speaker_id: number | null }
-    >;
+    voices: Record<string, { model_path: string; config_path: string; speaker_id: number | null }>;
     primary: string;
     length_scale: number | null;
     elevenlabs: {

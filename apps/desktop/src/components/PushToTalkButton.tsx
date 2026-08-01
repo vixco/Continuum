@@ -35,7 +35,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     () => () => {
       if (pressTimer.current) clearTimeout(pressTimer.current);
     },
-    [],
+    []
   );
 
   const isListening = mode === "listening";
@@ -67,9 +67,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         type="button"
         onClick={onClick}
         disabled={disabled}
-        aria-label={
-          isListening ? "Aan het luisteren" : "Klik om te praten met Kairo"
-        }
+        aria-label={isListening ? "Aan het luisteren" : "Klik om te praten met Kairo"}
         title={
           isListening
             ? "Aan het luisteren — praat nu"
@@ -83,11 +81,11 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60",
           "disabled:cursor-not-allowed",
           isListening
-            ? "border-accent-blue bg-accent-blue/15 text-accent-blue shadow-[0_0_24px_rgba(59,130,246,0.35)] animate-pulse-slow"
+            ? "animate-pulse-slow border-accent-blue bg-accent-blue/15 text-accent-blue shadow-[0_0_24px_rgba(59,130,246,0.35)]"
             : isBusy
               ? "border-bg-border bg-bg-elevated text-ink-dim opacity-60"
               : "border-bg-border bg-bg-elevated text-ink-muted hover:border-accent-blue/40 hover:bg-accent-blue/10 hover:text-accent-blue hover:shadow-[0_0_18px_rgba(59,130,246,0.25)]",
-          isPressed && "scale-95",
+          isPressed && "scale-95"
         )}
       >
         {isListening ? <ListeningBars /> : <Mic size={28} strokeWidth={1.6} />}
@@ -95,11 +93,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       <span
         className={clsx(
           "text-xs",
-          isListening
-            ? "text-accent-blue"
-            : isBusy
-              ? "text-ink-dim"
-              : "text-ink-muted",
+          isListening ? "text-accent-blue" : isBusy ? "text-ink-dim" : "text-ink-muted"
         )}
       >
         {hint}

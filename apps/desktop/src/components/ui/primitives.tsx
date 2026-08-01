@@ -32,7 +32,7 @@ export function Card({
       className={clsx(
         "rounded-xl border border-bg-border bg-bg-surface shadow-sm",
         dense ? "p-4" : "p-5",
-        className,
+        className
       )}
     >
       {(title || actions) && (
@@ -43,13 +43,9 @@ export function Card({
                 {title}
               </div>
             )}
-            {subtitle && (
-              <div className="mt-1 text-xs text-ink-dim">{subtitle}</div>
-            )}
+            {subtitle && <div className="mt-1 text-xs text-ink-dim">{subtitle}</div>}
           </div>
-          {actions && (
-            <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
-          )}
+          {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
         </div>
       )}
       {children}
@@ -73,18 +69,12 @@ const STATUS_LABEL: Record<ComponentStatus, string> = {
   unknown: "Unknown",
 };
 
-export function StatusBadge({
-  status,
-  label,
-}: {
-  status: ComponentStatus;
-  label?: string;
-}) {
+export function StatusBadge({ status, label }: { status: ComponentStatus; label?: string }) {
   return (
     <span
       className={clsx(
         "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium",
-        STATUS_STYLES[status],
+        STATUS_STYLES[status]
       )}
     >
       <span
@@ -93,7 +83,7 @@ export function StatusBadge({
           status === "healthy" && "bg-state-healthy",
           status === "degrading" && "bg-state-warn",
           status === "error" && "bg-state-error",
-          status === "unknown" && "bg-state-idle",
+          status === "unknown" && "bg-state-idle"
         )}
       />
       {label ?? STATUS_LABEL[status]}
@@ -126,12 +116,12 @@ export function Button({
         variant === "default" &&
           "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-purple bg-accent-purple text-white shadow-sm shadow-accent-purple/30 hover:bg-accent-purple-dim hover:border-accent-purple-dim",
+          "border-accent-purple bg-accent-purple text-white shadow-sm shadow-accent-purple/30 hover:border-accent-purple-dim hover:bg-accent-purple-dim",
         variant === "danger" &&
           "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&
           "border-transparent bg-transparent text-ink-muted hover:bg-bg-hover hover:text-ink",
-        className,
+        className
       )}
     >
       {children}
@@ -153,7 +143,7 @@ export function Toggle({
   disabled?: boolean;
 }) {
   return (
-    <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+    <label className="inline-flex cursor-pointer select-none items-center gap-2.5">
       <button
         type="button"
         role="switch"
@@ -164,14 +154,14 @@ export function Toggle({
           "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors",
           "disabled:cursor-not-allowed disabled:opacity-50",
           checked
-            ? "bg-accent-purple border-accent-purple"
-            : "bg-bg-elevated border-bg-border hover:border-bg-hover",
+            ? "border-accent-purple bg-accent-purple"
+            : "border-bg-border bg-bg-elevated hover:border-bg-hover"
         )}
       >
         <span
           className={clsx(
             "block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150",
-            checked ? "translate-x-4" : "translate-x-0",
+            checked ? "translate-x-4" : "translate-x-0"
           )}
         />
       </button>
@@ -243,9 +233,7 @@ export function Select<T extends string>({
 }) {
   return (
     <label className="block">
-      {label && (
-        <span className="mb-1.5 block text-xs text-ink-muted">{label}</span>
-      )}
+      {label && <span className="mb-1.5 block text-xs text-ink-muted">{label}</span>}
       <select
         {...props}
         value={value}
@@ -253,7 +241,7 @@ export function Select<T extends string>({
         className={clsx(
           "kairo-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
           "transition-colors hover:border-bg-hover",
-          "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
+          "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20"
         )}
       >
         {options.map((opt) => (
@@ -287,10 +275,10 @@ export function SearchInput({
       placeholder={placeholder}
       className={clsx(
         "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
-        "text-ink placeholder:text-ink-dim transition-colors",
+        "text-ink transition-colors placeholder:text-ink-dim",
         "hover:border-bg-hover",
         "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
-        className,
+        className
       )}
     />
   );
@@ -315,10 +303,10 @@ export function TextInput({
       {...props}
       className={clsx(
         "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
-        "text-ink placeholder:text-ink-dim transition-colors",
+        "text-ink transition-colors placeholder:text-ink-dim",
         "hover:border-bg-hover",
         "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
-        props.className,
+        props.className
       )}
     />
   );
@@ -341,8 +329,7 @@ export function Modal({
   width?: "sm" | "md" | "lg";
 }>) {
   if (!open) return null;
-  const widthClass =
-    width === "sm" ? "max-w-sm" : width === "lg" ? "max-w-2xl" : "max-w-md";
+  const widthClass = width === "sm" ? "max-w-sm" : width === "lg" ? "max-w-2xl" : "max-w-md";
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -351,14 +338,12 @@ export function Modal({
       <div
         className={clsx(
           "w-full rounded-lg border border-bg-border bg-bg-surface shadow-xl",
-          widthClass,
+          widthClass
         )}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <div className="border-b border-bg-border px-4 py-3 text-sm font-medium">
-            {title}
-          </div>
+          <div className="border-b border-bg-border px-4 py-3 text-sm font-medium">{title}</div>
         )}
         <div className="p-4">{children}</div>
         {footer && (
@@ -382,38 +367,21 @@ const ORB_COLOR: Record<VoiceMode, string> = {
   error: "bg-state-error",
 };
 
-export function StatusOrb({
-  mode,
-  size = "md",
-}: {
-  mode: VoiceMode;
-  size?: "sm" | "md" | "lg";
-}) {
-  const sizeClass =
-    size === "sm" ? "h-3 w-3" : size === "lg" ? "h-16 w-16" : "h-8 w-8";
+export function StatusOrb({ mode, size = "md" }: { mode: VoiceMode; size?: "sm" | "md" | "lg" }) {
+  const sizeClass = size === "sm" ? "h-3 w-3" : size === "lg" ? "h-16 w-16" : "h-8 w-8";
   const animClass =
     mode === "listening"
       ? "animate-pulse-slow"
       : mode === "thinking"
-      ? "animate-orb-thinking"
-      : mode === "speaking"
-      ? "animate-orb-speaking"
-      : "";
+        ? "animate-orb-thinking"
+        : mode === "speaking"
+          ? "animate-orb-speaking"
+          : "";
   return (
     <div className="relative inline-flex items-center justify-center">
+      <span className={clsx("absolute inset-0 rounded-full opacity-60 blur-lg", ORB_COLOR[mode])} />
       <span
-        className={clsx(
-          "rounded-full blur-lg absolute inset-0 opacity-60",
-          ORB_COLOR[mode],
-        )}
-      />
-      <span
-        className={clsx(
-          "relative rounded-full shadow-lg",
-          sizeClass,
-          ORB_COLOR[mode],
-          animClass,
-        )}
+        className={clsx("relative rounded-full shadow-lg", sizeClass, ORB_COLOR[mode], animClass)}
       />
     </div>
   );
@@ -429,19 +397,11 @@ export function Kbd({ children }: PropsWithChildren) {
   );
 }
 
-export function EmptyState({
-  title,
-  description,
-}: {
-  title: string;
-  description?: string;
-}) {
+export function EmptyState({ title, description }: { title: string; description?: string }) {
   return (
     <div className="flex h-32 flex-col items-center justify-center text-center">
       <div className="text-sm text-ink-muted">{title}</div>
-      {description && (
-        <div className="mt-1 text-xs text-ink-dim">{description}</div>
-      )}
+      {description && <div className="mt-1 text-xs text-ink-dim">{description}</div>}
     </div>
   );
 }

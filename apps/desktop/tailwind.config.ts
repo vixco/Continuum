@@ -6,15 +6,15 @@ const config: Config = {
     extend: {
       colors: {
         bg: {
-          DEFAULT: "#0a0a0f",
-          surface: "#121218",
-          elevated: "#1a1a24",
-          border: "#22222e",
-          hover: "#232330",
+          DEFAULT: "#090a09",
+          surface: "#111210",
+          elevated: "#171814",
+          border: "rgba(255,255,255,.075)",
+          hover: "#20211d",
         },
         accent: {
-          purple: "#7c3aed",
-          "purple-dim": "#5b21b6",
+          purple: "#f59e0b",
+          "purple-dim": "#b45309",
           blue: "#3b82f6",
           "blue-dim": "#1d4ed8",
         },
@@ -25,20 +25,14 @@ const config: Config = {
           idle: "#6b7280",
         },
         ink: {
-          DEFAULT: "#e5e7eb",
-          muted: "#9ca3af",
-          dim: "#6b7280",
-          subtle: "#4b5563",
+          DEFAULT: "#f4f4f2",
+          muted: "#a1a19a",
+          dim: "#6f7069",
+          subtle: "#4b4c47",
         },
       },
       fontFamily: {
-        sans: [
-          "Inter",
-          "-apple-system",
-          "BlinkMacSystemFont",
-          "Segoe UI",
-          "sans-serif",
-        ],
+        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
         mono: ["JetBrains Mono", "Consolas", "Monaco", "monospace"],
       },
       animation: {
