@@ -25,7 +25,7 @@ export function BrainTab() {
       <LayerDiagram />
 
       <Card
-        title="Layer 1 — Vision"
+        title="Layer 1 - Vision"
         subtitle={`Active model: ${config.vision.name}`}
         actions={
           <Button
@@ -68,7 +68,7 @@ export function BrainTab() {
       </Card>
 
       <Card
-        title="Layer 2 — Triage"
+        title="Layer 2 - Triage"
         subtitle="Local LLM gatekeeper"
         actions={
           <Button size="sm" onClick={() => testLayer("triage")} disabled={testing === "triage"}>
@@ -106,7 +106,7 @@ export function BrainTab() {
       </Card>
 
       <Card
-        title="Layer 3 — Orchestrator"
+        title="Layer 3 - Orchestrator"
         subtitle="Claude Opus via headless CLI"
         actions={
           <Button size="sm" onClick={() => testLayer("orchestrator")}>
@@ -138,7 +138,7 @@ export function BrainTab() {
       </Card>
 
       <Card
-        title="Layer 4 — Workers"
+        title="Layer 4 - Workers"
         subtitle="Headless Claude Code sessions spawned by the orchestrator"
         actions={
           <Button size="sm" disabled>

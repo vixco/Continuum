@@ -69,7 +69,7 @@ function RawLogPanel() {
   return (
     <Card
       title="Raw perception log"
-      subtitle="one row per frame — screen, audio, context, triage"
+      subtitle="one row per frame - screen, audio, context, triage"
       actions={
         <Button size="sm" variant="ghost">
           <Download size={12} /> Export NDJSON

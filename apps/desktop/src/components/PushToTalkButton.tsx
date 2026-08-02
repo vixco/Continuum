@@ -8,7 +8,7 @@ import { continuum } from "@/lib/tauri";
 import type { VoiceMode } from "@/lib/types";
 
 /**
- * Push-to-talk button — gives users a one-click alternative to the wake
+ * Push-to-talk button - gives users a one-click alternative to the wake
  * word and the global hotkey. Click writes a `talk_now` voice intent which
  * the daemon picks up within ~250ms and treats exactly like a hotkey press
  * (next transcript opens a session).
@@ -23,7 +23,7 @@ import type { VoiceMode } from "@/lib/types";
  *                 row)
  *   - thinking / speaking → dimmed, no-op (Continuum is busy responding)
  *
- * Tweede klik tijdens listening: no-op visueel + geen extra request — past
+ * Tweede klik tijdens listening: no-op visueel + geen extra request - past
  * bij de one-shot intent semantiek.
  */
 export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
@@ -70,7 +70,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         aria-label={isListening ? "Aan het luisteren" : "Klik om te praten met Continuum"}
         title={
           isListening
-            ? "Aan het luisteren — praat nu"
+            ? "Aan het luisteren - praat nu"
             : isBusy
               ? "Continuum is bezig"
               : "Klik om te praten (of zeg 'hey Continuum' / Ctrl+Shift+K)"

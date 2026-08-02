@@ -275,8 +275,8 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
   }, []);
 
   return (
-    <div className="titlebar" role="banner">
-      <div className="tb-brand">
+    <div className="titlebar" role="banner" data-tauri-drag-region>
+      <div className="tb-brand" data-tauri-drag-region>
         <span className="tb-mark">
           <Boxes size={18} />
         </span>
@@ -287,7 +287,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
         </span>
       </div>
 
-      <div className="tb-spacer" />
+      <div className="tb-spacer" data-tauri-drag-region />
 
       <div className="tb-actions no-drag">
         <button

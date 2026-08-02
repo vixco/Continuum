@@ -224,10 +224,10 @@ function WorkerDetail({ worker, onClose }: { worker: WorkerSnapshot; onClose: ()
           <Stat label="Elapsed" value={`${Math.floor(worker.elapsed_ms / 100) / 10}s`} />
           <Stat
             label="Cost"
-            value={worker.cost_usd != null ? `$${worker.cost_usd.toFixed(4)}` : "—"}
+            value={worker.cost_usd != null ? `$${worker.cost_usd.toFixed(4)}` : "-"}
           />
           <Stat label="Tool calls" value={worker.tool_calls.toString()} />
-          <Stat label="Session" value={worker.session_id?.slice(0, 8) ?? "—"} />
+          <Stat label="Session" value={worker.session_id?.slice(0, 8) ?? "-"} />
         </dl>
 
         {worker.skills.length > 0 && (
@@ -397,7 +397,7 @@ function RecentTimeline({ actions }: { actions: RecentAction[] }) {
     return (
       <Card title="Recent actions">
         <div className="py-6 text-center text-sm text-ink-dim">
-          Nothing yet — perception frames will appear here as the triage layer evaluates them.
+          Nothing yet - perception frames will appear here as the triage layer evaluates them.
         </div>
       </Card>
     );

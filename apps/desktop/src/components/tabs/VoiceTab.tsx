@@ -56,7 +56,7 @@ export function VoiceTab() {
         <div className="mt-4 text-sm text-ink-muted">
           Hotkey: <Kbd>{config.voice.hotkey || "unset"}</Kbd>
           <span className="ml-2 text-xs text-ink-dim">
-            (rebind via config.toml — UI rebind komt later)
+            (rebind via config.toml - UI rebind komt later)
           </span>
         </div>
       </Card>
@@ -158,7 +158,7 @@ export function VoiceTab() {
 /**
  * Banner that warns the user voice settings only take effect on the next
  * daemon start. The daemon currently loads its config once at boot and does
- * not watch `config.toml` for changes — making the dashboard's slider/select
+ * not watch `config.toml` for changes - making the dashboard's slider/select
  * changes "save now, apply on restart". Honest UX beats silent no-op.
  */
 function RestartNotice() {

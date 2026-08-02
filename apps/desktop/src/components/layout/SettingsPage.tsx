@@ -88,11 +88,11 @@ export function SettingsPage({
       <Card title="About">
         <dl className="grid grid-cols-1 gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
           <Row label="Version" value={version} />
-          <Row label="Started" value={startedAt ? new Date(startedAt).toLocaleString() : "—"} />
+          <Row label="Started" value={startedAt ? new Date(startedAt).toLocaleString() : "-"} />
           <Row label="Backups retained" value={String(statePath.backups_retained)} />
           <Row
             label="Last backup"
-            value={statePath.last_backup_ts ? new Date(statePath.last_backup_ts).toLocaleString() : "—"}
+            value={statePath.last_backup_ts ? new Date(statePath.last_backup_ts).toLocaleString() : "-"}
           />
         </dl>
       </Card>

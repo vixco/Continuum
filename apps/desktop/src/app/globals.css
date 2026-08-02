@@ -62,7 +62,7 @@ textarea:focus-visible {
   background-clip: padding-box;
 }
 
-/* Press feedback — applied to every interactive element so a click always
+/* Press feedback - applied to every interactive element so a click always
    answers back. Reduced-motion users get the transition neutralised below. */
 .press {
   transition:
@@ -95,7 +95,7 @@ textarea:focus-visible {
     inset 0 1px rgba(255, 255, 255, 0.02);
 }
 
-/* Titlebar — the only chrome bar. Frameless, drag region covers the empty
+/* Titlebar - the only chrome bar. Frameless, drag region covers the empty
    middle; controls and interactive bits opt out with .no-drag. */
 .titlebar {
   display: flex;
@@ -372,7 +372,7 @@ textarea:focus-visible {
 
 /* ---------- Form controls used by the real tabs ---------- */
 
-/* Range slider — amber fill tracks the value via --continuum-range-fill. */
+/* Range slider - amber fill tracks the value via --continuum-range-fill. */
 .continuum-range {
   appearance: none;
   -webkit-appearance: none;
@@ -413,7 +413,7 @@ textarea:focus-visible {
   opacity: 0.5;
 }
 
-/* Select — custom caret, removes the native Windows box. */
+/* Select - custom caret, removes the native Windows box. */
 .continuum-select {
   appearance: none;
   -webkit-appearance: none;
@@ -430,6 +430,92 @@ textarea:focus-visible {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #6f7069;
+}
+
+/* ---------- Onboarding wizard ---------- */
+
+.wizard {
+  display: flex;
+  height: 100dvh;
+  width: 100%;
+  flex-direction: column;
+  background:
+    radial-gradient(620px 320px at 50% -8%, rgba(245, 158, 11, 0.06), transparent 62%),
+    radial-gradient(560px 480px at 100% 100%, rgba(255, 255, 255, 0.02), transparent 60%), #08090a;
+}
+/* Top strip is the drag region so the frameless window can be moved during
+   onboarding (the main titlebar is hidden behind this full-screen overlay). */
+.wizard-drag {
+  flex: 0 0 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+  user-select: none;
+}
+.wizard-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 24px 28px;
+  overflow-y: auto;
+}
+.wizard-card {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.wizard-step {
+  animation: wstep 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes wstep {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.w-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.w-dot {
+  height: 4px;
+  width: 22px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  transition: width 0.3s ease, background 0.3s ease;
+}
+.w-dot.done {
+  background: rgba(245, 158, 11, 0.55);
+}
+.w-dot.active {
+  width: 34px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.4);
+}
+.w-soft {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.022);
+  padding: 16px 18px;
+}
+.w-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+}
+.w-row + .w-row {
+  border-top: 1px solid var(--border);
 }
 
 @media (max-width: 1180px) {
