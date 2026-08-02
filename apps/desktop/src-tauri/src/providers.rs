@@ -116,14 +116,11 @@ impl SecretStore for MemorySecretStore {
 }
 
 /// Shared Tauri-managed state for the chat feature: the provider store, the
-/// OS credential store, and in-flight stream cancellation tokens (the last
-/// is populated starting with Task 10's chat-send command).
+/// OS credential store, and in-flight stream cancellation tokens (populated
+/// and consumed by `chat_send_message` / `chat_cancel` in `chat.rs`).
 pub struct ChatState {
     pub providers: std::sync::Mutex<ProviderStore>,
     pub secrets: Box<dyn SecretStore>,
-    // Not read yet: populated and consumed by Task 10's chat-send / cancel
-    // commands, which don't exist in this task.
-    #[allow(dead_code)]
     pub inflight:
         std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
 }
@@ -164,19 +161,28 @@ pub struct ProviderAddInput {
 /// prefer the `.cmd` name when found. Everywhere else, and if the probe
 /// fails, we fall back to the bare `"claude"` name, which resolves
 /// normally via PATH.
+///
+/// The probe result is cached in a `OnceLock` — `build_adapter` runs on
+/// every chat send, and re-spawning `where` per message would add latency
+/// to the hot path for no benefit (the answer can't change mid-process).
 fn resolve_claude_binary() -> String {
-    #[cfg(windows)]
-    {
-        let found = std::process::Command::new("where")
-            .arg("claude.cmd")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if found {
-            return "claude.cmd".to_string();
-        }
-    }
-    "claude".to_string()
+    static CLAUDE_BINARY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CLAUDE_BINARY
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                let found = std::process::Command::new("where")
+                    .arg("claude.cmd")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if found {
+                    return "claude.cmd".to_string();
+                }
+            }
+            "claude".to_string()
+        })
+        .clone()
 }
 
 /// Builds a [`ChatProvider`] adapter for a stored connection. This is the

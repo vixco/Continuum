@@ -97,6 +97,9 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
         dev_dir: dev_dir.clone(),
     });
     registry.register(SystemResourceCheck::new(&cfg));
+    registry.register(ChatProvidersCheck {
+        dev_dir: dev_dir.clone(),
+    });
 }
 
 async fn snap(state: &Arc<RwLock<StateHandle>>) -> continuum_core::state::ContinuumState {
@@ -471,6 +474,37 @@ impl HealthCheck for SkillsCheck {
             HealthResult::degrading("no skills loaded", 1)
         } else {
             HealthResult::healthy(1)
+        }
+    }
+}
+
+/// Health probe for the Chat tab's provider connections (Task 10). Reads
+/// `providers.json` directly rather than through `ChatState` — this probe
+/// runs from the health-poll loop, not from a Tauri command, so it has no
+/// `tauri::State` to borrow from.
+struct ChatProvidersCheck {
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for ChatProvidersCheck {
+    fn name(&self) -> &str {
+        "chat_providers"
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some("Re-test or remove the failing provider in Settings → Integrations.".into())
+    }
+    async fn probe(&self) -> HealthResult {
+        let providers = crate::providers::ProviderStore::new(self.dev_dir.clone()).load();
+        match providers.iter().find(|p| p.last_test_ok == Some(false)) {
+            Some(bad) => HealthResult::degrading(
+                format!(
+                    "provider '{}' failed its last connection test",
+                    bad.display_name
+                ),
+                1,
+            ),
+            None => HealthResult::healthy(1),
         }
     }
 }
