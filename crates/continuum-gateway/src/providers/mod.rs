@@ -1,7 +1,9 @@
 //! Provider adapters.
 pub mod anthropic;
+pub mod claude_cli;
 pub mod openai_compat;
 pub use anthropic::AnthropicAdapter;
+pub use claude_cli::ClaudeCliAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
 
 use futures_util::stream::BoxStream;
