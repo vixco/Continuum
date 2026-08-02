@@ -1,7 +1,5 @@
-//! OpenAI-compatible adapter. Covers LM Studio, Ollama, OpenRouter,
-//! OpenAI, DeepSeek, Kimi, GLM, xAI, StepFun, NVIDIA, HF, Gemini-compat,
-//! DashScope-compat, and custom endpoints — same wire shape, different
-//! base URL. API key is optional (local servers run keyless).
+//! Anthropic Messages API adapter (API-key auth). Subscription users go
+//! through the ClaudeCliAdapter instead — never OAuth (non-negotiable #1).
 
 use std::time::Duration;
 
@@ -16,21 +14,25 @@ use crate::sse::SseParser;
 use crate::types::*;
 use crate::ChatProvider;
 
-/// Talks to any server exposing the OpenAI `/v1/chat/completions` and
-/// `/v1/models` wire shape.
-pub struct OpenAiCompatAdapter {
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Talks to the Anthropic `/v1/messages` and `/v1/models` API using an
+/// API key (`x-api-key` header). Never sends `temperature` — rejected by
+/// the newest models when combined with other sampling params here.
+pub struct AnthropicAdapter {
     base_url: String,
-    api_key: Option<String>,
+    api_key: String,
     client: reqwest::Client,
     idle_timeout: Duration,
 }
 
-impl OpenAiCompatAdapter {
-    /// Builds an adapter. `base_url` should include the `/v1` prefix
-    /// (e.g. `http://localhost:1234/v1`); a trailing slash is stripped.
+impl AnthropicAdapter {
+    /// Builds an adapter. `base_url` defaults to `https://api.anthropic.com`
+    /// in production but is overridable (e.g. for tests); a trailing slash
+    /// is stripped.
     pub fn new(
         base_url: String,
-        api_key: Option<String>,
+        api_key: String,
         connect_timeout: Duration,
         idle_timeout: Duration,
     ) -> Result<Self, GatewayError> {
@@ -48,12 +50,11 @@ impl OpenAiCompatAdapter {
         })
     }
 
-    /// Attaches the bearer token when this connection has one configured.
-    fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.api_key {
-            Some(k) => rb.bearer_auth(k),
-            None => rb,
-        }
+    /// Attaches the API key and required version header. Never logged —
+    /// the key only ever lives inside this header value.
+    fn headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        rb.header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
     }
 
     fn map_send_error(&self, e: reqwest::Error) -> GatewayError {
@@ -97,7 +98,7 @@ impl OpenAiCompatAdapter {
 }
 
 #[async_trait::async_trait]
-impl ChatProvider for OpenAiCompatAdapter {
+impl ChatProvider for AnthropicAdapter {
     async fn test_connection(&self) -> Result<ConnectionTestReport, GatewayError> {
         let started = std::time::Instant::now();
         let models = self.list_models().await?;
@@ -111,7 +112,9 @@ impl ChatProvider for OpenAiCompatAdapter {
 
     async fn list_models(&self) -> Result<Vec<String>, GatewayError> {
         let resp = self
-            .send_with_timeout(self.auth(self.client.get(format!("{}/models", self.base_url))))
+            .send_with_timeout(
+                self.headers(self.client.get(format!("{}/v1/models", self.base_url))),
+            )
             .await?;
         if !resp.status().is_success() {
             let ra = retry_after(&resp);
@@ -143,28 +146,28 @@ impl ChatProvider for OpenAiCompatAdapter {
         req: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ChatEvent>, GatewayError> {
-        let mut messages = vec![json!({"role": "system", "content": req.system})];
-        for m in &req.messages {
-            let role = match m.role {
-                ChatRole::User => "user",
-                ChatRole::Assistant => "assistant",
-            };
-            messages.push(json!({"role": role, "content": m.content}));
-        }
-        let mut body = json!({
+        let messages: Vec<serde_json::Value> = req
+            .messages
+            .iter()
+            .map(|m| {
+                let role = match m.role {
+                    ChatRole::User => "user",
+                    ChatRole::Assistant => "assistant",
+                };
+                json!({"role": role, "content": m.content})
+            })
+            .collect();
+        // Note: no `temperature` — the Anthropic Messages API rejects it
+        // on the newest models when combined with these other params.
+        let body = json!({
             "model": req.model,
-            "messages": messages,
-            "stream": true,
             "max_tokens": req.max_tokens,
+            "system": req.system,
+            "stream": true,
+            "messages": messages,
         });
-        if let Some(t) = req.temperature {
-            body["temperature"] = json!(t);
-        }
         let rb = self
-            .auth(
-                self.client
-                    .post(format!("{}/chat/completions", self.base_url)),
-            )
+            .headers(self.client.post(format!("{}/v1/messages", self.base_url)))
             .json(&body);
         let resp = self.send_with_timeout(rb).await?;
         if !resp.status().is_success() {
@@ -217,7 +220,7 @@ fn stream_events(
                         let _ = tx.send(ChatEvent::Error { message: GatewayError::Timeout.user_message(), retryable: true }).await;
                         return;
                     }
-                    Ok(None) => break, // connection closed without [DONE] — finish with what we have
+                    Ok(None) => break, // connection closed early — finish with what we have
                     Ok(Some(Err(e))) => {
                         let _ = tx.send(ChatEvent::Error { message: format!("Stream error: {e}"), retryable: true }).await;
                         return;
@@ -226,35 +229,71 @@ fn stream_events(
                 }
             };
             for payload in parser.push(&chunk) {
-                if payload == "[DONE]" {
-                    let _ = tx
-                        .send(ChatEvent::Done {
-                            usage: usage.clone(),
-                            stop_reason: stop_reason.clone(),
-                        })
-                        .await;
-                    return;
-                }
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     continue;
                 };
-                if let Some(u) = v.get("usage") {
-                    usage.input_tokens = u.get("prompt_tokens").and_then(|x| x.as_u64());
-                    usage.output_tokens = u.get("completion_tokens").and_then(|x| x.as_u64());
-                }
-                if let Some(choice) = v.get("choices").and_then(|c| c.get(0)) {
-                    if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-                        stop_reason = Some(fr.to_string());
+                match v.get("type").and_then(|t| t.as_str()) {
+                    Some("message_start") => {
+                        if let Some(t) = v
+                            .pointer("/message/usage/input_tokens")
+                            .and_then(|x| x.as_u64())
+                        {
+                            usage.input_tokens = Some(t);
+                        }
                     }
-                    if let Some(text) = choice.pointer("/delta/content").and_then(|t| t.as_str()) {
-                        if !text.is_empty() {
+                    Some("content_block_delta") => {
+                        if v.pointer("/delta/type").and_then(|t| t.as_str()) == Some("text_delta") {
+                            if let Some(text) = v.pointer("/delta/text").and_then(|t| t.as_str()) {
+                                let _ = tx
+                                    .send(ChatEvent::Delta {
+                                        text: text.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                    Some("message_delta") => {
+                        if let Some(sr) = v.pointer("/delta/stop_reason").and_then(|s| s.as_str()) {
+                            stop_reason = Some(sr.to_string());
+                        }
+                        if let Some(t) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64())
+                        {
+                            usage.output_tokens = Some(t);
+                        }
+                    }
+                    Some("message_stop") => {
+                        if stop_reason.as_deref() == Some("refusal") {
                             let _ = tx
-                                .send(ChatEvent::Delta {
-                                    text: text.to_string(),
+                                .send(ChatEvent::Error {
+                                    message: "The model declined this request (safety refusal). Rephrase or try another model.".into(),
+                                    retryable: false,
+                                })
+                                .await;
+                        } else {
+                            let _ = tx
+                                .send(ChatEvent::Done {
+                                    usage: usage.clone(),
+                                    stop_reason: stop_reason.clone(),
                                 })
                                 .await;
                         }
+                        return;
                     }
+                    Some("error") => {
+                        let detail = v
+                            .pointer("/error/message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let _ = tx
+                            .send(ChatEvent::Error {
+                                message: format!("Anthropic API error: {detail}"),
+                                retryable: true,
+                            })
+                            .await;
+                        return;
+                    }
+                    _ => {}
                 }
             }
         }
