@@ -20,6 +20,7 @@ mod commands;
 mod components;
 mod events;
 mod onboarding;
+mod providers;
 mod runtime_bridge;
 mod tray;
 

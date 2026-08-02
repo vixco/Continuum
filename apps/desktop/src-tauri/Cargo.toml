@@ -28,9 +28,13 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 continuum-core = { path = "../../../crates/continuum-core", default-features = false }
+continuum-gateway = { path = "../../../crates/continuum-gateway" }
 cpal = { version = "0.17", optional = true }
 dirs = "6"
+futures-util = "0.3"
+keyring = { version = "3", features = ["windows-native"] }
 parking_lot = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 tempfile = "3"
+tokio-util = "0.7"
 url = "2"
