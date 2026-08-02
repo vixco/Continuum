@@ -1,20 +1,17 @@
-// OnboardingWizard — eight-step first-run flow for Continuum.
-//
-// Mounted by Shell when `is_onboarding_complete` returns false. Uses the same
-// UI primitives and dark palette as the rest of the dashboard. Each step is a
-// focused panel; Next / Back navigation is handled by a single local state
-// machine.
+// OnboardingWizard - first-run setup for Continuum.
+// Mounted by Shell when `is_onboarding_complete` returns false. Minimal,
+// soft, animated single column. The top strip is a drag region so the
+// frameless window can still be moved while onboarding covers the screen.
 //
 // Backend contract (apps/desktop/src-tauri/src/commands.rs):
-//   check_claude_cli()         -> { installed: bool, version: string | null, error: string | null }
-//   check_claude_auth()        -> { authenticated: bool, error: string | null }
+//   check_claude_cli()         -> { installed, version, error }
+//   check_claude_auth()        -> { authenticated, error }
 //   list_audio_input_devices() -> [{ name, id }]
 //   list_audio_output_devices()-> [{ name, id }]
-//   list_tts_voices()          -> [{ id, language, path }]
-//   download_model(name, url)  -> starts a download; progress via `continuum:onboarding:progress` event
-//   run_diagnostics()          -> { checks: [{ name, status: "ok" | "fail" | "skip", detail }] }
+//   download_model(name, url)  -> progress via `continuum:onboarding:progress`
+//   run_diagnostics()          -> { checks: [{ name, status, detail }] }
 //   is_onboarding_complete()   -> bool
-//   complete_onboarding(payload) -> void  // persists ~/.continuum/config/onboarding-complete
+//   complete_onboarding(payload)-> void
 
 "use client";
 
@@ -32,12 +29,13 @@ import {
   User,
   Stethoscope,
   Sparkles,
+  Boxes,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 
 type StepId =
-  "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
+  | "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
 
 const STEPS: Array<{ id: StepId; label: string; icon: typeof Sparkles }> = [
   { id: "welcome", label: "Welcome", icon: Sparkles },
@@ -93,28 +91,68 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
     onComplete();
   };
 
+  const isDone = step === "done";
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg">
-      <div className="flex h-full w-full max-w-5xl flex-col">
-        <WizardHeader idx={idx} />
-        <div className="flex-1 overflow-y-auto px-8 py-8">
-          {step === "welcome" && <WelcomeStep onNext={goNext} />}
-          {step === "claude" && <ClaudeStep onNext={goNext} />}
-          {step === "models" && <ModelsStep onNext={goNext} />}
-          {step === "voice" && <VoiceStep payload={payload} setPayload={setPayload} />}
-          {step === "permissions" && <PermissionsStep payload={payload} setPayload={setPayload} />}
-          {step === "personal" && <PersonalStep payload={payload} setPayload={setPayload} />}
-          {step === "diagnostics" && <DiagnosticsStep />}
-          {step === "done" && <DoneStep onStart={finish} />}
+    <div className="wizard">
+      <div className="wizard-drag" data-tauri-drag-region>
+        <span className="grid h-6 w-6 place-items-center text-amber-400">
+          <Boxes size={16} />
+        </span>
+        <span className="text-[13px] font-semibold tracking-tight text-ink">Continuum</span>
+        <span className="ml-2 text-[11px] text-ink-dim">first-run setup</span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {STEPS.map((s, i) => (
+            <span
+              key={s.id}
+              className={clsx("w-dot", i < idx && "done", i === idx && "active")}
+              title={s.label}
+            />
+          ))}
         </div>
-        <WizardFooter
-          idx={idx}
-          onBack={goBack}
-          onNext={step === "done" ? finish : goNext}
-          nextLabel={step === "done" ? "Start Continuum" : "Next"}
-          canBack={idx > 0 && step !== "done"}
-        />
       </div>
+
+      <div className="wizard-body">
+        <div className="wizard-card" key={step}>
+          <div className="wizard-step">
+            {step === "welcome" && <WelcomeStep onNext={goNext} />}
+            {step === "claude" && <ClaudeStep onNext={goNext} />}
+            {step === "models" && <ModelsStep onNext={goNext} />}
+            {step === "voice" && <VoiceStep payload={payload} setPayload={setPayload} />}
+            {step === "permissions" && (
+              <PermissionsStep payload={payload} setPayload={setPayload} />
+            )}
+            {step === "personal" && <PersonalStep payload={payload} setPayload={setPayload} />}
+            {step === "diagnostics" && <DiagnosticsStep />}
+            {step === "done" && <DoneStep onStart={finish} />}
+          </div>
+        </div>
+      </div>
+
+      <footer className="flex items-center justify-between px-6 pb-5 pt-1">
+        <button
+          disabled={idx <= 0 || isDone}
+          onClick={goBack}
+          className={clsx(
+            "press inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px]",
+            idx > 0 && !isDone
+              ? "text-ink-muted hover:bg-white/5 hover:text-ink"
+              : "cursor-not-allowed opacity-30"
+          )}
+        >
+          <ChevronLeft size={15} /> Back
+        </button>
+        <span className="text-[11px] text-ink-dim">
+          {idx + 1} / {STEPS.length}
+        </span>
+        <button
+          onClick={isDone ? finish : goNext}
+          className="press inline-flex items-center gap-1.5 rounded-lg border border-amber-400/50 bg-amber-400/15 px-4 py-2 text-[13px] font-medium text-amber-200 hover:bg-amber-400/25"
+        >
+          {isDone ? "Start Continuum" : "Next"}
+          <ChevronRight size={15} />
+        </button>
+      </footer>
     </div>
   );
 }
@@ -126,94 +164,60 @@ function detectLanguage(): "en" | "nl" | "both" {
   return "en";
 }
 
-function WizardHeader({ idx }: { idx: number }) {
-  return (
-    <header className="flex items-center gap-4 border-b border-bg-border bg-bg-surface px-8 py-4">
-      <span className="text-lg font-semibold">
-        K<span className="text-accent-purple">AI</span>ro
-        <span className="ml-3 text-sm font-normal text-ink-dim">first-run setup</span>
-      </span>
-      <div className="ml-auto flex items-center gap-1">
-        {STEPS.map((s, i) => (
-          <span
-            key={s.id}
-            title={s.label}
-            className={clsx(
-              "h-1.5 w-8 rounded-full transition-colors",
-              i < idx && "bg-accent-purple",
-              i === idx && "bg-accent-purple",
-              i > idx && "bg-bg-border"
-            )}
-          />
-        ))}
-      </div>
-    </header>
-  );
-}
+// ---- Steps ------------------------------------------------------------------
 
-function WizardFooter({
-  idx,
-  onBack,
-  onNext,
-  nextLabel,
-  canBack,
+function StepContainer({
+  eyebrow,
+  title,
+  children,
 }: {
-  idx: number;
-  onBack: () => void;
-  onNext: () => void;
-  nextLabel: string;
-  canBack: boolean;
+  eyebrow?: string;
+  title: string;
+  children: React.ReactNode;
 }) {
   return (
-    <footer className="flex items-center justify-between border-t border-bg-border bg-bg-surface px-8 py-4">
-      <button
-        disabled={!canBack}
-        onClick={onBack}
-        className={clsx(
-          "inline-flex items-center gap-1.5 rounded-md border border-bg-border px-3 py-1.5 text-sm",
-          canBack ? "hover:bg-bg-hover" : "cursor-not-allowed opacity-40"
+    <div className="flex flex-col gap-5">
+      <div>
+        {eyebrow && (
+          <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-400/80">
+            {eyebrow}
+          </p>
         )}
-      >
-        <ChevronLeft size={14} /> Back
-      </button>
-      <span className="text-xs text-ink-dim">
-        Step {idx + 1} of {STEPS.length}
-      </span>
-      <button
-        onClick={onNext}
-        className="inline-flex items-center gap-1.5 rounded-md bg-accent-purple px-4 py-1.5 text-sm text-white hover:opacity-90"
-      >
-        {nextLabel} <ChevronRight size={14} />
-      </button>
-    </footer>
+        <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-ink">
+          {title}
+        </h1>
+      </div>
+      {children}
+    </div>
   );
 }
-
-// ---- Steps ------------------------------------------------------------------
 
 function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
-    <StepContainer title="Welcome to Continuum">
-      <p className="text-ink-muted">
-        Continuum is an ambient AI assistant for Windows. It sees what you see, hears what you hear,
-        remembers what matters, and acts only when the moment is right — powered by Claude Code and
-        small local models.
+    <StepContainer eyebrow="Welcome" title="Meet Continuum">
+      <p className="text-[14px] leading-relaxed text-ink-muted">
+        An ambient AI assistant for Windows. It watches your screen, listens when spoken to,
+        remembers what matters, and acts only when the moment is right. Local-first, powered by
+        Claude Code.
       </p>
-      <p className="text-ink-muted">
-        This wizard takes about ten minutes. Most of that is a one-time model download that runs in
-        the background while you configure the rest. You can rerun it later with{" "}
-        <code className="continuum-code">continuum setup</code>.
+      <p className="text-[13px] text-ink-dim">
+        Takes about ten minutes. Most of it is a one-time model download running in the background.
       </p>
-      <div className="continuum-card">
-        <h3 className="font-semibold">Before we start</h3>
-        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-ink-muted">
-          <li>Make sure you have a Claude Max or API subscription.</li>
-          <li>Have a working microphone and speaker ready (optional but recommended).</li>
-          <li>Expect ~6.5 GB of model downloads.</li>
-          <li>Nothing you enter is uploaded anywhere — Continuum is local-first.</li>
-        </ul>
-      </div>
+      <ul className="flex flex-col gap-2 text-[13px] text-ink-muted">
+        <Bullet>Needs a Claude Max or API subscription.</Bullet>
+        <Bullet>Microphone and speaker recommended.</Bullet>
+        <Bullet>About 6.5 GB of models download once.</Bullet>
+      </ul>
     </StepContainer>
+  );
+}
+
+function Bullet({ children }: { children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-2.5">
+      <Check size={14} className="mt-1 shrink-0 text-amber-400" />
+      <span>{children}</span>
+    </li>
   );
 }
 
@@ -265,57 +269,52 @@ function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
   }, []);
 
   return (
-    <StepContainer title="Claude Code check">
-      <p className="text-ink-muted">
-        Continuum drives the official <code className="continuum-code">claude</code> CLI as a subprocess.
-        Let&apos;s make sure it&apos;s installed and signed in.
+    <StepContainer eyebrow="Step 1" title="Connect Claude Code">
+      <p className="text-[14px] text-ink-muted">
+        Continuum drives the official <Code>claude</Code> CLI as a subprocess. Let&apos;s confirm
+        it&apos;s installed and signed in.
       </p>
 
-      <div className="continuum-card">
-        <StatusRow
-          label="Claude Code CLI installed"
-          state={state === "checking" ? "pending" : result?.installed ? "ok" : "fail"}
-          detail={
-            result?.installed
-              ? (result?.version ?? "")
-              : "Run npm install -g @anthropic-ai/claude-code"
-          }
-        />
-        <StatusRow
-          label="Logged in"
-          state={
-            state === "checking"
-              ? "pending"
-              : result?.authenticated
-                ? "ok"
-                : result?.installed
-                  ? "fail"
-                  : "pending"
-          }
-          detail={result?.authenticated ? "OK" : "Run 'claude login' in a separate terminal"}
-        />
+      <div className="w-soft">
+        <div className="w-row">
+          <StatusIcon
+            state={state === "checking" ? "pending" : result?.installed ? "ok" : "fail"}
+          />
+          <span className="flex-1 text-[13px] font-medium text-ink">Claude Code CLI</span>
+          <span className="text-[12px] text-ink-dim">
+            {result?.installed ? (result.version ?? "installed") : "not found"}
+          </span>
+        </div>
+        <div className="w-row">
+          <StatusIcon
+            state={
+              state === "checking"
+                ? "pending"
+                : result?.authenticated
+                  ? "ok"
+                  : result?.installed
+                    ? "fail"
+                    : "pending"
+            }
+          />
+          <span className="flex-1 text-[13px] font-medium text-ink">Signed in</span>
+          <span className="text-[12px] text-ink-dim">
+            {result?.authenticated ? "ready" : "run 'claude login'"}
+          </span>
+        </div>
       </div>
 
       {state !== "ok" && (
-        <div className="flex gap-3">
-          <button onClick={runCheck} className="continuum-button-primary">
-            Check again
-          </button>
-          {state === "missing" && (
-            <code className="continuum-code flex items-center px-3">
-              npm install -g @anthropic-ai/claude-code
-            </code>
-          )}
-          {state === "unauth" && (
-            <code className="continuum-code flex items-center px-3">claude login</code>
-          )}
-        </div>
+        <button onClick={runCheck} className="press w-fit rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink">
+          Check again
+        </button>
       )}
-
+      {state === "missing" && <Code>npm install -g @anthropic-ai/claude-code</Code>}
+      {state === "unauth" && <Code>claude login</Code>}
       {result?.error && (
-        <div className="continuum-error">
-          <AlertCircle size={14} className="inline" /> {result.error}
-        </div>
+        <p className="flex items-center gap-2 text-[12px] text-red-400">
+          <AlertCircle size={13} /> {result.error}
+        </p>
       )}
     </StepContainer>
   );
@@ -330,34 +329,10 @@ interface ModelInfo {
 }
 
 const MODELS: ModelInfo[] = [
-  {
-    key: "smolvlm",
-    label: "SmolVLM-256M",
-    size: "~500 MB",
-    purpose: "Vision (screen description)",
-    url: "https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct",
-  },
-  {
-    key: "qwen3-8b",
-    label: "Qwen 3 8B Q4_K_M",
-    size: "~4.5 GB",
-    purpose: "Triage (local decision LLM)",
-    url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
-  },
-  {
-    key: "whisper-medium",
-    label: "Whisper medium",
-    size: "~1.5 GB",
-    purpose: "Speech-to-text",
-    url: "https://huggingface.co/ggerganov/whisper.cpp",
-  },
-  {
-    key: "piper-voices",
-    label: "Piper voices (en + binary)",
-    size: "~150 MB",
-    purpose: "Text-to-speech",
-    url: "https://github.com/rhasspy/piper",
-  },
+  { key: "smolvlm", label: "SmolVLM-256M", size: "~500 MB", purpose: "Vision", url: "" },
+  { key: "qwen3-8b", label: "Qwen 3 8B Q4_K_M", size: "~4.5 GB", purpose: "Triage", url: "" },
+  { key: "whisper-medium", label: "Whisper medium", size: "~1.5 GB", purpose: "Speech-to-text", url: "" },
+  { key: "piper-voices", label: "Piper voices", size: "~150 MB", purpose: "Text-to-speech", url: "" },
 ];
 
 function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
@@ -376,7 +351,6 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
   };
 
   useEffect(() => {
-    // Subscribe to download progress if the Tauri layer is available.
     let unsubscribe: (() => void) | undefined;
     (async () => {
       try {
@@ -386,38 +360,38 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
           (e) => setProgress((p) => ({ ...p, [e.payload.model]: e.payload.percent }))
         );
       } catch {
-        // Running outside Tauri — no live progress, which is fine.
+        /* outside Tauri */
       }
     })();
     return () => unsubscribe?.();
   }, []);
 
   return (
-    <StepContainer title="Download models">
-      <p className="text-ink-muted">
-        Continuum needs four sets of models to work. If you&apos;ve installed Continuum before, existing
-        models under <code className="continuum-code">~/.continuum/models</code> will be reused.
+    <StepContainer eyebrow="Step 2" title="Download models">
+      <p className="text-[14px] text-ink-muted">
+        Four model sets power Continuum. Existing models under <Code>~/.continuum/models</Code> are
+        reused automatically.
       </p>
 
-      <div className="continuum-card space-y-2">
-        {MODELS.map((m) => {
+      <div className="w-soft">
+        {MODELS.map((m, i) => {
           const pct = progress[m.key] ?? 0;
           const done = pct >= 100;
           return (
-            <div key={m.key} className="flex items-center gap-3 py-1">
-              <span className="w-52 font-medium">{m.label}</span>
-              <span className="w-28 text-xs text-ink-dim">{m.size}</span>
-              <span className="flex-1 text-xs text-ink-muted">{m.purpose}</span>
-              <div className="h-1.5 w-32 overflow-hidden rounded-full bg-bg-border">
+            <div key={m.key} className={clsx("w-row", i > 0 && "")}>
+              <span className="w-36 text-[13px] font-medium text-ink">{m.label}</span>
+              <span className="w-20 text-[11px] text-ink-dim">{m.size}</span>
+              <span className="flex-1 text-[12px] text-ink-muted">{m.purpose}</span>
+              <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
                 <div
-                  className={clsx("h-full", done ? "bg-green-500" : "bg-accent-purple")}
+                  className={clsx("h-full transition-all", done ? "bg-emerald-400" : "bg-amber-400")}
                   style={{ width: `${pct}%` }}
                 />
               </div>
               {done ? (
-                <Check size={14} className="text-green-500" />
+                <Check size={14} className="text-emerald-400" />
               ) : pct > 0 ? (
-                <Loader2 size={14} className="animate-spin text-accent-purple" />
+                <Loader2 size={14} className="animate-spin text-amber-400" />
               ) : (
                 <span className="h-3.5 w-3.5" />
               )}
@@ -426,14 +400,14 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
         })}
       </div>
 
-      <div className="flex gap-3">
-        <button onClick={downloadAll} disabled={running} className="continuum-button-primary">
-          {running ? "Downloading..." : "Download all"}
-        </button>
-        <span className="text-xs text-ink-dim">
-          You can skip this step and run <code className="continuum-code">continuum setup</code> later.
-        </span>
-      </div>
+      <button
+        onClick={downloadAll}
+        disabled={running}
+        className="press inline-flex items-center gap-2 rounded-lg border border-amber-400/50 bg-amber-400/15 px-4 py-2 text-[13px] font-medium text-amber-200 hover:bg-amber-400/25 disabled:opacity-50"
+      >
+        {running ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+        {running ? "Downloading..." : "Download all"}
+      </button>
     </StepContainer>
   );
 }
@@ -459,34 +433,27 @@ function VoiceStep({
         setMics(await invoke<AudioDevice[]>("list_audio_input_devices"));
         setSpeakers(await invoke<AudioDevice[]>("list_audio_output_devices"));
       } catch {
-        // Running outside Tauri.
+        /* outside Tauri */
       }
     })();
   }, []);
 
   return (
-    <StepContainer title="Voice setup">
-      <div className="continuum-card space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-medium">Wake word</p>
-            <p className="text-xs text-ink-muted">
-              Default phrase: &quot;hey continuum&quot;. You can always use Ctrl+Shift+K as a
-              push-to-talk.
-            </p>
-          </div>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={payload.wake_word_enabled}
-              onChange={(e) => setPayload({ ...payload, wake_word_enabled: e.target.checked })}
-            />
-            <span className="text-sm">Enable</span>
-          </label>
-        </div>
-
+    <StepContainer eyebrow="Step 3" title="Voice">
+      <div className="w-soft flex flex-col gap-4">
+        <ToggleRow
+          label="Wake word"
+          hint='Say "hey continuum" to talk. Ctrl+Shift+K always works as push-to-talk.'
+          checked={payload.wake_word_enabled}
+          onChange={(v) => setPayload({ ...payload, wake_word_enabled: v })}
+        />
         <div>
-          <p className="font-medium">Sensitivity</p>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[13px] font-medium text-ink">Sensitivity</span>
+            <span className="text-[11px] text-ink-dim">
+              {payload.wake_sensitivity.toFixed(2)}
+            </span>
+          </div>
           <input
             type="range"
             min={0}
@@ -494,36 +461,29 @@ function VoiceStep({
             step={0.05}
             value={payload.wake_sensitivity}
             onChange={(e) => setPayload({ ...payload, wake_sensitivity: Number(e.target.value) })}
-            className="mt-1 w-full"
+            className="continuum-range w-full"
           />
-          <p className="text-xs text-ink-dim">
-            Higher = stricter (fewer false positives, more missed wakes). Current:{" "}
-            {payload.wake_sensitivity.toFixed(2)}
+          <p className="mt-1 text-[11px] text-ink-dim">
+            Higher = fewer false wakes, may miss quiet ones.
           </p>
         </div>
-
         <div>
-          <p className="font-medium">Language</p>
-          <div className="mt-1 flex gap-4 text-sm">
+          <span className="mb-1.5 block text-[13px] font-medium text-ink">Language</span>
+          <div className="flex gap-2">
             {(["en", "nl", "both"] as const).map((l) => (
-              <label key={l} className="flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={payload.language === l}
-                  onChange={() => setPayload({ ...payload, language: l })}
-                />
-                <span>{l === "en" ? "English" : l === "nl" ? "Dutch" : "Both"}</span>
-              </label>
+              <Chip
+                key={l}
+                active={payload.language === l}
+                onClick={() => setPayload({ ...payload, language: l })}
+              >
+                {l === "en" ? "English" : l === "nl" ? "Dutch" : "Both"}
+              </Chip>
             ))}
           </div>
-          <p className="text-xs text-ink-dim">
-            Whisper handles input in any language. Output is English by default — Dutch TTS voice is
-            available but lower quality.
-          </p>
         </div>
       </div>
 
-      <div className="continuum-card space-y-3">
+      <div className="flex flex-col gap-3">
         <DevicePicker
           label="Microphone"
           icon={Mic}
@@ -543,6 +503,65 @@ function VoiceStep({
   );
 }
 
+function ToggleRow({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div>
+        <p className="text-[13px] font-medium text-ink">{label}</p>
+        <p className="text-[11px] text-ink-dim">{hint}</p>
+      </div>
+      <button
+        onClick={() => onChange(!checked)}
+        className={clsx(
+          "press relative h-6 w-11 rounded-full transition-colors",
+          checked ? "bg-amber-400" : "bg-white/10"
+        )}
+      >
+        <span
+          className={clsx(
+            "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all",
+            checked ? "left-[22px]" : "left-0.5"
+          )}
+        />
+      </button>
+    </div>
+  );
+}
+
+function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={clsx(
+        "press rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors",
+        active
+          ? "border border-amber-400/50 bg-amber-400/15 text-amber-200"
+          : "border border-bg-border text-ink-muted hover:bg-white/5 hover:text-ink"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function DevicePicker({
   label,
   icon: Icon,
@@ -558,13 +577,13 @@ function DevicePicker({
 }) {
   return (
     <div>
-      <p className="flex items-center gap-2 font-medium">
-        <Icon size={14} /> {label}
+      <p className="mb-1 flex items-center gap-2 text-[13px] font-medium text-ink">
+        <Icon size={14} className="text-amber-400" /> {label}
       </p>
       <select
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded-md border border-bg-border bg-bg-elevated px-2 py-1 text-sm"
+        className="continuum-select w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink"
       >
         <option value="">System default</option>
         {devices.map((d) => (
@@ -587,100 +606,69 @@ function PermissionsStep({
   const [newPath, setNewPath] = useState("");
 
   return (
-    <StepContainer title="Permissions">
-      <p className="text-ink-muted">
-        Decide where Continuum can read and write. By default, it has read-only access to your home
-        directory and read-write in a projects folder you pick. Secrets, SSH keys, and browser
-        profiles are always blocked.
+    <StepContainer eyebrow="Step 4" title="Permissions">
+      <p className="text-[14px] text-ink-muted">
+        By default, Continuum reads your home folder (read-only) and writes inside a projects folder
+        you pick. Secrets and SSH keys are always blocked.
       </p>
 
-      <div className="continuum-card">
-        <p className="font-medium">Mode</p>
-        <div className="mt-2 flex gap-4 text-sm">
-          {(["default", "custom"] as const).map((m) => (
-            <label key={m} className="flex items-center gap-1">
-              <input
-                type="radio"
-                checked={payload.permissions === m}
-                onChange={() => setPayload({ ...payload, permissions: m })}
-              />
-              <span>{m === "default" ? "I'll use defaults" : "Custom folders"}</span>
-            </label>
-          ))}
-        </div>
+      <div className="flex gap-2">
+        <Chip active={payload.permissions === "default"} onClick={() => setPayload({ ...payload, permissions: "default" })}>
+          Use defaults
+        </Chip>
+        <Chip active={payload.permissions === "custom"} onClick={() => setPayload({ ...payload, permissions: "custom" })}>
+          Custom folders
+        </Chip>
       </div>
 
       {payload.permissions === "custom" && (
-        <div className="continuum-card">
-          <p className="font-medium">Additional read-write paths</p>
-          <div className="mt-2 flex gap-2">
+        <div className="w-soft">
+          <div className="flex gap-2">
             <input
               type="text"
               value={newPath}
               onChange={(e) => setNewPath(e.target.value)}
               placeholder="C:\Users\you\projects"
-              className="flex-1 rounded-md border border-bg-border bg-bg-elevated px-2 py-1 text-sm"
+              className="flex-1 rounded-lg border border-bg-border bg-bg-elevated px-3 py-1.5 text-[13px] text-ink"
             />
             <button
               onClick={() => {
                 if (newPath) {
-                  setPayload({
-                    ...payload,
-                    extra_paths: [...payload.extra_paths, newPath],
-                  });
+                  setPayload({ ...payload, extra_paths: [...payload.extra_paths, newPath] });
                   setNewPath("");
                 }
               }}
-              className="continuum-button-primary"
+              className="press rounded-lg border border-amber-400/50 bg-amber-400/15 px-3 py-1.5 text-[12px] font-medium text-amber-200 hover:bg-amber-400/25"
             >
               Add
             </button>
           </div>
-          <ul className="mt-2 space-y-1 text-sm text-ink-muted">
-            {payload.extra_paths.map((p) => (
-              <li key={p} className="flex justify-between">
-                <code className="continuum-code">{p}</code>
-                <button
-                  className="text-red-400 hover:underline"
-                  onClick={() =>
-                    setPayload({
-                      ...payload,
-                      extra_paths: payload.extra_paths.filter((x) => x !== p),
-                    })
-                  }
-                >
-                  remove
-                </button>
-              </li>
-            ))}
-          </ul>
+          {payload.extra_paths.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {payload.extra_paths.map((p) => (
+                <li key={p} className="flex items-center justify-between text-[12px]">
+                  <Code>{p}</Code>
+                  <button
+                    className="text-red-400 hover:underline"
+                    onClick={() =>
+                      setPayload({
+                        ...payload,
+                        extra_paths: payload.extra_paths.filter((x) => x !== p),
+                      })
+                    }
+                  >
+                    remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
-      <div className="continuum-card">
-        <p className="font-medium">Always blocked</p>
-        <p className="mt-1 text-xs text-ink-muted">
-          These paths Continuum never reads or writes, regardless of config:
-        </p>
-        <ul className="mt-2 grid grid-cols-2 gap-1 text-xs text-ink-dim">
-          {[
-            ".ssh",
-            ".aws",
-            ".gnupg",
-            ".docker",
-            "User Data (browsers)",
-            "Profiles",
-            "*.pem / *.key / id_rsa*",
-            ".env*",
-            "*.kdbx (KeePass)",
-            "AppData (by default)",
-          ].map((d) => (
-            <li key={d}>
-              <code className="continuum-code">{d}</code>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <p className="text-[11px] text-ink-dim">
+        Always blocked: .ssh, .aws, .gnupg, browser profiles, *.pem / *.key, .env files.
+      </p>
     </StepContainer>
   );
 }
@@ -693,13 +681,12 @@ function PersonalStep({
   setPayload: (p: OnboardingPayload) => void;
 }) {
   return (
-    <StepContainer title="A little about you">
-      <p className="text-ink-muted">
-        Anything you enter here gets written to Continuum&apos;s semantic memory so the orchestrator can
-        use it. Everything is optional and editable later from the Memory tab.
+    <StepContainer eyebrow="Step 5" title="A little about you">
+      <p className="text-[14px] text-ink-muted">
+        Optional. Stored in Continuum&apos;s semantic memory so the orchestrator can use it. Editable
+        later from the Memory tab.
       </p>
-
-      <div className="continuum-card space-y-3">
+      <div className="flex flex-col gap-3">
         <LabeledInput
           label="Name"
           value={payload.name ?? ""}
@@ -730,13 +717,13 @@ function LabeledInput({
 }) {
   return (
     <label className="block">
-      <span className="text-sm font-medium">{label}</span>
+      <span className="mb-1 block text-[12px] font-medium text-ink-muted">{label}</span>
       <input
         type="text"
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-1.5 text-sm"
+        className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink"
       />
     </label>
   );
@@ -764,11 +751,7 @@ function DiagnosticsStep() {
       setChecks(result.checks);
     } catch (err) {
       setChecks((cs) =>
-        cs.map((c) => ({
-          ...c,
-          status: "fail" as const,
-          detail: String(err),
-        }))
+        cs.map((c) => ({ ...c, status: "fail" as const, detail: String(err) }))
       );
     } finally {
       setRunning(false);
@@ -780,32 +763,58 @@ function DiagnosticsStep() {
   }, []);
 
   return (
-    <StepContainer title="Diagnostics">
-      <p className="text-ink-muted">
-        One last check that everything is wired up correctly. If anything fails, you can retry or
-        let the repair agent attempt a fix.
+    <StepContainer eyebrow="Step 6" title="Diagnostics">
+      <p className="text-[14px] text-ink-muted">
+        One last check that everything is wired up. Retry, or let the repair agent try.
       </p>
 
-      <div className="continuum-card space-y-1">
-        {checks.map((c) => (
-          <StatusRow key={c.name} label={c.name} state={c.status} detail={c.detail} />
+      <div className="w-soft">
+        {checks.map((c, i) => (
+          <div key={c.name} className={clsx("w-row", i > 0 && "")}>
+            <StatusIcon state={c.status} />
+            <span className="flex-1 text-[13px] font-medium text-ink">{c.name}</span>
+            {c.detail && (
+              <span
+                className={clsx(
+                  "text-[11px]",
+                  c.status === "fail" ? "text-red-400" : "text-ink-dim"
+                )}
+              >
+                {c.detail}
+              </span>
+            )}
+          </div>
         ))}
       </div>
 
-      <div className="flex gap-3">
-        <button onClick={run} disabled={running} className="continuum-button-primary">
+      <div className="flex gap-2">
+        <button
+          onClick={run}
+          disabled={running}
+          className="press inline-flex items-center gap-2 rounded-lg border border-amber-400/50 bg-amber-400/15 px-3 py-1.5 text-[12px] font-medium text-amber-200 hover:bg-amber-400/25 disabled:opacity-50"
+        >
+          {running ? <Loader2 size={13} className="animate-spin" /> : <RefreshIcon />}
           {running ? "Running..." : "Re-run"}
         </button>
         {!allPass && !running && (
           <button
             onClick={() => invoke("trigger_repair", { reason: "onboarding-diagnostics" })}
-            className="rounded-md border border-accent-purple px-3 py-1.5 text-sm text-accent-purple hover:bg-bg-hover"
+            className="press rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink"
           >
             Fix with repair agent
           </button>
         )}
       </div>
     </StepContainer>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 1 1-3-6.7" />
+      <path d="M21 3v6h-6" />
+    </svg>
   );
 }
 
@@ -822,26 +831,19 @@ const INITIAL_CHECKS: DiagnosticCheck[] = [
 
 function DoneStep({ onStart: _onStart }: { onStart: () => void }) {
   return (
-    <StepContainer title="Continuum is ready">
-      <p className="text-ink-muted">
-        That&apos;s it. Continuum will run in the background from now on.
-      </p>
-      <div className="continuum-card space-y-2 text-sm text-ink-muted">
-        <p className="font-medium text-ink">A few things to try first:</p>
-        <ul className="list-disc space-y-1 pl-5">
-          <li>
-            Say <em>&quot;hey continuum, hello&quot;</em> — simplest end-to-end test.
-          </li>
-          <li>
-            Press <code className="continuum-code">Ctrl+Shift+K</code> to talk without the wake word.
-          </li>
-          <li>Left-click the tray icon to open this dashboard again.</li>
-          <li>Right-click the tray icon for pause / mute / quit.</li>
-        </ul>
-      </div>
-      <p className="text-xs text-ink-dim">
-        Found something wrong? Head to the Health tab and click &quot;Fix Issues&quot; — the repair
-        agent will diagnose and try to fix it.
+    <StepContainer eyebrow="Ready" title="Continuum is set up">
+      <p className="text-[14px] text-ink-muted">It runs quietly in the background from now on.</p>
+      <ul className="flex flex-col gap-2.5 text-[13px] text-ink-muted">
+        <Bullet>
+          Say <em>&quot;hey continuum, hello&quot;</em> for the simplest end-to-end test.
+        </Bullet>
+        <Bullet>
+          Press <Code>Ctrl+Shift+K</Code> to talk without the wake word.
+        </Bullet>
+        <Bullet>Left-click the tray icon to open this dashboard again.</Bullet>
+      </ul>
+      <p className="text-[11px] text-ink-dim">
+        Something wrong? Open the Health tab and click &quot;Fix Issues&quot;.
       </p>
     </StepContainer>
   );
@@ -849,40 +851,17 @@ function DoneStep({ onStart: _onStart }: { onStart: () => void }) {
 
 // ---- Helpers ---------------------------------------------------------------
 
-function StepContainer({ title, children }: { title: string; children: React.ReactNode }) {
+function Code({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-auto flex max-w-3xl flex-col gap-4">
-      <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+    <code className="rounded-md border border-bg-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[12px] text-amber-200">
       {children}
-    </div>
-  );
-}
-
-function StatusRow({
-  label,
-  state,
-  detail,
-}: {
-  label: string;
-  state: "ok" | "fail" | "skip" | "pending";
-  detail?: string;
-}) {
-  return (
-    <div className="flex items-center gap-3 py-1">
-      <StatusIcon state={state} />
-      <span className="flex-1 font-medium">{label}</span>
-      {detail && (
-        <span className={clsx("text-xs", state === "fail" ? "text-red-400" : "text-ink-dim")}>
-          {detail}
-        </span>
-      )}
-    </div>
+    </code>
   );
 }
 
 function StatusIcon({ state }: { state: "ok" | "fail" | "skip" | "pending" }) {
-  if (state === "ok") return <Check size={16} className="text-green-500" />;
+  if (state === "ok") return <Check size={16} className="text-emerald-400" />;
   if (state === "fail") return <AlertCircle size={16} className="text-red-400" />;
   if (state === "skip") return <Check size={16} className="text-ink-dim" />;
-  return <Loader2 size={16} className="animate-spin text-accent-purple" />;
+  return <Loader2 size={16} className="animate-spin text-amber-400" />;
 }

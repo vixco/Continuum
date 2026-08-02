@@ -56,7 +56,7 @@ export function ResourcePanel() {
       try {
         const result = await continuum.updateResourceProfile(partial);
         // The backend may flip profile to Custom when an individual knob is
-        // set alongside a preset — adopt whatever it returns as the new
+        // set alongside a preset - adopt whatever it returns as the new
         // baseline so the UI reflects ground truth.
         setDraft(result.config);
         setProfile((prev) =>
@@ -101,13 +101,13 @@ export function ResourcePanel() {
         {/* Restart-to-apply banner */}
         {dirty && !profile.applied && (
           <div className="rounded-md border border-state-warn/30 bg-state-warn/10 px-3 py-2 text-xs text-state-warn">
-            Changes saved to config. <b>Restart the Continuum runtime</b> to apply — the resource
+            Changes saved to config. <b>Restart the Continuum runtime</b> to apply - the resource
             plan is resolved once at boot.
           </div>
         )}
         {profile.applied && (
           <div className="rounded-md border border-state-healthy/30 bg-state-healthy/10 px-3 py-2 text-xs text-state-healthy">
-            Plan is live — the running runtime has applied this resource plan.
+            Plan is live - the running runtime has applied this resource plan.
           </div>
         )}
         {error && (
@@ -169,12 +169,12 @@ export function ResourcePanel() {
             {draft.profile === "auto"
               ? "Picks Barely-notice on laptops / CPU-only boxes, Balanced on a GPU desktop."
               : isCustom
-                ? "Individual knobs are honoured verbatim — no preset overrides."
+                ? "Individual knobs are honoured verbatim - no preset overrides."
                 : `Preset uses ~${Math.round((PROFILE_PRESET_FRACTIONS[draft.profile] ?? 0.3) * 100)}% of cores.`}
           </p>
         </div>
 
-        {/* Custom knobs — only editable when profile is Custom. When on a
+        {/* Custom knobs - only editable when profile is Custom. When on a
             preset, editing any knob flips the profile to Custom (handled
             server-side) so we render them disabled-but-visible to show what
             the preset resolves to. */}

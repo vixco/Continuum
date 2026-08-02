@@ -223,7 +223,7 @@ export function ToolsTab() {
                   </div>
                   <div className="truncate text-xs text-ink-muted">{s.description}</div>
                   <div className="mt-0.5 truncate text-[11px] text-ink-dim">
-                    triggers: {s.triggers.join(", ") || "—"}
+                    triggers: {s.triggers.join(", ") || "-"}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">

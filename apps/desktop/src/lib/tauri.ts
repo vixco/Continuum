@@ -1,6 +1,6 @@
 // Thin wrappers around Tauri's invoke/listen. `isTauri()` lets components
 // degrade gracefully in the Next.js dev server (pnpm dev) where the Tauri
-// globals aren't injected — each command returns sensible empty defaults
+// globals aren't injected - each command returns sensible empty defaults
 // so the UI still renders for design iteration.
 
 "use client";
