@@ -122,6 +122,115 @@ async fn maps_401_and_429() {
 }
 
 #[tokio::test]
+async fn stream_end_without_done_still_yields_done() {
+    let server = MockServer::start().await;
+    // No `data: [DONE]` terminator — the mock server closes the connection
+    // after writing this body, so the stream must end on its own.
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut stream = adapter(&server, None)
+        .stream_chat(req(), CancellationToken::new())
+        .await
+        .expect("stream");
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            continuum_gateway::ChatEvent::Delta { text: t } => text.push_str(&t),
+            continuum_gateway::ChatEvent::Done { .. } => done = true,
+            continuum_gateway::ChatEvent::Error { message, .. } => panic!("error: {message}"),
+        }
+    }
+    assert_eq!(text, "Hi");
+    assert!(
+        done,
+        "connection close without [DONE] must still yield Done"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_yields_cancelled_error() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let cancel = CancellationToken::new();
+    let mut stream = adapter(&server, None)
+        .stream_chat(req(), cancel.clone())
+        .await
+        .expect("stream");
+    // Cancel before ever polling the stream: the eager `is_cancelled()`
+    // check at the top of the stream task's loop guarantees the Cancelled
+    // error wins deterministically, rather than racing an already-cancelled
+    // token against a possibly-already-buffered first chunk.
+    cancel.cancel();
+    let ev = stream.next().await.expect("event");
+    match ev {
+        continuum_gateway::ChatEvent::Error { message, retryable } => {
+            assert_eq!(message, GatewayError::Cancelled.user_message());
+            assert!(!retryable);
+        }
+        other => panic!("expected cancelled error as first event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn idle_timeout_yields_timeout_error() {
+    // Coverage note: wiremock can only delay a response as a whole (there's
+    // no way to start writing a body and then stall mid-stream), so this
+    // exercises the *outer* request timeout added for the "no overall
+    // request timeout" finding — the initial POST's `send()` is bounded by
+    // `idle_timeout` — rather than the mid-stream idle-timeout branch inside
+    // `stream_events`'s `tokio::select!` loop. A mid-stream stall isn't
+    // constructible with wiremock.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw("data: [DONE]\n\n", "text/event-stream")
+                .set_delay(Duration::from_secs(1)),
+        )
+        .mount(&server)
+        .await;
+
+    let a = OpenAiCompatAdapter::new(
+        format!("{}/v1", server.uri()),
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(200),
+    )
+    .expect("adapter");
+    let err = a
+        .stream_chat(req(), CancellationToken::new())
+        .await
+        .err()
+        .expect("err");
+    assert!(matches!(err, GatewayError::Timeout));
+}
+
+#[tokio::test]
 async fn unreachable_maps_to_unreachable() {
     let a = OpenAiCompatAdapter::new(
         "http://127.0.0.1:9".into(), // port 9 (discard) — nothing listens
