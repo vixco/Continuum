@@ -1,6 +1,7 @@
 "use client";
 
 import { clsx } from "clsx";
+import { useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -331,12 +332,22 @@ export function Modal({
   footer?: ReactNode;
   width?: "sm" | "md" | "lg";
 }>) {
+  // Close only when the press both started AND ended on the backdrop.
+  // A text-selection drag that starts inside the panel and releases outside
+  // dispatches its click on the backdrop, which must not dismiss the modal.
+  const pressStartedOnBackdrop = useRef(false);
   if (!open) return null;
   const widthClass = width === "sm" ? "max-w-sm" : width === "lg" ? "max-w-2xl" : "max-w-md";
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+      onMouseDown={(e) => {
+        pressStartedOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && pressStartedOnBackdrop.current) onClose();
+        pressStartedOnBackdrop.current = false;
+      }}
     >
       <div
         className={clsx(
