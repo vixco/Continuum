@@ -286,11 +286,9 @@ export const continuum = {
   resetOnboarding: () => invoke<boolean>("reset_onboarding", undefined, false),
   catalogList: () => invoke<CatalogEntry[]>("catalog_list", undefined, []),
   providersList: () => invoke<ProviderConnection[]>("providers_list", undefined, []),
-  providerAdd: (input: ProviderAddInput) =>
-    invoke<ProviderConnection>("provider_add", { input }),
+  providerAdd: (input: ProviderAddInput) => invoke<ProviderConnection>("provider_add", { input }),
   providerTest: (id: string) => invoke<ConnectionTestReport>("provider_test", { id }),
-  providerRefreshModels: (id: string) =>
-    invoke<string[]>("provider_refresh_models", { id }),
+  providerRefreshModels: (id: string) => invoke<string[]>("provider_refresh_models", { id }),
   providerRemove: (id: string) => invoke<void>("provider_remove", { id }),
   providerSetDefaultModel: (id: string, model: string) =>
     invoke<void>("provider_set_default_model", { id, model }),

@@ -12,6 +12,14 @@ env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.94.0"
   CARGO_TARGET_DIR: target
+  # sccache wraps rustc/cc so whisper.cpp + llama.cpp + ort + lancedb native
+  # compiles are cache hits across releases. First release is full speed;
+  # every subsequent release reuses the C/C++ objects in seconds. The wrapper
+  # is installed before any cargo invocation below, so it never poisons an
+  # earlier cargo step.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: ${{ runner.temp }}/sccache
+  SCCACHE_CACHE_SIZE: 4G
 
 jobs:
   release:
@@ -69,6 +77,21 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # whisper-rs-sys bindgen needs libclang. windows-latest ships LLVM, but
+      # pin the path explicitly (mirrors ci.yml clippy-full) so an image change
+      # never silently breaks the release build at the bindgen step.
+      - name: Configure LLVM + ninja for bindgen / cmake
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) { choco install llvm --no-progress --confirm }
+          echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
+          choco install ninja --no-progress --confirm --skip-if-not-installed
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -112,10 +135,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-release-
 
-      # CI is the test gate. A second full `cargo test --release` compiled the
-      # ML/native workspace again before this one required production build.
+      # CI is the test gate. Build only the dep graph of the two shipped bins
+      # (continuum + continuum-mcp); continuum-gateway and the Tauri desktop
+      # crate are not deps of either bin and are built in their own step.
+      # sccache (set via RUSTC_WRAPPER in the job env) turns the whisper.cpp /
+      # llama.cpp / ort / lancedb native compiles into cache hits after the
+      # first release.
       - name: Build release binaries
-        run: cargo build --workspace --release --locked --bin continuum --bin continuum-mcp
+        run: cargo build --release --locked --bin continuum --bin continuum-mcp
 
       - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop

@@ -35,7 +35,7 @@ import { clsx } from "clsx";
 import { invoke } from "@tauri-apps/api/core";
 
 type StepId =
-  | "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
+  "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
 
 const STEPS: Array<{ id: StepId; label: string; icon: typeof Sparkles }> = [
   { id: "welcome", label: "Welcome", icon: Sparkles },
@@ -122,9 +122,7 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
         <div className="wizard-card" key={step}>
           <div className="wizard-step">
             {step === "welcome" && <WelcomeStep onNext={goNext} />}
-            {step === "claude" && (
-              <ConnectStep payload={payload} setPayload={setPayload} />
-            )}
+            {step === "claude" && <ConnectStep payload={payload} setPayload={setPayload} />}
             {step === "models" && (
               <ModelsStep payload={payload} setPayload={setPayload} onNext={goNext} />
             )}
@@ -210,9 +208,7 @@ function StepContainer({
             {eyebrow}
           </p>
         )}
-        <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-ink">
-          {title}
-        </h1>
+        <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-ink">{title}</h1>
       </div>
       {children}
     </div>
@@ -281,8 +277,7 @@ function ConnectStep({
       // or to the first installed CLI if claude isn't present.
       if (!list.some((c) => c.id === payload.orchestrator_cli && c.installed)) {
         const fallback =
-          list.find((c) => c.id === "claude" && c.installed) ??
-          list.find((c) => c.installed);
+          list.find((c) => c.id === "claude" && c.installed) ?? list.find((c) => c.installed);
         setPayload({ ...payload, orchestrator_cli: fallback?.id ?? "claude" });
       }
     } catch (err) {
@@ -343,14 +338,10 @@ function ConnectStep({
                       Recommended
                     </span>
                   )}
-                  {!c.installed && (
-                    <span className="text-[10px] text-ink-dim">not installed</span>
-                  )}
+                  {!c.installed && <span className="text-[10px] text-ink-dim">not installed</span>}
                 </span>
                 <span className="truncate text-[11px] text-ink-dim">
-                  {c.installed
-                    ? c.version ?? "installed"
-                    : c.install_hint}
+                  {c.installed ? (c.version ?? "installed") : c.install_hint}
                 </span>
               </span>
               <span className="shrink-0 text-right text-[11px]">
@@ -404,8 +395,20 @@ const DEFAULT_QWEN_URL =
 const MODELS: ModelInfo[] = [
   { key: "smolvlm", label: "SmolVLM-256M", size: "~500 MB", purpose: "Vision", url: "" },
   { key: "qwen3-8b", label: "Qwen 3 8B Q4_K_M", size: "~4.5 GB", purpose: "Triage", url: "" },
-  { key: "whisper-medium", label: "Whisper medium", size: "~1.5 GB", purpose: "Speech-to-text", url: "" },
-  { key: "piper-voices", label: "Piper voices", size: "~150 MB", purpose: "Text-to-speech", url: "" },
+  {
+    key: "whisper-medium",
+    label: "Whisper medium",
+    size: "~1.5 GB",
+    purpose: "Speech-to-text",
+    url: "",
+  },
+  {
+    key: "piper-voices",
+    label: "Piper voices",
+    size: "~150 MB",
+    purpose: "Text-to-speech",
+    url: "",
+  },
 ];
 
 function ModelsStep({
@@ -513,7 +516,10 @@ function ModelsStep({
               <span className="flex-1 text-[12px] text-ink-muted">{m.purpose}</span>
               <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
                 <div
-                  className={clsx("h-full transition-all", done ? "bg-emerald-400" : "bg-amber-400")}
+                  className={clsx(
+                    "h-full transition-all",
+                    done ? "bg-emerald-400" : "bg-amber-400"
+                  )}
                   style={{ width: `${pct}%` }}
                 />
               </div>
@@ -579,9 +585,7 @@ function VoiceStep({
         <div>
           <div className="mb-1 flex items-center justify-between">
             <span className="text-[13px] font-medium text-ink">Sensitivity</span>
-            <span className="text-[11px] text-ink-dim">
-              {payload.wake_sensitivity.toFixed(2)}
-            </span>
+            <span className="text-[11px] text-ink-dim">{payload.wake_sensitivity.toFixed(2)}</span>
           </div>
           <input
             type="range"
@@ -611,7 +615,8 @@ function VoiceStep({
             ))}
           </div>
           <p className="mt-1.5 text-[11px] text-ink-dim">
-            Continuum speaks English and Dutch out loud; other languages set the UI and triage preference.
+            Continuum speaks English and Dutch out loud; other languages set the UI and triage
+            preference.
           </p>
         </div>
       </div>
@@ -732,9 +737,7 @@ function DevicePicker({
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center justify-between rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink transition-colors hover:border-bg-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40"
       >
-        <span className="truncate text-left">
-          {selected ? selected.name : "System default"}
-        </span>
+        <span className="truncate text-left">{selected ? selected.name : "System default"}</span>
         <ChevronRight
           size={14}
           className={clsx("shrink-0 text-ink-dim transition-transform", open && "rotate-90")}
@@ -797,10 +800,16 @@ function PermissionsStep({
       </p>
 
       <div className="flex gap-2">
-        <Chip active={payload.permissions === "default"} onClick={() => setPayload({ ...payload, permissions: "default" })}>
+        <Chip
+          active={payload.permissions === "default"}
+          onClick={() => setPayload({ ...payload, permissions: "default" })}
+        >
           Use defaults
         </Chip>
-        <Chip active={payload.permissions === "custom"} onClick={() => setPayload({ ...payload, permissions: "custom" })}>
+        <Chip
+          active={payload.permissions === "custom"}
+          onClick={() => setPayload({ ...payload, permissions: "custom" })}
+        >
           Custom folders
         </Chip>
       </div>
@@ -867,8 +876,8 @@ function PersonalStep({
   return (
     <StepContainer eyebrow="Step 5" title="A little about you">
       <p className="text-[14px] text-ink-muted">
-        Optional. Stored in Continuum&apos;s semantic memory so the orchestrator can use it. Editable
-        later from the Memory tab.
+        Optional. Stored in Continuum&apos;s semantic memory so the orchestrator can use it.
+        Editable later from the Memory tab.
       </p>
       <div className="flex flex-col gap-3">
         <LabeledInput
@@ -934,9 +943,7 @@ function DiagnosticsStep() {
       const result = await invoke<{ checks: DiagnosticCheck[] }>("run_diagnostics");
       setChecks(result.checks);
     } catch (err) {
-      setChecks((cs) =>
-        cs.map((c) => ({ ...c, status: "fail" as const, detail: String(err) }))
-      );
+      setChecks((cs) => cs.map((c) => ({ ...c, status: "fail" as const, detail: String(err) })));
     } finally {
       setRunning(false);
     }
@@ -995,7 +1002,16 @@ function DiagnosticsStep() {
 
 function RefreshIcon() {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M21 12a9 9 0 1 1-3-6.7" />
       <path d="M21 3v6h-6" />
     </svg>

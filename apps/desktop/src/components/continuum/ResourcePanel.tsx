@@ -202,13 +202,22 @@ export function ResourcePanel() {
               </span>
             </div>
             <div className="flex gap-1.5">
-              <TriButton active={draft.gpu_enabled === null} onClick={() => void update({ gpu_enabled: null })}>
+              <TriButton
+                active={draft.gpu_enabled === null}
+                onClick={() => void update({ gpu_enabled: null })}
+              >
                 Auto
               </TriButton>
-              <TriButton active={draft.gpu_enabled === true} onClick={() => void update({ gpu_enabled: true })}>
+              <TriButton
+                active={draft.gpu_enabled === true}
+                onClick={() => void update({ gpu_enabled: true })}
+              >
                 On
               </TriButton>
-              <TriButton active={draft.gpu_enabled === false} onClick={() => void update({ gpu_enabled: false })}>
+              <TriButton
+                active={draft.gpu_enabled === false}
+                onClick={() => void update({ gpu_enabled: false })}
+              >
                 Off
               </TriButton>
             </div>
@@ -307,10 +316,7 @@ function SystemResourcesSummary() {
   return (
     <div className="flex items-center justify-between rounded-md border border-bg-border bg-bg-elevated px-3 py-2">
       <div className="text-xs text-ink-muted">Live system load</div>
-      <StatusBadge
-        status={probe.status}
-        label={probe.last_error ?? "within headroom"}
-      />
+      <StatusBadge status={probe.status} label={probe.last_error ?? "within headroom"} />
     </div>
   );
 }

@@ -52,7 +52,10 @@ export function IntegrationsPanel() {
   useEffect(() => {
     void (async () => {
       try {
-        const [cat, provs] = await Promise.all([continuum.catalogList(), continuum.providersList()]);
+        const [cat, provs] = await Promise.all([
+          continuum.catalogList(),
+          continuum.providersList(),
+        ]);
         setCatalog(cat);
         setProviders(provs);
         setError(null);

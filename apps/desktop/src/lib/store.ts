@@ -14,7 +14,13 @@ import {
   subscribeRepair,
   subscribeState,
 } from "./tauri";
-import type { ComponentHealth, ContinuumConfig, ContinuumState, LogEntry, RepairEvent } from "./types";
+import type {
+  ComponentHealth,
+  ContinuumConfig,
+  ContinuumState,
+  LogEntry,
+  RepairEvent,
+} from "./types";
 
 interface Store {
   state: ContinuumState;

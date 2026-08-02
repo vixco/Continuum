@@ -86,9 +86,7 @@ function ChatWorkspace() {
   // text we remember), and always scoped to the conversation the failed
   // send belongs to - so Retry can never fire into the wrong chat, or
   // linger next to an unrelated (load/delete/model-switch) error.
-  const [retryInfo, setRetryInfo] = useState<{ conversationId: string; text: string } | null>(
-    null
-  );
+  const [retryInfo, setRetryInfo] = useState<{ conversationId: string; text: string } | null>(null);
   const [composerText, setComposerText] = useState("");
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -129,7 +127,11 @@ function ChatWorkspace() {
   // appear next to a message it doesn't apply to. Only the two
   // send-failure call sites pass a real `retry`.
   const showConversationError = useCallback(
-    (id: string, message: string, retry: { conversationId: string; text: string } | null = null) => {
+    (
+      id: string,
+      message: string,
+      retry: { conversationId: string; text: string } | null = null
+    ) => {
       setErrors((e) => ({ ...e, [id]: message }));
       setRetryInfo((r) => (retry ? retry : r?.conversationId === id ? null : r));
     },
@@ -455,7 +457,9 @@ function ChatWorkspace() {
                   <button
                     type="button"
                     aria-label={
-                      confirmDeleteId === c.id ? "Confirm delete conversation" : "Delete conversation"
+                      confirmDeleteId === c.id
+                        ? "Confirm delete conversation"
+                        : "Delete conversation"
                     }
                     disabled={deletingId === c.id}
                     onClick={() => handleDeleteClick(c.id)}
@@ -477,7 +481,9 @@ function ChatWorkspace() {
         {!activeConv ? (
           <div className="flex flex-1 items-center justify-center">
             <EmptyState
-              title={providers.length === 0 ? "Connect a provider to start" : "No conversation selected"}
+              title={
+                providers.length === 0 ? "Connect a provider to start" : "No conversation selected"
+              }
               description={
                 providers.length === 0
                   ? "Open Settings -> Integrations to add a model."
