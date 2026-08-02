@@ -16,6 +16,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chat;
 mod chat_store;
 mod commands;
 mod components;
@@ -188,6 +189,14 @@ fn main() {
             providers::provider_refresh_models,
             providers::provider_remove,
             providers::provider_set_default_model,
+            chat::chat_list_conversations,
+            chat::chat_get_conversation,
+            chat::chat_create_conversation,
+            chat::chat_delete_conversation,
+            chat::chat_rename_conversation,
+            chat::chat_set_conversation_model,
+            chat::chat_send_message,
+            chat::chat_cancel,
             onboarding::check_claude_cli,
             onboarding::check_claude_auth,
             onboarding::list_audio_input_devices,
