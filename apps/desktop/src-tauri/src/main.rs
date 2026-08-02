@@ -180,6 +180,8 @@ fn main() {
             onboarding::run_diagnostics,
             onboarding::is_onboarding_complete,
             onboarding::complete_onboarding,
+            onboarding::reset_onboarding,
+            onboarding::list_ai_clis,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
