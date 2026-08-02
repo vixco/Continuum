@@ -10,6 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.94.0"
+  CARGO_TARGET_DIR: target
 
 jobs:
   release:
@@ -96,17 +98,24 @@ jobs:
         shell: pwsh
         run: .\scripts\bump-version.ps1 -NewVersion "${{ steps.version.outputs.version }}"
 
-      - name: Refresh Cargo.lock for the bumped workspace version
-        run: cargo generate-lockfile
+      # Cache failure must never block a signed release. The stable restore key
+      # reuses native dependencies across incrementing alpha versions.
+      - name: Restore release compiler cache
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-release-
 
-      # Compile the workspace only once. Release-profile tests leave the native
-      # dependencies ready for the binaries below; the previous debug tests
-      # followed by a fresh release build duplicated more than an hour of work.
-      - name: Run release tests (last-chance verification)
-        run: cargo test --workspace --release -- --skip matches_whisper_k_to_c_homophone
-
-      - name: Build release binaries from tested artifacts
-        run: cargo build --release --bin kairo --bin kairo-mcp
+      # CI is the test gate. A second full `cargo test --release` compiled the
+      # ML/native workspace again before this one required production build.
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked --bin kairo --bin kairo-mcp
 
       - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop
@@ -127,7 +136,7 @@ jobs:
 
           Copy-Item "target\release\kairo.exe" "$stage\"
           Copy-Item "target\release\kairo-mcp.exe" "$stage\"
-          $desktop = Get-ChildItem "apps\desktop\src-tauri\target\release" -Filter "kairo-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $desktop = Get-ChildItem "target\release" -Filter "kairo-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($desktop) { Copy-Item $desktop.FullName "$stage\" }
           Copy-Item "config" "$stage\config" -Recurse
           Copy-Item "prompts" "$stage\prompts" -Recurse
@@ -139,7 +148,7 @@ jobs:
           $portable = "kairo-$version-windows-x64.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
 
-          $bundleRoot = "apps\desktop\src-tauri\target\release\bundle"
+          $bundleRoot = "target\release\bundle"
           $msi = Get-ChildItem "$bundleRoot\msi" -Filter "*.msi" | Select-Object -First 1
           if (-not $msi) { throw "Tauri did not produce an MSI" }
           # Tauri 2's modern updater mode signs the installer executable

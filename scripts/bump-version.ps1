@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Validate the version loosely — we want to fail fast on typos but not be a SemVer parser.
+# Validate the version loosely - fail fast on typos without becoming a SemVer parser.
 if ($NewVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$') {
     Write-Error "Version '$NewVersion' doesn't look like SemVer (e.g. 0.1.0-alpha.1 or 1.2.3)."
     exit 1
@@ -51,6 +51,12 @@ $targets = @(
         Find    = '(version:\s*")[^"]+(")'
         Replace = '${1}' + $NewVersion + '${2}'
         Label   = "DEFAULT_STATE.system.version in tauri.ts"
+    },
+    @{
+        Path    = Join-Path $repoRoot "Cargo.lock"
+        Find    = '(?ms)(\[\[package\]\]\s*\r?\nname = "kairo-(?:core|desktop|llm|mcp|vision)"\s*\r?\nversion = ")[^"]+(")'
+        Replace = '${1}' + $NewVersion + '${2}'
+        Label   = "workspace packages in Cargo.lock"
     }
 )
 
@@ -63,7 +69,7 @@ foreach ($t in $targets) {
     $content = Get-Content $t.Path -Raw
     $updated = [System.Text.RegularExpressions.Regex]::Replace($content, $t.Find, $t.Replace)
     if ($updated -eq $content) {
-        Write-Warning "$($t.Label): no match in $($t.Path) — pattern may be out of date."
+        Write-Warning "$($t.Label): no match in $($t.Path) - pattern may be out of date."
         continue
     }
     if ($DryRun) {
@@ -77,11 +83,11 @@ foreach ($t in $targets) {
 
 Write-Host ""
 if ($DryRun) {
-    Write-Host "Dry run complete — no files modified." -ForegroundColor Yellow
+    Write-Host "Dry run complete - no files modified." -ForegroundColor Yellow
 } else {
     Write-Host "$changed file(s) updated." -ForegroundColor Green
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  cargo check --workspace   # regenerate Cargo.lock"
+    Write-Host "  cargo check --workspace"
     Write-Host "  git add -A"
     Write-Host "  git commit -m 'chore: bump version to $NewVersion'"
 }
