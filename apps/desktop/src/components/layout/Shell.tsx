@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
 import {
   Bell,
   Bot,
   Boxes,
+  Check,
   CircleHelp,
   Clock3,
   FolderGit2,
@@ -16,6 +17,7 @@ import {
   MemoryStick,
   MessageSquareShare,
   Minus,
+  RefreshCw,
   Search,
   Settings,
   X,
@@ -31,6 +33,7 @@ import {
   TimelineScreen,
 } from "@/components/continuum/screens";
 import { Dot } from "@/components/continuum/ui";
+import { kairo, type UpdateInfo } from "@/lib/tauri";
 
 type TabId = "home" | "projects" | "memory" | "agents" | "permissions" | "timeline" | "settings";
 
@@ -44,10 +47,91 @@ const NAV: Array<{ id: TabId; label: string; icon: typeof Home }> = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+type UpdatePhase = "idle" | "checking" | "current" | "available" | "downloading" | "error";
+
+interface UpdateState {
+  phase: UpdatePhase;
+  update: UpdateInfo | null;
+  message: string | null;
+  progress: number | null;
+}
+
+const AUTO_UPDATE_STORAGE_KEY = "continuum.auto-updates";
+
+function useUpdates() {
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(true);
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [state, setState] = useState<UpdateState>({
+    phase: "idle",
+    update: null,
+    message: null,
+    progress: null,
+  });
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(AUTO_UPDATE_STORAGE_KEY);
+    setAutoUpdateEnabled(stored !== "false");
+    setPreferencesReady(true);
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    setState((current) => ({ ...current, phase: "downloading", message: null, progress: 0 }));
+    try {
+      await kairo.installPendingUpdate((downloaded, total) => {
+        setState((current) => ({
+          ...current,
+          progress: total ? Math.round((downloaded / total) * 100) : null,
+        }));
+      });
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        phase: "error",
+        message: error instanceof Error ? error.message : "Update installation failed",
+      }));
+    }
+  }, []);
+
+  const checkForUpdates = useCallback(
+    async (automatic = false) => {
+      setState({ phase: "checking", update: null, message: null, progress: null });
+      try {
+        const update = await kairo.checkForUpdate();
+        if (!update) {
+          setState({ phase: "current", update: null, message: null, progress: null });
+          return;
+        }
+        setState({ phase: "available", update, message: null, progress: null });
+        if (automatic && autoUpdateEnabled) await installUpdate();
+      } catch (error) {
+        setState({
+          phase: "error",
+          update: null,
+          message: error instanceof Error ? error.message : "Update check failed",
+          progress: null,
+        });
+      }
+    },
+    [autoUpdateEnabled, installUpdate]
+  );
+
+  useEffect(() => {
+    if (preferencesReady) void checkForUpdates(true);
+  }, [checkForUpdates, preferencesReady]);
+
+  const setAutoUpdate = (enabled: boolean) => {
+    setAutoUpdateEnabled(enabled);
+    window.localStorage.setItem(AUTO_UPDATE_STORAGE_KEY, String(enabled));
+  };
+
+  return { autoUpdateEnabled, setAutoUpdate, state, checkForUpdates, installUpdate };
+}
+
 export function Shell() {
   const [tab, setTab] = useState<TabId>("home");
   const [agentMode, setAgentMode] = useState<"handoff" | "launch">("handoff");
   const [commandOpen, setCommandOpen] = useState(false);
+  const updates = useUpdates();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -72,6 +156,7 @@ export function Shell() {
         <Sidebar active={tab} onSelect={setTab} onCommand={() => setCommandOpen(true)} />
         <div className="relative min-w-0 flex-1 overflow-hidden">
           <GlobalBar />
+          <UpdateBanner state={updates.state} onInstall={updates.installUpdate} />
           <main
             className={clsx(
               "continuum-main",
@@ -85,13 +170,54 @@ export function Shell() {
             {tab === "agents" && <AgentsScreen mode={agentMode} setMode={setAgentMode} />}
             {tab === "permissions" && <PermissionsScreen />}
             {tab === "timeline" && <TimelineScreen />}
-            {tab === "settings" && <SettingsScreen />}
+            {tab === "settings" && (
+              <SettingsScreen
+                autoUpdateEnabled={updates.autoUpdateEnabled}
+                onAutoUpdateChange={updates.setAutoUpdate}
+                updateState={updates.state}
+                onCheckForUpdates={() => void updates.checkForUpdates()}
+                onInstallUpdate={() => void updates.installUpdate()}
+              />
+            )}
           </main>
         </div>
       </div>
       <StatusBar />
       {commandOpen && (
         <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={navigate} />
+      )}
+    </div>
+  );
+}
+
+function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () => void }) {
+  if (state.phase === "idle" || state.phase === "current" || state.phase === "checking")
+    return null;
+
+  const updateLabel = state.update ? `v${state.update.version}` : "update";
+  return (
+    <div className="mx-6 mt-3 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[.08] px-4 py-3 text-[11px] text-white/80">
+      {state.phase === "error" ? (
+        <span className="text-red-300">Update check failed: {state.message}</span>
+      ) : state.phase === "downloading" ? (
+        <>
+          <RefreshCw size={14} className="animate-spin text-amber-400" />
+          <span>
+            Installing {updateLabel}
+            {state.progress !== null ? ` (${state.progress}%)` : ""}…
+          </span>
+        </>
+      ) : (
+        <>
+          <Check size={14} className="text-amber-400" />
+          <span className="flex-1">Update available: {updateLabel}</span>
+          <button
+            onClick={onInstall}
+            className="rounded-md border border-amber-400/50 px-3 py-1.5 text-[10px] font-medium text-amber-300 hover:bg-amber-400/10"
+          >
+            Install update
+          </button>
+        </>
       )}
     </div>
   );

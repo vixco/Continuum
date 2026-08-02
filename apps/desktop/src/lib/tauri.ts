@@ -71,9 +71,78 @@ export async function listen<T>(event: string, handler: (payload: T) => void): P
   return api.listen<T>(event, (e) => handler(e.payload));
 }
 
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+
+interface UpdateDownloadEvent {
+  event: string;
+  data?: {
+    contentLength?: number | null;
+    chunkLength?: number;
+  };
+}
+
+interface PendingUpdate {
+  version: string;
+  body?: string | null;
+  date?: string | null;
+  downloadAndInstall: (onEvent: (event: UpdateDownloadEvent) => void) => Promise<void>;
+}
+
+let pendingUpdate: PendingUpdate | null = null;
+
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  if (!(await isTauri())) {
+    pendingUpdate = null;
+    return null;
+  }
+
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) {
+    pendingUpdate = null;
+    return null;
+  }
+
+  pendingUpdate = update as unknown as PendingUpdate;
+  return {
+    version: update.version,
+    notes: update.body ?? null,
+    date: update.date ?? null,
+  };
+}
+
+export async function installPendingUpdate(
+  onProgress?: (downloaded: number, total: number | null) => void
+): Promise<void> {
+  if (!pendingUpdate) {
+    throw new Error("No update is waiting to be installed");
+  }
+
+  let downloaded = 0;
+  let total: number | null = null;
+  await pendingUpdate.downloadAndInstall((event) => {
+    if (event.event === "Started") {
+      total = event.data?.contentLength ?? null;
+    } else if (event.event === "Progress") {
+      downloaded += event.data?.chunkLength ?? 0;
+    }
+    onProgress?.(downloaded, total);
+  });
+
+  pendingUpdate = null;
+  const { relaunch } = await import("@tauri-apps/plugin-process");
+  await relaunch();
+}
+
 // --- Commands ---
 
 export const kairo = {
+  checkForUpdate,
+  installPendingUpdate,
   getState: () => invoke<KairoState>("get_state", undefined, DEFAULT_STATE),
   getConfig: () => invoke<KairoConfig>("get_config", undefined, DEFAULT_CONFIG),
   updateVoiceVolume: (volume: number) =>

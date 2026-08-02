@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,30 +12,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-windows:
-    name: Build Windows release
+  release:
+    name: Build and publish Windows release
+    # The workflow commits a version bump back to main. Do not start a second
+    # release for that generated commit.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: windows-latest
+    concurrency:
+      group: continuum-release-main
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed for `git describe` in the release notes
+          fetch-depth: 0
 
-      - name: Extract version from tag
+      - name: Calculate next release version
         id: version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag -replace '^v', ''
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          $line = Get-Content "Cargo.toml" | Select-String '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { throw "Could not find the workspace version in Cargo.toml" }
+          $current = $line.Matches[0].Groups[1].Value
+          if ($current -match '^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$') {
+            $base = $Matches[1]
+            $channel = $Matches[2]
+            $nextNumber = [int]$Matches[3] + 1
+            $next = "$base-$channel.$nextNumber"
+          } elseif ($current -match '^([0-9]+)\.([0-9]+)\.([0-9]+)$') {
+            $next = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)"
+          } else {
+            throw "Unsupported SemVer in Cargo.toml: $current"
+          }
+
+          while (git tag --list "v$next") {
+            if ($next -match '^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$') {
+              $next = "$($Matches[1])-$($Matches[2]).$([int]$Matches[3] + 1)"
+            } else {
+              throw "Release tag v$next already exists; bump the source version manually."
+            }
+          }
+
+          "version=$next" >> $env:GITHUB_OUTPUT
+          "tag=v$next" >> $env:GITHUB_OUTPUT
+          Write-Host "Current source version: $current"
+          Write-Host "Next release version: $next"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install sccache
-        # .cargo/config.toml sets sccache as the rustc-wrapper + cmake launcher.
-        # Without this step the GitHub runner has no sccache and every cargo
-        # invocation fails with "program not found".
         uses: mozilla-actions/sccache-action@v0.0.5
 
       - name: Setup pnpm
@@ -50,14 +77,25 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure updater signing
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is not configured. Signed updater releases cannot be published safely."
+          }
+
+      - name: Bump version in release checkout
+        shell: pwsh
+        run: .\scripts\bump-version.ps1 -NewVersion "${{ steps.version.outputs.version }}"
+
+      - name: Refresh Cargo.lock for the bumped workspace version
+        run: cargo generate-lockfile
 
       - name: Run tests (last-chance verification)
         run: cargo test --workspace -- --skip matches_whisper_k_to_c_homophone
@@ -68,19 +106,23 @@ jobs:
       - name: Build kairo-mcp.exe (release)
         run: cargo build --release --bin kairo-mcp
 
-      - name: Install frontend deps (pnpm workspace root)
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Build Tauri desktop app (release, bundles MSI)
-        run: pnpm tauri build
+      - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
 
-      - name: Assemble portable bundle
+      - name: Assemble release assets and updater metadata
+        id: assets
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+          $repo = "${{ github.repository }}"
           $stage = "staging\kairo-$version-windows-x64"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
           Copy-Item "target\release\kairo.exe" "$stage\"
           Copy-Item "target\release\kairo-mcp.exe" "$stage\"
           $desktop = Get-ChildItem "apps\desktop\src-tauri\target\release" -Filter "kairo-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -92,82 +134,89 @@ jobs:
           Copy-Item "LICENSE" "$stage\"
           Copy-Item "KNOWN_ISSUES.md" "$stage\"
           Copy-Item "scripts\install.ps1" "$stage\install.ps1"
-          Compress-Archive -Path "$stage\*" -DestinationPath "kairo-$version-windows-x64.zip" -Force
-          echo "Portable bundle: kairo-$version-windows-x64.zip"
+          $portable = "kairo-$version-windows-x64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
 
-      - name: Locate MSI
-        id: msi
-        shell: pwsh
-        run: |
-          $msi = Get-ChildItem "apps\desktop\src-tauri\target\release\bundle\msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $msi) {
-            Write-Warning "No MSI produced; Tauri bundle may have failed."
-            echo "msi_path=" >> $env:GITHUB_OUTPUT
-          } else {
-            echo "msi_path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          $bundleRoot = "apps\desktop\src-tauri\target\release\bundle"
+          $msi = Get-ChildItem "$bundleRoot\msi" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) { throw "Tauri did not produce an MSI" }
+          # Tauri 2's modern updater mode signs the installer executable
+          # directly; v1Compatible mode emits a .nsis.zip instead. Accept
+          # either artifact so the release job remains migration-safe.
+          $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*.nsis.zip" | Select-Object -First 1
+          if (-not $nsis) {
+            $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*-setup.exe" | Select-Object -First 1
           }
+          if (-not $nsis) { throw "Tauri did not produce an NSIS updater artifact" }
+          $nsisSig = Get-Item "$($nsis.FullName).sig" -ErrorAction SilentlyContinue
+          if (-not $nsisSig) { throw "Tauri did not produce a signature for $($nsis.Name)" }
 
-      - name: Sign binaries (optional)
-        # Runs only if the signing secrets are configured. Otherwise skipped.
-        if: env.KAIRO_SIGN_THUMBPRINT != ''
-        env:
-          KAIRO_SIGN_THUMBPRINT: ${{ secrets.KAIRO_SIGN_THUMBPRINT }}
-        shell: pwsh
-        run: |
-          .\scripts\sign-release.ps1 -ArtifactDir "target\release" -Thumbprint $env:KAIRO_SIGN_THUMBPRINT
-
-      - name: Generate SHA256 checksums
-        id: checksums
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $zip = "kairo-$version-windows-x64.zip"
-          $lines = @()
-          if (Test-Path $zip) {
-            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-            $lines += "$hash  $zip"
-          }
-          if ("${{ steps.msi.outputs.msi_path }}") {
-            $msi = "${{ steps.msi.outputs.msi_path }}"
-            if (Test-Path $msi) {
-              $hash = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLower()
-              $lines += "$hash  $(Split-Path -Leaf $msi)"
+          $updaterExtension = if ($nsis.Extension -eq ".zip") { ".nsis.zip" } else { ".exe" }
+          $updaterName = "kairo-$version-windows-x64-updater$updaterExtension"
+          $signatureName = "$updaterName.sig"
+          Copy-Item $nsis.FullName $updaterName
+          Copy-Item $nsisSig.FullName $signatureName
+          $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
+          $latest = [ordered]@{
+            version = $version
+            notes = "Automatic Continuum release $tag. See the GitHub release notes for details."
+            pub_date = [DateTime]::UtcNow.ToString("o")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = "https://github.com/$repo/releases/download/$tag/$updaterName"
+              }
             }
           }
-          $lines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
+          $latest | ConvertTo-Json -Depth 5 | Set-Content -Path "latest.json" -Encoding utf8NoBOM
+
+          $shaFiles = @($portable, $msi.FullName, $updaterName, $signatureName, "latest.json")
+          $shaLines = foreach ($file in $shaFiles) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path -Leaf $file)"
+          }
+          $shaLines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
+
+          "msi_path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          "updater_name=$updaterName" >> $env:GITHUB_OUTPUT
+          "signature_name=$signatureName" >> $env:GITHUB_OUTPUT
+          Get-Content "latest.json"
           Get-Content "SHA256SUMS.txt"
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kairo-${{ steps.version.outputs.version }}-windows-x64
-          path: |
-            kairo-${{ steps.version.outputs.version }}-windows-x64.zip
-            ${{ steps.msi.outputs.msi_path }}
-            SHA256SUMS.txt
+      - name: Commit version and updater metadata to main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock apps/desktop/package.json apps/desktop/src-tauri/tauri.conf.json apps/desktop/src/lib/tauri.ts latest.json
+          git commit -m "chore(release): prepare ${{ steps.version.outputs.tag }} [skip ci]"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Continuum ${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main --follow-tags
 
-      - name: Create or update draft GitHub release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Kairo ${{ steps.version.outputs.tag }}
-          draft: true
+          name: Continuum ${{ steps.version.outputs.tag }}
+          draft: false
           prerelease: ${{ contains(steps.version.outputs.tag, '-alpha') || contains(steps.version.outputs.tag, '-beta') }}
           generate_release_notes: true
           files: |
             kairo-${{ steps.version.outputs.version }}-windows-x64.zip
-            ${{ steps.msi.outputs.msi_path }}
+            ${{ steps.assets.outputs.msi_path }}
+            ${{ steps.assets.outputs.updater_name }}
+            ${{ steps.assets.outputs.signature_name }}
+            latest.json
             SHA256SUMS.txt
           body: |
-            ## Kairo ${{ steps.version.outputs.tag }}
+            ## Continuum ${{ steps.version.outputs.tag }}
 
-            See [CHANGELOG.md](https://github.com/PrincNL/kairo-ai/blob/${{ steps.version.outputs.tag }}/CHANGELOG.md) for the full list of changes.
-
-            Known issues: [KNOWN_ISSUES.md](https://github.com/PrincNL/kairo-ai/blob/${{ steps.version.outputs.tag }}/KNOWN_ISSUES.md).
+            This release was published automatically after a successful push to `main`.
+            The Windows updater artifact is signed and is described by `latest.json`.
 
             **Install from this release:**
             ```powershell
-            irm https://raw.githubusercontent.com/PrincNL/kairo-ai/${{ steps.version.outputs.tag }}/scripts/install.ps1 | iex
+            irm https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.version.outputs.tag }}/scripts/install.ps1 | iex
             ```
 
-            This release is **unsigned** — Windows SmartScreen will warn on first launch.
+            Windows binaries remain unsigned; Windows SmartScreen may warn on first launch.

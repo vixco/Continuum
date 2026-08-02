@@ -168,6 +168,13 @@ state and must not be presented as a live integration. The visual language is:
 - dense but legible cards, 4/8px spacing rhythm, Lucide vector icons
 - keyboard-visible focus, reduced-motion support, and no hover-only actions
 
+Desktop distribution uses Tauri's signed updater for Windows. Release metadata
+is a public `latest.json` projection committed by the release workflow; the
+private signing key remains a GitHub Actions secret. The UI checks for updates
+at startup, exposes a manual check in Settings, and stores the user's automatic
+installation preference locally. Update installation is only delegated to the
+Tauri updater after its artifact signature has been verified.
+
 ## Migration sequence
 
 1. Make CI and dependency installation reproducible and blocking.

@@ -4,6 +4,13 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- **Signed desktop updates**: the Tauri app checks for updates at startup,
+  exposes a manual check in Settings, and lets users enable or disable
+  automatic installation. Windows update artifacts are signed and published
+  through the `main` push release workflow.
+
 ## [0.1.0-alpha.2] — 2026-04-18
 
 ### Security + reliability hardening (post-alpha.1 audit)

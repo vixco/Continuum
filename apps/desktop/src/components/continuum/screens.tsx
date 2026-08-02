@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 
 import { Badge, Button, Dot, Panel, Progress, Ring, StatCard, TextAction } from "./ui";
+import type { UpdateInfo } from "@/lib/tauri";
 
 function PageHeader({
   title,
@@ -1316,7 +1317,24 @@ export function TimelineScreen() {
   );
 }
 
-export function SettingsScreen() {
+export function SettingsScreen({
+  autoUpdateEnabled,
+  onAutoUpdateChange,
+  updateState,
+  onCheckForUpdates,
+  onInstallUpdate,
+}: {
+  autoUpdateEnabled: boolean;
+  onAutoUpdateChange: (enabled: boolean) => void;
+  updateState: {
+    phase: string;
+    update: UpdateInfo | null;
+    message: string | null;
+    progress: number | null;
+  };
+  onCheckForUpdates: () => void;
+  onInstallUpdate: () => void;
+}) {
   const tools = [
     ["Codex", "Full access", "2m ago"],
     ["Claude Code", "Full access", "3m ago"],
@@ -1353,6 +1371,52 @@ export function SettingsScreen() {
           )
         )}
       </div>
+      <Panel className="mb-3" title="Continuum updates">
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="min-w-[240px] flex-1">
+            <div className="text-[12px] text-white/80">Keep Continuum current</div>
+            <p className="mt-1 text-[10px] leading-4 text-white/40">
+              Updates are checked securely at startup and installed from signed release artifacts.
+            </p>
+          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-[11px] text-white/70">
+            <input
+              type="checkbox"
+              checked={autoUpdateEnabled}
+              onChange={(event) => onAutoUpdateChange(event.target.checked)}
+              className="h-4 w-4 accent-amber-400"
+            />
+            Install updates automatically
+          </label>
+          <Button onClick={onCheckForUpdates}>
+            <RefreshCw
+              size={13}
+              className={updateState.phase === "checking" ? "animate-spin" : ""}
+            />
+            Check for updates
+          </Button>
+        </div>
+        <div className="mt-3 border-t border-white/[.06] pt-3 text-[10px] text-white/45">
+          {updateState.phase === "checking" && "Checking for updates…"}
+          {updateState.phase === "current" && "You are up to date."}
+          {updateState.phase === "available" && updateState.update && (
+            <span className="flex flex-wrap items-center gap-3 text-amber-300">
+              Update v{updateState.update.version} is available.
+              <Button className="min-h-8 px-3" onClick={onInstallUpdate}>
+                Install now
+              </Button>
+            </span>
+          )}
+          {updateState.phase === "downloading" && (
+            <>
+              Installing update{updateState.progress !== null ? ` (${updateState.progress}%)` : ""}…
+            </>
+          )}
+          {updateState.phase === "error" && (
+            <span className="text-red-300">{updateState.message ?? "Update check failed."}</span>
+          )}
+        </div>
+      </Panel>
       <div className="grid gap-3 xl:grid-cols-[290px_minmax(0,1fr)_390px]">
         <div className="space-y-3">
           <Panel title="Connected tools" action={<Badge>12</Badge>}>
