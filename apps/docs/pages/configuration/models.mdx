@@ -1,25 +1,25 @@
 # Models
 
-All model config lives at `~/.kairo/config/default-models.toml`. Edit it directly or use the dashboard Brain tab.
+All model config lives at `~/.continuum/config/default-models.toml`. Edit it directly or use the dashboard Brain tab.
 
 ## Vision
 
 ```toml
 [vision]
 name = "SmolVLM-256M"
-model_path = ""                # blank = search ~/.kairo/models/vision
+model_path = ""                # blank = search ~/.continuum/models/vision
 gpu_enabled = false            # auto-detected at runtime; explicit true forces ONNX-GPU
 input_width = 384
 input_height = 384
 ```
 
-To swap: drop a new ONNX vision model into `~/.kairo/models/vision/` and point `model_path` at it. The model must implement the `VisionModel` trait — see `crates/kairo-vision` for the interface.
+To swap: drop a new ONNX vision model into `~/.continuum/models/vision/` and point `model_path` at it. The model must implement the `VisionModel` trait — see `crates/continuum-vision` for the interface.
 
 ## Triage
 
 ```toml
 [triage]
-model_path = "~/.kairo/models/triage/qwen3-8b-q4_k_m.gguf"
+model_path = "~/.continuum/models/triage/qwen3-8b-q4_k_m.gguf"
 gpu_layers = 999               # max; 0 for CPU-only
 grammar_path = "prompts/triage-grammar.gbnf"
 max_retries = 3
@@ -52,7 +52,7 @@ default_timeout_secs = 1800
 
 ```toml
 [audio]
-whisper_model_path = "~/.kairo/models/stt/whisper-medium.bin"
+whisper_model_path = "~/.continuum/models/stt/whisper-medium.bin"
 whisper_language = "auto"      # or "en", "nl", etc.
 
 [tts]
@@ -63,13 +63,33 @@ voices = { en = "en_US-norman-medium" }
 
 ## GPU detection
 
-Kairo auto-detects NVIDIA CUDA at startup. If found, triage runs on GPU (`gpu_layers = 999`) and vision runs on ONNX Runtime's CUDA provider. Override with explicit config values if you want CPU-only for debugging.
+At startup Continuum probes for NVIDIA CUDA in two steps: it tries to load
+`nvcuda.dll` (so a driver install without `nvidia-smi` on PATH still
+registers as CUDA-capable) and runs `nvidia-smi --query-gpu=memory.total` to
+read VRAM. When CUDA is present **and** VRAM is at least `resources.gpu_min_vram_mb`
+(default 3000 MB, enough for Qwen3-8B Q4_K_M with headroom), the triage LLM
+fully offloads to GPU (`gpu_layers = 999`) and the vision model builds its
+ONNX Runtime sessions with `CUDAExecutionProvider` (falling back to CPU +
+a warning if the CUDA EP commit fails). Below the VRAM floor, or on a box
+without CUDA, both fall back to CPU.
+
+This is part of the adaptive resource policy (`[resources]` in config /
+the dashboard Settings → Resources panel). To force CPU-only for debugging
+regardless of detected hardware, set:
+
+```toml
+[resources]
+gpu_enabled = false
+```
+
+To force GPU on even when detection fails, set `gpu_enabled = true`. Leave
+it unset (`null`) for the auto-detect behaviour above.
 
 ## Where models live
 
 Default search order:
 
 1. Explicit `model_path` in config
-2. `$KAIRO_MODELS_DIR` (set by the installer)
-3. `~/.kairo/models/`
-4. `~/.kairo-dev/models/` (for developer builds)
+2. `$CONTINUUM_MODELS_DIR` (set by the installer)
+3. `~/.continuum/models/`
+4. `~/.continuum-dev/models/` (for developer builds)

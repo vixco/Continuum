@@ -3,7 +3,7 @@
 import { Info, Volume2 } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import { Button, Card, Kbd, Select, Slider, Toggle } from "@/components/ui/primitives";
 
 export function VoiceTab() {
@@ -44,7 +44,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.wake_word_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag("wake_word_enabled", v);
+              const cfg = await continuum.updateVoiceFlag("wake_word_enabled", v);
               setConfig(cfg);
             }}
             label="Wake word enabled"
@@ -71,7 +71,7 @@ export function VoiceTab() {
               { value: "elevenlabs", label: "ElevenLabs (cloud plugin)" },
             ]}
             onChange={async (v) => {
-              const cfg = await kairo.updateTtsEngine(v);
+              const cfg = await continuum.updateTtsEngine(v);
               setConfig(cfg);
             }}
           />
@@ -80,7 +80,7 @@ export function VoiceTab() {
             value={config.tts.primary}
             options={voiceOptions}
             onChange={async (v) => {
-              const cfg = await kairo.updateTtsPrimaryVoice(v);
+              const cfg = await continuum.updateTtsPrimaryVoice(v);
               setConfig(cfg);
             }}
           />
@@ -88,7 +88,7 @@ export function VoiceTab() {
             label="Volume"
             value={config.voice.volume}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceVolume(v);
+              const cfg = await continuum.updateVoiceVolume(v);
               setConfig(cfg);
             }}
             format={(v) => `${Math.round(v * 100)}%`}
@@ -97,7 +97,7 @@ export function VoiceTab() {
             label="Length scale (speed)"
             value={config.tts.length_scale ?? 1}
             onChange={async (v) => {
-              const cfg = await kairo.updateTtsLengthScale(v);
+              const cfg = await continuum.updateTtsLengthScale(v);
               setConfig(cfg);
             }}
             min={0.7}
@@ -110,7 +110,7 @@ export function VoiceTab() {
             <Volume2 size={12} /> Preview
           </Button>
           <span className="text-xs text-ink-muted">
-            Plays "Kairo checking in" using the primary voice.
+            Plays "Continuum checking in" using the primary voice.
           </span>
         </div>
       </Card>
@@ -120,7 +120,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.barge_in_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag("barge_in_enabled", v);
+              const cfg = await continuum.updateVoiceFlag("barge_in_enabled", v);
               setConfig(cfg);
             }}
             label="Barge-in (stop speaking when I talk)"
@@ -128,7 +128,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.ambient_mute_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag("ambient_mute_enabled", v);
+              const cfg = await continuum.updateVoiceFlag("ambient_mute_enabled", v);
               setConfig(cfg);
             }}
             label="Mute during calls"
@@ -136,7 +136,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.feedback_sounds}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag("feedback_sounds", v);
+              const cfg = await continuum.updateVoiceFlag("feedback_sounds", v);
               setConfig(cfg);
             }}
             label="Feedback sounds (chimes)"
@@ -144,7 +144,7 @@ export function VoiceTab() {
           <Toggle
             checked={config.voice.language_detection_enabled}
             onChange={async (v) => {
-              const cfg = await kairo.updateVoiceFlag("language_detection_enabled", v);
+              const cfg = await continuum.updateVoiceFlag("language_detection_enabled", v);
               setConfig(cfg);
             }}
             label="Auto-switch voice by detected language"
@@ -167,11 +167,11 @@ function RestartNotice() {
       <Info size={16} className="mt-0.5 shrink-0 text-state-warn" />
       <div>
         <div className="font-medium text-ink">
-          Voice-instellingen worden pas toegepast bij de volgende start van Kairo.
+          Voice-instellingen worden pas toegepast bij de volgende start van Continuum.
         </div>
         <div className="mt-0.5 text-xs text-ink-muted">
           Wijzigingen hier worden opgeslagen, maar de daemon leest de config alleen bij opstart.
-          Sluit en herstart Kairo om ze actief te maken. (Live hot-reload komt in een latere
+          Sluit en herstart Continuum om ze actief te maken. (Live hot-reload komt in een latere
           update.)
         </div>
       </div>

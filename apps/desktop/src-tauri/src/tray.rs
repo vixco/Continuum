@@ -2,7 +2,7 @@
 //!
 //! Left-click shows the main window. The right-click menu offers the same
 //! actions the dashboard exposes (pause/resume, voice on/off, quit) so the
-//! user can drive Kairo without opening the window.
+//! user can drive Continuum without opening the window.
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -15,7 +15,7 @@ pub fn init(app: &mut App) -> tauri::Result<()> {
     let voice_on = MenuItem::with_id(app, "voice-on", "Voice on", true, None::<&str>)?;
     let voice_off = MenuItem::with_id(app, "voice-off", "Voice off", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Kairo", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Continuum", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
@@ -24,22 +24,28 @@ pub fn init(app: &mut App) -> tauri::Result<()> {
         ],
     )?;
 
-    let _tray = TrayIconBuilder::with_id("kairo-tray")
+    let _tray = TrayIconBuilder::with_id("continuum-tray")
         .menu(&menu)
-        .tooltip("Kairo — idle")
+        .tooltip("Continuum — idle")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "pause" => {
-                let _ = app.emit("kairo:control", serde_json::json!({"action": "pause"}));
+                let _ = app.emit("continuum:control", serde_json::json!({"action": "pause"}));
             }
             "resume" => {
-                let _ = app.emit("kairo:control", serde_json::json!({"action": "resume"}));
+                let _ = app.emit("continuum:control", serde_json::json!({"action": "resume"}));
             }
             "voice-on" => {
-                let _ = app.emit("kairo:control", serde_json::json!({"action": "voice-on"}));
+                let _ = app.emit(
+                    "continuum:control",
+                    serde_json::json!({"action": "voice-on"}),
+                );
             }
             "voice-off" => {
-                let _ = app.emit("kairo:control", serde_json::json!({"action": "voice-off"}));
+                let _ = app.emit(
+                    "continuum:control",
+                    serde_json::json!({"action": "voice-off"}),
+                );
             }
             "quit" => {
                 app.exit(0);

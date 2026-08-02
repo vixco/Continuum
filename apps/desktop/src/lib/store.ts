@@ -1,5 +1,5 @@
 // Zustand store: single source of truth for the dashboard. Hydrated on
-// mount by useDashboardBootstrap, then kept in sync via Tauri's `kairo:*`
+// mount by useDashboardBootstrap, then kept in sync via Tauri's `continuum:*`
 // events. Components select thin slices with useStore(selector) so a
 // perception-only change doesn't re-render the Voice tab.
 
@@ -9,23 +9,23 @@ import { create } from "zustand";
 import {
   DEFAULT_CONFIG,
   DEFAULT_STATE,
-  kairo,
+  continuum,
   subscribeLogs,
   subscribeRepair,
   subscribeState,
 } from "./tauri";
-import type { ComponentHealth, KairoConfig, KairoState, LogEntry, RepairEvent } from "./types";
+import type { ComponentHealth, ContinuumConfig, ContinuumState, LogEntry, RepairEvent } from "./types";
 
 interface Store {
-  state: KairoState;
-  config: KairoConfig;
+  state: ContinuumState;
+  config: ContinuumConfig;
   logs: LogEntry[];
   logLimit: number;
   repairEvents: RepairEvent[];
   components: ComponentHealth[];
   bootstrapped: boolean;
-  setState: (state: KairoState) => void;
-  setConfig: (config: KairoConfig) => void;
+  setState: (state: ContinuumState) => void;
+  setConfig: (config: ContinuumConfig) => void;
   setComponents: (components: ComponentHealth[]) => void;
   pushLog: (entry: LogEntry) => void;
   setLogs: (entries: LogEntry[]) => void;
@@ -65,10 +65,10 @@ export async function bootstrapStore() {
   bootstrapped = true;
 
   const [state, config, logs, components] = await Promise.all([
-    kairo.getState(),
-    kairo.getConfig(),
-    kairo.getLogs({ limit: 500 }),
-    kairo.getHealth(),
+    continuum.getState(),
+    continuum.getConfig(),
+    continuum.getLogs({ limit: 500 }),
+    continuum.getHealth(),
   ]);
 
   useStore.setState({

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
 import { Mic } from "lucide-react";
 
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import type { VoiceMode } from "@/lib/types";
 
 /**
@@ -21,7 +21,7 @@ import type { VoiceMode } from "@/lib/types";
  *   - listening → continuous pulse + accent color + tiny bar visualizer in
  *                 place of the mic icon (matches the StatusOrb on the same
  *                 row)
- *   - thinking / speaking → dimmed, no-op (Kairo is busy responding)
+ *   - thinking / speaking → dimmed, no-op (Continuum is busy responding)
  *
  * Tweede klik tijdens listening: no-op visueel + geen extra request — past
  * bij de one-shot intent semantiek.
@@ -49,7 +49,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     if (pressTimer.current) clearTimeout(pressTimer.current);
     pressTimer.current = setTimeout(() => setIsPressed(false), 180);
     try {
-      await kairo.talkNow();
+      await continuum.talkNow();
     } catch {
       // Tauri unavailable in pnpm-dev mode, or daemon not running. Either
       // way the user gets the local visual feedback; no toast needed for
@@ -67,13 +67,13 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         type="button"
         onClick={onClick}
         disabled={disabled}
-        aria-label={isListening ? "Aan het luisteren" : "Klik om te praten met Kairo"}
+        aria-label={isListening ? "Aan het luisteren" : "Klik om te praten met Continuum"}
         title={
           isListening
             ? "Aan het luisteren — praat nu"
             : isBusy
-              ? "Kairo is bezig"
-              : "Klik om te praten (of zeg 'hey Kairo' / Ctrl+Shift+K)"
+              ? "Continuum is bezig"
+              : "Klik om te praten (of zeg 'hey Continuum' / Ctrl+Shift+K)"
         }
         className={clsx(
           "relative flex h-20 w-20 items-center justify-center rounded-full",
@@ -119,7 +119,7 @@ function hintFor(mode: VoiceMode): string {
   }
 }
 
-/** Three thin vertical bars that animate while Kairo is listening. CSS-only. */
+/** Three thin vertical bars that animate while Continuum is listening. CSS-only. */
 function ListeningBars() {
   return (
     <div className="flex items-end gap-1">

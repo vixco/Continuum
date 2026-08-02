@@ -1,6 +1,6 @@
 # Voice settings
 
-Full reference for the `[voice]`, `[audio]`, and `[tts]` blocks in `~/.kairo/config/default-models.toml`.
+Full reference for the `[voice]`, `[audio]`, and `[tts]` blocks in `~/.continuum/config/default-models.toml`.
 
 ## `[voice]`
 
@@ -8,7 +8,7 @@ Full reference for the `[voice]`, `[audio]`, and `[tts]` blocks in `~/.kairo/con
 [voice]
 enabled = true
 wake_word_enabled = true
-wake_keyword = "hey kairo"
+wake_keyword = "hey continuum"
 wake_sensitivity = 0.5                  # 0.0–1.0; higher = stricter match
 custom_keyword_path = ""                # Porcupine .ppn, optional
 listen_timeout_ms = 12000
@@ -29,7 +29,7 @@ conversation_followup_seconds = 5
 ```toml
 [audio]
 enabled = true
-whisper_model_path = ""                 # blank = search ~/.kairo/models/stt
+whisper_model_path = ""                 # blank = search ~/.continuum/models/stt
 whisper_language = "auto"               # or "en", "nl"
 vad_threshold = 0.005                   # energy VAD; lower = more sensitive
 silence_duration_ms = 800               # min silence to end a whisper segment
@@ -44,7 +44,7 @@ device_index = null
 [tts]
 enabled = true
 engine = "piper"                        # or "elevenlabs" (stubbed)
-espeak_data_dir = ""                    # blank = ~/.kairo/models/tts/espeak-ng-data
+espeak_data_dir = ""                    # blank = ~/.continuum/models/tts/espeak-ng-data
 primary = "en"
 length_scale = null                     # speech speed; null = Piper default
 
@@ -63,5 +63,5 @@ similarity_boost = 0.75
 ## Where overrides apply
 
 - **Dashboard sliders / dropdowns** write back to this file atomically.
-- **Env var `KAIRO_PIPER_BIN`** overrides the Piper binary search path.
-- **Env var `KAIRO_MODELS_DIR`** overrides the model-search root.
+- **Env var `CONTINUUM_PIPER_BIN`** overrides the Piper binary search path.
+- **Env var `CONTINUUM_MODELS_DIR`** overrides the model-search root.

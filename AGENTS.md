@@ -2,11 +2,11 @@
 
 ## Continuum transition directive
 
-This repository is being migrated from Kairo into Continuum. Read
+This repository is being migrated from Continuum into Continuum. Read
 `CONTINUUM_ARCHITECTURE.md` before making changes. For product scope, domain
 model, permissions, agent adapters, and UI direction, that document overrides
-the older Kairo-specific pitch and roadmap in `ARCHITECTURE.md` and
-`ROADMAP.md`. Existing `kairo-*` names remain temporarily as compatibility
+the older Continuum-specific pitch and roadmap in `ARCHITECTURE.md` and
+`ROADMAP.md`. Existing `continuum-*` names remain temporarily as compatibility
 boundaries; do not perform broad mechanical renames without a migration plan.
 
 The approved Continuum desktop reference uses fixture data during Phase 0, but
@@ -17,30 +17,30 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Who you are in this repo
 
-You are the primary developer of Kairo. The human maintainer (Toshan) is the architect and reviewer, but you will write most of the code. Your job is to implement the design described in `ARCHITECTURE.md` faithfully, stay consistent with the principles in this document, and keep the codebase in a state that another Codex instance can pick up and continue.
+You are the primary developer of Continuum. The human maintainer (Toshan) is the architect and reviewer, but you will write most of the code. Your job is to implement the design described in `ARCHITECTURE.md` faithfully, stay consistent with the principles in this document, and keep the codebase in a state that another Codex instance can pick up and continue.
 
-## What Kairo is
+## What Continuum is
 
-Kairo is a desktop-native, local-first, ambient AI assistant for Windows. It uses a four-layer cognitive architecture:
+Continuum is a desktop-native, local-first, ambient AI assistant for Windows. It uses a four-layer cognitive architecture:
 
 1. **Senses** — local vision (Moondream), audio (whisper.cpp), and context polling
 2. **Triage** — a small local LLM (Qwen 2.5 3B default) that decides what matters
 3. **Orchestrator** — Codex Opus 4.6 via the official `Codex` CLI in headless mode, woken up only when genuine reasoning is needed
 4. **Workers** — headless Codex sessions spawned by the orchestrator to do actual work
 
-Read `README.md` for the public pitch, `ARCHITECTURE.md` for the full technical blueprint, and `SOUL.md` for Kairo's personality. If any of those are unclear, stop and ask before writing code.
+Read `README.md` for the public pitch, `ARCHITECTURE.md` for the full technical blueprint, and `SOUL.md` for Continuum's personality. If any of those are unclear, stop and ask before writing code.
 
 ## Non-negotiables
 
 These rules are absolute. Do not violate them without explicit permission from the maintainer.
 
-1. **Never scrape OAuth tokens or reverse-engineer subscription auth.** Kairo uses the official `Codex` CLI as a subprocess. That is the only legal way. If you find yourself wanting to call the Anthropic API directly from Kairo Core, stop — that is the wrong approach.
-2. **Never phone home.** Kairo does not send telemetry, crash reports, or usage data to any server that is not the Anthropic API (via Codex) or optionally ElevenLabs if the user has enabled premium TTS. Every new network call requires justification in the PR description.
+1. **Never scrape OAuth tokens or reverse-engineer subscription auth.** Continuum uses the official `Codex` CLI as a subprocess. That is the only legal way. If you find yourself wanting to call the Anthropic API directly from Continuum Core, stop — that is the wrong approach.
+2. **Never phone home.** Continuum does not send telemetry, crash reports, or usage data to any server that is not the Anthropic API (via Codex) or optionally ElevenLabs if the user has enabled premium TTS. Every new network call requires justification in the PR description.
 3. **Never assume defaults without making them configurable.** Every model, interval, threshold, and prompt must be readable from config and overridable via the dashboard. If you hardcode something, you are creating technical debt that someone will have to remove later.
 4. **Never bypass the layer hierarchy.** Layer 1 outputs perception frames. Layer 2 triages them. Layer 3 plans. Layer 4 executes. Do not let a worker trigger the orchestrator. Do not let the orchestrator directly touch the senses. Data flows up, commands flow down.
 5. **Never ship a feature without self-healing hooks.** If a new component can fail, it must expose a health check, log its failures in a way the repair agent can read, and have a documented recovery procedure.
 6. **Never commit secrets.** API keys, tokens, user data, telemetry endpoints. Use environment variables and config files outside the repo.
-7. **Never break the public API of `kairo-mcp`.** Once a tool name and schema is published in a release, it cannot change without a version bump. Downstream Codex instances rely on stable tool signatures.
+7. **Never break the public API of `continuum-mcp`.** Once a tool name and schema is published in a release, it cannot change without a version bump. Downstream Codex instances rely on stable tool signatures.
 
 ## Project structure
 
@@ -48,11 +48,11 @@ This is a monorepo with a Cargo workspace for Rust crates and a pnpm workspace f
 
 ```
 apps/desktop/          Tauri desktop app (Rust backend + Next.js frontend)
-crates/kairo-core/     Main orchestration runtime
-crates/kairo-mcp/      MCP server exposing Windows-specific tools
-crates/kairo-llm/      Local LLM runtime (llama.cpp wrapper)
-crates/kairo-vision/   Local vision model runtime
-skills/                Bundled Kairo skills (SKILL.md files)
+crates/continuum-core/     Main orchestration runtime
+crates/continuum-mcp/      MCP server exposing Windows-specific tools
+crates/continuum-llm/      Local LLM runtime (llama.cpp wrapper)
+crates/continuum-vision/   Local vision model runtime
+skills/                Bundled Continuum skills (SKILL.md files)
 docs/                  User-facing documentation
 prompts/               System prompts for triage, orchestrator, repair agent
 config/                Default config files
@@ -67,7 +67,7 @@ The workspace has native dependencies that must be present before `cargo build` 
 
 - **LLVM/libclang** — required by `whisper-rs` bindgen. Set `LIBCLANG_PATH` (default: `C:/LLVM/bin`)
 - **CMake + Ninja** — required by `whisper-rs` (whisper.cpp build). `CMAKE_GENERATOR` is set to `Ninja`
-- **ONNX Runtime** — required at runtime by `kairo-vision` via `ort` (load-dynamic). Set `ORT_DYLIB_PATH`
+- **ONNX Runtime** — required at runtime by `continuum-vision` via `ort` (load-dynamic). Set `ORT_DYLIB_PATH`
 - **protoc** — required by `lancedb` (prost-build). Set `PROTOC` env var
 - **MSVC Build Tools** — Windows SDK headers for bindgen
 
@@ -81,7 +81,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 # Build
 cargo build                              # debug build, full workspace
-cargo build -p kairo-core                # single crate
+cargo build -p continuum-core                # single crate
 cargo build --release                    # release build
 
 # Lint and format
@@ -91,23 +91,23 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 # Test
 cargo test                               # all tests in workspace
-cargo test -p kairo-core                 # tests for one crate
-cargo test -p kairo-core -- triage       # tests matching "triage" in kairo-core
-cargo test -p kairo-core --test orchestrator_mock  # run a specific integration test
+cargo test -p continuum-core                 # tests for one crate
+cargo test -p continuum-core -- triage       # tests matching "triage" in continuum-core
+cargo test -p continuum-core --test orchestrator_mock  # run a specific integration test
 
 # Run binaries
-cargo run --bin kairo-perception         # live perception stream
-cargo run --bin kairo-perception -- --triage  # perception + triage decisions
-cargo run --bin kairo-triage-bench       # triage accuracy benchmark (20 frames)
-cargo run --bin kairo                    # main orchestrator binary
+cargo run --bin continuum-perception         # live perception stream
+cargo run --bin continuum-perception -- --triage  # perception + triage decisions
+cargo run --bin continuum-triage-bench       # triage accuracy benchmark (20 frames)
+cargo run --bin continuum                    # main orchestrator binary
 
-# Triage benchmark (measures accuracy + latency, expects model in ~/.kairo-dev/models/)
-cargo run --bin kairo-triage-bench       # runs 20-frame benchmark, reports accuracy/P50/P95
+# Triage benchmark (measures accuracy + latency, expects model in ~/.continuum-dev/models/)
+cargo run --bin continuum-triage-bench       # runs 20-frame benchmark, reports accuracy/P50/P95
 ```
 
 ## Current project status
 
-Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `kairo-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
+Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `continuum-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
 
 ## Coding standards
 
@@ -138,11 +138,11 @@ Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tool
 - **PRs:** Every PR updates `CHANGELOG.md` under `## [Unreleased]`. Every PR that changes architecture updates `ARCHITECTURE.md` in the same commit.
 - **No force-pushing to main, ever.** Feature branches can be rebased and force-pushed.
 
-## How to run Codex from within Kairo
+## How to run Codex from within Continuum
 
 This is the single most important technical pattern in the codebase. Get it right.
 
-Kairo Core spawns Codex as a child process using tokio. The command template is:
+Continuum Core spawns Codex as a child process using tokio. The command template is:
 
 ```rust
 let mut cmd = tokio::process::Command::new("Codex");
@@ -169,7 +169,7 @@ Then write a JSON user message to stdin:
 }
 ```
 
-And read newline-delimited JSON events from stdout, parsing each one into a strongly-typed event enum in `kairo-core/src/orchestrator/events.rs`. The key event types you will see are (verified against CLI v2.1.100):
+And read newline-delimited JSON events from stdout, parsing each one into a strongly-typed event enum in `continuum-core/src/orchestrator/events.rs`. The key event types you will see are (verified against CLI v2.1.100):
 
 - `system` init events — subtype `"init"`, session_id, tools array, model, cwd, claude_code_version, permissionMode, apiKeySource, agents, skills, plugins, uuid, fast_mode_state
 - `stream_event` events wrapping raw Anthropic API events in an `event` field: `message_start`, `content_block_start`, `content_block_delta` (with `text_delta`), `content_block_stop`, `message_delta`, `message_stop`. Each also has session_id, parent_tool_use_id, uuid
@@ -180,11 +180,11 @@ And read newline-delimited JSON events from stdout, parsing each one into a stro
 
 When streaming text from the orchestrator, pipe `text_delta` events directly into the TTS queue as they arrive. Do not wait for the full response. Low latency is the whole point of using stream-json.
 
-When the orchestrator wants to spawn a worker, it calls the `mcp__kairo__workers__spawn_worker` MCP tool. The MCP server (running as a separate process) spawns the worker Codex process, captures its output, and streams progress back.
+When the orchestrator wants to spawn a worker, it calls the `mcp__continuum__workers__spawn_worker` MCP tool. The MCP server (running as a separate process) spawns the worker Codex process, captures its output, and streams progress back.
 
 ## How to write and test MCP tools
 
-The Kairo MCP server is in `crates/kairo-mcp`. It uses the `rmcp` crate. Every tool follows this pattern:
+The Continuum MCP server is in `crates/continuum-mcp`. It uses the `rmcp` crate. Every tool follows this pattern:
 
 1. Define the input schema as a Rust struct with `#[derive(Serialize, Deserialize, JsonSchema)]`
 2. Define the handler as an async function that takes the input struct and returns a `Result<ToolResult>`
@@ -211,11 +211,11 @@ async fn test_memory_query_returns_top_results() {
 
 ## Working with local models
 
-Local models (llama.cpp for LLMs, ONNX Runtime for vision) live in `kairo-llm` and `kairo-vision`. These crates wrap the native libraries and expose safe Rust APIs.
+Local models (llama.cpp for LLMs, ONNX Runtime for vision) live in `continuum-llm` and `continuum-vision`. These crates wrap the native libraries and expose safe Rust APIs.
 
 Rules for local model code:
 
-- **Model files are never checked into git.** They live in `~/.kairo/models/` on the user's machine. Provide download scripts in `scripts/download-models.ps1`.
+- **Model files are never checked into git.** They live in `~/.continuum/models/` on the user's machine. Provide download scripts in `scripts/download-models.ps1`.
 - **Always quantize by default.** Q4_K_M for LLMs, FP16 for vision. Expose quantization as a config option.
 - **Always stream when possible.** llama.cpp supports streaming. Use it. The triage layer should start producing tokens within 200 ms of being called.
 - **Always respect GPU detection.** If CUDA is available, use it. If not, fall back to CPU gracefully. Never require a GPU.
@@ -237,7 +237,7 @@ For any task with more than 3 steps, create a todo list at the start of your wor
 When you are implementing a feature that touches multiple crates or has a distinct research phase, use the `Task` tool to spawn sub-agents. Examples of good sub-agent delegation:
 
 - "Research the best Rust crate for Windows screen capture and return a comparison" → spawn a research sub-agent
-- "Implement the `perception_screenshot` MCP tool in `kairo-mcp`" → spawn an implementation sub-agent with narrow scope
+- "Implement the `perception_screenshot` MCP tool in `continuum-mcp`" → spawn an implementation sub-agent with narrow scope
 - "Write integration tests for the triage layer" → spawn a test-writing sub-agent
 
 Sub-agents should have narrow, well-scoped tasks. Do not delegate vague goals like "build the dashboard." Break it down first.
@@ -256,7 +256,7 @@ When you are stuck, log what you tried and hand off to the maintainer rather tha
 
 ## Skills
 
-Kairo has its own skills directory at `skills/` with `SKILL.md` files that tell the orchestrator how to handle specific workflows. If you add a new capability that the orchestrator needs to know how to use in a specific context, write a skill file. Follow the Anthropic skills format: a `SKILL.md` with frontmatter name and description, and supporting files in the same directory.
+Continuum has its own skills directory at `skills/` with `SKILL.md` files that tell the orchestrator how to handle specific workflows. If you add a new capability that the orchestrator needs to know how to use in a specific context, write a skill file. Follow the Anthropic skills format: a `SKILL.md` with frontmatter name and description, and supporting files in the same directory.
 
 Example skill:
 
@@ -274,7 +274,7 @@ The `SKILL.md` frontmatter should explain exactly when the skill triggers so the
 
 Every new component must support the repair agent. This means:
 
-- It writes logs to `~/.kairo/logs/<component>.log` with structured events
+- It writes logs to `~/.continuum/logs/<component>.log` with structured events
 - It has a health check exposed via the `system_health` MCP tool
 - It has a documented recovery procedure in `docs/self-healing.md`
 - It can be restarted via a `repair_restart_component` call without losing user data
@@ -284,7 +284,7 @@ If a new component cannot be repaired by the repair agent, it is a liability. Ei
 
 ## Final rule
 
-**If you are not sure, ask.** Kairo is an ambitious project. Ambitious projects die from confident wrong decisions, not from cautious questions. The maintainer would rather answer ten clarifying questions than review one PR that took the wrong direction.
+**If you are not sure, ask.** Continuum is an ambitious project. Ambitious projects die from confident wrong decisions, not from cautious questions. The maintainer would rather answer ten clarifying questions than review one PR that took the wrong direction.
 
 ---
 

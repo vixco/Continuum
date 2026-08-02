@@ -26,13 +26,13 @@ Default: Qwen 3 4B (Q4_K_M, ~2.5 GB). See [ADR 004](decisions/004-triage-model.m
 
 ### Swapping models
 
-1. Download any GGUF model to `~/.kairo-dev/models/triage/`
-2. Update `~/.kairo-dev/config.toml`:
+1. Download any GGUF model to `~/.continuum-dev/models/triage/`
+2. Update `~/.continuum-dev/config.toml`:
    ```toml
    [triage]
-   path = "~/.kairo-dev/models/triage/your-model.gguf"
+   path = "~/.continuum-dev/models/triage/your-model.gguf"
    ```
-3. Restart kairo-perception
+3. Restart continuum-perception
 
 Any GGUF-compatible instruct model should work. Smaller models (1-3B) may need lower temperature and more explicit prompting.
 
@@ -40,22 +40,22 @@ Any GGUF-compatible instruct model should work. Smaller models (1-3B) may need l
 
 ```bash
 # Perception only (no triage)
-cargo run --bin kairo-perception
+cargo run --bin continuum-perception
 
 # Perception + triage
-cargo run --bin kairo-perception -- --triage
+cargo run --bin continuum-perception -- --triage
 
 # Benchmark triage accuracy
-cargo run --bin kairo-triage-bench
+cargo run --bin continuum-triage-bench
 ```
 
 ## Debugging wrong decisions
 
-1. **Check the benchmark**: Run `kairo-triage-bench` to see accuracy across labeled frames
+1. **Check the benchmark**: Run `continuum-triage-bench` to see accuracy across labeled frames
 2. **Check latency**: If P95 > 1500ms, consider fewer GPU layers or a smaller model
 3. **Check the prompt**: The system prompt is in `prompts/triage-system.md` — verify the signal hierarchy is clear
 4. **Check the grammar**: The GBNF grammar is in `prompts/triage-grammar.gbnf` — verify it matches the `TriageDecision` enum
-5. **Inspect raw output**: Set `RUST_LOG=kairo_core::triage=debug` to see raw model output on fallback attempts
+5. **Inspect raw output**: Set `RUST_LOG=continuum_core::triage=debug` to see raw model output on fallback attempts
 6. **Common issues**:
    - Model keeps choosing `ignore`: Temperature may be too low, or the perception frame lacks distinguishing information
    - Model produces thinking tokens: Ensure `/no_think` is at the start of the system prompt
@@ -74,6 +74,6 @@ The triage prompt documents which perception signals to trust:
 
 | Setting | Default | Description |
 |---|---|---|
-| `triage.path` | `~/.kairo-dev/models/triage/qwen3-4b-q4_k_m.gguf` | Model path |
+| `triage.path` | `~/.continuum-dev/models/triage/qwen3-4b-q4_k_m.gguf` | Model path |
 | `triage.gpu_layers` | `0` | GPU offload layers (0 = CPU only) |
 | `frame.salience_threshold` | `0.10` | Minimum salience to reach triage |

@@ -1,6 +1,6 @@
 # Orchestrator (Layer 3)
 
-The orchestrator is Claude Opus 4.6, invoked via the official Claude Code CLI in headless mode. It is the only cloud component of Kairo and only runs when the triage layer decides genuine reasoning is needed.
+The orchestrator is Claude Opus 4.6, invoked via the official Claude Code CLI in headless mode. It is the only cloud component of Continuum and only runs when the triage layer decides genuine reasoning is needed.
 
 ## How it works
 
@@ -13,7 +13,7 @@ The orchestrator is Claude Opus 4.6, invoked via the official Claude Code CLI in
    - 8 relevant user/project facts
    - The wake reason
 4. A fresh `claude -p` process is spawned with the system prompt
-5. Text deltas stream to the terminal in real time with `KAIRO:` prefix
+5. Text deltas stream to the terminal in real time with `CONTINUUM:` prefix
 6. On completion, cost/duration are logged and the interaction is stored in episodic memory
 
 ## Architecture decision: fresh process per wake
@@ -22,7 +22,7 @@ See [ADR 005](decisions/005-orchestrator-lifecycle.md) for full context.
 
 Each wake spawns a fresh process. There is no long-lived Claude session. This ensures:
 - **Conversation purity**: each wake sees only what we put in the user message
-- **Kairo's LanceDB is the authoritative memory**, not Claude's conversation history
+- **Continuum's LanceDB is the authoritative memory**, not Claude's conversation history
 - **Simple crash handling**: if a process dies, we just skip that wake
 
 The ~500ms process startup overhead is acceptable for 20-50 wakes/day.
@@ -30,7 +30,7 @@ The ~500ms process startup overhead is acceptable for 20-50 wakes/day.
 ## System prompt
 
 The orchestrator system prompt lives at `prompts/orchestrator-system.md` (~400 tokens). It is a compact operational version of SOUL.md:
-- Kairo's identity and core traits
+- Continuum's identity and core traits
 - When to speak vs stay silent
 - Response style (short, direct, bilingual NL/EN)
 - Phase 3 guardrails (no tools, text-only)
@@ -58,7 +58,7 @@ Expected $0.02-0.10 per wake depending on response length. With 20-50 wakes/day,
 
 ## Configuration
 
-In `~/.kairo-dev/config.toml`:
+In `~/.continuum-dev/config.toml`:
 
 ```toml
 [orchestrator]
@@ -70,8 +70,8 @@ timeout_secs = 60
 
 ```bash
 # Full system (perception + triage + orchestrator)
-cargo run --release --bin kairo
+cargo run --release --bin continuum
 
 # Perception + triage only (Phase 2 behavior, no API calls)
-cargo run --release --bin kairo-perception -- --triage
+cargo run --release --bin continuum-perception -- --triage
 ```

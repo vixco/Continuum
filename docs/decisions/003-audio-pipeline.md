@@ -3,11 +3,11 @@
 **Status:** Accepted
 **Date:** 2026-04-10
 **Layer:** 1 (Senses)
-**Crate:** `kairo-core` (senses::audio)
+**Crate:** `continuum-core` (senses::audio)
 
 ## Context
 
-Kairo continuously captures microphone audio, detects when the user is speaking, and transcribes speech segments. The pipeline must:
+Continuum continuously captures microphone audio, detects when the user is speaking, and transcribes speech segments. The pipeline must:
 
 - Run locally with no cloud API calls.
 - Detect voice activity to avoid transcribing silence.
@@ -35,7 +35,7 @@ Rust bindings to whisper.cpp. Uses the `whisper-small` model (244M parameters) b
 
 ## Why Energy VAD Over Silero
 
-The `voice_activity_detector` crate (Silero VAD) is more accurate than energy-based detection, but it uses `ort` (ONNX Runtime) internally. Kairo already pins a specific `ort` version for the vision model in `kairo-vision`. Having two crates depend on potentially different `ort` versions causes version conflicts and linker errors.
+The `voice_activity_detector` crate (Silero VAD) is more accurate than energy-based detection, but it uses `ort` (ONNX Runtime) internally. Continuum already pins a specific `ort` version for the vision model in `continuum-vision`. Having two crates depend on potentially different `ort` versions causes version conflicts and linker errors.
 
 Energy-based VAD is simpler, has zero external dependencies, and is reliable enough for Phase 1 where the primary use case is detecting clear speech directed at the assistant. Upgrading to Silero VAD is planned for a later phase once the `ort` version situation is resolved.
 
@@ -45,14 +45,14 @@ whisper-rs uses `bindgen` to generate Rust bindings for whisper.cpp, which requi
 
 The entire audio pipeline is gated behind the `audio` Cargo feature:
 
-- **With feature:** `crates/kairo-core/src/senses/audio/full.rs` provides the real `AudioWatcher`.
-- **Without feature:** `crates/kairo-core/src/senses/audio/stub.rs` provides a stub `AudioWatcher` that parks until shutdown, producing no observations.
+- **With feature:** `crates/continuum-core/src/senses/audio/full.rs` provides the real `AudioWatcher`.
+- **Without feature:** `crates/continuum-core/src/senses/audio/stub.rs` provides a stub `AudioWatcher` that parks until shutdown, producing no observations.
 
 Build with the audio feature:
 
 ```bash
-cargo build -p kairo-core --features audio
-cargo run --bin kairo-perception --features audio
+cargo build -p continuum-core --features audio
+cargo run --bin continuum-perception --features audio
 ```
 
 ## Performance
@@ -76,7 +76,7 @@ All audio settings are in `[audio]` in `config.toml`:
 ```toml
 [audio]
 enabled = true
-whisper_model_path = "~/.kairo-dev/models/stt/whisper-small.bin"
+whisper_model_path = "~/.continuum-dev/models/stt/whisper-small.bin"
 vad_threshold = 0.5
 silence_duration_ms = 500
 max_segment_secs = 8
@@ -84,8 +84,8 @@ max_segment_secs = 8
 
 ## References
 
-- `crates/kairo-core/src/senses/audio/mod.rs` -- Feature gate and module structure
-- `crates/kairo-core/src/senses/audio/full.rs` -- Full audio pipeline (behind `audio` feature)
-- `crates/kairo-core/src/senses/audio/stub.rs` -- Stub when audio feature is disabled
-- `crates/kairo-core/src/senses/types.rs` -- `AudioObservation` struct
-- `crates/kairo-core/src/config.rs` -- `AudioConfig` with defaults
+- `crates/continuum-core/src/senses/audio/mod.rs` -- Feature gate and module structure
+- `crates/continuum-core/src/senses/audio/full.rs` -- Full audio pipeline (behind `audio` feature)
+- `crates/continuum-core/src/senses/audio/stub.rs` -- Stub when audio feature is disabled
+- `crates/continuum-core/src/senses/types.rs` -- `AudioObservation` struct
+- `crates/continuum-core/src/config.rs` -- `AudioConfig` with defaults

@@ -3,8 +3,8 @@ name: project-context
 description: Load context about a known project so responses match stack, conventions, and history
 source: bundled
 triggers:
-  - kairo-ai
-  - kairo
+  - continuum-ai
+  - continuum
   - simcharts
   - polybot
   - polymarket
@@ -18,7 +18,7 @@ triggers:
 # Project Context
 
 This skill activates when the user is working in (or asking about) a
-project Kairo already knows. The point is to tailor responses to the
+project Continuum already knows. The point is to tailor responses to the
 project's stack, conventions, and recent history instead of giving
 generic advice.
 
@@ -26,16 +26,16 @@ generic advice.
 
 1. Identify the project name from the trigger that matched (or from the
    foreground window title). Normalise to the canonical key used in
-   memory (e.g. `simcharts`, `kairo-ai`, `polybot`).
-2. Call `mcp__kairo__memory_list_facts` with prefix `"project.<name>."`
+   memory (e.g. `simcharts`, `continuum-ai`, `polybot`).
+2. Call `mcp__continuum__memory_list_facts` with prefix `"project.<name>."`
    to retrieve every stored fact (repo path, stack, conventions,
    active contributor, last-touched area).
-3. Call `mcp__kairo__memory_query_episodic` with a query like
+3. Call `mcp__continuum__memory_query_episodic` with a query like
    `"<name> debugging"` or `"<name> recent"` (limit 3) to surface the
    last few meaningful sessions on that project.
 4. If the project has a `.dir` fact and the request would benefit from
    current code, list the top of the repo with
-   `mcp__kairo__fs_list_dir` or read one orienting file
+   `mcp__continuum__fs_list_dir` or read one orienting file
    (`README.md`, `Cargo.toml`, `package.json`).
 
 ## Apply the context
@@ -62,7 +62,7 @@ generic advice.
 
 If the user casually mentions something worth remembering
 (`"we switched to bun"`, `"the CI job is now called ship"`), call
-`mcp__kairo__memory_set_fact` with the appropriate
+`mcp__continuum__memory_set_fact` with the appropriate
 `project.<name>.<field>` key. Don't ask permission for low-stakes
 facts; do ask before persisting things that could be wrong
 (deadlines, email addresses, financial numbers).

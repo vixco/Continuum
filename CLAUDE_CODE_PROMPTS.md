@@ -1,6 +1,6 @@
-# Kairo Build Prompts
+# Continuum Build Prompts
 
-This file contains the prompts you feed to Claude Code to build Kairo. There are two main prompts and a set of phase prompts. Use them in order.
+This file contains the prompts you feed to Claude Code to build Continuum. There are two main prompts and a set of phase prompts. Use them in order.
 
 ## How to use this file
 
@@ -21,19 +21,19 @@ For every phase, open a fresh Claude Code session in the repo and paste the corr
 Use this exactly once, at the very beginning, to set up the full project scaffolding.
 
 ```
-You are the primary developer of Kairo, an ambitious open-source desktop AI assistant project. I am Toshan, the architect and maintainer. You will do most of the actual coding.
+You are the primary developer of Continuum, an ambitious open-source desktop AI assistant project. I am Toshan, the architect and maintainer. You will do most of the actual coding.
 
 Before you do anything else, read these files in this order:
 
-1. README.md — the public pitch, tells you what Kairo is
+1. README.md — the public pitch, tells you what Continuum is
 2. ARCHITECTURE.md — the full technical blueprint, this is the source of truth for every design decision
-3. CLAUDE.md — your operating manual for this repo, covers coding standards, non-negotiables, and how to call the claude CLI from within Kairo
-4. SOUL.md — Kairo's personality, you'll need this for prompt files later
+3. CLAUDE.md — your operating manual for this repo, covers coding standards, non-negotiables, and how to call the claude CLI from within Continuum
+4. SOUL.md — Continuum's personality, you'll need this for prompt files later
 5. ROADMAP.md — the phased build plan, we are starting from Phase 0
 
 Read them fully. Do not skim. If anything in these files contradicts anything I say in this prompt, the files win — tell me and we'll update the files together.
 
-Your job in this first session is to scaffold the entire repository so that subsequent sessions can start writing actual code. You are not writing any Kairo logic yet. You are setting up the skeleton that ARCHITECTURE.md describes in the "Directory layout" section.
+Your job in this first session is to scaffold the entire repository so that subsequent sessions can start writing actual code. You are not writing any Continuum logic yet. You are setting up the skeleton that ARCHITECTURE.md describes in the "Directory layout" section.
 
 Use the TodoWrite tool to create a detailed plan with at least 15 items before you start. Track your progress as you go.
 
@@ -41,13 +41,13 @@ Here is what I want you to produce, in order:
 
 ## Part 1: Workspace setup
 
-1. Create a Cargo workspace at the repo root. The root Cargo.toml should declare a workspace with members: `crates/kairo-core`, `crates/kairo-mcp`, `crates/kairo-llm`, `crates/kairo-vision`, and `apps/desktop/src-tauri`. Set resolver = "2".
+1. Create a Cargo workspace at the repo root. The root Cargo.toml should declare a workspace with members: `crates/continuum-core`, `crates/continuum-mcp`, `crates/continuum-llm`, `crates/continuum-vision`, and `apps/desktop/src-tauri`. Set resolver = "2".
 
-2. Create a pnpm workspace. Add a root `package.json` with the workspace name `kairo-ai`, private: true, and a `pnpm-workspace.yaml` declaring `apps/*` as the workspace packages.
+2. Create a pnpm workspace. Add a root `package.json` with the workspace name `continuum-ai`, private: true, and a `pnpm-workspace.yaml` declaring `apps/*` as the workspace packages.
 
 3. Create a `rust-toolchain.toml` pinned to Rust 1.82, components rustfmt and clippy, profile default.
 
-4. Create a `.gitignore` at the root that covers Rust (target/, Cargo.lock should NOT be ignored since this is an application), Node (node_modules, .next, .turbo, dist, .DS_Store), Tauri (src-tauri/target, src-tauri/gen, *.dmg, *.msi, *.exe), editor files (.vscode/, .idea/, *.swp), and environment files (.env, .env.local). Also ignore `~/.kairo/` equivalents in the dev workspace: `.kairo-dev/`.
+4. Create a `.gitignore` at the root that covers Rust (target/, Cargo.lock should NOT be ignored since this is an application), Node (node_modules, .next, .turbo, dist, .DS_Store), Tauri (src-tauri/target, src-tauri/gen, *.dmg, *.msi, *.exe), editor files (.vscode/, .idea/, *.swp), and environment files (.env, .env.local). Also ignore `~/.continuum/` equivalents in the dev workspace: `.continuum-dev/`.
 
 5. Create `.editorconfig` with UTF-8, LF line endings, 4 spaces for Rust, 2 spaces for TypeScript/JSON/YAML/Markdown, trim trailing whitespace, insert final newline.
 
@@ -61,21 +61,21 @@ For each of the four Rust crates, create:
 
 The four crates and their purposes:
 
-**crates/kairo-core** — The main orchestration runtime. Contains the four-layer logic: senses, triage, orchestrator, workers, memory, voice, health, config. Set up the module tree as described in ARCHITECTURE.md directory layout. Create empty module files (with doc comments but no implementation yet) for each submodule. Add these dependencies to Cargo.toml but do not implement anything: tokio (full features), serde, serde_json, anyhow, thiserror, tracing, tracing-subscriber, chrono (with serde), uuid (v4 and serde), async-trait, sqlx (sqlite and runtime-tokio-rustls).
+**crates/continuum-core** — The main orchestration runtime. Contains the four-layer logic: senses, triage, orchestrator, workers, memory, voice, health, config. Set up the module tree as described in ARCHITECTURE.md directory layout. Create empty module files (with doc comments but no implementation yet) for each submodule. Add these dependencies to Cargo.toml but do not implement anything: tokio (full features), serde, serde_json, anyhow, thiserror, tracing, tracing-subscriber, chrono (with serde), uuid (v4 and serde), async-trait, sqlx (sqlite and runtime-tokio-rustls).
 
-**crates/kairo-mcp** — The MCP server exposing Windows-specific tools. This is a binary crate, not a library. Set it up with a main.rs that prints "kairo-mcp not yet implemented" and exits 0. Create the `src/tools/` directory with empty module files for memory, perception, voice, windows, shell, workers, schedule, system. Add dependencies: rmcp (the Rust MCP SDK), tokio, serde, serde_json, schemars, anyhow, thiserror, tracing.
+**crates/continuum-mcp** — The MCP server exposing Windows-specific tools. This is a binary crate, not a library. Set it up with a main.rs that prints "continuum-mcp not yet implemented" and exits 0. Create the `src/tools/` directory with empty module files for memory, perception, voice, windows, shell, workers, schedule, system. Add dependencies: rmcp (the Rust MCP SDK), tokio, serde, serde_json, schemars, anyhow, thiserror, tracing.
 
-**crates/kairo-llm** — The local LLM runtime wrapper. This is a library crate. Add dependencies: tokio, anyhow, thiserror, tracing, serde, serde_json. Leave llama-cpp-rs out for now since it needs native libs — we'll add it in Phase 2.
+**crates/continuum-llm** — The local LLM runtime wrapper. This is a library crate. Add dependencies: tokio, anyhow, thiserror, tracing, serde, serde_json. Leave llama-cpp-rs out for now since it needs native libs — we'll add it in Phase 2.
 
-**crates/kairo-vision** — The local vision model runtime. Library crate. Same minimal dependencies as kairo-llm.
+**crates/continuum-vision** — The local vision model runtime. Library crate. Same minimal dependencies as continuum-llm.
 
 ## Part 3: Tauri desktop app scaffolding
 
 1. Create `apps/desktop/` as a Next.js 15 + Tauri 2 project. Use the App Router, TypeScript, and Tailwind CSS.
 
-2. Frontend: in `apps/desktop/`, create a minimal Next.js setup with `package.json`, `next.config.mjs` (with `output: 'export'` because Tauri wants static files), `tsconfig.json` (strict: true), `tailwind.config.ts`, `postcss.config.mjs`, and `src/app/layout.tsx`, `src/app/page.tsx`, `src/app/globals.css`. The homepage should just show "Kairo — pre-alpha scaffolding" in a centered dark layout using Tailwind.
+2. Frontend: in `apps/desktop/`, create a minimal Next.js setup with `package.json`, `next.config.mjs` (with `output: 'export'` because Tauri wants static files), `tsconfig.json` (strict: true), `tailwind.config.ts`, `postcss.config.mjs`, and `src/app/layout.tsx`, `src/app/page.tsx`, `src/app/globals.css`. The homepage should just show "Continuum — pre-alpha scaffolding" in a centered dark layout using Tailwind.
 
-3. Tauri backend: in `apps/desktop/src-tauri/`, create a Tauri 2 project with `Cargo.toml`, `tauri.conf.json` (with app name "Kairo", bundle identifier "com.princ.kairo", window title "Kairo"), `build.rs`, and `src/main.rs`. The main.rs should set up a basic Tauri app with a single command `greet` that returns "hello from kairo core". Add the `kairo-core` crate as a dependency via workspace path.
+3. Tauri backend: in `apps/desktop/src-tauri/`, create a Tauri 2 project with `Cargo.toml`, `tauri.conf.json` (with app name "Continuum", bundle identifier "com.princ.continuum", window title "Continuum"), `build.rs`, and `src/main.rs`. The main.rs should set up a basic Tauri app with a single command `greet` that returns "hello from continuum core". Add the `continuum-core` crate as a dependency via workspace path.
 
 4. Make sure the Tauri Cargo.toml has the correct `tauri-build` in `[build-dependencies]` and `tauri` in `[dependencies]` with the right feature flags for Tauri 2.
 
@@ -92,13 +92,13 @@ Create `prompts/` with these four files. Each file should have a clear header ex
 
 Create `config/` with these files. Fill them with sensible defaults matching ARCHITECTURE.md:
 
-- `config/default-models.toml` — TOML file listing the default model choices for vision (Moondream 2), triage (Qwen 2.5 3B Q4_K_M), orchestrator (claude-opus-4-6), workers (auto mode), STT (whisper small), TTS (piper with a default voice). Include paths where models will be downloaded to (`~/.kairo/models/<component>/`).
+- `config/default-models.toml` — TOML file listing the default model choices for vision (Moondream 2), triage (Qwen 2.5 3B Q4_K_M), orchestrator (claude-opus-4-6), workers (auto mode), STT (whisper small), TTS (piper with a default voice). Include paths where models will be downloaded to (`~/.continuum/models/<component>/`).
 - `config/default-permissions.toml` — TOML file defining the permission tiers for MCP tools. Organize by namespace (memory, perception, voice, windows, shell, workers, schedule, system). For each tool, set the tier: auto, session-approved, always-confirm, or blocked. Use the defaults I'd expect from reading ARCHITECTURE.md section "Security and permissions".
-- `config/default-mcp-servers.json` — JSON file that Claude Code will read via `--mcp-config`. Initially it registers only the Kairo MCP server (pointing to the kairo-mcp binary) plus leaves room for user-added servers.
+- `config/default-mcp-servers.json` — JSON file that Claude Code will read via `--mcp-config`. Initially it registers only the Continuum MCP server (pointing to the continuum-mcp binary) plus leaves room for user-added servers.
 
 ## Part 6: Skills directory
 
-Create `skills/` with a `README.md` explaining what skills are (SKILL.md files that extend Kairo's knowledge for specific workflows) and three placeholder skill directories:
+Create `skills/` with a `README.md` explaining what skills are (SKILL.md files that extend Continuum's knowledge for specific workflows) and three placeholder skill directories:
 
 - `skills/daily-briefing/SKILL.md`
 - `skills/code-review/SKILL.md`
@@ -125,7 +125,7 @@ Create `.github/workflows/ci.yml` that runs on push and PR to main. It should:
 - Run `pnpm install --frozen-lockfile`
 - Run `pnpm --filter desktop build` to verify the Next.js frontend builds
 
-For now the workflow can be Windows-only since Kairo is Windows-first.
+For now the workflow can be Windows-only since Continuum is Windows-first.
 
 ## Part 9: Miscellaneous
 
@@ -135,7 +135,7 @@ For now the workflow can be Windows-only since Kairo is Windows-first.
 
     # Changelog
     
-    All notable changes to Kairo are documented here. Format based on Keep a Changelog, versioning based on SemVer.
+    All notable changes to Continuum are documented here. Format based on Keep a Changelog, versioning based on SemVer.
     
     ## [Unreleased]
     
@@ -144,10 +144,10 @@ For now the workflow can be Windows-only since Kairo is Windows-first.
     - Architecture, soul, roadmap, and Claude Code instructions
     - Cargo and pnpm workspace setup
     - Tauri 2 desktop app skeleton
-    - Placeholder Rust crates for kairo-core, kairo-mcp, kairo-llm, kairo-vision
+    - Placeholder Rust crates for continuum-core, continuum-mcp, continuum-llm, continuum-vision
     - CI workflow for Rust and Next.js builds
 
-3. Create `CONTRIBUTING.md` with a short "Kairo is not accepting code contributions during the pre-alpha phase. Star the repo and watch for updates" message plus a longer section on how contributions will work after alpha (fork, branch, PR, follow the rules in CLAUDE.md).
+3. Create `CONTRIBUTING.md` with a short "Continuum is not accepting code contributions during the pre-alpha phase. Star the repo and watch for updates" message plus a longer section on how contributions will work after alpha (fork, branch, PR, follow the rules in CLAUDE.md).
 
 4. Update the existing README.md "Project status" table if any of the checkmarks need adjusting based on what you just built.
 
@@ -163,7 +163,7 @@ Once everything is in place, verify:
 
 When all of this is done, write a summary of what you created, what works, what doesn't, and what I should check manually before moving to Phase 0.
 
-Do not try to implement any actual Kairo features in this session. This is scaffolding only. The goal is that at the end, the repo compiles, looks right, and is ready for Phase 0. No more, no less.
+Do not try to implement any actual Continuum features in this session. This is scaffolding only. The goal is that at the end, the repo compiles, looks right, and is ready for Phase 0. No more, no less.
 
 If you hit something you're unsure about — a crate version, an API choice, a configuration detail — stop and ask me. Do not guess.
 
@@ -177,17 +177,17 @@ Start by reading the docs, creating your todo list, and confirming you understan
 Use this after the master bootstrap has been committed and pushed.
 
 ```
-We are now starting Phase 0 of the Kairo roadmap: Hello World.
+We are now starting Phase 0 of the Continuum roadmap: Hello World.
 
 Read ROADMAP.md section "Phase 0 — Hello world" in full. That is the goal for this session.
 
-Then read CLAUDE.md section "How to run Claude Code from within Kairo". That pattern is exactly what you need to implement.
+Then read CLAUDE.md section "How to run Claude Code from within Continuum". That pattern is exactly what you need to implement.
 
 You also need to read these external docs before writing any code:
 - https://code.claude.com/docs/en/headless — the headless mode documentation
 - https://code.claude.com/docs/en/cli-reference — the full CLI reference
 
-Your deliverable is an example binary at `crates/kairo-core/examples/hello_world.rs` that:
+Your deliverable is an example binary at `crates/continuum-core/examples/hello_world.rs` that:
 
 1. Spawns `claude` as a child process with these flags: `--print --output-format stream-json --input-format stream-json --verbose --include-partial-messages --model claude-opus-4-6`
 2. Writes a single JSON user message to stdin: `{"type":"user","message":{"role":"user","content":"What is 2+2? Respond in one sentence."}}`
@@ -196,7 +196,7 @@ Your deliverable is an example binary at `crates/kairo-core/examples/hello_world
 5. Exits cleanly when the `result` event arrives, printing the total cost and duration
 6. Handles errors gracefully: missing claude binary, invalid JSON, stream termination, etc.
 
-Define the event enum in `crates/kairo-core/src/orchestrator/events.rs` as a new module. Export it from lib.rs. The event types you need to handle include:
+Define the event enum in `crates/continuum-core/src/orchestrator/events.rs` as a new module. Export it from lib.rs. The event types you need to handle include:
 - system init events
 - assistant messages with content blocks (text, tool_use)
 - user messages with tool_result blocks
@@ -207,7 +207,7 @@ Use serde's `#[serde(tag = "type")]` pattern for the top-level enum and handle u
 
 Acceptance criteria:
 
-1. `cargo run --example hello_world -p kairo-core` works from the repo root
+1. `cargo run --example hello_world -p continuum-core` works from the repo root
 2. The user sees text appear word-by-word as Claude streams it
 3. At the end, the total cost and duration are printed
 4. If `claude` is not installed, the error message says so clearly
@@ -228,11 +228,11 @@ If Claude Code's stream-json format has changed since ARCHITECTURE.md was writte
 Use this after Phase 0 is merged.
 
 ```
-We are starting Phase 1 of the Kairo roadmap: Perception.
+We are starting Phase 1 of the Continuum roadmap: Perception.
 
 Read ROADMAP.md section "Phase 1 — Perception" and ARCHITECTURE.md section "Layer 1 — Senses" in full before you start.
 
-The goal of this phase is to produce a running Kairo Core binary that continuously captures perception frames from screen, audio, and context, and writes them to a SQLite raw log.
+The goal of this phase is to produce a running Continuum Core binary that continuously captures perception frames from screen, audio, and context, and writes them to a SQLite raw log.
 
 This is a large phase. Break it into subtasks and use sub-agents via the Task tool for the independent pieces. Create a detailed TodoWrite plan with at least 20 items.
 
@@ -240,7 +240,7 @@ This is a large phase. Break it into subtasks and use sub-agents via the Task to
 
 ### 1. The vision crate
 
-In `crates/kairo-vision`, implement Moondream 2 inference via ONNX Runtime.
+In `crates/continuum-vision`, implement Moondream 2 inference via ONNX Runtime.
 
 - Add dependencies: `ort` (the ONNX Runtime crate), `image`, `ndarray`, `tokenizers`, `anyhow`, `tracing`
 - Create a `Moondream` struct that loads the model file from a path
@@ -252,7 +252,7 @@ Before implementing, research the current state of Moondream 2 on ONNX and confi
 
 ### 2. Screen capture
 
-In `crates/kairo-core/src/senses/vision.rs`, implement screen capture.
+In `crates/continuum-core/src/senses/vision.rs`, implement screen capture.
 
 - Use the `windows-capture` crate or the `windows` crate's Graphics Capture API
 - Capture the primary monitor at full resolution
@@ -264,7 +264,7 @@ In `crates/kairo-core/src/senses/vision.rs`, implement screen capture.
 
 ### 3. Audio capture and transcription
 
-In `crates/kairo-core/src/senses/audio.rs`, implement mic capture with VAD and Whisper transcription.
+In `crates/continuum-core/src/senses/audio.rs`, implement mic capture with VAD and Whisper transcription.
 
 - Use `cpal` for cross-platform audio capture
 - Use `webrtc-vad` or `silero-vad` for voice activity detection
@@ -275,7 +275,7 @@ In `crates/kairo-core/src/senses/audio.rs`, implement mic capture with VAD and W
 
 ### 4. Context polling
 
-In `crates/kairo-core/src/senses/context.rs`, implement Windows context polling.
+In `crates/continuum-core/src/senses/context.rs`, implement Windows context polling.
 
 - Use the `windows` crate to query:
   - Foreground window handle, title, and process name
@@ -286,7 +286,7 @@ In `crates/kairo-core/src/senses/context.rs`, implement Windows context polling.
 
 ### 5. Frame builder
 
-In `crates/kairo-core/src/senses/frame.rs`, implement the perception frame builder.
+In `crates/continuum-core/src/senses/frame.rs`, implement the perception frame builder.
 
 - Define the `PerceptionFrame` struct with all observations plus timestamp and salience_hint
 - Define a `PerceptionFrameBuilder` that reads from the three observation channels and assembles frames at a configurable interval
@@ -295,19 +295,19 @@ In `crates/kairo-core/src/senses/frame.rs`, implement the perception frame build
 
 ### 6. Raw log storage
 
-In `crates/kairo-core/src/memory/raw_log.rs`, implement SQLite storage for perception frames.
+In `crates/continuum-core/src/memory/raw_log.rs`, implement SQLite storage for perception frames.
 
 - Use `sqlx` with SQLite and rustls
 - Create the schema on first run (perception_frames table with all the fields from ARCHITECTURE.md)
 - Expose `write_frame(frame: &PerceptionFrame)` and `query_frames(since, until)` methods
-- Write screenshots to `~/.kairo/screenshots/<date>/` and store paths in the DB (not blobs)
+- Write screenshots to `~/.continuum/screenshots/<date>/` and store paths in the DB (not blobs)
 - Implement nightly rotation that deletes frames older than the retention policy
 
 ### 7. The main perception binary
 
-In `crates/kairo-core/src/bin/kairo-perception.rs`, create a binary that:
+In `crates/continuum-core/src/bin/continuum-perception.rs`, create a binary that:
 
-- Loads config from `~/.kairo/config.toml` (or a dev default)
+- Loads config from `~/.continuum/config.toml` (or a dev default)
 - Initializes the three senses subsystems
 - Starts the frame builder
 - Writes every frame to the raw log
@@ -328,7 +328,7 @@ Update CHANGELOG.md under Unreleased with everything you added.
 
 ## Acceptance criteria
 
-1. `cargo run --bin kairo-perception` runs cleanly for at least 5 minutes without crashing
+1. `cargo run --bin continuum-perception` runs cleanly for at least 5 minutes without crashing
 2. The terminal shows a continuous stream of frame summaries
 3. The SQLite raw log has entries for every frame
 4. Screenshots are saved to disk and paths match the DB
@@ -349,7 +349,7 @@ Use sub-agents for the independent subtasks. The vision crate, audio crate, and 
 Use this after Phase 1 is merged.
 
 ```
-We are starting Phase 2 of the Kairo roadmap: Triage.
+We are starting Phase 2 of the Continuum roadmap: Triage.
 
 Read ROADMAP.md section "Phase 2 — Triage" and ARCHITECTURE.md section "Layer 2 — Triage" in full.
 
@@ -359,7 +359,7 @@ The goal is to add a local LLM that evaluates every salient perception frame and
 
 ### 1. The LLM crate
 
-In `crates/kairo-llm`, wrap llama.cpp via `llama-cpp-rs` (or the `llama-cpp-2` crate if that's more current — research which is actively maintained). Expose:
+In `crates/continuum-llm`, wrap llama.cpp via `llama-cpp-rs` (or the `llama-cpp-2` crate if that's more current — research which is actively maintained). Expose:
 
 - `struct LocalLlm` that loads a GGUF model from a path
 - Async `generate(prompt: &str, opts: GenerateOptions) -> Result<String>` method
@@ -372,7 +372,7 @@ Support GPU acceleration when CUDA is available but fall back to CPU gracefully.
 
 In `scripts/download-models.ps1`, implement actual model downloads for:
 - Qwen 2.5 3B Instruct Q4_K_M GGUF from Hugging Face
-- Target path `~/.kairo/models/triage/qwen2.5-3b-q4.gguf`
+- Target path `~/.continuum/models/triage/qwen2.5-3b-q4.gguf`
 
 Check if the file already exists before downloading. Verify the SHA256 after download.
 
@@ -382,7 +382,7 @@ Fill in `prompts/triage-system.md` with the real prompt from ARCHITECTURE.md sec
 
 ### 4. The triage loop
 
-In `crates/kairo-core/src/triage/mod.rs`, implement:
+In `crates/continuum-core/src/triage/mod.rs`, implement:
 
 - `struct TriageLayer` that holds a LocalLlm instance
 - `async fn evaluate(frame: PerceptionFrame) -> TriageDecision` method
@@ -402,7 +402,7 @@ The `wake_orchestrator` variant is deferred to Phase 3.
 
 ### 6. Triage benchmarking harness
 
-Create `crates/kairo-core/src/bin/kairo-triage-bench.rs` that loads a set of hand-labeled perception frames from `benchmarks/triage-frames.jsonl`, runs each through the triage layer, and measures:
+Create `crates/continuum-core/src/bin/continuum-triage-bench.rs` that loads a set of hand-labeled perception frames from `benchmarks/triage-frames.jsonl`, runs each through the triage layer, and measures:
 - Accuracy (matches expected decision)
 - Latency (p50, p95, p99)
 - Token usage
@@ -437,7 +437,7 @@ Before starting, research llama.cpp Rust bindings to pick the best crate. Also v
 Use this after Phase 2 is merged.
 
 ```
-We are starting Phase 3 of the Kairo roadmap: Orchestrator.
+We are starting Phase 3 of the Continuum roadmap: Orchestrator.
 
 Read ROADMAP.md section "Phase 3 — Orchestrator" and ARCHITECTURE.md sections "Layer 3 — Orchestrator" and "Memory system" in full.
 
@@ -449,7 +449,7 @@ This is the biggest phase so far. Plan carefully. Use sub-agents.
 
 ### 1. Orchestrator spawner
 
-Build on top of the Phase 0 hello_world to implement `crates/kairo-core/src/orchestrator/spawn.rs`:
+Build on top of the Phase 0 hello_world to implement `crates/continuum-core/src/orchestrator/spawn.rs`:
 
 - `struct Orchestrator` with config for model, prompt paths, allowed tools
 - `async fn wake(ctx: WakeContext) -> OrchestratorResponse` method
@@ -459,7 +459,7 @@ Build on top of the Phase 0 hello_world to implement `crates/kairo-core/src/orch
 
 ### 2. Wake context builder
 
-In `crates/kairo-core/src/orchestrator/context.rs`, build the wake context that gets sent to Opus:
+In `crates/continuum-core/src/orchestrator/context.rs`, build the wake context that gets sent to Opus:
 - Current perception frame
 - Last 15 minutes of raw log summarized to under 500 tokens
 - Top 3 relevant episodic memories (needs memory system first)
@@ -471,7 +471,7 @@ Must fit within 4000 tokens total.
 
 ### 3. Episodic memory
 
-In `crates/kairo-core/src/memory/episodic.rs`, implement LanceDB-based episodic memory:
+In `crates/continuum-core/src/memory/episodic.rs`, implement LanceDB-based episodic memory:
 - Add dependencies: `lancedb`, `fastembed`
 - Create the LanceDB table schema (id, ts_start, ts_end, content, embedding, tags, importance, linked_facts)
 - Implement `write_memory`, `query_by_vector`, `query_by_tag` methods
@@ -479,14 +479,14 @@ In `crates/kairo-core/src/memory/episodic.rs`, implement LanceDB-based episodic 
 
 ### 4. Semantic memory
 
-In `crates/kairo-core/src/memory/semantic.rs`, implement SQLite-based semantic fact storage:
+In `crates/continuum-core/src/memory/semantic.rs`, implement SQLite-based semantic fact storage:
 - The schema from ARCHITECTURE.md (semantic_facts and semantic_edges tables)
 - `fact_get`, `fact_set`, `fact_query`, `edge_add`, `edge_query` methods
 - Seed some initial facts from a `config/initial-facts.toml` file (user name, timezone, etc.)
 
 ### 5. Memory retrieval flow
 
-In `crates/kairo-core/src/memory/retrieval.rs`, implement the two-step retrieval:
+In `crates/continuum-core/src/memory/retrieval.rs`, implement the two-step retrieval:
 1. Vector search episodic memory with the current frame as query, return top 10
 2. Use the triage LLM to re-rank: "which of these 10 memories are most relevant?" Return top 3.
 
@@ -498,9 +498,9 @@ Fill in `prompts/orchestrator-system.md` with a real prompt that:
 - Lists the tools it can call (even though tools aren't built yet, list the names that will exist)
 - Sets the ground rules: plan and delegate, don't do long tasks yourself, be brief
 
-### 7. The main Kairo binary
+### 7. The main Continuum binary
 
-Create `crates/kairo-core/src/bin/kairo.rs` that ties everything together:
+Create `crates/continuum-core/src/bin/continuum.rs` that ties everything together:
 - Starts the perception layer
 - Starts the triage layer
 - When triage decides `wake_orchestrator`, builds the wake context and calls the orchestrator
@@ -513,7 +513,7 @@ Integration test that runs the full pipeline against a mocked claude CLI. Update
 
 ## Acceptance criteria
 
-1. `cargo run --bin kairo` runs the full stack
+1. `cargo run --bin continuum` runs the full stack
 2. When you manually trigger a wake (e.g. via a test command), Opus responds within 5 seconds
 3. Opus's response streams token-by-token to stdout
 4. Episodic memory entries are created from raw log every 15 minutes
@@ -532,7 +532,7 @@ Before starting, verify claude -p --output-format stream-json --input-format str
 For phases 4 through 9, use this template and fill in the phase name:
 
 ```
-We are starting Phase [N] of the Kairo roadmap: [Name].
+We are starting Phase [N] of the Continuum roadmap: [Name].
 
 Read:
 1. ROADMAP.md section "Phase [N] — [Name]" — the done-when checklist is your acceptance criteria
@@ -574,11 +574,11 @@ A single phase might take multiple days. After each work session, note the sessi
 
 ### Set generous tool allowlists
 
-For development sessions on this project, run claude with `--allowedTools "Read,Write,Edit,Bash,Task,WebFetch,WebSearch,TodoWrite"` or use `--permission-mode acceptEdits` to avoid constant approval prompts. Kairo is a big project — too much friction kills momentum.
+For development sessions on this project, run claude with `--allowedTools "Read,Write,Edit,Bash,Task,WebFetch,WebSearch,TodoWrite"` or use `--permission-mode acceptEdits` to avoid constant approval prompts. Continuum is a big project — too much friction kills momentum.
 
 ### Keep the dashboard open (once it exists)
 
-After Phase 6, you can actually watch Kairo build Kairo from the dashboard. Open Home tab, watch the active workers panel. It's surreal but useful for catching runaway sessions.
+After Phase 6, you can actually watch Continuum build Continuum from the dashboard. Open Home tab, watch the active workers panel. It's surreal but useful for catching runaway sessions.
 
 ### Commit after every phase, tag pre-releases
 

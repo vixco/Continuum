@@ -5,7 +5,7 @@ A skill is a `SKILL.md` file the orchestrator picks up at wake time to handle a 
 ## Where skills live
 
 - `skills/<name>/SKILL.md` — **bundled skills** (shipped in the repo)
-- `~/.kairo/skills/<name>/SKILL.md` — **user skills** (installed locally)
+- `~/.continuum/skills/<name>/SKILL.md` — **user skills** (installed locally)
 
 Both locations are scanned at startup. Bundled skills are hot-reloaded; user skills currently need a restart to reload.
 
@@ -59,7 +59,7 @@ triggers:
 
 When active, the orchestrator should:
 
-1. Read `kairo.daily_briefing_time` from semantic memory. If the current time is not within 3 hours of it, decline.
+1. Read `continuum.daily_briefing_time` from semantic memory. If the current time is not within 3 hours of it, decline.
 2. Use `memory_query_episodic` to retrieve the top 10 events from the last 24h.
 3. Use `workers_worker_list` to find overnight worker outcomes.
 4. Use `system_current_time` to anchor relative phrases ("yesterday", "this morning").
@@ -71,12 +71,12 @@ When active, the orchestrator should:
 
 ## Refusal
 If the user asks for a briefing mid-afternoon, decline and suggest "status" instead.
-If episodic memory is empty (new install), decline and suggest letting Kairo run for a day first.
+If episodic memory is empty (new install), decline and suggest letting Continuum run for a day first.
 ```
 
 ## Installing from a URL
 
-Dashboard → Tools → "Install skill from URL". Kairo runs `git clone --depth 1 <url> <tmp>`, validates the `SKILL.md`, and moves it to `~/.kairo/skills/`.
+Dashboard → Tools → "Install skill from URL". Continuum runs `git clone --depth 1 <url> <tmp>`, validates the `SKILL.md`, and moves it to `~/.continuum/skills/`.
 
 ## Disabling
 
@@ -85,7 +85,7 @@ Dashboard → Tools → toggle the skill off. Persisted at `skills.disabled`.
 ## Testing
 
 ```bash
-cargo run --release --example skill_match_demo -p kairo-core -- "your wake reason here"
+cargo run --release --example skill_match_demo -p continuum-core -- "your wake reason here"
 ```
 
 Lists matched skills + their scores for a given wake context. Useful for checking trigger collisions before committing.

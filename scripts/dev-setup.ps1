@@ -1,4 +1,4 @@
-# Kairo development prerequisite check.
+# Continuum development prerequisite check.
 # Idempotent and read-only: it reports exact install/configuration actions.
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +41,7 @@ function Get-CommandVersion {
     return ($output | Select-Object -First 1).ToString().Trim()
 }
 
-Write-Host "Kairo Development Setup" -ForegroundColor Cyan
+Write-Host "Continuum Development Setup" -ForegroundColor Cyan
 Write-Host "========================" -ForegroundColor Cyan
 Write-Host ""
 

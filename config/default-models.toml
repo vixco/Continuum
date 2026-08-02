@@ -1,10 +1,10 @@
-# Kairo default model configuration
-# Override in ~/.kairo/config.toml under [models]
+# Continuum default model configuration
+# Override in ~/.continuum/config.toml under [models]
 
 [vision]
 name = "SmolVLM-256M"
 variant = "smolvlm-256m"
-path = "~/.kairo-dev/models/vision/smolvlm-256m"
+path = "~/.continuum-dev/models/vision/smolvlm-256m"
 size_mb = 500
 runtime = "onnx"
 gpu_enabled = false  # Phase 1: CPU only. Set true for CUDA acceleration.
@@ -13,13 +13,13 @@ gpu_enabled = false  # Phase 1: CPU only. Set true for CUDA acceleration.
 [triage]
 name = "Qwen 3 8B"
 variant = "qwen3-8b-q4_k_m"
-path = "~/.kairo-dev/models/triage/qwen3-8b-q4_k_m.gguf"
+path = "~/.continuum-dev/models/triage/qwen3-8b-q4_k_m.gguf"
 size_mb = 4800
 runtime = "llama-cpp"
 gpu_layers = -1  # -1 or 999 = offload all layers to GPU (recommended). 0 = CPU only.
 # Thinking mode must be disabled for triage — the system prompt includes /no_think.
 # Low-VRAM fallback: qwen3-4b-q4_k_m (~2.5 GB, weaker Dutch + decision boundaries)
-# path = "~/.kairo-dev/models/triage/qwen3-4b-q4_k_m.gguf"
+# path = "~/.continuum-dev/models/triage/qwen3-4b-q4_k_m.gguf"
 
 [orchestrator]
 name = "Claude Opus 4.6"
@@ -34,27 +34,27 @@ power_model = "claude-opus-4-6"
 max_concurrent = 3
 
 [audio]
-# Chosen audio input device. Kairo runs an interactive picker on first start
+# Chosen audio input device. Continuum runs an interactive picker on first start
 # (or when you pass `--reset-audio`, or when the hardware has changed) and
-# saves the result here. Pick by running `kairo` once, or by running
+# saves the result here. Pick by running `continuum` once, or by running
 # `cargo run --release --bin audio-probe` to re-pick without booting the full
 # runtime.
 #
 # These fields are written by the picker at runtime to
-# ~/.kairo-dev/config.toml. Leave them empty here — this file is a template.
+# ~/.continuum-dev/config.toml. Leave them empty here — this file is a template.
 # device_name  = "Microphone"     # display name from cpal description()
 # device_index = 2                # cpal enumeration index at pick time
 
 # Whisper input language. Default "en" because whisper-small's
 # auto-detect is unreliable on short (< 2 s) wake-word clips — we've
-# seen "hey kairo" mis-detected as Portuguese "Ei, Cairo!" at p=0.55.
+# seen "hey continuum" mis-detected as Portuguese "Ei, Cairo!" at p=0.55.
 # Forcing English keeps wake detection stable.
 #
 # Change to "nl", "de", or another code if you primarily speak a
 # different language. Change to "auto" if your clips are long enough
-# (>2 s) for confident language detection. Kairo's output language is
+# (>2 s) for confident language detection. Continuum's output language is
 # controlled separately under [tts] — input and output are decoupled,
-# so "en" input still lets Kairo respond in English (current default).
+# so "en" input still lets Continuum respond in English (current default).
 whisper_language = "en"
 
 # Adaptive VAD: the runtime threshold is
@@ -92,24 +92,24 @@ distillation_batch_size = 100
 [stt]
 name = "Whisper small"
 variant = "whisper-small"
-path = "~/.kairo/models/stt/whisper-small.bin"
+path = "~/.continuum/models/stt/whisper-small.bin"
 size_mb = 244
 runtime = "whisper-cpp"
 # Alternatives: whisper-tiny, whisper-base, whisper-medium, whisper-large-v3
 
 [tts]
 # Phase 5 TTS is fully local (Piper). Every model file must exist before
-# `cargo run --bin kairo` attempts to speak - otherwise whisper decisions
+# `cargo run --bin continuum` attempts to speak - otherwise whisper decisions
 # and orchestrator responses will fall through to log-only mode.
 #
-# Run `powershell scripts/download-models.ps1` to populate ~/.kairo-dev/models/tts/
-# AND to install piper.exe + espeak-ng-data under ~/.kairo-dev/bin/piper/.
+# Run `powershell scripts/download-models.ps1` to populate ~/.continuum-dev/models/tts/
+# AND to install piper.exe + espeak-ng-data under ~/.continuum-dev/bin/piper/.
 #
-# OUTPUT STRATEGY: Kairo speaks English by default because the Dutch Piper
+# OUTPUT STRATEGY: Continuum speaks English by default because the Dutch Piper
 # voices available as of 2026-04 (nl_NL-mls-medium) produce barely-
 # intelligible speech. Input is still multilingual - whisper.cpp
-# transcribes any language the user speaks and Kairo understands it;
-# Kairo just always responds in English.
+# transcribes any language the user speaks and Continuum understands it;
+# Continuum just always responds in English.
 #
 # To re-enable multilingual output later (e.g. once a better Dutch voice
 # ships):
@@ -128,11 +128,11 @@ engine = "piper"
 # espeak-ng dictionary directory (exported as PIPER_ESPEAKNG_DATA_DIRECTORY
 # at startup). Installed by scripts/download-models.ps1 from the Piper
 # Windows release bundle.
-espeak_data_dir = "~/.kairo-dev/models/tts/espeak-ng-data"
+espeak_data_dir = "~/.continuum-dev/models/tts/espeak-ng-data"
 
 # BCP-47 short code of the voice used when no language hint is available.
 # When language_detection_enabled = false (default), this is the ONLY
-# voice Kairo ever uses, regardless of the transcribed input language.
+# voice Continuum ever uses, regardless of the transcribed input language.
 primary = "en"
 
 # length_scale = 1.0 is Piper's default. <1.0 speeds up speech, >1.0 slows
@@ -140,8 +140,8 @@ primary = "en"
 # length_scale = 1.0
 
 [tts.voices.en]
-model_path  = "~/.kairo-dev/models/tts/en_US-norman-medium.onnx"
-config_path = "~/.kairo-dev/models/tts/en_US-norman-medium.onnx.json"
+model_path  = "~/.continuum-dev/models/tts/en_US-norman-medium.onnx"
+config_path = "~/.continuum-dev/models/tts/en_US-norman-medium.onnx.json"
 # en_US-norman-medium is single-speaker - leave unset.
 # speaker_id = 0
 
@@ -150,8 +150,8 @@ config_path = "~/.kairo-dev/models/tts/en_US-norman-medium.onnx.json"
 # so you can opt in by uncommenting this section and setting
 # [voice].language_detection_enabled = true.
 # [tts.voices.nl]
-# model_path  = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx"
-# config_path = "~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx.json"
+# model_path  = "~/.continuum-dev/models/tts/nl_NL-mls-medium.onnx"
+# config_path = "~/.continuum-dev/models/tts/nl_NL-mls-medium.onnx.json"
 # speaker_id  = 0
 
 # Optional ElevenLabs streaming cloud backend. Disabled by default. To
@@ -166,10 +166,10 @@ similarity_boost = 0.75
 [voice]
 enabled = true
 wake_word_enabled = true
-wake_keyword = "hey kairo"
+wake_keyword = "hey continuum"
 wake_sensitivity = 0.5
 # Optional native wake-word .ppn path. Empty uses local transcript detection
-# over Whisper output, so Kairo still has a fully local wake gate without an
+# over Whisper output, so Continuum still has a fully local wake gate without an
 # access-key dependency in core.
 custom_keyword_path = ""
 listen_timeout_ms = 12000
@@ -179,10 +179,10 @@ barge_in_enabled = true
 ambient_mute_enabled = true
 
 # Route TTS to a per-language voice based on whisper's detected language.
-# Disabled by default: Kairo understands any language the user speaks
+# Disabled by default: Continuum understands any language the user speaks
 # (whisper_language = "auto" above) but always responds in English via
 # the [tts].primary voice. Enable only if you have a quality voice file
-# for every language you want Kairo to speak.
+# for every language you want Continuum to speak.
 language_detection_enabled = false
 
 default_language = "en"
@@ -199,15 +199,57 @@ feedback_sounds = true
 # chord: "Ctrl", "Shift", "Alt", "Win" joined with "+".
 hotkey = "Ctrl+Shift+K"
 
-# After Kairo finishes speaking, keep the voice session alive this many
+# After Continuum finishes speaking, keep the voice session alive this many
 # seconds for a natural follow-up without re-triggering the wake word.
 # Set to 0 to require wake word on every interaction.
 conversation_followup_seconds = 5
 
 # Phase 4: MCP server configuration (filesystem allowlist extension)
-# Default allowed roots: ~/.kairo-dev/ and every semantic fact matching key
+# Default allowed roots: ~/.continuum-dev/ and every semantic fact matching key
 # "project.*.dir". The deny list is hardcoded and cannot be disabled. Add extra
 # read-only directories here to expand what Opus can inspect via fs_read_file /
 # fs_list_dir. Paths support ~ expansion.
 [mcp.fs]
 extra_paths = []
+
+# Adaptive resource policy. Probed once at boot (CPU cores, RAM, GPU/VRAM,
+# laptop-vs-desktop, AC-vs-battery) and resolved into concrete knobs applied
+# to the triage LLM, vision model, whisper, screen/context pollers, and
+# worker pool. Override via the dashboard Settings → Resources panel or here.
+# See crates/continuum-core/src/hardware.rs + ARCHITECTURE.md "Resource policy".
+[resources]
+# Profile preset. "auto" picks barely_notice on laptops / CPU-only boxes and
+# balanced on a GPU desktop. "custom" honours every field below verbatim.
+profile = "barely_notice"
+
+# Fraction (0.0-1.0) of logical cores local models may use on AC power.
+# Barely-notice default 0.30; balanced 0.55; performance 0.80.
+cpu_core_fraction = 0.30
+# Floor / cap for local-model thread counts (the OS + orchestrator need cores too).
+cpu_min_threads = 2
+cpu_max_threads = 8
+# Fraction of total RAM to leave free for the OS + other apps.
+ram_reserve_fraction = 0.50
+
+# GPU: null = auto-detect (nvcuda.dll + nvidia-smi), true = force on, false = force off.
+gpu_enabled = null
+# Minimum VRAM (MB) to enable GPU offload. Below this, fall back to CPU.
+gpu_min_vram_mb = 3000
+
+# Throttle harder on battery power.
+battery_throttle = true
+battery_core_fraction = 0.20
+
+# Vision model: null = auto (on when total RAM >= vision_min_ram_mb), true/false = force.
+vision_enabled = null
+# Below this much total RAM, vision is disabled and perception runs text-only.
+vision_min_ram_mb = 6144
+
+# Override the derived worker concurrency cap. null = derive from cores + RAM
+# (halved on battery, capped by ram_gb/4, clamped 1-10).
+workers_max_concurrent = null
+
+# Override the derived poll intervals (seconds). null = derive from profile
+# (screen: 3s AC / 5s battery; context: 1s AC / 2s battery).
+screen_interval_secs = null
+context_interval_secs = null

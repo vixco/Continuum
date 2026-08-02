@@ -5,7 +5,7 @@ import { clsx } from "clsx";
 import { AlertCircle, MessagesSquare, Sparkles, Users, Wallet, X } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import { Button, Card, StatusOrb } from "@/components/ui/primitives";
 import { PushToTalkButton } from "@/components/PushToTalkButton";
 import type { RecentAction, VoiceMode, WorkerSnapshot } from "@/lib/types";
@@ -28,7 +28,7 @@ export function HomeTab() {
     let cancelled = false;
     async function poll() {
       try {
-        const list = await kairo.listWorkers(50);
+        const list = await continuum.listWorkers(50);
         if (!cancelled) {
           setWorkers(list);
           if (selectedId) {
@@ -98,7 +98,7 @@ export function HomeTab() {
                   key={w.id}
                   worker={w}
                   onSelect={() => setSelected(w)}
-                  onCancel={() => kairo.cancelWorker(w.id)}
+                  onCancel={() => continuum.cancelWorker(w.id)}
                 />
               ))}
               {completed.map((w) => (
@@ -106,7 +106,7 @@ export function HomeTab() {
                   key={w.id}
                   worker={w}
                   onSelect={() => setSelected(w)}
-                  onCancel={() => kairo.dismissWorker(w.id)}
+                  onCancel={() => continuum.dismissWorker(w.id)}
                   dismiss
                 />
               ))}
@@ -258,7 +258,7 @@ function WorkerDetail({ worker, onClose }: { worker: WorkerSnapshot; onClose: ()
         <div className="mt-4 flex items-center justify-between text-xs text-ink-dim">
           <span>Model chose because: {worker.model_reason}</span>
           {ACTIVE_STATUSES.has(worker.status) ? (
-            <Button size="sm" variant="ghost" onClick={() => kairo.cancelWorker(worker.id)}>
+            <Button size="sm" variant="ghost" onClick={() => continuum.cancelWorker(worker.id)}>
               Cancel worker
             </Button>
           ) : (
@@ -266,7 +266,7 @@ function WorkerDetail({ worker, onClose }: { worker: WorkerSnapshot; onClose: ()
               size="sm"
               variant="ghost"
               onClick={() => {
-                kairo.dismissWorker(worker.id);
+                continuum.dismissWorker(worker.id);
                 onClose();
               }}
             >

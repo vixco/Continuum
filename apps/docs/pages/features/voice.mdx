@@ -1,6 +1,6 @@
 # Voice
 
-The voice pipeline is Kairo's most user-facing feature. Whole thing runs locally except for the orchestrator call itself.
+The voice pipeline is Continuum's most user-facing feature. Whole thing runs locally except for the orchestrator call itself.
 
 ## The pipeline
 
@@ -12,7 +12,7 @@ mic → whisper (continuous) → wake-phrase match → voice session
 
 ## Wake word
 
-- Default phrase: **"hey kairo"**. Configurable at `voice.wake_keyword`.
+- Default phrase: **"hey continuum"**. Configurable at `voice.wake_keyword`.
 - Matching happens on the whisper transcript, not on raw audio — no Porcupine dependency.
 - Sensitivity is a fuzzy-match threshold (`voice.wake_sensitivity`, 0.0–1.0). Default 0.5.
 - Custom keyword files (Porcupine-style `.ppn`) can be loaded via `voice.custom_keyword_path` if you prefer.
@@ -23,33 +23,33 @@ Global hotkey, default `Ctrl+Shift+K`, registered via `RegisterHotKey`. Press an
 
 ## Endpoint detection
 
-Once the session is open, Kairo uses heuristic semantic endpoint detection — a few hundred ms of silence **plus** a transcript that looks complete (ends in punctuation or a natural clause boundary). The timeouts are:
+Once the session is open, Continuum uses heuristic semantic endpoint detection — a few hundred ms of silence **plus** a transcript that looks complete (ends in punctuation or a natural clause boundary). The timeouts are:
 
 - `voice.endpoint_silence_ms` — pause length that triggers end-of-utterance (default 700 ms).
 - `voice.listen_timeout_ms` — hard cap on a single session (default 12 s).
 
 ## Barge-in (interruption)
 
-If you start speaking while Kairo is speaking, the playback queue clears and Kairo shuts up mid-sentence. `voice.barge_in_enabled = true` by default.
+If you start speaking while Continuum is speaking, the playback queue clears and Continuum shuts up mid-sentence. `voice.barge_in_enabled = true` by default.
 
 ## Ambient mute
 
-If Discord, Teams, Zoom, Meet, or Slack has an active call, Kairo switches to quiet mode — no TTS, no wake replies. You can still use the hotkey to summon it explicitly. `voice.ambient_mute_enabled = true` by default.
+If Discord, Teams, Zoom, Meet, or Slack has an active call, Continuum switches to quiet mode — no TTS, no wake replies. You can still use the hotkey to summon it explicitly. `voice.ambient_mute_enabled = true` by default.
 
 ## Conversation follow-up
 
-After every orchestrator wake, Kairo leaves a short listening window open (`voice.conversation_followup_seconds`, default 5). Within this window you can speak again without the wake phrase, as if continuing a conversation. After the window, it falls back to passive mode.
+After every orchestrator wake, Continuum leaves a short listening window open (`voice.conversation_followup_seconds`, default 5). Within this window you can speak again without the wake phrase, as if continuing a conversation. After the window, it falls back to passive mode.
 
 ## TTS engines
 
 - **Piper** (default) — local, fast, multilingual. See the [Piper voices](https://huggingface.co/rhasspy/piper-voices) catalogue; any voice that ships as `.onnx` + `.onnx.json` will work.
 - **ElevenLabs** — stubbed, not fully integrated yet. Config lives at `tts.elevenlabs.*` but enabling the engine logs a warning and falls back to Piper.
 
-Switch voices in the dashboard Voice tab or by editing `tts.voices` and `tts.primary` in `~/.kairo/config/default-models.toml`.
+Switch voices in the dashboard Voice tab or by editing `tts.voices` and `tts.primary` in `~/.continuum/config/default-models.toml`.
 
 ## Latency budget
 
-See `crates/kairo-core/examples/voice_latency_bench.rs` for the measurement harness. Rough P95 targets on an RTX 3060:
+See `crates/continuum-core/examples/voice_latency_bench.rs` for the measurement harness. Rough P95 targets on an RTX 3060:
 
 - Wake match: < 150 ms
 - Endpoint detection: < 800 ms after last word

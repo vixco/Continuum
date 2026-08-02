@@ -1,4 +1,4 @@
-# Cargo build configuration for Kairo
+# Cargo build configuration for Continuum
 #
 # whisper-rs-sys requires:
 # - LLVM/libclang for bindgen (set LIBCLANG_PATH)
@@ -44,7 +44,7 @@ CMAKE_GENERATOR = "Ninja"
 # or `cmake` crates for native code) to build with the Release CRT even
 # when Rust itself is in debug mode. Without this, file handles crossing
 # the Rust ↔ native-code boundary trigger a debug-CRT assertion in
-# read.cpp:381 (`_osfile(fh) & FOPEN`) and Kairo crashes with exit
+# read.cpp:381 (`_osfile(fh) & FOPEN`) and Continuum crashes with exit
 # code 3 during whisper model load.
 #
 # Why both env vars are needed on Windows MSVC:

@@ -15,7 +15,7 @@ triggers:
 
 # File Organizer
 
-When this skill matches, the user wants Kairo to tidy a folder. The
+When this skill matches, the user wants Continuum to tidy a folder. The
 rules are simple: **never delete, always propose before moving, and
 move questionable files to a `to-review/` subfolder rather than
 guessing.**
@@ -26,13 +26,13 @@ If the user didn't specify a folder, ask once:
 "Which folder should I organise?" Don't proceed without an explicit
 path inside the allowlist.
 
-Use `mcp__kairo__memory_list_facts` prefix `"project."` to check
+Use `mcp__continuum__memory_list_facts` prefix `"project."` to check
 whether the folder belongs to a known project — if so, respect that
 project's structure if one is documented.
 
 ## Step 2 — Inspect
 
-Use `mcp__kairo__fs_list_dir` on the target folder. If the tool isn't
+Use `mcp__continuum__fs_list_dir` on the target folder. If the tool isn't
 available (allowlist too narrow) or the path is denied, report that
 and stop.
 
@@ -86,7 +86,7 @@ Moved 22 files into 4 categories.
 Write a single episodic memory entry describing what changed:
 
 ```
-mcp__kairo__memory_set_fact(
+mcp__continuum__memory_set_fact(
   key="folder.<name>.last_tidy",
   value="<RFC3339 now>"
 )

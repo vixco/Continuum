@@ -6,11 +6,11 @@
 - **16 GB RAM recommended.** 8 GB works if you use the Qwen 3 4B triage fallback instead of the 8B default.
 - **NVIDIA GPU (optional).** Any CUDA-capable GPU with 6+ GB VRAM speeds up triage and vision substantially. If absent, everything still runs on CPU.
 - **~10 GB disk space** for models + binaries.
-- **A Claude subscription.** Max recommended; Pro and API plans also work. Kairo drives the official `claude` CLI as a subprocess — your subscription is yours.
+- **A Claude subscription.** Max recommended; Pro and API plans also work. Continuum drives the official `claude` CLI as a subprocess — your subscription is yours.
 
 ## Install Claude Code first
 
-Kairo doesn't work without the Claude Code CLI. Install it and sign in before running the Kairo installer.
+Continuum doesn't work without the Claude Code CLI. Install it and sign in before running the Continuum installer.
 
 ```powershell
 npm install -g @anthropic-ai/claude-code
@@ -22,24 +22,24 @@ If `claude login` opens a browser and you complete authentication successfully, 
 ## One-liner install
 
 ```powershell
-irm https://raw.githubusercontent.com/PrincNL/kairo-ai/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/vixco/Continuum/main/scripts/install.ps1 | iex
 ```
 
 This runs the installer script, which:
 
 1. Checks your Windows version and confirms you meet the 1903+ / 11 baseline.
 2. Checks for Node.js 18+, Claude Code CLI, and authenticated login. Offers to install missing pieces.
-3. Downloads the latest release binary to `%LOCALAPPDATA%\Kairo`.
-4. Creates `~/.kairo/` with the standard subdirectories (`config`, `models`, `logs`, `memory`, `backups`, `bin`, `worker-intents`, `workers`, `repair-intents`).
-5. Copies default config files into `~/.kairo/config/` (existing user configs are not overwritten).
+3. Downloads the latest release binary to `%LOCALAPPDATA%\Continuum`.
+4. Creates `~/.continuum/` with the standard subdirectories (`config`, `models`, `logs`, `memory`, `backups`, `bin`, `worker-intents`, `workers`, `repair-intents`).
+5. Copies default config files into `~/.continuum/config/` (existing user configs are not overwritten).
 6. Runs `scripts/download-models.ps1` to fetch ~6.5 GB of default models.
 7. Adds a Start Menu shortcut.
 
 Optional flags:
 
 - `-DesktopShortcut` — also add a shortcut to the Desktop.
-- `-AutoStart` — register Kairo to start with Windows.
-- `-SkipModels` — skip model downloads (you can run `kairo setup` later).
+- `-AutoStart` — register Continuum to start with Windows.
+- `-SkipModels` — skip model downloads (you can run `continuum setup` later).
 - `-FromSource` — build from source instead of downloading the release binary. Requires the full dev toolchain.
 - `-Version v0.1.0-alpha.1` — pin a specific release instead of `latest`.
 
@@ -50,8 +50,8 @@ The installer is idempotent — running it again upgrades / repairs your install
 If you want to build from source:
 
 ```powershell
-git clone https://github.com/PrincNL/kairo-ai.git
-cd kairo-ai
+git clone https://github.com/vixco/Continuum.git
+cd continuum-ai
 .\scripts\dev-setup.ps1          # verify Rust, Node, pnpm, Claude Code are present
 .\scripts\install.ps1 -FromSource
 ```
@@ -64,26 +64,26 @@ Building from source requires:
 - protoc (for LanceDB's prost-build)
 - MSVC Build Tools (for Windows SDK headers)
 
-See [CONTRIBUTING.md](https://github.com/PrincNL/kairo-ai/blob/main/CONTRIBUTING.md) for the full dev-setup guide.
+See [CONTRIBUTING.md](https://github.com/vixco/Continuum/blob/main/CONTRIBUTING.md) for the full dev-setup guide.
 
 ## Verify
 
 After installation, run:
 
 ```powershell
-kairo --version
+continuum --version
 ```
 
-and launch Kairo from the Start Menu. The dashboard should open and walk you through the [First run wizard](/getting-started/first-run).
+and launch Continuum from the Start Menu. The dashboard should open and walk you through the [First run wizard](/getting-started/first-run).
 
 ## Uninstall
 
 ```powershell
 # Remove the binary
-Remove-Item -Recurse -Force $env:LOCALAPPDATA\Kairo
+Remove-Item -Recurse -Force $env:LOCALAPPDATA\Continuum
 
 # Optionally remove user data (memory, logs, config)
-Remove-Item -Recurse -Force $env:USERPROFILE\.kairo
+Remove-Item -Recurse -Force $env:USERPROFILE\.continuum
 ```
 
-User data (`~/.kairo/`) is preserved by default. Delete it explicitly if you want a clean slate.
+User data (`~/.continuum/`) is preserved by default. Delete it explicitly if you want a clean slate.

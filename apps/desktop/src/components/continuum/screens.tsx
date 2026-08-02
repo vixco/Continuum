@@ -37,6 +37,7 @@ import {
 
 import { Badge, Button, Dot, Panel, Progress, Ring, StatCard, TextAction } from "./ui";
 import type { UpdateInfo } from "@/lib/tauri";
+import { ResourcePanel } from "@/components/continuum/ResourcePanel";
 
 function PageHeader({
   title,
@@ -1359,6 +1360,9 @@ export function SettingsScreen({
           </label>
         }
       />
+      <div className="mb-4">
+        <ResourcePanel />
+      </div>
       <div className="mb-4 flex gap-7 border-b border-white/[.07] px-3 text-[11px]">
         {["Integrations", "Models", "Routing", "Adapters", "Permissions", "Diagnostics"].map(
           (x, i) => (

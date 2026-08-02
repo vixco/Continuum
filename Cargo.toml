@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/kairo-core",
-    "crates/kairo-mcp",
-    "crates/kairo-llm",
-    "crates/kairo-vision",
+    "crates/continuum-core",
+    "crates/continuum-mcp",
+    "crates/continuum-llm",
+    "crates/continuum-vision",
     "apps/desktop/src-tauri",
 ]
 resolver = "2"
@@ -12,7 +12,7 @@ resolver = "2"
 version = "0.1.0-alpha.3"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/PrincNL/kairo-ai"
+repository = "https://github.com/vixco/Continuum"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -37,19 +37,19 @@ fastembed = { version = "5.13", default-features = false, features = ["ort-load-
 arrow-array = "57"
 arrow-schema = "57"
 
-# Note on debug builds for kairo.exe:
+# Note on debug builds for continuum.exe:
 #
 # llama-cpp-sys-2 compiles its C++ wrapper files through the `cc` crate,
 # which picks /MDd based on cargo's internal DEBUG=true env var. We tried
 # [env].DEBUG="false" (cargo overrides it), [profile.dev.package.*]
 # debug=false (cargo's profile override doesn't propagate to the build
 # script env the way we needed), and CMAKE_BUILD_TYPE=Release (only
-# covers the cmake-driven part, not cc::Build). The debug Kairo binary
+# covers the cmake-driven part, not cc::Build). The debug Continuum binary
 # ends up mixing /MDd-compiled wrapper objects with /MD-compiled Rust
 # code and crashes in ucrtbased!read.cpp:381 during whisper model load.
 #
 # Pragmatic resolution: **release mode is the default dev loop for
-# kairo.exe**. See CLAUDE.md "Build workflow" for the full story —
-# TL;DR: `cargo run --release --bin kairo`, sccache makes clean
+# continuum.exe**. See CLAUDE.md "Build workflow" for the full story —
+# TL;DR: `cargo run --release --bin continuum`, sccache makes clean
 # rebuilds fast, debug mode is used for tests / examples / other
 # binaries (which don't drag in llama-cpp-sys-2).

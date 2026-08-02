@@ -1,6 +1,6 @@
-# Kairo Skills
+# Continuum Skills
 
-Skills are `SKILL.md` files that extend Kairo's knowledge for specific workflows. Each skill lives in its own directory under `skills/` and tells the orchestrator how to handle a particular type of task.
+Skills are `SKILL.md` files that extend Continuum's knowledge for specific workflows. Each skill lives in its own directory under `skills/` and tells the orchestrator how to handle a particular type of task.
 
 ## How skills work
 
@@ -41,7 +41,7 @@ Instructions for the orchestrator when this skill is active...
 
 ## Adding skills
 
-Drop a new `<name>/SKILL.md` under `skills/` and Kairo picks it up at
+Drop a new `<name>/SKILL.md` under `skills/` and Continuum picks it up at
 the next reload (hot reload is on by default — see `SkillsConfig`).
 Skills can also be created, edited, or disabled from the dashboard
 Tools tab.

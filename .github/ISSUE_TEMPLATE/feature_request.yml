@@ -1,13 +1,13 @@
 name: Feature request
-description: Propose a new feature or capability for Kairo.
+description: Propose a new feature or capability for Continuum.
 title: "[feature]: "
 labels: ["enhancement", "triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for proposing a feature. Before filing, please make sure this fits Kairo's scope:
-        Kairo is a desktop-native, local-first ambient AI for Windows, using Claude Code via its official CLI.
+        Thanks for proposing a feature. Before filing, please make sure this fits Continuum's scope:
+        Continuum is a desktop-native, local-first ambient AI for Windows, using Claude Code via its official CLI.
         Features that push toward "more ambient, more local, more self-reliant" are a great fit. Features that
         require cloud services, paid APIs, or violate the [non-negotiables in CLAUDE.md](../../CLAUDE.md#non-negotiables)
         almost certainly aren't.
@@ -17,7 +17,7 @@ body:
     attributes:
       label: What problem does this solve?
       description: Describe the concrete situation where you'd use this feature.
-      placeholder: "When I'm in a meeting, Kairo keeps whispering transcript notes — I'd like to mute it automatically."
+      placeholder: "When I'm in a meeting, Continuum keeps whispering transcript notes — I'd like to mute it automatically."
     validations:
       required: true
 
@@ -25,7 +25,7 @@ body:
     id: proposed
     attributes:
       label: Proposed solution
-      description: What should Kairo do? How should it behave? Be specific.
+      description: What should Continuum do? How should it behave? Be specific.
     validations:
       required: true
 
@@ -59,11 +59,11 @@ body:
   - type: checkboxes
     id: principles
     attributes:
-      label: Does this fit Kairo's principles?
+      label: Does this fit Continuum's principles?
       description: Check only the boxes that apply. Features that violate any of these need a very good reason.
       options:
-        - label: This keeps Kairo local-first (no new cloud dependency).
-        - label: This keeps Kairo legal (no token scraping, no reverse engineering).
+        - label: This keeps Continuum local-first (no new cloud dependency).
+        - label: This keeps Continuum legal (no token scraping, no reverse engineering).
         - label: This keeps the four-layer architecture intact.
         - label: This includes self-healing hooks (health check, recovery procedure, structured logs).
         - label: I'm willing to help implement this.

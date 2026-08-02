@@ -17,7 +17,7 @@ Run `.\scripts\dev-setup.ps1` first — it checks everything.
 
 ```bash
 # Runtime binary — RELEASE ONLY (debug crashes on Windows)
-cargo run --release --bin kairo
+cargo run --release --bin continuum
 
 # Dashboard — debug is fine
 cd apps/desktop
@@ -25,10 +25,10 @@ pnpm install
 pnpm tauri dev
 
 # Library tests
-cargo test -p kairo-core
+cargo test -p continuum-core
 
 # Specific example
-cargo run --release --example voice_test -p kairo-core
+cargo run --release --example voice_test -p continuum-core
 
 # Everything
 cargo build --release
@@ -36,9 +36,9 @@ cargo build --release
 
 ## Why the main binary is release-only
 
-`llama-cpp-sys-2` compiles its C++ wrappers via `cc::Build`, which picks `/MDd` in debug profiles and links against `ucrtbased.dll`. Rust itself uses `/MD` on MSVC regardless of profile. The resulting binary mixes CRTs and crashes during whisper model load. See [CLAUDE.md build workflow](https://github.com/PrincNL/kairo-ai/blob/main/CLAUDE.md#build-workflow) for the long story.
+`llama-cpp-sys-2` compiles its C++ wrappers via `cc::Build`, which picks `/MDd` in debug profiles and links against `ucrtbased.dll`. Rust itself uses `/MD` on MSVC regardless of profile. The resulting binary mixes CRTs and crashes during whisper model load. See [CLAUDE.md build workflow](https://github.com/vixco/Continuum/blob/main/CLAUDE.md#build-workflow) for the long story.
 
-The `kairo-desktop` app gates out llama-cpp-sys-2 via `kairo-core` `default-features = false`, so it builds fine in debug.
+The `continuum-desktop` app gates out llama-cpp-sys-2 via `continuum-core` `default-features = false`, so it builds fine in debug.
 
 ## First build is slow
 
@@ -67,7 +67,7 @@ pnpm tauri build          # produces MSI under src-tauri/target/release/bundle/m
 
 ```bash
 cargo test --workspace                                    # all crates
-cargo test -p kairo-core -- --skip matches_whisper_k     # skip known-failing
+cargo test -p continuum-core -- --skip matches_whisper_k     # skip known-failing
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -75,5 +75,5 @@ cargo fmt --all -- --check
 ## Launch helpers
 
 - `scripts\dev-setup.ps1` — prerequisite check
-- `scripts\download-models.ps1` — one-shot model download to `~/.kairo-dev/models/`
+- `scripts\download-models.ps1` — one-shot model download to `~/.continuum-dev/models/`
 - `scripts\bump-version.ps1 -NewVersion 0.1.0-alpha.N` — version bump across all files

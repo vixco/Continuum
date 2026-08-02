@@ -1,25 +1,29 @@
-//! Default health-check registrations for the Kairo runtime.
+//! Default health-check registrations for the Continuum runtime.
 //!
 //! These probes intentionally don't block on heavy work — they mostly
-//! check the state-store flags set by the headless `kairo` binary (when
+//! check the state-store flags set by the headless `continuum` binary (when
 //! it's running) or verify on-disk model artefacts are present. That
 //! keeps the dashboard usable even when the main runtime isn't active,
 //! and the Health tab displays `Unknown` for subsystems whose owner
 //! process hasn't published yet.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
+use sysinfo::System;
 use tokio::sync::RwLock;
 
-use kairo_core::config::KairoConfig;
-use kairo_core::health::{HealthCheck, HealthRegistry, HealthResult};
-use kairo_core::runtime::KairoRuntime;
-use kairo_core::state::StateHandle;
+use continuum_core::config::ContinuumConfig;
+use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
+use continuum_core::health::{HealthCheck, HealthRegistry, HealthResult};
+use continuum_core::runtime::ContinuumRuntime;
+use continuum_core::state::StateHandle;
 
-/// Directory where kairo-desktop.exe was started from. Used by checks that
-/// need to find sibling files (kairo-mcp.exe, prompts/, skills/) that the
+/// Directory where continuum-desktop.exe was started from. Used by checks that
+/// need to find sibling files (continuum-mcp.exe, prompts/, skills/) that the
 /// installer places next to the binaries.
 fn install_dir() -> Option<PathBuf> {
     std::env::current_exe()
@@ -27,7 +31,7 @@ fn install_dir() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
 }
 
-/// True if `kairo.exe` has touched `~/.kairo-dev/state.json` recently.
+/// True if `continuum.exe` has touched `~/.continuum-dev/state.json` recently.
 /// Used to avoid screaming "Degrading" across every model/voice/orchestrator
 /// probe when the runtime simply isn't running (the common case for dashboard-only
 /// installs).
@@ -45,7 +49,7 @@ fn runtime_alive(dev_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
+pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     let state = Arc::new(RwLock::new(runtime.state.clone()));
     let cfg = Arc::new(runtime.config_snapshot());
     let dev_dir = runtime.dev_dir();
@@ -92,13 +96,14 @@ pub fn register_default(registry: &HealthRegistry, runtime: &KairoRuntime) {
         cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
+    registry.register(SystemResourceCheck::new(&cfg));
 }
 
-async fn snap(state: &Arc<RwLock<StateHandle>>) -> kairo_core::state::KairoState {
+async fn snap(state: &Arc<RwLock<StateHandle>>) -> continuum_core::state::ContinuumState {
     state.read().await.snapshot().await
 }
 
-/// Heartbeat: is the headless `kairo.exe` runtime currently alive?
+/// Heartbeat: is the headless `continuum.exe` runtime currently alive?
 /// Everything else downgrades to Unknown when this is offline, because
 /// the state snapshot the dashboard reads is stale / default.
 struct RuntimeCheck {
@@ -112,7 +117,7 @@ impl HealthCheck for RuntimeCheck {
     }
     fn recovery_note(&self) -> Option<String> {
         Some(
-            "Start the Kairo runtime: launch `kairo.exe` (it lives next to kairo-desktop.exe)."
+            "Start the Continuum runtime: launch `continuum.exe` (it lives next to continuum-desktop.exe)."
                 .into(),
         )
     }
@@ -121,7 +126,7 @@ impl HealthCheck for RuntimeCheck {
             HealthResult::healthy(1)
         } else {
             HealthResult::unknown(
-                "runtime process is not publishing state — start kairo.exe",
+                "runtime process is not publishing state — start continuum.exe",
                 1,
             )
         }
@@ -130,7 +135,7 @@ impl HealthCheck for RuntimeCheck {
 
 struct VisionCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<KairoConfig>,
+    cfg: Arc<ContinuumConfig>,
     dev_dir: PathBuf,
 }
 
@@ -140,7 +145,7 @@ impl HealthCheck for VisionCheck {
         "vision"
     }
     fn log_path(&self) -> Option<String> {
-        Some("~/.kairo-dev/logs/kairo.log".into())
+        Some("~/.continuum-dev/logs/continuum.log".into())
     }
     fn recovery_note(&self) -> Option<String> {
         Some("Re-run scripts/download-models.ps1 to reinstall SmolVLM.".into())
@@ -173,7 +178,7 @@ impl HealthCheck for TriageCheck {
         "triage"
     }
     fn log_path(&self) -> Option<String> {
-        Some("~/.kairo-dev/logs/kairo.log".into())
+        Some("~/.continuum-dev/logs/continuum.log".into())
     }
     fn recovery_note(&self) -> Option<String> {
         Some("Re-download the triage GGUF via scripts/download-models.ps1.".into())
@@ -234,7 +239,7 @@ impl HealthCheck for OrchestratorCheck {
 
 struct VoiceTtsCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<KairoConfig>,
+    cfg: Arc<ContinuumConfig>,
     dev_dir: PathBuf,
 }
 
@@ -270,7 +275,7 @@ impl HealthCheck for VoiceTtsCheck {
 
 struct VoiceSttCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<KairoConfig>,
+    cfg: Arc<ContinuumConfig>,
     dev_dir: PathBuf,
 }
 
@@ -336,24 +341,24 @@ impl HealthCheck for McpCheck {
         "mcp"
     }
     fn recovery_note(&self) -> Option<String> {
-        Some("Rebuild kairo-mcp: `cargo build --release -p kairo-mcp`".into())
+        Some("Rebuild continuum-mcp: `cargo build --release -p continuum-mcp`".into())
     }
     async fn probe(&self) -> HealthResult {
-        // kairo-mcp is spawned on demand by the orchestrator. Presence of
+        // continuum-mcp is spawned on demand by the orchestrator. Presence of
         // the binary on disk is the best boot-time signal available. Check
-        // both packaged installs (next to kairo-desktop.exe) and local dev
+        // both packaged installs (next to continuum-desktop.exe) and local dev
         // layouts (target/release/... from a repo cwd).
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(dir) = install_dir() {
-            candidates.push(dir.join("kairo-mcp.exe"));
-            candidates.push(dir.join("kairo-mcp"));
+            candidates.push(dir.join("continuum-mcp.exe"));
+            candidates.push(dir.join("continuum-mcp"));
         }
         candidates.extend(
             [
-                "target/release/kairo-mcp.exe",
-                "target/release/kairo-mcp",
-                "target/debug/kairo-mcp.exe",
-                "target/debug/kairo-mcp",
+                "target/release/continuum-mcp.exe",
+                "target/release/continuum-mcp",
+                "target/debug/continuum-mcp.exe",
+                "target/debug/continuum-mcp",
             ]
             .iter()
             .map(PathBuf::from),
@@ -361,7 +366,7 @@ impl HealthCheck for McpCheck {
         if candidates.iter().any(|p| p.exists()) {
             HealthResult::healthy(1)
         } else {
-            HealthResult::degrading("kairo-mcp binary not found", 1)
+            HealthResult::degrading("continuum-mcp binary not found", 1)
         }
     }
 }
@@ -376,13 +381,13 @@ impl HealthCheck for WorkersCheck {
         "workers"
     }
     fn log_path(&self) -> Option<String> {
-        Some("~/.kairo-dev/logs/kairo.log".into())
+        Some("~/.continuum-dev/logs/continuum.log".into())
     }
     fn recovery_note(&self) -> Option<String> {
-        Some("Check workers/*.json under the Kairo data dir; restart kairo runtime.".into())
+        Some("Check workers/*.json under the Continuum data dir; restart continuum runtime.".into())
     }
     async fn probe(&self) -> HealthResult {
-        let snaps = match kairo_core::workers::intent::list_snapshots(&self.dev_dir) {
+        let snaps = match continuum_core::workers::intent::list_snapshots(&self.dev_dir) {
             Ok(s) => s,
             Err(e) => return HealthResult::error(e.to_string(), 1),
         };
@@ -393,8 +398,8 @@ impl HealthCheck for WorkersCheck {
             .filter(|s| {
                 matches!(
                     s.status,
-                    kairo_core::workers::WorkerStatus::Failed
-                        | kairo_core::workers::WorkerStatus::TimedOut
+                    continuum_core::workers::WorkerStatus::Failed
+                        | continuum_core::workers::WorkerStatus::TimedOut
                 )
             })
             .filter(|s| {
@@ -420,7 +425,7 @@ impl HealthCheck for WorkersCheck {
 }
 
 struct SkillsCheck {
-    cfg: Arc<KairoConfig>,
+    cfg: Arc<ContinuumConfig>,
     dev_dir: PathBuf,
 }
 
@@ -450,7 +455,7 @@ impl HealthCheck for SkillsCheck {
                 .or_else(|| install_dir().map(|d| d.join(rel)).filter(|p| p.exists()))
                 .unwrap_or_else(|| self.dev_dir.join(rel))
         };
-        let loader = kairo_core::skills::SkillLoader::new(&root);
+        let loader = continuum_core::skills::SkillLoader::new(&root);
         if let Err(e) = loader.reload() {
             return HealthResult::error(e.to_string(), 1);
         }
@@ -496,6 +501,131 @@ impl HealthCheck for ContextCheck {
             }
         } else {
             HealthResult::degrading("no perception frames yet", 1)
+        }
+    }
+}
+
+/// System-resource health probe (CLAUDE.md non-negotiable #5).
+///
+/// Samples host CPU + RAM every poll cycle (30 s by default). Reports
+/// `Degrading` when CPU usage stays above 90 % across the last two samples
+/// (~60 s sustained) and `Error` when RAM utilisation exceeds 95 %. The
+/// detected `HardwareSpecs` and resolved `ResolvedResourcePlan` are folded
+/// into the message so the repair agent can reason about model-load
+/// failures (e.g. triage OOM on a 4-core laptop → reduce `cpu_core_fraction`).
+///
+/// This sits *outside* the four cognitive layers — it only reads system
+/// state, never feeds perception frames upward.
+struct SystemResourceCheck {
+    specs: HardwareSpecs,
+    plan: ResolvedResourcePlan,
+    /// sysinfo handle kept across probes so CPU usage reflects the delta
+    /// since the previous refresh. `System` is `Send`; wrap in a `Mutex`
+    /// so the probe is `Sync`.
+    sys: Mutex<System>,
+    /// Rolling CPU% samples (newest at the back). 4 entries = ~120 s window.
+    recent_cpu: Mutex<VecDeque<f32>>,
+}
+
+impl SystemResourceCheck {
+    fn new(cfg: &ContinuumConfig) -> Self {
+        let specs = hardware::probe_hardware();
+        let plan = hardware::resolve_resource_policy(&specs, &cfg.resources);
+        let mut sys = System::new();
+        // Prime the first CPU reading so the next probe has a real delta.
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
+        Self {
+            specs,
+            plan,
+            sys: Mutex::new(sys),
+            recent_cpu: Mutex::new(VecDeque::with_capacity(4)),
+        }
+    }
+}
+
+#[async_trait]
+impl HealthCheck for SystemResourceCheck {
+    fn name(&self) -> &str {
+        "system_resources"
+    }
+    fn log_path(&self) -> Option<String> {
+        Some("~/.continuum-dev/logs/continuum.log".into())
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some(
+            "Lower [resources].cpu_core_fraction or workers_max_concurrent in config.toml, \
+             then restart the Continuum runtime."
+                .into(),
+        )
+    }
+    async fn probe(&self) -> HealthResult {
+        // CPU usage is computed from the delta since the last refresh, so
+        // we read first, then refresh for next time.
+        let (cpu_pct, ram_used_bytes, ram_total_bytes) = {
+            let mut sys = self.sys.lock();
+            let cpus = sys.cpus();
+            let cpu_pct = if cpus.is_empty() {
+                0.0
+            } else {
+                let sum: f32 = cpus.iter().map(|c| c.cpu_usage()).sum();
+                sum / cpus.len() as f32
+            };
+            let ram_used = sys.used_memory();
+            let ram_total = sys.total_memory();
+            sys.refresh_cpu_all();
+            sys.refresh_memory();
+            (cpu_pct, ram_used, ram_total)
+        };
+
+        // Rolling window of CPU samples (cap 4 → ~120 s at a 30 s cadence).
+        {
+            let mut recent = self.recent_cpu.lock();
+            recent.push_back(cpu_pct);
+            while recent.len() > 4 {
+                recent.pop_front();
+            }
+        }
+
+        let ram_total_mb = ram_total_bytes / 1024 / 1024;
+        let ram_used_mb = ram_used_bytes / 1024 / 1024;
+        let ram_fraction = if ram_total_bytes > 0 {
+            ram_used_bytes as f32 / ram_total_bytes as f32
+        } else {
+            0.0
+        };
+        let ram_pct = ram_fraction * 100.0;
+
+        let plan_summary = format!(
+            "cpu={cpu_pct:.0}% ram={ram_used_mb}/{ram_total_mb}MB ({ram_pct:.0}%) | \
+             specs: {} cores / {ram_total_mb}MB / cuda={cuda} vram={vram_mb}MB battery={batt} | \
+             plan: triage_threads={tt} gpu_layers={gl} vision={vis} workers={w}",
+            self.specs.logical_cores,
+            cuda = self.specs.has_cuda,
+            vram_mb = self.specs.vram_mb.unwrap_or(0),
+            batt = self.specs.on_battery,
+            tt = self.plan.triage_threads,
+            gl = self.plan.triage_gpu_layers,
+            vis = if self.plan.vision_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            w = self.plan.workers_max_concurrent,
+        );
+
+        // Classify via the pure helper so the threshold logic is unit-tested
+        // in `continuum_core::hardware::tests`.
+        let recent_vec: Vec<f32> = self.recent_cpu.lock().iter().copied().collect();
+        match hardware::classify_system_load(&recent_vec, ram_fraction) {
+            hardware::LoadStatus::Critical => HealthResult::error(
+                format!("RAM nearly exhausted ({ram_pct:.0}%). {plan_summary}"),
+                1,
+            ),
+            hardware::LoadStatus::Degrading => {
+                HealthResult::degrading(format!("Sustained high CPU/RAM load. {plan_summary}"), 1)
+            }
+            hardware::LoadStatus::Ok => HealthResult::healthy_with(plan_summary, 1),
         }
     }
 }

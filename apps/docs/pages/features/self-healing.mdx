@@ -1,14 +1,14 @@
 # Self-healing
 
-Kairo is pre-alpha software. Things break. The **repair agent** is a dedicated Claude Code session with access to Kairo's installation, its logs, and a set of narrow repair tools.
+Continuum is pre-alpha software. Things break. The **repair agent** is a dedicated Claude Code session with access to Continuum's installation, its logs, and a set of narrow repair tools.
 
 ## What it can do
 
-- Read logs from `~/.kairo/logs/<component>.log`
-- Restart a component (`mcp__kairo__repair_restart_component`)
-- Reinstall a missing or corrupt model (`mcp__kairo__repair_reinstall_model`)
-- Roll back to a previous config from a backup (`mcp__kairo__repair_rollback_config`)
-- Run a component self-test (`mcp__kairo__repair_test_component`)
+- Read logs from `~/.continuum/logs/<component>.log`
+- Restart a component (`mcp__continuum__repair_restart_component`)
+- Reinstall a missing or corrupt model (`mcp__continuum__repair_reinstall_model`)
+- Roll back to a previous config from a backup (`mcp__continuum__repair_rollback_config`)
+- Run a component self-test (`mcp__continuum__repair_test_component`)
 - Escalate to the human if it cannot fix the issue
 
 ## What it cannot do
@@ -21,21 +21,21 @@ Kairo is pre-alpha software. Things break. The **repair agent** is a dedicated C
 ## How to trigger a repair
 
 - **From the dashboard:** Health tab → "Fix Issues" button. The repair agent starts and streams its output into a side panel.
-- **By voice:** say "kairo, something isn't right" (triage recognises this via `execute_simple`).
-- **From the CLI:** `kairo repair` (coming soon — see [ROADMAP.md](https://github.com/PrincNL/kairo-ai/blob/main/ROADMAP.md)).
+- **By voice:** say "continuum, something isn't right" (triage recognises this via `execute_simple`).
+- **From the CLI:** `continuum repair` (coming soon — see [ROADMAP.md](https://github.com/vixco/Continuum/blob/main/ROADMAP.md)).
 
 ## Nightly diagnostics
 
-Every night at 04:00 Kairo runs a self-diagnose pass:
+Every night at 04:00 Continuum runs a self-diagnose pass:
 
 1. Ping each component's health check
 2. Roll up 24-hour error rates
 3. Warn in the Health tab if any component's error rate exceeds 5%
-4. Take a config snapshot into `~/.kairo-backups/YYYY-MM-DD/` (keeps the last 7)
+4. Take a config snapshot into `~/.continuum-backups/YYYY-MM-DD/` (keeps the last 7)
 
 ## Backups
 
-Nightly zips at `~/.kairo-backups/YYYY-MM-DD/` contain:
+Nightly zips at `~/.continuum-backups/YYYY-MM-DD/` contain:
 
 - `config.toml`
 - `automations.json`
@@ -47,6 +47,6 @@ Rotation keeps the 7 most recent. Rollback restores `config.toml` only today; br
 
 ## What to do if the repair agent can't help
 
-1. Read the logs directly at `~/.kairo/logs/` — they're structured JSON, timestamped, per component.
+1. Read the logs directly at `~/.continuum/logs/` — they're structured JSON, timestamped, per component.
 2. Open an issue with the bug-report template.
 3. The agent's final output always ends with either `RESOLVED`, `ESCALATED`, or `PARTIAL`. If `ESCALATED`, attach the streaming transcript to your issue — it's already a great bug report.

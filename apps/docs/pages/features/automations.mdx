@@ -30,10 +30,10 @@ One-shot automations use a `fireAt` ISO timestamp instead of a cron expression.
 
 ## Managing automations
 
-Dashboard → Automations tab. You can create, edit, delete, toggle, and run-now from the UI. Under the hood they're stored in `~/.kairo/automations.json` (atomic writes via `.tmp` + rename).
+Dashboard → Automations tab. You can create, edit, delete, toggle, and run-now from the UI. Under the hood they're stored in `~/.continuum/automations.json` (atomic writes via `.tmp` + rename).
 
 ## When scheduled runs fire
 
-Automations fire **only while Kairo is running**. If your machine is off at the scheduled time, the run is skipped — Kairo does not keep a persistent cron daemon.
+Automations fire **only while Continuum is running**. If your machine is off at the scheduled time, the run is skipped — Continuum does not keep a persistent cron daemon.
 
-If you want rock-solid scheduling, pair automations with Windows Task Scheduler calling `kairo setup --start` (future work; today, launch Kairo at login).
+If you want rock-solid scheduling, pair automations with Windows Task Scheduler calling `continuum setup --start` (future work; today, launch Continuum at login).

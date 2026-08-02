@@ -53,14 +53,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Clippy (kairo-core no-default-features)
-        # The "light" path is what the Tauri dashboard consumes: kairo-core
+      - name: Clippy (continuum-core no-default-features)
+        # The "light" path is what the Tauri dashboard consumes: continuum-core
         # without runtime, no llama-cpp / whisper-rs-sys / ort / lancedb
         # build scripts, no native toolchain needed.
-        run: cargo clippy -p kairo-core --no-default-features --lib --tests -- -D warnings
+        run: cargo clippy -p continuum-core --no-default-features --lib --tests -- -D warnings
 
-      - name: Clippy (kairo-desktop)
-        run: cargo clippy -p kairo-desktop --no-deps -- -D warnings
+      - name: Clippy (continuum-desktop)
+        run: cargo clippy -p continuum-desktop --no-deps -- -D warnings
 
   clippy-full:
     # Exhaustive native linting runs once before merge. Main is validated by
@@ -183,11 +183,11 @@ jobs:
             ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-
             ${{ runner.os }}-cargo-registry-
 
-      # Light tests: the lib test path for kairo-core without runtime. Fast,
+      # Light tests: the lib test path for continuum-core without runtime. Fast,
       # covers the UTF-8 / sentence-split / config / permissions code that
       # doesn't need a native toolchain.
       - name: Run tests (light path)
-        run: cargo test -p kairo-core --no-default-features --lib
+        run: cargo test -p continuum-core --no-default-features --lib
 
       - name: Run tests (full workspace)
         run: cargo test --workspace
@@ -247,8 +247,8 @@ jobs:
       - name: Build Tauri desktop app (debug)
         # Debug build is faster for CI and still validates the Rust side compiles.
         # Release bundling happens in release.yml. Desktop depends on
-        # kairo-core with default-features = false, so no native toolchain needed.
-        run: cargo build -p kairo-desktop
+        # continuum-core with default-features = false, so no native toolchain needed.
+        run: cargo build -p continuum-desktop
 
   docs-site:
     name: Build docs site

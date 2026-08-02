@@ -69,7 +69,7 @@ export function LogsTab() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `kairo-logs-${new Date().toISOString()}.ndjson`;
+    link.download = `continuum-logs-${new Date().toISOString()}.ndjson`;
     link.click();
     URL.revokeObjectURL(url);
   }

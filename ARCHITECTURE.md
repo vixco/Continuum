@@ -1,6 +1,6 @@
-# Kairo Architecture
+# Continuum Architecture
 
-This document is the authoritative technical blueprint for Kairo. It describes every layer of the system, how data flows between them, how tools are exposed, how memory is stored, and how the self-healing subsystem works. Read this before writing any code, and update it before changing any major design decision.
+This document is the authoritative technical blueprint for Continuum. It describes every layer of the system, how data flows between them, how tools are exposed, how memory is stored, and how the self-healing subsystem works. Read this before writing any code, and update it before changing any major design decision.
 
 ## Contents
 
@@ -24,17 +24,17 @@ This document is the authoritative technical blueprint for Kairo. It describes e
 
 ## Design philosophy
 
-Kairo follows five architectural rules that drive every decision below them.
+Continuum follows five architectural rules that drive every decision below them.
 
 **Rule 1 — Cost scales with intelligence.** Every task should be handled by the cheapest layer that can do it correctly. A screenshot of your browser is processed by a 0.23B vision model, not by Claude Opus. A question like "what time is it?" is answered by a 3B local LLM, not by a round trip to the Anthropic API. Opus only wakes up when a task genuinely requires reasoning, planning, or multi-step tool use.
 
-**Rule 2 — Perception is first-class.** Kairo is not a chatbot that happens to have eyes. It is an observation system that happens to speak. The perception layer runs 24/7 and produces a continuous stream of structured frames. Every other layer is a consumer of that stream.
+**Rule 2 — Perception is first-class.** Continuum is not a chatbot that happens to have eyes. It is an observation system that happens to speak. The perception layer runs 24/7 and produces a continuous stream of structured frames. Every other layer is a consumer of that stream.
 
-**Rule 3 — Official subprocess over custom integration.** Kairo does not call the Anthropic API directly. It does not scrape OAuth tokens. It invokes the officially supported `claude` CLI in headless mode as a child process and communicates via stdin/stdout. This is the only approach that is legal, stable, and will keep working as Claude evolves.
+**Rule 3 — Official subprocess over custom integration.** Continuum does not call the Anthropic API directly. It does not scrape OAuth tokens. It invokes the officially supported `claude` CLI in headless mode as a child process and communicates via stdin/stdout. This is the only approach that is legal, stable, and will keep working as Claude evolves.
 
-**Rule 4 — Configuration beats assumption.** Every model, every sample rate, every retention policy, every voice, every tool permission is exposed in the dashboard. Kairo ships with sensible defaults but assumes nothing.
+**Rule 4 — Configuration beats assumption.** Every model, every sample rate, every retention policy, every voice, every tool permission is exposed in the dashboard. Continuum ships with sensible defaults but assumes nothing.
 
-**Rule 5 — The system must be able to repair itself.** A cognitive assistant that breaks and requires terminal debugging has failed its users. Kairo includes a Repair Agent — a dedicated Claude Code session with access to its own installation — that can diagnose and fix component failures on demand.
+**Rule 5 — The system must be able to repair itself.** A cognitive assistant that breaks and requires terminal debugging has failed its users. Continuum includes a Repair Agent — a dedicated Claude Code session with access to its own installation — that can diagnose and fix component failures on demand.
 
 ---
 
@@ -72,7 +72,7 @@ Each layer has a distinct job, a distinct latency budget, and a distinct cost pr
 ┌───────────────────────────────────────────────────────────────┐
 │  TRIAGE (local 3–4B LLM)                                      │
 │  ┌─────────────────────────────────────────────────────────┐  │
-│  │  Prompt: You are Kairo's triage layer...                │  │
+│  │  Prompt: You are Continuum's triage layer...                │  │
 │  │  Decision: ignore | remember | whisper | wake | exec    │  │
 │  └────────────────────────┬────────────────────────────────┘  │
 └───────────────────────────┼───────────────────────────────────┘
@@ -113,13 +113,13 @@ Each layer has a distinct job, a distinct latency budget, and a distinct cost pr
               └─────────────────────────────────────┘
 ```
 
-The key insight is that **the orchestrator rarely runs**. In normal use it wakes up 20 to 50 times per day. Workers run even less often and finish in seconds or minutes. The bulk of Kairo's activity — 99.9% of all tokens processed — happens in Layer 1 and Layer 2, which are free and local.
+The key insight is that **the orchestrator rarely runs**. In normal use it wakes up 20 to 50 times per day. Workers run even less often and finish in seconds or minutes. The bulk of Continuum's activity — 99.9% of all tokens processed — happens in Layer 1 and Layer 2, which are free and local.
 
 ---
 
 ## Layer 1 — Senses
 
-The senses layer runs as a dedicated subprocess inside Kairo Core. It has one job: produce a steady stream of `PerceptionFrame` objects and push them to the triage layer via an internal queue.
+The senses layer runs as a dedicated subprocess inside Continuum Core. It has one job: produce a steady stream of `PerceptionFrame` objects and push them to the triage layer via an internal queue.
 
 ### Vision watcher
 
@@ -222,8 +222,8 @@ Qwen 3 has a "thinking" mode that is intentionally **enabled** for triage — th
 The triage LLM gets a short structured prompt on every call:
 
 ```
-You are the triage layer of Kairo, {user}'s personal AI assistant.
-You are not Kairo. You are the part of Kairo that decides whether Kairo should act.
+You are the triage layer of Continuum, {user}'s personal AI assistant.
+You are not Continuum. You are the part of Continuum that decides whether Continuum should act.
 
 You will receive a perception frame describing what is happening on {user}'s computer.
 Your job is to output exactly one of these decisions, as JSON:
@@ -247,7 +247,7 @@ Be extremely conservative about waking the orchestrator. It costs money and
 interrupts the user. Only wake it when genuine reasoning or multi-step action 
 is needed, or when {user} has explicitly asked for something.
 
-{SOUL.md excerpt — who Kairo is and how Kairo behaves}
+{SOUL.md excerpt — who Continuum is and how Continuum behaves}
 
 Current frame:
 {perception_frame_json}
@@ -260,11 +260,11 @@ Output (one JSON object, nothing else):
 
 **GPU acceleration:** CUDA GPU offload is enabled by default and recommended for all users with NVIDIA GPUs. With GPU offload, prompt processing runs at 1000+ tokens/sec (vs ~45 tok/s on CPU), bringing triage latency from ~12 seconds to under 1 second. Users without compatible GPUs fall back to CPU automatically — llama.cpp detects GPU availability at runtime. For CPU-only users, consider the Qwen 2.5 3B model (smaller, faster on CPU).
 
-The triage LLM must respond in under 500 ms. If it takes longer than 2 seconds, Kairo logs a warning and considers quantization adjustment.
+The triage LLM must respond in under 500 ms. If it takes longer than 2 seconds, Continuum logs a warning and considers quantization adjustment.
 
 ### Voice fast path
 
-When the user speaks directly to Kairo (wake word detected or in active conversation mode), the triage LLM also handles **fast conversational responses**. A simple question like "what time is it" or "turn off the music" gets answered or executed by triage itself without ever waking Opus. This is what keeps voice latency under 500 ms for routine interactions.
+When the user speaks directly to Continuum (wake word detected or in active conversation mode), the triage LLM also handles **fast conversational responses**. A simple question like "what time is it" or "turn off the music" gets answered or executed by triage itself without ever waking Opus. This is what keeps voice latency under 500 ms for routine interactions.
 
 Opus only gets called for voice input when the request involves reasoning, memory recall, or multi-step action.
 
@@ -272,11 +272,11 @@ Opus only gets called for voice input when the request involves reasoning, memor
 
 ## Layer 3 — Orchestrator
 
-The orchestrator is Claude Opus 4.6, invoked via the official Claude Code CLI in headless mode. This is the only cloud component of Kairo.
+The orchestrator is Claude Opus 4.6, invoked via the official Claude Code CLI in headless mode. This is the only cloud component of Continuum.
 
-### How Kairo spawns the orchestrator
+### How Continuum spawns the orchestrator
 
-Kairo Core spawns the orchestrator as a child process using Rust's `tokio::process::Command`. The command is:
+Continuum Core spawns the orchestrator as a child process using Rust's `tokio::process::Command`. The command is:
 
 ```bash
 claude \
@@ -286,25 +286,25 @@ claude \
   --verbose \
   --include-partial-messages \
   --model claude-opus-4-6 \
-  --append-system-prompt-file ~/.kairo/orchestrator-prompt.md \
-  --mcp-config ~/.kairo-dev/mcp-config-<nonce>.json \
+  --append-system-prompt-file ~/.continuum/orchestrator-prompt.md \
+  --mcp-config ~/.continuum-dev/mcp-config-<nonce>.json \
   --strict-mcp-config \
-  --allowedTools "mcp__kairo__*" \
+  --allowedTools "mcp__continuum__*" \
   --permission-mode default
 ```
 
-The allowed-tools list is intentionally restricted to the Kairo MCP namespace — the orchestrator has **no access to `Bash`, `Read`, `Write`, `Edit`, or `Task`**. Every file read, code edit, and shell-adjacent action flows through an explicit Kairo MCP tool so it can be audited, permission-gated, and mocked during repair. Workers (Layer 4) get a broader allowlist that includes the Claude Code built-ins; orchestrators do not. The MCP config file name carries a per-wake nonce so parallel wakes cannot clobber each other's config. The model ID, wake timeout, and bare-mode flag come from `[orchestrator]` in `config.toml` — none of these are hardcoded in the runtime (non-negotiable #3).
+The allowed-tools list is intentionally restricted to the Continuum MCP namespace — the orchestrator has **no access to `Bash`, `Read`, `Write`, `Edit`, or `Task`**. Every file read, code edit, and shell-adjacent action flows through an explicit Continuum MCP tool so it can be audited, permission-gated, and mocked during repair. Workers (Layer 4) get a broader allowlist that includes the Claude Code built-ins; orchestrators do not. The MCP config file name carries a per-wake nonce so parallel wakes cannot clobber each other's config. The model ID, wake timeout, and bare-mode flag come from `[orchestrator]` in `config.toml` — none of these are hardcoded in the runtime (non-negotiable #3).
 
-Kairo writes a single JSON message to the orchestrator's stdin:
+Continuum writes a single JSON message to the orchestrator's stdin:
 
 ```json
 {"type": "user", "message": {"role": "user", "content": "<wake context>"}}
 ```
 
-Where `<wake context>` is a structured payload containing the current perception frame, relevant memory recall results, active project info, and the reason the triage layer decided to wake up Opus. Opus then streams events back on stdout, one JSON object per line. Kairo Core parses those events in real time and can:
+Where `<wake context>` is a structured payload containing the current perception frame, relevant memory recall results, active project info, and the reason the triage layer decided to wake up Opus. Opus then streams events back on stdout, one JSON object per line. Continuum Core parses those events in real time and can:
 
 - Display the orchestrator's thinking in the dashboard live
-- Stream text to the TTS pipeline as it arrives (so Kairo starts speaking before the full response is done)
+- Stream text to the TTS pipeline as it arrives (so Continuum starts speaking before the full response is done)
 - Capture tool calls and display them in the "watch mode" panel
 - Spawn workers based on the orchestrator's instructions
 
@@ -312,7 +312,7 @@ Where `<wake context>` is a structured payload containing the current perception
 
 The orchestrator's system prompt is built by concatenating:
 
-1. `SOUL.md` — Kairo's personality
+1. `SOUL.md` — Continuum's personality
 2. `TOOLS.md` — documentation of every MCP tool and when to use it
 3. A runtime header with current time, active user, and available workers
 
@@ -322,11 +322,11 @@ The orchestrator is instructed to **never do long tasks itself**. Its job is to 
 
 The Claude Code CLI emits `rate_limit_event` objects in the stream-json output. These events contain `resetsAt` (ISO timestamp), `rateLimitType` (e.g. `"token"`, `"request"`), and `overageStatus` fields. As of CLI v2.1.100 (April 2026), this event type is undocumented but reliably emitted.
 
-Kairo Core's stream parser already recognizes and deserializes `rate_limit_event`. Consumer logic (backoff, queue pausing, user notification) is deferred to Phase 3 (orchestrator) and Phase 7 (self-healing). For now, the event is logged at `warn` level and stored in the session metadata.
+Continuum Core's stream parser already recognizes and deserializes `rate_limit_event`. Consumer logic (backoff, queue pausing, user notification) is deferred to Phase 3 (orchestrator) and Phase 7 (self-healing). For now, the event is logged at `warn` level and stored in the session metadata.
 
 ### Resume vs fresh sessions
 
-Every wake-up is a fresh Claude Code session by default. This is intentional — it keeps context clean and costs low. For conversation continuity (e.g. the user and Kairo are in an ongoing back-and-forth), Kairo Core persists the session ID from the first wake-up and passes `--resume <session_id>` for follow-ups.
+Every wake-up is a fresh Claude Code session by default. This is intentional — it keeps context clean and costs low. For conversation continuity (e.g. the user and Continuum are in an ongoing back-and-forth), Continuum Core persists the session ID from the first wake-up and passes `--resume <session_id>` for follow-ups.
 
 ---
 
@@ -340,7 +340,7 @@ Workers are independent Claude Code sessions spawned by the orchestrator to do a
 - Gets its own session ID and log file
 - Reports progress back to the orchestrator via a structured status file or MCP callback
 
-The orchestrator does not spawn workers directly via `tokio::process`. Instead, it calls the `mcp__kairo__spawn_worker` tool exposed by the Kairo MCP server. The MCP server then spawns the Claude Code process, captures its output, and streams progress back to the orchestrator and to the dashboard.
+The orchestrator does not spawn workers directly via `tokio::process`. Instead, it calls the `mcp__continuum__spawn_worker` tool exposed by the Continuum MCP server. The MCP server then spawns the Claude Code process, captures its output, and streams progress back to the orchestrator and to the dashboard.
 
 ### Worker model selection
 
@@ -360,41 +360,41 @@ The dashboard exposes a `max_concurrent_workers` setting (default 3, max 10). Wo
 
 ## The MCP tool layer
 
-This is the heart of what makes Kairo more than a Claude Code wrapper. Kairo ships with a bundled **MCP server** written in Rust using the [rmcp](https://github.com/modelcontextprotocol/rust-sdk) crate. The orchestrator and workers get this MCP server registered automatically via the `--mcp-config` flag.
+This is the heart of what makes Continuum more than a Claude Code wrapper. Continuum ships with a bundled **MCP server** written in Rust using the [rmcp](https://github.com/modelcontextprotocol/rust-sdk) crate. The orchestrator and workers get this MCP server registered automatically via the `--mcp-config` flag.
 
-The Kairo MCP server exposes these tools. Permission tiers are defined in `config/default-permissions.toml` and overridable via `~/.kairo/permissions.toml`.
+The Continuum MCP server exposes these tools. Permission tiers are defined in `config/default-permissions.toml` and overridable via `~/.continuum/permissions.toml`.
 
 ### Shipped in v0.1.0-alpha
 
-These are registered by `crates/kairo-mcp/src/server.rs` today; CI keeps the list below in sync with `config/default-permissions.toml` via an integration test that loads both and diffs them.
+These are registered by `crates/continuum-mcp/src/server.rs` today; CI keeps the list below in sync with `config/default-permissions.toml` via an integration test that loads both and diffs them.
 
-**Memory (`mcp__kairo__memory_*`)**
+**Memory (`mcp__continuum__memory_*`)**
 - `memory_query_episodic(query, limit?)` — vector search over episodic memory
 - `memory_list_facts(prefix?, limit?)` — list semantic facts by dotted key prefix
 - `memory_get_fact(key)` — fetch one semantic fact
 - `memory_set_fact(key, value, source?)` — upsert a semantic fact (confidence clamped by source)
 
-**System (`mcp__kairo__system_*`)**
+**System (`mcp__continuum__system_*`)**
 - `system_current_time()` — local wall-clock + tz + epoch ms
 - `system_active_window()` — foreground window title + process name
 - `system_clipboard_get()` — best-effort clipboard read (text only)
 - `system_notification(title, body)` — Windows toast, rate-limited to 1 / 10 s per session
 
-**Filesystem (`mcp__kairo__fs_*`, read-only, path-allowlisted)**
-- `fs_read_file(path)` — up to 100 KB UTF-8 text; paths must fall inside Kairo data dir, `project.*.dir` facts, or `[mcp.fs].extra_paths`
+**Filesystem (`mcp__continuum__fs_*`, read-only, path-allowlisted)**
+- `fs_read_file(path)` — up to 100 KB UTF-8 text; paths must fall inside Continuum data dir, `project.*.dir` facts, or `[mcp.fs].extra_paths`
 - `fs_list_dir(path)` — up to 500 entries with kind / size / mtime
 
 **Web**
 - `web_fetch(url)` — HTTP GET only, public-IP enforcement with DNS pinning (no rebinding), 5 s timeout, 50 KB cap, no redirects
 
-**Repair (`mcp__kairo__repair_*`, blocked by default, unlocked inside a repair session)**
+**Repair (`mcp__continuum__repair_*`, blocked by default, unlocked inside a repair session)**
 - `repair_restart_component(component)` — queue a restart intent
 - `repair_reinstall_model(component)` — queue a model reinstall intent
 - `repair_rollback_config(date)` — restore a dated config backup
 - `repair_test_component(component)` — quick health sanity check
 - `repair_escalate(message)` — post a user-visible red banner on the Health tab
 
-**Workers (`mcp__kairo__workers_*`)**
+**Workers (`mcp__continuum__workers_*`)**
 - `workers_spawn_worker(task, cwd, model?, tools?)` — queue a worker spawn intent
 - `workers_worker_status(worker_id)` — snapshot
 - `workers_worker_wait(worker_id, timeout_secs?)` — block until terminal state
@@ -405,13 +405,13 @@ These are registered by `crates/kairo-mcp/src/server.rs` today; CI keeps the lis
 
 These tool namespaces are reserved by the architecture but **not exposed in the alpha**. The MCP server does not register handlers for them; adding one requires updating this section, `config/default-permissions.toml`, and the server in the same PR. A missing handler would return a protocol-level "unknown tool" error — no silent fallback.
 
-- **`mcp__kairo__perception_*`** — live frame / screenshot / transcription reads for the orchestrator (currently, the orchestrator sees the trigger frame embedded in the wake context; this namespace would expose on-demand reads)
-- **`mcp__kairo__voice_*`** — programmatic TTS (`voice_speak`) and push-to-listen (`voice_listen`)
-- **`mcp__kairo__windows_*`** — focus, launch, close, UI automation (ui_click / ui_type), clipboard_set
-- **`mcp__kairo__schedule_*`** — cron-style scheduled wakes
-- **`mcp__kairo__system_config_*`** — dynamic config read / write
+- **`mcp__continuum__perception_*`** — live frame / screenshot / transcription reads for the orchestrator (currently, the orchestrator sees the trigger frame embedded in the wake context; this namespace would expose on-demand reads)
+- **`mcp__continuum__voice_*`** — programmatic TTS (`voice_speak`) and push-to-listen (`voice_listen`)
+- **`mcp__continuum__windows_*`** — focus, launch, close, UI automation (ui_click / ui_type), clipboard_set
+- **`mcp__continuum__schedule_*`** — cron-style scheduled wakes
+- **`mcp__continuum__system_config_*`** — dynamic config read / write
 
-**Deliberately excluded, no `mcp__kairo__shell_*` namespace ever.** Shell execution inside Kairo's permission boundary is a non-goal — workers that need a shell go through Claude Code's built-in `Bash` tool, which is gated by Kairo Core's worker-pool permission model rather than by Kairo's MCP server.
+**Deliberately excluded, no `mcp__continuum__shell_*` namespace ever.** Shell execution inside Continuum's permission boundary is a non-goal — workers that need a shell go through Claude Code's built-in `Bash` tool, which is gated by Continuum Core's worker-pool permission model rather than by Continuum's MCP server.
 
 Every tool has a strict permission model. Destructive operations (repair intents, worker spawns, filesystem writes that aren't yet shipped) require either a pre-approved allowlist rule or live user confirmation via the dashboard.
 
@@ -419,7 +419,7 @@ Every tool has a strict permission model. Destructive operations (repair intents
 
 ## Memory system
 
-Memory is arguably the hardest part of Kairo and what separates it from every chatbot. Kairo uses three stores for three kinds of memory, mirroring the cognitive science distinction between raw experience, episodic memory, and semantic knowledge.
+Memory is arguably the hardest part of Continuum and what separates it from every chatbot. Continuum uses three stores for three kinds of memory, mirroring the cognitive science distinction between raw experience, episodic memory, and semantic knowledge.
 
 ### Raw log (SQLite)
 
@@ -468,7 +468,7 @@ Stored in a LanceDB table with vector indexing. Retrieved via semantic similarit
 
 ### Semantic memory (structured JSON/graph)
 
-Stable facts about the user, their projects, their relationships, their preferences. This is the equivalent of "things Kairo just knows about you."
+Stable facts about the user, their projects, their relationships, their preferences. This is the equivalent of "things Continuum just knows about you."
 
 Stored as a single SQLite table plus a graph structure for relationships:
 
@@ -476,7 +476,7 @@ Stored as a single SQLite table plus a graph structure for relationships:
 CREATE TABLE semantic_facts (
   key TEXT PRIMARY KEY,         -- "user.name", "project.simcharts.stack"
   value TEXT NOT NULL,          -- JSON-encoded value
-  confidence REAL,              -- how sure Kairo is (learned facts have lower confidence than user-provided)
+  confidence REAL,              -- how sure Continuum is (learned facts have lower confidence than user-provided)
   source TEXT,                  -- "user_stated" | "observed" | "inferred"
   updated_at TIMESTAMP
 );
@@ -493,7 +493,7 @@ Examples of keys: `user.name`, `user.location`, `project.simcharts.repo_path`, `
 
 ### Memory retrieval flow
 
-When the orchestrator wakes up, Kairo Core runs a two-step retrieval:
+When the orchestrator wakes up, Continuum Core runs a two-step retrieval:
 
 1. **Vector search** in episodic memory using the current perception frame as the query (embedded via fastembed). Returns top 10.
 2. **Re-rank** via the triage LLM: "Which of these 10 memories are most relevant to the current situation?" Returns top 3.
@@ -502,13 +502,13 @@ The top 3 episodic memories, plus all relevant semantic facts (selected by tag a
 
 ### Memory writing
 
-The orchestrator can write to memory via the MCP tools (`memory_write`, `memory_fact_set`). When something important is discussed or decided, it writes a note. Over time, Kairo's memory grows organically without manual curation.
+The orchestrator can write to memory via the MCP tools (`memory_write`, `memory_fact_set`). When something important is discussed or decided, it writes a note. Over time, Continuum's memory grows organically without manual curation.
 
 ---
 
 ## Voice pipeline
 
-Voice is what makes Kairo feel alive. It has to be low-latency, interruptible, and natural. The pipeline is:
+Voice is what makes Continuum feel alive. It has to be low-latency, interruptible, and natural. The pipeline is:
 
 ```
 Wake word detected  ──▶  Start streaming transcription (whisper.cpp)
@@ -542,7 +542,7 @@ Wake word detected  ──▶  Start streaming transcription (whisper.cpp)
 
 ### Wake word
 
-Wake detection runs on the continuous whisper transcript stream — the same whisper-medium pipeline that drives STT is the wake gate. A small `TranscriptWakeDetector` scans each new transcript fragment for "hey kairo" (configurable via `voice.wake_keyword`) with a narrow edit-distance tolerance tuned for the failure modes we see in practice (e.g. whisper hears "hey cairo" on short clips). No separate wake-word model ships — Porcupine was prototyped but dropped to keep the model-download footprint smaller and avoid a second audio-inference pipeline competing with whisper for the microphone. Users can disable the wake gate entirely (`voice.wake_word_enabled = false`), in which case every transcript is offered to triage and the LLM decides whether it's addressed to Kairo.
+Wake detection runs on the continuous whisper transcript stream — the same whisper-medium pipeline that drives STT is the wake gate. A small `TranscriptWakeDetector` scans each new transcript fragment for "hey continuum" (configurable via `voice.wake_keyword`) with a narrow edit-distance tolerance tuned for the failure modes we see in practice (e.g. whisper hears "hey cairo" on short clips). No separate wake-word model ships — Porcupine was prototyped but dropped to keep the model-download footprint smaller and avoid a second audio-inference pipeline competing with whisper for the microphone. Users can disable the wake gate entirely (`voice.wake_word_enabled = false`), in which case every transcript is offered to triage and the LLM decides whether it's addressed to Continuum.
 
 ### TTS options
 
@@ -552,17 +552,17 @@ Wake detection runs on the continuous whisper transcript stream — the same whi
 
 ### Interrupt handling
 
-The microphone keeps listening while Kairo speaks. If the user starts talking, playback is cut within 50 ms and the new input goes into the pipeline. This is what makes it feel like a conversation instead of a walkie-talkie.
+The microphone keeps listening while Continuum speaks. If the user starts talking, playback is cut within 50 ms and the new input goes into the pipeline. This is what makes it feel like a conversation instead of a walkie-talkie.
 
 ### Ambient mute
 
-When Kairo detects that the user is in a Discord, Teams, Zoom, or Meet call (via the context watcher), it switches to a quiet mode: no spontaneous speech, only on-screen text responses, and any voice output happens at reduced volume through a secondary audio channel.
+When Continuum detects that the user is in a Discord, Teams, Zoom, or Meet call (via the context watcher), it switches to a quiet mode: no spontaneous speech, only on-screen text responses, and any voice output happens at reduced volume through a secondary audio channel.
 
 ---
 
 ## Dashboard
 
-The dashboard is a Tauri window opened from the system tray. It is the single place where the user configures, monitors, and repairs Kairo. It has the following tabs:
+The dashboard is a Tauri window opened from the system tray. It is the single place where the user configures, monitors, and repairs Continuum. It has the following tabs:
 
 ### Home
 
@@ -596,25 +596,25 @@ Searchable event log with filters by layer, severity, and time range.
 
 Component status grid, recent errors, and the **Fix Issues** button that triggers the Repair Agent.
 
-All tabs are live-updating via a WebSocket connection from the Kairo Core to the dashboard frontend.
+All tabs are live-updating via a WebSocket connection from the Continuum Core to the dashboard frontend.
 
 ---
 
 ## Self-healing subsystem
 
-This is the feature that takes Kairo from "ambitious but fragile" to "a system you can trust."
+This is the feature that takes Continuum from "ambitious but fragile" to "a system you can trust."
 
 ### How it works
 
-When the user clicks **Fix Issues** (or says "Kairo, something is broken"), Kairo Core:
+When the user clicks **Fix Issues** (or says "Continuum, something is broken"), Continuum Core:
 
 1. Collects the last 500 log lines, all current component statuses, any stacktraces, and the current config snapshot.
-2. Writes this context to `~/.kairo/repair-context.md`.
+2. Writes this context to `~/.continuum/repair-context.md`.
 3. Spawns a dedicated Claude Code session with:
-   - Working directory set to the Kairo install folder
+   - Working directory set to the Continuum install folder
    - Model forced to Claude Opus 4.6
-   - A custom system prompt from `~/.kairo/repair-agent-prompt.md`
-   - Full file system access to the Kairo installation
+   - A custom system prompt from `~/.continuum/repair-agent-prompt.md`
+   - Full file system access to the Continuum installation
    - Access to a dedicated MCP tool set: `repair_restart_component`, `repair_reinstall_component`, `repair_rollback_config`, `repair_test_component`, `repair_escalate`
 4. Streams the repair agent's output live to the dashboard Health tab.
 
@@ -629,7 +629,7 @@ The repair agent is instructed to:
 
 ### Backup rotation
 
-Every morning at 04:00, Kairo Core snapshots the entire `~/.kairo` directory (excluding the raw log and memory stores) to `~/.kairo-backups/<date>/`. The repair agent has read access to the last 7 backups and can rollback to any of them if a fix goes wrong.
+Every morning at 04:00, Continuum Core snapshots the entire `~/.continuum` directory (excluding the raw log and memory stores) to `~/.continuum-backups/<date>/`. The repair agent has read access to the last 7 backups and can rollback to any of them if a fix goes wrong.
 
 ### Predictive maintenance
 
@@ -637,13 +637,42 @@ The self-diagnose routine runs nightly: checks every component's response time, 
 
 ### Voice-activated repair
 
-The user can trigger the repair agent with voice: *"Kairo, something isn't right, can you check?"* The orchestrator routes this to the repair subsystem and reports back by voice when done.
+The user can trigger the repair agent with voice: *"Continuum, something isn't right, can you check?"* The orchestrator routes this to the repair subsystem and reports back by voice when done.
+
+---
+
+## Resource policy
+
+Continuum runs several local models continuously (a triage LLM, Whisper STT, an ONNX vision model) plus screen/context pollers and a worker pool. On a laptop these can eat the whole machine if each picks "all cores / full GPU" naively. So the runtime probes the host once at boot and resolves a concrete resource plan that tunes every resource-affecting knob. This is **not a cognitive layer** — it sits *outside* the Senses → Triage → Orchestrator → Workers hierarchy: it never feeds perception frames upward and never makes triage decisions. It only tunes downward-facing knobs before components spawn. Data still flows up, commands still flow down.
+
+### Detection
+
+`crates/continuum-core/src/hardware.rs::probe_hardware()` runs once at startup and produces a `HardwareSpecs`:
+
+- **sysinfo** — physical + logical core counts, total RAM, CPU brand string.
+- **`windows::Win32::System::Power::GetSystemPowerStatus`** — AC vs battery, and whether the machine has a battery (laptop vs desktop).
+- **`windows::Win32::System::LibraryLoader::LoadLibraryW("nvcuda.dll")`** — is an NVIDIA CUDA runtime present? (works even when `nvidia-smi` isn't on PATH).
+- **`nvidia-smi --query-gpu=memory.total`** subprocess (short timeout) — VRAM in MB, when queryable. If `nvcuda.dll` loads but VRAM can't be read, Continuum assumes enough and lets the model loader fall back internally on failure.
+
+### Resolution
+
+`resolve_resource_policy(specs, &config.resources)` is a **pure** function (the unit-test target) that maps specs + the user's `[resources]` config to a `ResolvedResourcePlan`: triage threads / GPU layers, vision enabled + CUDA EP, whisper threads, worker concurrency, screen + context poll intervals. The default profile is `barely_notice` — a barely-noticeable CPU/RAM footprint (≤ ~30% of logical cores, ≥ 50% RAM free, halved on battery) with the GPU/VRAM used **freely** for quality (full offload when VRAM ≥ `gpu_min_vram_mb`). No model downgrades — Qwen3-8B Q4_K_M, whisper-medium, SmolVLM-256M stay; only the threads / GPU / intervals / concurrency move. Profiles: `auto` / `barely_notice` / `balanced` / `performance` / `custom` (custom honours every field verbatim).
+
+The three binaries (`continuum`, `continuum-perception`, `continuum-triage-bench`) apply the resolved plan to the loaded config before components spawn, so every downstream consumer picks up the adapted values without each needing to know about hardware detection. The plan + specs are published to `state.json` (`RuntimeSnapshot` gained `hardware_specs` + `resource_plan` fields) for the dashboard.
+
+### Self-healing
+
+A `system_resources` health probe (registered in `apps/desktop/src-tauri/src/components.rs`) samples CPU%/RAM every 30 s via sysinfo and reports `Degrading` on sustained >90% CPU across ~60 s or >90% RAM, `Error` on >95% RAM (imminent OOM). `write_repair_context` (`health/repair.rs`) appends a `## System resources` block (detected specs + live CPU/RAM + GPU/VRAM + power + resolved plan) so the repair agent can reason about model-load failures — e.g. "triage OOM'd → 4 GB laptop → vision should be off → lower `cpu_core_fraction` / `workers_max_concurrent`".
+
+### Override
+
+Every knob is overridable via `[resources]` in `config.toml` or the dashboard Settings → Resources panel (Tauri commands `get_resource_profile` / `update_resource_profile`). There is no hot-reload: the plan is resolved once at boot, so a profile change persists to config and the dashboard shows a "Restart to apply" banner (consistent with the existing daemon limitation).
 
 ---
 
 ## Security and permissions
 
-Kairo has access to your computer. Trust is earned through transparency and explicit permissions.
+Continuum has access to your computer. Trust is earned through transparency and explicit permissions.
 
 ### Tool permission tiers
 
@@ -652,13 +681,13 @@ Every MCP tool has one of four permission levels:
 - **Auto** — can be called without confirmation (read operations, voice output, memory reads)
 - **Session-approved** — requires confirmation once per session, then allowed (most shell commands, file writes in specified directories)
 - **Always-confirm** — requires confirmation every single call (elevated shell, file deletes, sending messages, financial actions)
-- **Blocked** — cannot be called at all unless the user explicitly enables it (modifying Kairo's own installation except via repair agent, accessing password stores, anything touching credentials)
+- **Blocked** — cannot be called at all unless the user explicitly enables it (modifying Continuum's own installation except via repair agent, accessing password stores, anything touching credentials)
 
-The defaults are set in `~/.kairo/permissions.toml` and visible in the dashboard.
+The defaults are set in `~/.continuum/permissions.toml` and visible in the dashboard.
 
 ### Per-folder policies
 
-The user configures which folders are read-write, read-only, or off-limits to the orchestrator and workers. By default, `~/.kairo`, system folders, and credential stores are off-limits.
+The user configures which folders are read-write, read-only, or off-limits to the orchestrator and workers. By default, `~/.continuum`, system folders, and credential stores are off-limits.
 
 ### Audit log
 
@@ -666,7 +695,7 @@ Every tool call is logged with timestamp, caller (orchestrator or specific worke
 
 ### No telemetry
 
-Kairo does not phone home. Ever. There is no usage tracking, no crash reporting to third parties, no "anonymous analytics." The only network calls Kairo makes are to the Anthropic API (via Claude Code) and optionally to ElevenLabs (if the user enables premium TTS).
+Continuum does not phone home. Ever. There is no usage tracking, no crash reporting to third parties, no "anonymous analytics." The only network calls Continuum makes are to the Anthropic API (via Claude Code) and optionally to ElevenLabs (if the user enables premium TTS).
 
 ---
 
@@ -675,7 +704,7 @@ Kairo does not phone home. Ever. There is no usage tracking, no crash reporting 
 The repository is a monorepo using pnpm workspaces for JavaScript/TypeScript parts and a Cargo workspace for Rust parts.
 
 ```
-kairo-ai/
+continuum-ai/
 ├── README.md
 ├── ARCHITECTURE.md
 ├── CLAUDE.md
@@ -706,7 +735,7 @@ kairo-ai/
 │       └── tailwind.config.ts
 │
 ├── crates/
-│   ├── kairo-core/               # Main orchestration runtime
+│   ├── continuum-core/               # Main orchestration runtime
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -738,7 +767,7 @@ kairo-ai/
 │   │       │   └── repair.rs
 │   │       └── config.rs
 │   │
-│   ├── kairo-mcp/                # MCP server exposing Windows tools
+│   ├── continuum-mcp/                # MCP server exposing Windows tools
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs
@@ -753,17 +782,17 @@ kairo-ai/
 │   │       │   └── system.rs
 │   │       └── permissions.rs
 │   │
-│   ├── kairo-llm/                # Local LLM runtime (llama.cpp wrapper)
+│   ├── continuum-llm/                # Local LLM runtime (llama.cpp wrapper)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       └── lib.rs
 │   │
-│   └── kairo-vision/             # Local vision model runtime
+│   └── continuum-vision/             # Local vision model runtime
 │       ├── Cargo.toml
 │       └── src/
 │           └── lib.rs
 │
-├── skills/                       # Bundled Kairo skills (SKILL.md files)
+├── skills/                       # Bundled Continuum skills (SKILL.md files)
 │   ├── README.md
 │   ├── simcharts-dev/
 │   │   └── SKILL.md
@@ -813,13 +842,13 @@ These are the decisions that shape everything else. Change them only with delibe
 
 **Tauri over Electron.** Smaller binary, native performance, Rust backend gives us direct access to Windows APIs without FFI gymnastics. Electron would work but would double our install size and lose us native UI Automation access.
 
-**Rust for Kairo Core and the MCP server.** Performance matters because Layer 1 runs 24/7. Rust gives us zero-cost abstractions over Windows APIs and clean integration with llama.cpp, whisper.cpp, and LanceDB. TypeScript would be faster to prototype but slower at runtime and messier for Windows COM interop.
+**Rust for Continuum Core and the MCP server.** Performance matters because Layer 1 runs 24/7. Rust gives us zero-cost abstractions over Windows APIs and clean integration with llama.cpp, whisper.cpp, and LanceDB. TypeScript would be faster to prototype but slower at runtime and messier for Windows COM interop.
 
-**Claude Code as subprocess, not SDK.** The Agent SDK exists in Python and TypeScript but tying Kairo to it would mean bundling a language runtime and fighting version drift. The `claude` CLI is the official, stable, language-agnostic contract. We spawn it and talk JSON.
+**Claude Code as subprocess, not SDK.** The Agent SDK exists in Python and TypeScript but tying Continuum to it would mean bundling a language runtime and fighting version drift. The `claude` CLI is the official, stable, language-agnostic contract. We spawn it and talk JSON.
 
 **Stream-json for both directions.** We use `--input-format stream-json --output-format stream-json` for all orchestrator calls. This gives us bidirectional structured communication, live tool call visibility, and the ability to feed follow-up messages into a running agent loop.
 
-**MCP for extending Claude Code, not replacing it.** Claude Code already handles the hard parts (tool loop, file editing, sub-agents, context management). We add Windows-specific capabilities via MCP and let Claude Code drive. This also means anyone else's MCP server works with Kairo out of the box.
+**MCP for extending Claude Code, not replacing it.** Claude Code already handles the hard parts (tool loop, file editing, sub-agents, context management). We add Windows-specific capabilities via MCP and let Claude Code drive. This also means anyone else's MCP server works with Continuum out of the box.
 
 **LanceDB over Chroma/Qdrant.** LanceDB is embedded (no server), Rust-native, and designed for on-device use. Chroma is Python-first. Qdrant is a server product. LanceDB is the right choice for a local-first desktop app.
 

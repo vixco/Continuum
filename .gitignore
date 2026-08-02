@@ -37,8 +37,8 @@ apps/desktop/src-tauri/gen/
 .env.local
 .env.*.local
 
-# Kairo dev workspace
-.kairo-dev/
+# Continuum dev workspace
+.continuum-dev/
 
 # OS files
 Thumbs.db

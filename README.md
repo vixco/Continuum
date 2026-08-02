@@ -2,7 +2,7 @@
 
 **Local context, handoff, and permission infrastructure for coding agents.**
 
-Continuum is evolving from the Apache-2.0 Kairo codebase into a local control
+Continuum is evolving from the Apache-2.0 Continuum codebase into a local control
 plane for Codex, Claude Code, and local agents. The first product promise is:
 
 > Every coding agent starts with the right project context. Every important
@@ -15,7 +15,7 @@ desktop experience.
 
 - The desktop shell and its seven navigation tabs are real.
 - Dashboard content is fixture data while the typed world model is built.
-- Existing Kairo Rust crates remain as donor infrastructure and compatibility
+- Existing Continuum Rust crates remain as donor infrastructure and compatibility
   boundaries; they have not yet been renamed or connected to every new panel.
 - A green frontend build does not prove live agent, model, memory, or permission
   integrations.
@@ -56,7 +56,7 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm build
 cargo fmt --all -- --check
-cargo test -p kairo-core --no-default-features --lib
+cargo test -p continuum-core --no-default-features --lib
 ```
 
 The full Rust workspace adds LLVM/libclang, CMake, Ninja, ONNX Runtime, protoc,
@@ -66,11 +66,11 @@ and MSVC requirements. CI must run those checks without masking failures.
 
 ```text
 apps/desktop/          Tauri + Next.js Continuum desktop app
-apps/docs/             Existing Kairo donor documentation
-crates/kairo-core/     Donor runtime, memory, senses, workers, and health
-crates/kairo-mcp/      Donor MCP server and hardened tool primitives
-crates/kairo-llm/      Local LLM wrapper
-crates/kairo-vision/   Local vision wrapper
+apps/docs/             Existing Continuum donor documentation
+crates/continuum-core/     Donor runtime, memory, senses, workers, and health
+crates/continuum-mcp/      Donor MCP server and hardened tool primitives
+crates/continuum-llm/      Local LLM wrapper
+crates/continuum-vision/   Local vision wrapper
 config/                Runtime and permission defaults
 docs/                  Engineering and provenance documentation
 ```

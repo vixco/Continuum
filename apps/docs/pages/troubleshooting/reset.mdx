@@ -1,4 +1,4 @@
-# Resetting Kairo
+# Resetting Continuum
 
 Sometimes the cleanest fix is a fresh start. Here's how, from least to most destructive.
 
@@ -8,16 +8,16 @@ Right-click tray → Quit. Relaunch from the Start Menu. This clears in-memory s
 
 ## 2. Rollback the config to last night's snapshot
 
-Dashboard → Health tab → pick a backup date → "Rollback config". Nightly backups live in `~/.kairo-backups/`. Rolls `config.toml` only.
+Dashboard → Health tab → pick a backup date → "Rollback config". Nightly backups live in `~/.continuum-backups/`. Rolls `config.toml` only.
 
 ## 3. Reset the config to defaults
 
 ```powershell
-Remove-Item $env:USERPROFILE\.kairo\config\default-models.toml
-Copy-Item <repo>\config\default-models.toml $env:USERPROFILE\.kairo\config\
+Remove-Item $env:USERPROFILE\.continuum\config\default-models.toml
+Copy-Item <repo>\config\default-models.toml $env:USERPROFILE\.continuum\config\
 ```
 
-Relaunch Kairo. Memory, logs, and models are untouched.
+Relaunch Continuum. Memory, logs, and models are untouched.
 
 ## 4. Wipe memory
 
@@ -32,28 +32,28 @@ Configs, models, logs, and backups are kept.
 ## 5. Reinstall models
 
 ```powershell
-Remove-Item -Recurse $env:USERPROFILE\.kairo\models
+Remove-Item -Recurse $env:USERPROFILE\.continuum\models
 scripts\download-models.ps1
 ```
 
 ~6.5 GB of downloads. Use when models seem corrupted or you want to pick up a newer revision.
 
-## 6. Reinstall Kairo entirely (but keep data)
+## 6. Reinstall Continuum entirely (but keep data)
 
 ```powershell
-Remove-Item -Recurse $env:LOCALAPPDATA\Kairo
-irm https://raw.githubusercontent.com/PrincNL/kairo-ai/main/scripts/install.ps1 | iex
+Remove-Item -Recurse $env:LOCALAPPDATA\Continuum
+irm https://raw.githubusercontent.com/vixco/Continuum/main/scripts/install.ps1 | iex
 ```
 
-User data at `~/.kairo/` is preserved because we never delete it without explicit instruction.
+User data at `~/.continuum/` is preserved because we never delete it without explicit instruction.
 
 ## 7. Full factory reset
 
 ```powershell
-Remove-Item -Recurse -Force $env:LOCALAPPDATA\Kairo
-Remove-Item -Recurse -Force $env:USERPROFILE\.kairo
-Remove-Item -Recurse -Force $env:USERPROFILE\.kairo-backups
-irm https://raw.githubusercontent.com/PrincNL/kairo-ai/main/scripts/install.ps1 | iex
+Remove-Item -Recurse -Force $env:LOCALAPPDATA\Continuum
+Remove-Item -Recurse -Force $env:USERPROFILE\.continuum
+Remove-Item -Recurse -Force $env:USERPROFILE\.continuum-backups
+irm https://raw.githubusercontent.com/vixco/Continuum/main/scripts/install.ps1 | iex
 ```
 
 Relaunch, the onboarding wizard runs again.
@@ -64,6 +64,6 @@ Open an issue with the bug-report template. Include:
 
 - The exact commands you ran
 - The last 50 lines of `orchestrator.log` / `voice.log` / whichever component failed
-- `kairo --version`
+- `continuum --version`
 - `claude --version`
-- The output of `kairo setup` if it runs
+- The output of `continuum setup` if it runs
