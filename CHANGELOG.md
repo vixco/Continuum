@@ -11,6 +11,13 @@ All notable changes to Kairo are documented here. Format based on [Keep a Change
   automatic installation. Windows update artifacts are signed and published
   through the `main` push release workflow.
 
+### Changed
+
+- **Faster CI/releases**: full native Clippy/tests run on pull requests, while
+  `main` reuses the tested code path and performs one production build. Release
+  compiler artifacts are cached across version bumps, dependency resolution is
+  kept locked, and Tauri assets are collected from the actual root target.
+
 ## [0.1.0-alpha.2] — 2026-04-18
 
 ### Security + reliability hardening (post-alpha.1 audit)
