@@ -394,3 +394,94 @@ export interface ResourceProfileUpdateResult {
   plan: ResolvedResourcePlan;
   restart_required: boolean;
 }
+
+// --- Chat + provider connections (mirrors
+//     crates/continuum-gateway/src/types.rs,
+//     apps/desktop/src-tauri/src/chat_store.rs,
+//     apps/desktop/src-tauri/src/providers.rs). Keep in sync. ---
+
+export type ProviderKind = "open_ai_compat" | "anthropic" | "claude_cli";
+
+export interface ProviderConnection {
+  id: string;
+  display_name: string;
+  kind: ProviderKind;
+  base_url: string | null;
+  catalog_id: string | null;
+  models: string[];
+  default_model: string | null;
+  roles: string[];
+  requires_key: boolean;
+  last_tested_at: string | null;
+  last_test_ok: boolean | null;
+}
+
+export interface CatalogEntry {
+  id: string;
+  label: string;
+  kind: ProviderKind;
+  default_base_url: string | null;
+  needs_key: boolean;
+  key_hint: string;
+}
+
+export interface ConnectionTestReport {
+  ok: boolean;
+  latency_ms: number;
+  models: string[];
+  detail: string;
+}
+
+export interface TokenUsage {
+  input_tokens: number | null;
+  output_tokens: number | null;
+}
+
+export type ChatRole = "user" | "assistant";
+
+export interface StoredMessage {
+  role: ChatRole;
+  content: string;
+  ts: string;
+  model: string | null;
+  duration_ms: number | null;
+  usage: TokenUsage | null;
+  aborted: boolean;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  provider_id: string;
+  model: string;
+  created_at: string;
+  updated_at: string;
+  messages: StoredMessage[];
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  provider_id: string;
+  model: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export type ChatStreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "done"; usage: TokenUsage; stop_reason: string | null }
+  | { type: "error"; message: string; retryable: boolean };
+
+export interface ChatEventPayload {
+  conversation_id: string;
+  event: ChatStreamEvent;
+}
+
+export interface ProviderAddInput {
+  catalog_id: string | null;
+  display_name: string;
+  base_url: string | null;
+  api_key: string | null;
+  save_anyway: boolean;
+}
