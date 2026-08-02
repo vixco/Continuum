@@ -368,7 +368,7 @@ function TriButton({
       type="button"
       onClick={onClick}
       className={clsx(
-        "rounded-md border px-2.5 py-1 text-xs transition-colors",
+        "rounded-md border px-2.5 py-1 text-xs transition-colors active:scale-95",
         active
           ? "border-accent-purple bg-accent-purple/15 text-ink"
           : "border-bg-border bg-bg-elevated text-ink-muted hover:border-bg-hover"

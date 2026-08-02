@@ -60,6 +60,41 @@ export async function isTauri(): Promise<boolean> {
   return (await loadApi()) !== null;
 }
 
+// --- Window controls (frameless titlebar) ---
+// No-ops outside Tauri (pnpm dev) so the buttons don't throw.
+
+export const windowControls = {
+  async minimize() {
+    if (!(await isTauri())) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().minimize();
+  },
+  async toggleMaximize() {
+    if (!(await isTauri())) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().toggleMaximize();
+  },
+  async hide() {
+    if (!(await isTauri())) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().hide();
+  },
+  async isMaximized(): Promise<boolean> {
+    if (!(await isTauri())) return false;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    return await getCurrentWindow().isMaximized();
+  },
+  async onMaximizeChange(cb: (maximized: boolean) => void): Promise<() => void> {
+    if (!(await isTauri())) return () => {};
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    const unlisten = await win.onResized(async () => {
+      cb(await win.isMaximized());
+    });
+    return unlisten;
+  },
+};
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>, fallback?: T): Promise<T> {
   const api = await loadApi();
   if (!api) {
@@ -240,6 +275,7 @@ export const continuum = {
       binary_path: null,
     }),
   startRuntime: () => invoke<void>("start_runtime"),
+  isOnboardingComplete: () => invoke<boolean>("is_onboarding_complete", undefined, true),
 };
 
 export interface RuntimeStatus {
