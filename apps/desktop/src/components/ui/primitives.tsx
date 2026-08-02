@@ -107,16 +107,16 @@ export function Button({
     <button
       {...props}
       className={clsx(
-        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-all",
+        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-all active:scale-[0.97]",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40",
-        "disabled:cursor-not-allowed disabled:opacity-50",
+        "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
         size === "sm" && "px-2.5 py-1 text-xs",
         size === "md" && "px-3 py-1.5 text-sm",
         size === "lg" && "px-4 py-2 text-sm",
         variant === "default" &&
           "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-purple bg-accent-purple text-white shadow-sm shadow-accent-purple/30 hover:border-accent-purple-dim hover:bg-accent-purple-dim",
+          "border-accent-purple/60 bg-accent-purple text-black shadow-sm shadow-accent-purple/25 hover:brightness-105 hover:shadow-accent-purple/40",
         variant === "danger" &&
           "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&
@@ -151,7 +151,7 @@ export function Toggle({
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={clsx(
-          "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors",
+          "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors active:scale-95",
           "disabled:cursor-not-allowed disabled:opacity-50",
           checked
             ? "border-accent-purple bg-accent-purple"

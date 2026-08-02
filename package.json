@@ -7,6 +7,8 @@
   },
   "scripts": {
     "dev": "pnpm --filter desktop dev",
+    "dev:app": "pnpm --filter @continuum/desktop tauri dev",
+    "dev:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "build": "pnpm run build:desktop && pnpm run build:docs",
     "build:desktop": "pnpm --filter @continuum/desktop build",
     "build:docs": "pnpm --filter continuum-docs build",

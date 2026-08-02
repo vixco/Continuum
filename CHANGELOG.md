@@ -10,6 +10,19 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   exposes a manual check in Settings, and lets users enable or disable
   automatic installation. Windows update artifacts are signed and published
   through the `main` push release workflow.
+- **Redesigned dashboard**: frameless window with a single custom titlebar (the
+  duplicate OS menu bar is gone), click/press animations on every control, a
+  minimal Hermes/Buzz.xyz-style sidebar grouped into Daily/Configure/Advanced,
+  and a Ctrl+K command palette. All mockup screens removed; the live tabs
+  (Home, Voice, Memory, Brain, Tools, Automations, Health, Logs, Settings) are
+  now wired to the Zustand store, which is hydrated by `bootstrapStore()` and
+  kept in sync via the `continuum:state`/`continuum:log`/`continuum:repair`
+  Tauri events. Window controls use `@tauri-apps/api/window` with no-op
+  fallbacks outside Tauri.
+- **One-command local dev**: `scripts/dev.ps1` runs the dashboard locally with
+  no CI/CD or push. Modes: default (Tauri app), `-FrontendOnly` (Next.js on
+  :3000), `-WithRuntime` (also start `continuum.exe` for live data), `-Check`
+  (prereqs only). Aliased as `pnpm dev:local` / `pnpm dev:app`.
 
 ### Changed
 
