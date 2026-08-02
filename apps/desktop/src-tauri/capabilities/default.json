@@ -19,8 +19,10 @@
     "core:app:default",
     "core:app:allow-name",
     "core:app:allow-version",
+    "process:default",
     "shell:default",
     "opener:default",
-    "opener:allow-open-path"
+    "opener:allow-open-path",
+    "updater:default"
   ]
 }
