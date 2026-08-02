@@ -80,6 +80,19 @@ impl OpenAiCompatAdapter {
             Err(_) => Err(GatewayError::Timeout),
         }
     }
+
+    /// Reads an error response's body for the `BadResponse`/status-mapped
+    /// error detail, bounded by `idle_timeout` — a body read can stall the
+    /// same way an initial `send()` can, so this must not block forever
+    /// either. Any failure (timeout or read error) degrades to an empty
+    /// string; the body text is diagnostic-only, never load-bearing.
+    async fn read_body_text(&self, resp: reqwest::Response) -> String {
+        tokio::time::timeout(self.idle_timeout, resp.text())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+    }
 }
 
 fn map_status(status: reqwest::StatusCode, retry_after: Option<u64>, body: String) -> GatewayError {
@@ -126,11 +139,7 @@ impl ChatProvider for OpenAiCompatAdapter {
         if !resp.status().is_success() {
             let ra = retry_after(&resp);
             let status = resp.status();
-            return Err(map_status(
-                status,
-                ra,
-                resp.text().await.unwrap_or_default(),
-            ));
+            return Err(map_status(status, ra, self.read_body_text(resp).await));
         }
         #[derive(serde::Deserialize)]
         struct ModelEntry {
@@ -184,11 +193,7 @@ impl ChatProvider for OpenAiCompatAdapter {
         if !resp.status().is_success() {
             let ra = retry_after(&resp);
             let status = resp.status();
-            return Err(map_status(
-                status,
-                ra,
-                resp.text().await.unwrap_or_default(),
-            ));
+            return Err(map_status(status, ra, self.read_body_text(resp).await));
         }
 
         let idle = self.idle_timeout;

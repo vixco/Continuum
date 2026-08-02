@@ -202,7 +202,8 @@ async fn idle_timeout_yields_timeout_error() {
     // request timeout" finding — the initial POST's `send()` is bounded by
     // `idle_timeout` — rather than the mid-stream idle-timeout branch inside
     // `stream_events`'s `tokio::select!` loop. A mid-stream stall isn't
-    // constructible with wiremock.
+    // constructible with wiremock; see `mid_stream_stall_yields_timeout_error`
+    // below, which drives that branch via a hand-rolled raw-TCP fixture.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -228,6 +229,60 @@ async fn idle_timeout_yields_timeout_error() {
         .err()
         .expect("err");
     assert!(matches!(err, GatewayError::Timeout));
+}
+
+#[tokio::test]
+async fn mid_stream_stall_yields_timeout_error() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        // Read the request bytes (don't parse; just drain a bit) then answer
+        let mut buf = [0u8; 4096];
+        use tokio::io::AsyncReadExt;
+        let _ = sock.read(&mut buf).await;
+        let resp =
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+        sock.write_all(resp.as_bytes()).await.expect("headers");
+        // one complete SSE event as a chunked body piece
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+        let chunk = format!("{:x}\r\n{}\r\n", payload.len(), payload);
+        sock.write_all(chunk.as_bytes()).await.expect("chunk");
+        sock.flush().await.expect("flush");
+        // then stall forever (never send terminating chunk)
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let a = OpenAiCompatAdapter::new(
+        format!("http://{addr}/v1"),
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(200),
+    )
+    .expect("adapter");
+    let mut s = a
+        .stream_chat(req(), CancellationToken::new())
+        .await
+        .expect("stream");
+    let mut got_delta = false;
+    let mut got_timeout = false;
+    while let Some(ev) = s.next().await {
+        match ev {
+            continuum_gateway::ChatEvent::Delta { text } => {
+                assert_eq!(text, "Hi");
+                got_delta = true;
+            }
+            continuum_gateway::ChatEvent::Error { message, retryable } => {
+                assert!(retryable);
+                assert_eq!(message, GatewayError::Timeout.user_message());
+                got_timeout = true;
+            }
+            continuum_gateway::ChatEvent::Done { .. } => panic!("should not complete"),
+        }
+    }
+    assert!(got_delta && got_timeout);
 }
 
 #[tokio::test]
