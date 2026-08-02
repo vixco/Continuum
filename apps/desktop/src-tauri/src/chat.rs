@@ -20,7 +20,18 @@
 //!   sequence on a conversation (the user-message save here, the three
 //!   assistant-message saves in the consumer task, and the mutating CRUD
 //!   commands) is serialized through `ChatState::conv_lock`, a
-//!   per-conversation `tokio::sync::Mutex` held across the save.
+//!   per-conversation `tokio::sync::Mutex` held across the save. In
+//!   `chat_send_message` this means the lock is acquired *before* the load,
+//!   not just around the save, so a concurrent rename/model-switch/delete
+//!   can't land between our load and save.
+//!
+//! One deliberate asymmetry in failure handling: if sending fails *before*
+//! the stream starts (bad adapter config, unreachable provider, CLI not
+//! found), the just-saved user message is popped back out — otherwise every
+//! failed Retry would leave a duplicate user turn behind. If it fails
+//! *after* the stream starts (mid-generation error), the user message is
+//! kept — the model may have partially answered, and popping the question
+//! that produced a partial answer would be more confusing than leaving it.
 
 use std::sync::Arc;
 
@@ -57,6 +68,47 @@ fn release_inflight(
         .lock()
         .expect("inflight lock")
         .remove(conversation_id);
+}
+
+/// Undoes the user-message save from `chat_send_message` when a pre-stream
+/// failure (adapter build, stream start) happens after that save already
+/// landed. Without this, every failed Retry re-sends the same text and
+/// appends another duplicate user turn.
+///
+/// Re-acquires `conv_lock` (it was dropped after the initial save — see the
+/// comment at that call site), reloads the conversation, and pops the
+/// trailing message only if it is still exactly the one just appended (last
+/// message, user role, matching content) — defensive against a concurrent
+/// edit landing in between. Mid-stream failures (inside the consumer task
+/// spawned further down) deliberately do NOT call this — see the module
+/// doc's note on that asymmetry.
+async fn unwind_pending_user_message(
+    conv_lock: &tokio::sync::Mutex<()>,
+    store: &ChatStore,
+    conversation_id: &str,
+    text: &str,
+) {
+    let _guard = conv_lock.lock().await;
+    let Some(mut conv) = store.get(conversation_id) else {
+        return;
+    };
+    let is_our_pending_message = conv
+        .messages
+        .last()
+        .is_some_and(|m| m.role == ChatRole::User && m.content == text);
+    if !is_our_pending_message {
+        return;
+    }
+    conv.messages.pop();
+    if let Err(e) = store.save(&conv) {
+        tracing::error!(
+            layer = "desktop",
+            component = "chat",
+            conversation_id = %conversation_id,
+            error = %e,
+            "failed to unwind pending user message after pre-stream failure"
+        );
+    }
 }
 
 /// Assembles the system prompt: the built-in (or user-overridden) base text
@@ -218,9 +270,19 @@ pub async fn chat_send_message(
     let store = ChatStore::new(dev_dir.clone());
     let conv_lock = chat_state.conv_lock(&conversation_id);
 
+    // The lock is acquired BEFORE the load, not just around the save, so
+    // the whole load -> mutate -> save sequence below is one atomic unit
+    // with respect to every other load-mutate-save on this conversation
+    // (rename, model switch, delete) — see the module doc's "concurrent
+    // writers" hazard. Loading outside the lock would let a concurrent
+    // rename/model-switch land between our load and save and be silently
+    // reverted, or let a concurrent delete's file be resurrected by our
+    // stale save.
+    let guard = conv_lock.lock().await;
     let mut conv = match store.get(&conversation_id) {
         Some(c) => c,
         None => {
+            drop(guard);
             release_inflight(&chat_state.inflight, &conversation_id);
             return Err("Unknown conversation".into());
         }
@@ -229,6 +291,7 @@ pub async fn chat_send_message(
     let conn = match providers.iter().find(|p| p.id == conv.provider_id) {
         Some(c) => c.clone(),
         None => {
+            drop(guard);
             release_inflight(&chat_state.inflight, &conversation_id);
             return Err("This conversation's provider was removed. Pick a model again.".into());
         }
@@ -236,14 +299,17 @@ pub async fn chat_send_message(
 
     conv.messages.push(StoredMessage::user(text.trim()));
     conv.derive_title();
-    {
-        let _guard = conv_lock.lock().await;
-        if let Err(e) = store.save(&conv) {
-            drop(_guard);
-            release_inflight(&chat_state.inflight, &conversation_id);
-            return Err(e.to_string());
-        }
+    if let Err(e) = store.save(&conv) {
+        drop(guard);
+        release_inflight(&chat_state.inflight, &conversation_id);
+        return Err(e.to_string());
     }
+    // Released here, before adapter construction/stream start — those can
+    // block on network connects or a CLI spawn and must not hold up other
+    // load-mutate-save ops on this conversation for that long. The
+    // pre-stream error paths below that need to undo the save each
+    // re-acquire it via `unwind_pending_user_message`.
+    drop(guard);
 
     let chat_cfg = state.runtime.config_snapshot().chat.clone();
     // No std lock is held across this call — `build_adapter` itself does
@@ -251,6 +317,7 @@ pub async fn chat_send_message(
     let adapter = match build_adapter(&conn, chat_state.secrets.as_ref(), &chat_cfg) {
         Ok(a) => a,
         Err(e) => {
+            unwind_pending_user_message(&conv_lock, &store, &conversation_id, text.trim()).await;
             release_inflight(&chat_state.inflight, &conversation_id);
             return Err(e);
         }
@@ -281,6 +348,7 @@ pub async fn chat_send_message(
     let mut stream = match adapter.stream_chat(req, cancel).await {
         Ok(s) => s,
         Err(e) => {
+            unwind_pending_user_message(&conv_lock, &store, &conversation_id, text.trim()).await;
             release_inflight(&chat_state.inflight, &conversation_id);
             return Err(e.user_message());
         }
@@ -417,5 +485,100 @@ pub fn chat_cancel(conversation_id: String, chat_state: tauri::State<'_, Arc<Cha
         .get(&conversation_id)
     {
         tok.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `chat_send_message` itself takes `tauri::State`/`tauri::AppHandle`
+    /// params that need a running Tauri app to construct, so it isn't
+    /// exercised directly here. `unwind_pending_user_message` is the free
+    /// function that contains all of Finding 3's actual logic (find the
+    /// pending user message, pop it, save) and has no Tauri dependency, so
+    /// these tests cover it directly against a real `ChatStore` on a temp
+    /// dir — the same persistence path `chat_send_message` uses.
+    fn conv_with_trailing_user_message(store: &ChatStore, text: &str) -> Conversation {
+        let mut conv = store.create("prov-1", "model-1").expect("create");
+        conv.messages.push(StoredMessage::user(text));
+        store.save(&conv).expect("save");
+        conv
+    }
+
+    #[tokio::test]
+    async fn unwind_pops_matching_trailing_user_message() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = ChatStore::new(dir.path().to_path_buf());
+        let conv = conv_with_trailing_user_message(&store, "hello");
+        let lock = tokio::sync::Mutex::new(());
+
+        unwind_pending_user_message(&lock, &store, &conv.id, "hello").await;
+
+        let reloaded = store.get(&conv.id).expect("get");
+        assert!(
+            reloaded.messages.is_empty(),
+            "the just-appended user message should have been popped, leaving no duplicate for a Retry to build on"
+        );
+    }
+
+    #[tokio::test]
+    async fn unwind_leaves_unrelated_trailing_message_untouched() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = ChatStore::new(dir.path().to_path_buf());
+        // Trailing message belongs to a different send (different text) -
+        // e.g. a concurrent send landed in between. Must not be popped.
+        let conv = conv_with_trailing_user_message(&store, "the real last message");
+        let lock = tokio::sync::Mutex::new(());
+
+        unwind_pending_user_message(&lock, &store, &conv.id, "some other text").await;
+
+        let reloaded = store.get(&conv.id).expect("get");
+        assert_eq!(
+            reloaded.messages.len(),
+            1,
+            "unrelated trailing message must survive unwind"
+        );
+        assert_eq!(reloaded.messages[0].content, "the real last message");
+    }
+
+    #[tokio::test]
+    async fn unwind_ignores_non_trailing_match() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = ChatStore::new(dir.path().to_path_buf());
+        let mut conv = store.create("prov-1", "model-1").expect("create");
+        conv.messages.push(StoredMessage::user("question"));
+        conv.messages.push(StoredMessage {
+            role: ChatRole::Assistant,
+            content: "answer".into(),
+            ts: chrono::Utc::now(),
+            model: None,
+            duration_ms: None,
+            usage: None,
+            aborted: false,
+        });
+        store.save(&conv).expect("save");
+        let lock = tokio::sync::Mutex::new(());
+
+        // "question" matches an earlier message's text, but it's no longer
+        // the LAST message (the assistant reply is) - nothing should pop.
+        unwind_pending_user_message(&lock, &store, &conv.id, "question").await;
+
+        let reloaded = store.get(&conv.id).expect("get");
+        assert_eq!(
+            reloaded.messages.len(),
+            2,
+            "a text match that isn't the trailing message must not be popped"
+        );
+    }
+
+    #[tokio::test]
+    async fn unwind_is_noop_on_missing_conversation() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = ChatStore::new(dir.path().to_path_buf());
+        let lock = tokio::sync::Mutex::new(());
+        // Must not panic when the conversation is gone (e.g. deleted
+        // concurrently with the failed send) - just do nothing.
+        unwind_pending_user_message(&lock, &store, "does-not-exist", "hello").await;
     }
 }

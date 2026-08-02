@@ -193,7 +193,12 @@ pub struct ChatConfig {
     pub connect_timeout_secs: u64,
     /// Abort a stream after this many seconds without a delta.
     pub stream_idle_timeout_secs: u64,
-    /// Overall timeout for claude-CLI sends.
+    /// Idle timeout for claude-CLI sends: the max seconds allowed to pass
+    /// WITHOUT a new line of CLI stdout before the send is aborted. This
+    /// resets on every line the CLI emits, so it is not an overall/
+    /// end-to-end timeout — a long generation that keeps steadily
+    /// streaming output is never killed by this, only a CLI that goes
+    /// silent mid-send is.
     pub cli_timeout_secs: u64,
     /// Optional path to a custom system prompt file (overrides the built-in).
     pub system_prompt_path: Option<String>,

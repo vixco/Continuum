@@ -192,8 +192,11 @@ fn resolve_claude_binary() -> String {
         .get_or_init(|| {
             #[cfg(windows)]
             {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 let found = std::process::Command::new("where")
                     .arg("claude.cmd")
+                    .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .map(|o| o.status.success())
                     .unwrap_or(false);
@@ -340,7 +343,10 @@ pub async fn provider_add(
     let store = chat_state.providers.lock().expect("providers lock");
     let mut all = store.load();
     all.push(conn.clone());
-    store.save(&all).map_err(|e| e.to_string())?;
+    store.save(&all).map_err(|e| {
+        let _ = chat_state.secrets.delete(&id); // don't orphan the secret
+        e.to_string()
+    })?;
     Ok(conn)
 }
 

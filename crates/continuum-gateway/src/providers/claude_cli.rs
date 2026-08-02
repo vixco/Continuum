@@ -23,6 +23,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// subscription account (see non-negotiable #1 in `CLAUDE.md`).
 pub struct ClaudeCliAdapter {
     binary: String,
+    /// Idle timeout, not an overall/end-to-end one: it bounds the
+    /// `--version` probe outright, and for a streaming send it bounds each
+    /// individual `lines.next_line()` read (see the `tokio::time::timeout`
+    /// around it in `stream_chat`) — so it resets on every line of CLI
+    /// stdout. A long generation that keeps steadily streaming output is
+    /// never killed by this; only a CLI that goes silent mid-send is.
     timeout: Duration,
 }
 
