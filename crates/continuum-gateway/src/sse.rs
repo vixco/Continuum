@@ -7,8 +7,6 @@
 //! newline (0x0A) never appears inside a multi-byte UTF-8 sequence
 //! (continuation bytes are ≥0x80), splitting at `\n` never splits a character.
 
-#![allow(dead_code)] // TODO(task-4): remove — parser gets wired into the HTTP adapters
-
 pub struct SseParser {
     buf: Vec<u8>,
 }
