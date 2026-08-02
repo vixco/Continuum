@@ -60,7 +60,7 @@ jobs:
           Write-Host "Next release version: $next"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -102,20 +102,28 @@ jobs:
       - name: Refresh Cargo.lock for the bumped workspace version
         run: cargo generate-lockfile
 
-      - name: Run tests (last-chance verification)
-        run: cargo test --workspace -- --skip matches_whisper_k_to_c_homophone
+      # Compile the workspace only once. Release-profile tests leave the native
+      # dependencies ready for the binaries below; the previous debug tests
+      # followed by a fresh release build duplicated more than an hour of work.
+      - name: Run release tests (last-chance verification)
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo test --workspace --release -- --skip matches_whisper_k_to_c_homophone
 
-      - name: Build kairo.exe (release)
-        run: cargo build --release --bin kairo
-
-      - name: Build kairo-mcp.exe (release)
-        run: cargo build --release --bin kairo-mcp
+      - name: Build release binaries from tested artifacts
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo build --release --bin kairo --bin kairo-mcp
 
       - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
         run: pnpm tauri build
 
       - name: Assemble release assets and updater metadata
