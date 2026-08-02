@@ -2,25 +2,31 @@
 //! Handles chunk boundaries mid-line, CRLF, comment lines, and multi-line
 //! buffering. Event names are ignored — both the OpenAI and Anthropic
 //! streams carry everything we need in the `data:` JSON payload.
+//!
+//! **UTF-8 safety:** Buffers raw bytes, decoding only complete lines. Since
+//! newline (0x0A) never appears inside a multi-byte UTF-8 sequence
+//! (continuation bytes are ≥0x80), splitting at `\n` never splits a character.
 
 #![allow(dead_code)] // TODO(task-4): remove — parser gets wired into the HTTP adapters
 
 pub struct SseParser {
-    buf: String,
+    buf: Vec<u8>,
 }
 
 impl SseParser {
     pub fn new() -> Self {
-        Self { buf: String::new() }
+        Self { buf: Vec::new() }
     }
 
     /// Feed a network chunk; returns every completed `data:` payload.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
         // Process complete lines; keep the trailing partial line in the buffer.
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
+        // Safe to split at \n because it never appears in multi-byte UTF-8 sequences.
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
             let line = line.trim_end_matches(['\n', '\r']);
             if let Some(payload) = line.strip_prefix("data:") {
                 out.push(payload.trim().to_string());
@@ -63,5 +69,21 @@ mod tests {
         let mut p = SseParser::new();
         let out = p.push(b": keepalive\n\nevent: ping\n\ndata: 1\n\n");
         assert_eq!(out, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn multibyte_utf8_split_across_chunks_survives() {
+        let payload = "data: em—dash ✓ ééé\n\n".as_bytes();
+        // split at every possible byte position, including mid-character
+        for split in 1..payload.len() {
+            let mut p = SseParser::new();
+            let mut out = p.push(&payload[..split]);
+            out.extend(p.push(&payload[split..]));
+            assert_eq!(
+                out,
+                vec!["em—dash ✓ ééé".to_string()],
+                "split at byte {split}"
+            );
+        }
     }
 }
