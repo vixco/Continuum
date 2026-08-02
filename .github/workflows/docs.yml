@@ -44,19 +44,15 @@ jobs:
         run: pnpm build
         working-directory: apps/docs
         env:
-          # Nextra / Next.js base path for GitHub Pages deploys under /kairo-ai
-          NEXT_PUBLIC_BASE_PATH: /kairo-ai
+          # Nextra / Next.js base path for GitHub Pages deploys under /Continuum.
+          NEXT_PUBLIC_BASE_PATH: /Continuum
 
       - name: Setup Pages
-        # `enablement: true` creates the Pages site on first run if it isn't
-        # already configured, so the initial deploy doesn't require manual
-        # repo-settings clicks. Requires `pages: write` permission (already
-        # set below).
+        if: ${{ vars.CONTINUUM_PAGES_ENABLED == 'true' }}
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload Pages artifact
+        if: ${{ vars.CONTINUUM_PAGES_ENABLED == 'true' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: apps/docs/out
@@ -64,6 +60,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
+    if: ${{ vars.CONTINUUM_PAGES_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
