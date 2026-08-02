@@ -9,6 +9,7 @@ import {
   Database,
   Home,
   Maximize2,
+  MessagesSquare,
   Mic,
   Minimize2,
   Minus,
@@ -24,6 +25,7 @@ import {
 
 import { AutomationsTab } from "@/components/tabs/AutomationsTab";
 import { BrainTab } from "@/components/tabs/BrainTab";
+import { ChatTab } from "@/components/tabs/ChatTab";
 import { HealthTab } from "@/components/tabs/HealthTab";
 import { HomeTab } from "@/components/tabs/HomeTab";
 import { LogsTab } from "@/components/tabs/LogsTab";
@@ -44,6 +46,7 @@ import type { VoiceMode } from "@/lib/types";
 
 type TabId =
   | "home"
+  | "chat"
   | "voice"
   | "brain"
   | "memory"
@@ -64,6 +67,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
     label: "Daily",
     items: [
       { id: "home", label: "Home", icon: Home },
+      { id: "chat", label: "Chat", icon: MessagesSquare },
       { id: "voice", label: "Voice", icon: Mic },
       { id: "memory", label: "Memory", icon: Database },
     ],
@@ -222,6 +226,7 @@ export function Shell() {
           <UpdateBanner state={updates.state} onInstall={updates.installUpdate} />
           <div className="main-scroll">
             {tab === "home" && <HomeTab />}
+            {tab === "chat" && <ChatTab />}
             {tab === "voice" && <VoiceTab />}
             {tab === "brain" && <BrainTab />}
             {tab === "memory" && <MemoryTab />}
