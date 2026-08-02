@@ -12,7 +12,13 @@ Write-Host "Continuum Model Downloader" -ForegroundColor Cyan
 Write-Host "======================" -ForegroundColor Cyan
 Write-Host ""
 
-$ModelsBase = Join-Path $env:USERPROFILE ".continuum-dev\models"
+# Models base directory. The onboarding wizard passes a custom path via
+# CONTINUUM_MODELS_DIR; fall back to ~/.continuum-dev/models when unset.
+if ($env:CONTINUUM_MODELS_DIR -and $env:CONTINUUM_MODELS_DIR.Trim() -ne "") {
+    $ModelsBase = $env:CONTINUUM_MODELS_DIR
+} else {
+    $ModelsBase = Join-Path $env:USERPROFILE ".continuum-dev\models"
+}
 
 # Minimum file size (bytes) to consider a download valid.
 # Anything smaller is likely an error page saved as a file.
@@ -169,13 +175,28 @@ if ((Test-Path $StaleEncoder) -and ((Get-Item $StaleEncoder).Length -lt $MinVali
 # ============================================================================
 # Source: Official Qwen org on HuggingFace (no auth required).
 # 8B recommended for accuracy on Dutch + decision boundary classification.
+# The wizard may override the URL via CONTINUUM_QWEN_URL so the user can pick a
+# custom HuggingFace GGUF (e.g. a different quant or a community fine-tune).
 
 Write-Host "`n--- Qwen 3 8B Q4_K_M (Triage, default) ---" -ForegroundColor Cyan
 
+$Qwen8BOutName = "qwen3-8b-q4_k_m.gguf"
+if ($env:CONTINUUM_QWEN_URL -and $env:CONTINUUM_QWEN_URL.Trim() -ne "") {
+    $Qwen8BUrl = $env:CONTINUUM_QWEN_URL
+    # Derive a filename from the URL's last path segment; fall back to a generic
+    # name if the URL has no usable segment.
+    $seg = Split-Path -Leaf $Qwen8BUrl
+    if (-not $seg -or $seg -eq "") { $seg = "qwen3-8b-custom.gguf" }
+    $Qwen8BOutName = $seg
+    Write-Host "[INFO] Using custom Qwen URL: $Qwen8BUrl" -ForegroundColor Gray
+} else {
+    $Qwen8BUrl = "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
+}
+
 Download-Model `
     -Name "Qwen 3 8B Q4_K_M" `
-    -Url "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" `
-    -OutPath (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf") `
+    -Url $Qwen8BUrl `
+    -OutPath (Join-Path $ModelsBase "triage\$Qwen8BOutName") `
     -ExpectedSizeMB "4800"
 
 # ============================================================================
@@ -356,7 +377,7 @@ $critical = @(
     @("Vision embed_tokens",    (Join-Path $VisionDir "embed_tokens.onnx"),        $MinValidSize),
     @("Vision decoder",         (Join-Path $VisionDir "decoder.onnx"),             $MinValidSize),
     @("Vision tokenizer",       (Join-Path $VisionDir "tokenizer.json"),           10000),
-    @("Triage model (8B)",      (Join-Path $ModelsBase "triage\qwen3-8b-q4_k_m.gguf"), $MinValidSize),
+    @("Triage model (8B)",      (Join-Path $ModelsBase "triage\$Qwen8BOutName"),       $MinValidSize),
     @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf"), $MinValidSize),
     @("Whisper medium",         (Join-Path $ModelsBase "stt\whisper-medium.bin"),  $MinValidSize),
     @("Whisper small (fallback)", (Join-Path $ModelsBase "stt\whisper-small.bin"), $MinValidSize),

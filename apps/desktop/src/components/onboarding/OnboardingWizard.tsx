@@ -15,7 +15,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronLeft,
@@ -39,7 +39,7 @@ type StepId =
 
 const STEPS: Array<{ id: StepId; label: string; icon: typeof Sparkles }> = [
   { id: "welcome", label: "Welcome", icon: Sparkles },
-  { id: "claude", label: "Claude Code", icon: Check },
+  { id: "claude", label: "Connect AI", icon: Check },
   { id: "models", label: "Models", icon: Download },
   { id: "voice", label: "Voice", icon: Mic },
   { id: "permissions", label: "Permissions", icon: ShieldCheck },
@@ -51,7 +51,7 @@ const STEPS: Array<{ id: StepId; label: string; icon: typeof Sparkles }> = [
 export interface OnboardingPayload {
   name?: string;
   timezone?: string;
-  language?: "en" | "nl" | "both";
+  language?: string;
   wake_word_enabled: boolean;
   wake_sensitivity: number;
   primary_voice: string;
@@ -59,6 +59,9 @@ export interface OnboardingPayload {
   speaker_device?: string;
   permissions: "default" | "custom";
   extra_paths: string[];
+  orchestrator_cli: string;
+  models_dir: string;
+  qwen_url: string;
 }
 
 const DEFAULT_PAYLOAD: OnboardingPayload = {
@@ -68,6 +71,9 @@ const DEFAULT_PAYLOAD: OnboardingPayload = {
   permissions: "default",
   extra_paths: [],
   language: "en",
+  orchestrator_cli: "claude",
+  models_dir: "",
+  qwen_url: "",
 };
 
 export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
@@ -116,8 +122,12 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
         <div className="wizard-card" key={step}>
           <div className="wizard-step">
             {step === "welcome" && <WelcomeStep onNext={goNext} />}
-            {step === "claude" && <ClaudeStep onNext={goNext} />}
-            {step === "models" && <ModelsStep onNext={goNext} />}
+            {step === "claude" && (
+              <ConnectStep payload={payload} setPayload={setPayload} />
+            )}
+            {step === "models" && (
+              <ModelsStep payload={payload} setPayload={setPayload} onNext={goNext} />
+            )}
             {step === "voice" && <VoiceStep payload={payload} setPayload={setPayload} />}
             {step === "permissions" && (
               <PermissionsStep payload={payload} setPayload={setPayload} />
@@ -157,12 +167,29 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
   );
 }
 
-function detectLanguage(): "en" | "nl" | "both" {
+function detectLanguage(): string {
   if (typeof navigator === "undefined") return "en";
   const lang = navigator.language.toLowerCase();
-  if (lang.startsWith("nl")) return "both";
+  const prefix = lang.split("-")[0];
+  if (LANGUAGES.some((l) => l.code === prefix)) return prefix;
   return "en";
 }
+
+// Top 10 most-spoken languages globally, plus Dutch (the app ships Dutch TTS
+// voices and the original picker offered it). Codes are ISO 639-1.
+const LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: "en", label: "English" },
+  { code: "zh", label: "中文" },
+  { code: "hi", label: "हिन्दी" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+  { code: "ar", label: "العربية" },
+  { code: "pt", label: "Português" },
+  { code: "ru", label: "Русский" },
+  { code: "de", label: "Deutsch" },
+  { code: "ja", label: "日本語" },
+  { code: "nl", label: "Nederlands" },
+];
 
 // ---- Steps ------------------------------------------------------------------
 
@@ -204,7 +231,7 @@ function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
         Takes about ten minutes. Most of it is a one-time model download running in the background.
       </p>
       <ul className="flex flex-col gap-2 text-[13px] text-ink-muted">
-        <Bullet>Needs a Claude Max or API subscription.</Bullet>
+        <Bullet>Needs an LLM subscription or a local model.</Bullet>
         <Bullet>Microphone and speaker recommended.</Bullet>
         <Bullet>About 6.5 GB of models download once.</Bullet>
       </ul>
@@ -221,99 +248,141 @@ function Bullet({ children }: { children: React.ReactNode }) {
   );
 }
 
-interface ClaudeCheckResult {
+interface AiCli {
+  id: string;
+  name: string;
   installed: boolean;
-  version: string | null;
-  authenticated: boolean;
-  error: string | null;
+  version: Option<string>;
+  auth: "ok" | "unauth" | "unknown";
+  auth_detail: Option<string>;
+  install_hint: string;
+  login_hint: Option<string>;
+  recommended: boolean;
 }
 
-function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
-  const [state, setState] = useState<"idle" | "checking" | "ok" | "missing" | "unauth">("idle");
-  const [result, setResult] = useState<ClaudeCheckResult | null>(null);
+type Option<T> = T | null;
+
+function ConnectStep({
+  payload,
+  setPayload,
+}: {
+  payload: OnboardingPayload;
+  setPayload: (p: OnboardingPayload) => void;
+}) {
+  const [clis, setClis] = useState<AiCli[]>([]);
+  const [checking, setChecking] = useState(true);
 
   const runCheck = async () => {
-    setState("checking");
+    setChecking(true);
     try {
-      const cli = await invoke<{
-        installed: boolean;
-        version: string | null;
-        error: string | null;
-      }>("check_claude_cli");
-      const auth = await invoke<{ authenticated: boolean; error: string | null }>(
-        "check_claude_auth"
-      );
-      const combined: ClaudeCheckResult = {
-        installed: cli.installed,
-        version: cli.version,
-        authenticated: auth.authenticated,
-        error: cli.error ?? auth.error,
-      };
-      setResult(combined);
-      if (!combined.installed) setState("missing");
-      else if (!combined.authenticated) setState("unauth");
-      else setState("ok");
+      const list = await invoke<AiCli[]>("list_ai_clis");
+      setClis(list);
+      // Default the selection to claude when nothing usable is selected yet,
+      // or to the first installed CLI if claude isn't present.
+      if (!list.some((c) => c.id === payload.orchestrator_cli && c.installed)) {
+        const fallback =
+          list.find((c) => c.id === "claude" && c.installed) ??
+          list.find((c) => c.installed);
+        setPayload({ ...payload, orchestrator_cli: fallback?.id ?? "claude" });
+      }
     } catch (err) {
-      setResult({
-        installed: false,
-        version: null,
-        authenticated: false,
-        error: String(err),
-      });
-      setState("missing");
+      console.warn("list_ai_clis failed", err);
+    } finally {
+      setChecking(false);
     }
   };
 
   useEffect(() => {
     void runCheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const installed = clis.filter((c) => c.installed);
+
   return (
-    <StepContainer eyebrow="Step 1" title="Connect Claude Code">
+    <StepContainer eyebrow="Step 1" title="Connect an AI CLI">
       <p className="text-[14px] text-ink-muted">
-        Continuum drives the official <Code>claude</Code> CLI as a subprocess. Let&apos;s confirm
-        it&apos;s installed and signed in.
+        Continuum detects the coding-AI CLIs installed on your machine. Pick the one you want
+        Continuum to drive. <span className="text-ink-dim">Claude Code is recommended</span> and is
+        the only one wired into the runtime today; others are recorded as your preference.
       </p>
 
-      <div className="w-soft">
-        <div className="w-row">
-          <StatusIcon
-            state={state === "checking" ? "pending" : result?.installed ? "ok" : "fail"}
-          />
-          <span className="flex-1 text-[13px] font-medium text-ink">Claude Code CLI</span>
-          <span className="text-[12px] text-ink-dim">
-            {result?.installed ? (result.version ?? "installed") : "not found"}
-          </span>
-        </div>
-        <div className="w-row">
-          <StatusIcon
-            state={
-              state === "checking"
-                ? "pending"
-                : result?.authenticated
-                  ? "ok"
-                  : result?.installed
-                    ? "fail"
-                    : "pending"
-            }
-          />
-          <span className="flex-1 text-[13px] font-medium text-ink">Signed in</span>
-          <span className="text-[12px] text-ink-dim">
-            {result?.authenticated ? "ready" : "run 'claude login'"}
-          </span>
-        </div>
+      <div className="w-soft flex flex-col gap-1">
+        {checking && clis.length === 0 && (
+          <div className="w-row">
+            <Loader2 size={14} className="animate-spin text-amber-400" />
+            <span className="text-[12px] text-ink-dim">Detecting installed CLIs…</span>
+          </div>
+        )}
+        {clis.map((c) => {
+          const selected = payload.orchestrator_cli === c.id;
+          return (
+            <button
+              key={c.id}
+              type="button"
+              disabled={!c.installed}
+              onClick={() => setPayload({ ...payload, orchestrator_cli: c.id })}
+              className={clsx(
+                "w-row text-left transition-colors",
+                c.installed ? "cursor-pointer hover:bg-white/5" : "cursor-not-allowed opacity-50",
+                selected && "bg-amber-400/10"
+              )}
+            >
+              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                {selected ? (
+                  <span className="h-3 w-3 rounded-full border-2 border-amber-400 bg-amber-400/40" />
+                ) : (
+                  <span className="h-3 w-3 rounded-full border-2 border-bg-border" />
+                )}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
+                  {c.name}
+                  {c.recommended && (
+                    <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+                      Recommended
+                    </span>
+                  )}
+                  {!c.installed && (
+                    <span className="text-[10px] text-ink-dim">not installed</span>
+                  )}
+                </span>
+                <span className="truncate text-[11px] text-ink-dim">
+                  {c.installed
+                    ? c.version ?? "installed"
+                    : c.install_hint}
+                </span>
+              </span>
+              <span className="shrink-0 text-right text-[11px]">
+                {c.installed && c.auth === "ok" && (
+                  <span className="text-emerald-400">signed in</span>
+                )}
+                {c.installed && c.auth === "unauth" && (
+                  <span className="text-amber-300">{c.login_hint ?? "sign in"}</span>
+                )}
+                {c.installed && c.auth === "unknown" && (
+                  <span className="text-ink-dim">auth unknown</span>
+                )}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
-      {state !== "ok" && (
-        <button onClick={runCheck} className="press w-fit rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink">
-          Check again
-        </button>
-      )}
-      {state === "missing" && <Code>npm install -g @anthropic-ai/claude-code</Code>}
-      {state === "unauth" && <Code>claude login</Code>}
-      {result?.error && (
-        <p className="flex items-center gap-2 text-[12px] text-red-400">
-          <AlertCircle size={13} /> {result.error}
+      <button
+        onClick={runCheck}
+        disabled={checking}
+        className="press w-fit rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink disabled:opacity-50"
+      >
+        {checking ? "Detecting…" : "Detect again"}
+      </button>
+
+      {installed.length === 0 && !checking && (
+        <p className="flex items-start gap-2 text-[12px] text-amber-300">
+          <AlertCircle size={13} className="mt-0.5 shrink-0" />
+          No coding-AI CLI detected. Install one (e.g.{" "}
+          <Code>npm i -g @anthropic-ai/claude-code</Code>) and click Detect again. You can still
+          finish setup and connect one later.
         </p>
       )}
     </StepContainer>
@@ -328,6 +397,10 @@ interface ModelInfo {
   url: string;
 }
 
+const DEFAULT_MODELS_DIR = "~/.continuum-dev/models";
+const DEFAULT_QWEN_URL =
+  "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf";
+
 const MODELS: ModelInfo[] = [
   { key: "smolvlm", label: "SmolVLM-256M", size: "~500 MB", purpose: "Vision", url: "" },
   { key: "qwen3-8b", label: "Qwen 3 8B Q4_K_M", size: "~4.5 GB", purpose: "Triage", url: "" },
@@ -335,14 +408,35 @@ const MODELS: ModelInfo[] = [
   { key: "piper-voices", label: "Piper voices", size: "~150 MB", purpose: "Text-to-speech", url: "" },
 ];
 
-function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
+function ModelsStep({
+  payload,
+  setPayload,
+  onNext: _onNext,
+}: {
+  payload: OnboardingPayload;
+  setPayload: (p: OnboardingPayload) => void;
+  onNext: () => void;
+}) {
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [running, setRunning] = useState(false);
+  // Local UI state for the two text fields, seeded from the payload so users
+  // can edit without each keystroke touching the global payload.
+  const [modelsDir, setModelsDir] = useState(payload.models_dir);
+  const [qwenUrl, setQwenUrl] = useState(payload.qwen_url);
 
   const downloadAll = async () => {
     setRunning(true);
+    // Commit the local field values into the payload right before download.
+    const dir = modelsDir.trim();
+    const url = qwenUrl.trim();
+    setPayload({ ...payload, models_dir: dir, qwen_url: url });
     try {
-      await invoke("download_model", { name: "__all__", url: "" });
+      await invoke("download_model", {
+        name: "__all__",
+        url: "",
+        modelsDir: dir === "" ? null : dir,
+        qwenUrl: url === "" ? null : url,
+      });
     } catch (err) {
       console.warn("download_model(__all__) failed, wizard will not block", err);
     } finally {
@@ -369,9 +463,44 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer eyebrow="Step 2" title="Download models">
       <p className="text-[14px] text-ink-muted">
-        Four model sets power Continuum. Existing models under <Code>~/.continuum/models</Code> are
-        reused automatically.
+        Four model sets power Continuum. Existing models in the chosen folder are reused
+        automatically.
       </p>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[13px] font-medium text-ink" htmlFor="models-dir">
+          Models directory
+        </label>
+        <input
+          id="models-dir"
+          type="text"
+          value={modelsDir}
+          onChange={(e) => setModelsDir(e.target.value)}
+          placeholder={DEFAULT_MODELS_DIR}
+          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none"
+        />
+        <p className="text-[11px] text-ink-dim">
+          Leave empty for the default <Code>{DEFAULT_MODELS_DIR}</Code>.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[13px] font-medium text-ink" htmlFor="qwen-url">
+          Qwen 3 8B model (HuggingFace URL)
+        </label>
+        <input
+          id="qwen-url"
+          type="text"
+          value={qwenUrl}
+          onChange={(e) => setQwenUrl(e.target.value)}
+          placeholder={DEFAULT_QWEN_URL}
+          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[12px] text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none"
+        />
+        <p className="text-[11px] text-ink-dim">
+          Paste any HuggingFace GGUF URL to use a custom triage model. Leave empty for the default
+          Qwen3-8B-Q4_K_M.
+        </p>
+      </div>
 
       <div className="w-soft">
         {MODELS.map((m, i) => {
@@ -461,6 +590,7 @@ function VoiceStep({
             step={0.05}
             value={payload.wake_sensitivity}
             onChange={(e) => setPayload({ ...payload, wake_sensitivity: Number(e.target.value) })}
+            style={{ ["--continuum-range-fill" as string]: `${payload.wake_sensitivity * 100}%` }}
             className="continuum-range w-full"
           />
           <p className="mt-1 text-[11px] text-ink-dim">
@@ -469,17 +599,20 @@ function VoiceStep({
         </div>
         <div>
           <span className="mb-1.5 block text-[13px] font-medium text-ink">Language</span>
-          <div className="flex gap-2">
-            {(["en", "nl", "both"] as const).map((l) => (
+          <div className="flex flex-wrap gap-2">
+            {LANGUAGES.map((l) => (
               <Chip
-                key={l}
-                active={payload.language === l}
-                onClick={() => setPayload({ ...payload, language: l })}
+                key={l.code}
+                active={payload.language === l.code}
+                onClick={() => setPayload({ ...payload, language: l.code })}
               >
-                {l === "en" ? "English" : l === "nl" ? "Dutch" : "Both"}
+                {l.label}
               </Chip>
             ))}
           </div>
+          <p className="mt-1.5 text-[11px] text-ink-dim">
+            Continuum speaks English and Dutch out loud; other languages set the UI and triage preference.
+          </p>
         </div>
       </div>
 
@@ -575,23 +708,74 @@ function DevicePicker({
   value: string | undefined;
   onChange: (id: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = devices.find((d) => d.id === value);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
   return (
-    <div>
+    <div ref={ref} className="relative">
       <p className="mb-1 flex items-center gap-2 text-[13px] font-medium text-ink">
         <Icon size={14} className="text-amber-400" /> {label}
       </p>
-      <select
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value)}
-        className="continuum-select w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink"
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink transition-colors hover:border-bg-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40"
       >
-        <option value="">System default</option>
-        {devices.map((d) => (
-          <option key={d.id} value={d.id}>
-            {d.name}
-          </option>
-        ))}
-      </select>
+        <span className="truncate text-left">
+          {selected ? selected.name : "System default"}
+        </span>
+        <ChevronRight
+          size={14}
+          className={clsx("shrink-0 text-ink-dim transition-transform", open && "rotate-90")}
+        />
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-1 max-h-56 w-full overflow-auto rounded-lg border border-bg-border bg-bg-surface py-1 shadow-xl">
+          <button
+            type="button"
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+            }}
+            className={clsx(
+              "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-white/5",
+              !value ? "text-amber-300" : "text-ink-muted"
+            )}
+          >
+            System default
+          </button>
+          {devices.length === 0 && (
+            <div className="px-3 py-1.5 text-[12px] text-ink-dim">No devices detected.</div>
+          )}
+          {devices.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              onClick={() => {
+                onChange(d.id);
+                setOpen(false);
+              }}
+              className={clsx(
+                "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-white/5",
+                value === d.id ? "text-amber-300" : "text-ink"
+              )}
+            >
+              <span className="truncate">{d.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

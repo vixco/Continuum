@@ -276,6 +276,7 @@ export const continuum = {
     }),
   startRuntime: () => invoke<void>("start_runtime"),
   isOnboardingComplete: () => invoke<boolean>("is_onboarding_complete", undefined, true),
+  resetOnboarding: () => invoke<boolean>("reset_onboarding", undefined, false),
 };
 
 export interface RuntimeStatus {

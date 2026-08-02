@@ -8,6 +8,10 @@ description = "Continuum desktop app — Tauri 2 backend"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = ["audio-devices"]
+audio-devices = ["dep:cpal"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-process = "2.3.1"
@@ -24,6 +28,8 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 continuum-core = { path = "../../../crates/continuum-core", default-features = false }
+cpal = { version = "0.17", optional = true }
+dirs = "6"
 parking_lot = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 tempfile = "3"

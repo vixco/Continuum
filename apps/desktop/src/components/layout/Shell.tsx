@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
 import {
-  Boxes,
   BrainCircuit,
   CalendarClock,
   Check,
@@ -237,6 +236,7 @@ export function Shell() {
                 updateState={updates.state}
                 onCheckForUpdates={() => void updates.checkForUpdates()}
                 onInstallUpdate={() => void updates.installUpdate()}
+                onResetEverything={() => setOnboarding(true)}
               />
             )}
           </div>
@@ -278,7 +278,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
     <div className="titlebar" role="banner" data-tauri-drag-region>
       <div className="tb-brand" data-tauri-drag-region>
         <span className="tb-mark">
-          <Boxes size={18} />
+          <img src="/continuum-mark.png" alt="" width={18} height={18} draggable={false} />
         </span>
         Continuum
         <span className="tb-status no-drag">
