@@ -4,6 +4,7 @@ members = [
     "crates/continuum-mcp",
     "crates/continuum-llm",
     "crates/continuum-vision",
+    "crates/continuum-gateway",
     "apps/desktop/src-tauri",
 ]
 resolver = "2"
