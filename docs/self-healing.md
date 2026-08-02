@@ -119,3 +119,24 @@ Recovery:
 - Re-run `scripts/download-models.ps1` if Piper model/config files are missing.
 - Install or repair the Piper CLI and set `CONTINUUM_PIPER_BIN` if it is not on `PATH`.
 - Use `--no-tts` to keep Continuum running in log-only voice output mode while repairing audio output.
+
+## Chat Providers
+
+Component: `chat_providers`
+
+Logs:
+
+- `layer = "desktop"`, `component = "providers"` when `providers.json` fails to parse (starts empty rather than crashing the dashboard).
+- `layer = "desktop"`, `component = "chat"` / `component = "chat_store"` for send/stream/persist failures.
+
+Health check:
+
+- `ChatProvidersCheck` (`apps/desktop/src-tauri/src/components.rs`) reads `providers.json` directly — it runs from the health-poll loop, not a Tauri command, so it has no live app state to borrow from.
+- Reports `Degrading` when any stored connection's `last_test_ok` is `false` (i.e. the last time it was tested, from Settings → Integrations or an automatic re-test, it failed). `Healthy` otherwise, including when there are no providers configured yet.
+
+Recovery:
+
+- Re-test the failing connection: Settings → Integrations → the provider row → **Test**. For a local provider (LM Studio/Ollama) this usually just needs the local server started.
+- If the key was rotated or revoked upstream, remove the connection and re-add it with the new key — keys are never edited in place, only replaced (Remove deletes the Credential Manager entry; Add writes a fresh one).
+- If the provider is fine but the probe still shows Degrading, restart the app — `chat_providers` is a pure file-read probe with no daemon of its own to restart, so a full app restart re-reads `providers.json` cleanly.
+- This probe never blocks Chat itself: a Degrading status only means one *stored* connection's last test failed, not that sending messages is broken. Check the in-app error banner on the Chat tab for the actual `GatewayError::user_message()` text (see `docs/chat.md`'s error glossary) when a send fails.
