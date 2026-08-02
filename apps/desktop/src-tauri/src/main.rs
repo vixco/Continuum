@@ -120,6 +120,12 @@ fn main() {
     });
     let runtime_for_tauri = runtime.clone();
 
+    let chat_state = Arc::new(providers::ChatState {
+        providers: std::sync::Mutex::new(providers::ProviderStore::new(dev_dir.clone())),
+        secrets: Box::new(providers::KeyringSecretStore),
+        inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
@@ -127,6 +133,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(app_state)
+        .manage(chat_state)
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_config,
@@ -173,6 +180,13 @@ fn main() {
             commands::dismiss_worker,
             commands::get_runtime_status,
             commands::start_runtime,
+            providers::catalog_list,
+            providers::providers_list,
+            providers::provider_add,
+            providers::provider_test,
+            providers::provider_refresh_models,
+            providers::provider_remove,
+            providers::provider_set_default_model,
             onboarding::check_claude_cli,
             onboarding::check_claude_auth,
             onboarding::list_audio_input_devices,
