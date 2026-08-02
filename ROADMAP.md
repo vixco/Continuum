@@ -88,6 +88,17 @@ Deze verdeling is het startpunt. Wissel taken als ervaring of beschikbaarheid da
 
 **Resultaat:** het Context Model verzamelt context; de Main AI voert zware redeneertaken uit.
 
+> **Vroeg geleverde plak (2026-08-02):** de nieuwe `continuum-gateway` crate
+> (provider-trait, drie adapters, statische providercatalogus) en lokaal
+> versleuteld secretbeheer (Windows Credential Manager via `keyring`) zijn al
+> gebouwd en liggen live achter de nieuwe Chat-tab en het echte
+> Settings → Integrations-paneel — zie `docs/chat.md` en
+> `docs/superpowers/specs/2026-08-02-chat-tab-design.md`. Dit dekt alvast een
+> deel van "Main AI gateway met provider-adapters" en "secrets lokaal en
+> versleuteld beheren" hieronder, maar zonder modelrouter, zonder
+> context-packagecontract en zonder de twee-modellenarchitectuur zelf — die
+> items blijven open.
+
 - [ ] **Toshan:** lokale Context Model-runtime integreren
 - [ ] **Toshan:** Main AI gateway met provider-adapters bouwen
 - [ ] **Toshan:** versioned context package contract implementeren

@@ -6,6 +6,28 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
+  `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
+  Claude Code CLI — plus a static provider catalog covering ~18 presets such
+  as LM Studio, Ollama, OpenAI, OpenRouter, DeepSeek, and a custom-endpoint
+  option) backs a real **Chat** tab and a real **Settings → AI providers**
+  ("Integrations") panel, replacing prior fixture data. Conversations stream
+  token-by-token over the `continuum:chat` Tauri event, render markdown,
+  support **Stop** mid-stream (the partial reply is kept and marked
+  `stopped`, never discarded) and **Retry** on retryable failures, and
+  persist per-conversation to `~/.continuum-dev/chats/<id>.json`. Provider
+  connections persist to `~/.continuum-dev/providers.json` with **no secret
+  material** — enforced by a dedicated unit test — while API keys live
+  exclusively in Windows Credential Manager via the `keyring` crate (service
+  `Continuum`); adding a connection tests it before saving, with an explicit
+  "Save anyway" escape hatch. New `[chat]` config section (`max_tokens`,
+  `temperature`, `connect_timeout_secs`, `stream_idle_timeout_secs`,
+  `cli_timeout_secs`, `system_prompt_path`) makes every knob overridable per
+  non-negotiable #3. A new `chat_providers` health probe reports Degraded
+  when a configured provider's last connection test failed. Per
+  non-negotiable #2: the only new network calls this feature introduces go
+  to provider endpoints the user explicitly configures in Settings — no
+  telemetry, no new default egress. See `docs/chat.md`.
 - **Signed desktop updates**: the Tauri app checks for updates at startup,
   exposes a manual check in Settings, and lets users enable or disable
   automatic installation. Windows update artifacts are signed and published

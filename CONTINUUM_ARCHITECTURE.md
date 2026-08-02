@@ -185,6 +185,18 @@ Tauri updater after its artifact signature has been verified.
 6. Enforce permission policy on brokered actions.
 7. Connect the fixture-backed UI to real read models one panel at a time.
 
+Step 7 is already partly underway outside its listed order: `crates/continuum-gateway`
+now exists as a standalone, pure-Rust crate (provider trait, OpenAI-compatible/
+Anthropic/Claude-CLI adapters, a static provider catalog) as the first concrete
+piece of the Model Gateway described in `Continuum.md` §16, and two panels that
+used to show fixture data — Settings → Integrations and the Chat tab — are live,
+backed by real Tauri commands, `providers.json`/`~/.continuum-dev/chats/*.json`
+storage, and Windows Credential Manager for secrets, not mockups. This does not
+change the migration order for the remaining fixture-backed panels (Projects,
+Agents, Permissions, Timeline) or pull forward the two-model architecture from
+Phase 3 — it is a narrow, reviewed early slice scoped to Chat only. See
+`docs/chat.md` and `docs/superpowers/specs/2026-08-02-chat-tab-design.md`.
+
 ## v0.1 acceptance demo
 
 Claude Code attempts a task and fails. Continuum records its objective, changed
