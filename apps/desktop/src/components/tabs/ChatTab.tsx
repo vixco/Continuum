@@ -68,11 +68,21 @@ function ChatWorkspace() {
   const [listLoaded, setListLoaded] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
-  const [streamingText, setStreamingText] = useState<string | null>(null);
+  // Per-conversation in-flight stream text. A key's presence means that
+  // conversation is currently streaming - even if it isn't the one on
+  // screen right now. See the `continuum:chat` subscription below.
+  const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
-  const [lastSentText, setLastSentText] = useState("");
+  // Only ever set for a *send* failure (chatSendMessage rejecting, or a
+  // stream `error` event for a conversation whose last outgoing text we
+  // remember), and always scoped to the conversation the failed send
+  // belongs to - so Retry can never fire into the wrong chat, or linger
+  // next to an unrelated (load/delete/model-switch) error.
+  const [retryInfo, setRetryInfo] = useState<{ conversationId: string; text: string } | null>(
+    null
+  );
   const [composerText, setComposerText] = useState("");
-  const [sending, setSending] = useState(false);
+  const [sendingId, setSendingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -82,13 +92,30 @@ function ChatWorkspace() {
   // the time an event arrives the closure would see whatever `activeId`
   // was at mount time. A ref sidesteps that stale-closure trap.
   const activeIdRef = useRef<string | null>(null);
+  // Last text sent per conversation, so a mid-stream `error` event (which
+  // carries no text of its own) can still populate `retryInfo` correctly.
+  const lastSentTextRef = useRef<Record<string, string>>({});
   const threadRef = useRef<HTMLDivElement>(null);
 
-  const streaming = streamingText !== null;
+  const activeBuffer = activeId != null ? streamBuffers[activeId] : undefined;
+  const streaming = activeBuffer !== undefined;
+  const sendingActive = sendingId !== null && sendingId === activeId;
 
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  // Sets the error banner. `retry` defaults to null, which also clears
+  // out any stale retry left over from an earlier, unrelated send failure
+  // - so the Retry button can never appear next to a message it doesn't
+  // apply to. Only the two send-failure call sites pass a real `retry`.
+  const showError = useCallback(
+    (message: string, retry: { conversationId: string; text: string } | null = null) => {
+      setError(message);
+      setRetryInfo(retry);
+    },
+    []
+  );
 
   const loadConversations = useCallback(async () => {
     try {
@@ -96,19 +123,22 @@ function ChatWorkspace() {
       setConversations(list);
       return list;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      showError(e instanceof Error ? e.message : String(e));
       return [];
     }
-  }, []);
+  }, [showError]);
 
-  const loadActive = useCallback(async (id: string) => {
-    try {
-      const conv = await continuum.chatGetConversation(id);
-      if (activeIdRef.current === id) setActiveConv(conv);
-    } catch (e) {
-      if (activeIdRef.current === id) setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  const loadActive = useCallback(
+    async (id: string) => {
+      try {
+        const conv = await continuum.chatGetConversation(id);
+        if (activeIdRef.current === id) setActiveConv(conv);
+      } catch (e) {
+        if (activeIdRef.current === id) showError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [showError]
+  );
 
   // Initial load: providers + conversation list, then select the most
   // recently updated conversation (backend already sorts newest-first).
@@ -116,7 +146,7 @@ function ChatWorkspace() {
     void (async () => {
       const [provs, list] = await Promise.all([
         continuum.providersList().catch((e) => {
-          setError(e instanceof Error ? e.message : String(e));
+          showError(e instanceof Error ? e.message : String(e));
           return [] as ProviderConnection[];
         }),
         loadConversations(),
@@ -129,47 +159,73 @@ function ChatWorkspace() {
         void loadActive(list[0].id);
       }
     })();
-  }, [loadConversations, loadActive]);
+  }, [loadConversations, loadActive, showError]);
 
   // Streaming subscription - mounted once for the lifetime of the tab.
+  // Buffers by conversation id regardless of which one is active, so
+  // switching away and back doesn't lose in-progress text or leave a
+  // stale-enabled composer on a conversation that's still generating.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void onChatEvent((payload: ChatEventPayload) => {
-      if (payload.conversation_id !== activeIdRef.current) return;
+      const id = payload.conversation_id;
       const ev = payload.event;
+
       if (ev.type === "delta") {
-        setStreamingText((t) => (t ?? "") + ev.text);
-      } else if (ev.type === "done") {
-        // The assistant message is already persisted by the time this
-        // event lands - reload rather than trying to reconstruct it.
-        setStreamingText(null);
-        void loadActive(payload.conversation_id);
-        void loadConversations();
-      } else if (ev.type === "error") {
-        setStreamingText(null);
-        setError(ev.message);
-        void loadActive(payload.conversation_id);
-        void loadConversations();
+        setStreamBuffers((b) => ({ ...b, [id]: (b[id] ?? "") + ev.text }));
+        return;
+      }
+
+      // Both done/error clear this conversation's buffer, refresh the
+      // sidebar (title/updated_at can change on the first turn), and pull
+      // the full conversation if it's the one currently on screen - the
+      // assistant message (or aborted partial) is already persisted by
+      // the time either event lands.
+      setStreamBuffers((b) => {
+        if (!(id in b)) return b;
+        const next = { ...b };
+        delete next[id];
+        return next;
+      });
+      if (activeIdRef.current === id) void loadActive(id);
+      void loadConversations();
+
+      if (ev.type === "done") {
+        setRetryInfo((r) => (r?.conversationId === id ? null : r));
+      } else {
+        const text = lastSentTextRef.current[id];
+        showError(ev.message, text ? { conversationId: id, text } : null);
       }
     }).then((u) => {
-      unlisten = u;
+      // The effect's cleanup can fire before this promise settles (fast
+      // unmount, React StrictMode double-invoke) - if it already has,
+      // unlisten immediately instead of stashing a handle nobody will
+      // ever call.
+      if (disposed) {
+        u();
+      } else {
+        unlisten = u;
+      }
     });
-    return () => unlisten?.();
-  }, [loadActive, loadConversations]);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadActive, loadConversations, showError]);
 
   // Autoscroll the thread as new messages arrive or text streams in.
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [activeConv?.messages.length, streamingText]);
+  }, [activeConv?.messages.length, activeBuffer]);
 
   function selectConversation(id: string) {
     if (id === activeId) return;
     activeIdRef.current = id;
     setActiveId(id);
     setActiveConv(null);
-    setStreamingText(null);
     setError(null);
     void loadActive(id);
   }
@@ -185,9 +241,8 @@ function ChatWorkspace() {
       activeIdRef.current = conv.id;
       setActiveId(conv.id);
       setActiveConv(conv);
-      setStreamingText(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      showError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
@@ -205,17 +260,23 @@ function ChatWorkspace() {
     setDeletingId(id);
     try {
       await continuum.chatDeleteConversation(id);
+      setStreamBuffers((b) => {
+        if (!(id in b)) return b;
+        const next = { ...b };
+        delete next[id];
+        return next;
+      });
+      delete lastSentTextRef.current[id];
       const list = await loadConversations();
       if (activeId === id) {
         const next = list[0] ?? null;
         activeIdRef.current = next?.id ?? null;
         setActiveId(next?.id ?? null);
         setActiveConv(null);
-        setStreamingText(null);
         if (next) void loadActive(next.id);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      showError(e instanceof Error ? e.message : String(e));
     } finally {
       setConfirmDeleteId(null);
       setDeletingId(null);
@@ -230,35 +291,39 @@ function ChatWorkspace() {
       await continuum.chatSetConversationModel(id, providerId, model);
       void loadConversations();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      showError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function sendMessage(text: string) {
-    const id = activeId;
+  async function sendMessage(id: string, text: string) {
     const trimmed = text.trim();
-    if (!id || !trimmed) return;
-    setLastSentText(trimmed);
+    if (!trimmed) return;
+    lastSentTextRef.current[id] = trimmed;
     setError(null);
-    setSending(true);
+    setSendingId(id);
     try {
       await continuum.chatSendMessage(id, trimmed);
+      // This send succeeded - any earlier failed send for this same
+      // conversation is no longer worth retrying.
+      setRetryInfo((r) => (r?.conversationId === id ? null : r));
+      // Seed the buffer so the pulse bubble shows before the first delta.
+      setStreamBuffers((b) => ({ ...b, [id]: "" }));
       // The user message is persisted before this resolves - reload now
-      // rather than waiting for the first delta.
-      setStreamingText("");
-      await loadActive(id);
+      // rather than waiting for the first delta, but only if this is
+      // still the conversation on screen.
+      if (activeIdRef.current === id) await loadActive(id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      showError(e instanceof Error ? e.message : String(e), { conversationId: id, text: trimmed });
     } finally {
-      setSending(false);
+      setSendingId((cur) => (cur === id ? null : cur));
     }
   }
 
   function handleComposerSend() {
-    if (streaming || sending || !composerText.trim() || !activeId) return;
+    if (streaming || sendingActive || !composerText.trim() || !activeId) return;
     const text = composerText;
     setComposerText("");
-    void sendMessage(text);
+    void sendMessage(activeId, text);
   }
 
   function stop() {
@@ -266,7 +331,8 @@ function ChatWorkspace() {
   }
 
   function retry() {
-    if (lastSentText) void sendMessage(lastSentText);
+    if (!retryInfo) return;
+    void sendMessage(retryInfo.conversationId, retryInfo.text);
   }
 
   const activeProvider = providers.find((p) => p.id === activeConv?.provider_id) ?? null;
@@ -379,15 +445,15 @@ function ChatWorkspace() {
               {streaming && (
                 <div className="flex justify-start">
                   <div className="max-w-[85%] rounded-lg bg-bg-elevated px-3 py-2">
-                    {streamingText && (
+                    {activeBuffer && (
                       <div className={MARKDOWN_CLASSES}>
-                        <ReactMarkdown>{streamingText}</ReactMarkdown>
+                        <ReactMarkdown>{activeBuffer}</ReactMarkdown>
                       </div>
                     )}
                     <span
                       className={clsx(
                         "inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent-purple",
-                        streamingText && "ml-1"
+                        activeBuffer && "ml-1"
                       )}
                     />
                   </div>
@@ -398,7 +464,7 @@ function ChatWorkspace() {
             {error && (
               <div className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-300">
                 <span className="min-w-0 flex-1 truncate">{error}</span>
-                {lastSentText && (
+                {retryInfo && retryInfo.conversationId === activeId && (
                   <Button size="sm" variant="ghost" onClick={retry}>
                     Retry
                   </Button>
@@ -416,7 +482,7 @@ function ChatWorkspace() {
                     handleComposerSend();
                   }
                 }}
-                disabled={streaming || sending}
+                disabled={streaming || sendingActive}
                 rows={Math.min(6, Math.max(1, composerText.split("\n").length))}
                 placeholder="Message..."
                 className="min-h-9 flex-1 resize-none rounded-md border border-bg-border bg-transparent px-3 py-2 text-sm text-ink outline-none placeholder:text-ink-dim focus:border-accent-purple disabled:opacity-50"
@@ -426,7 +492,10 @@ function ChatWorkspace() {
                   <Square size={14} />
                 </Button>
               ) : (
-                <Button onClick={handleComposerSend} disabled={!composerText.trim() || sending}>
+                <Button
+                  onClick={handleComposerSend}
+                  disabled={!composerText.trim() || sendingActive}
+                >
                   Send
                 </Button>
               )}
@@ -494,17 +563,18 @@ function ModelField({
 
   if (!provider || provider.kind === "claude_cli" || provider.models.length === 0) {
     return (
-      <TextInput
-        aria-label="Model"
-        value={draft}
-        onChange={setDraft}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-        }}
-        placeholder="model name"
-        className="w-36"
-      />
+      <div className="w-36">
+        <TextInput
+          aria-label="Model"
+          value={draft}
+          onChange={setDraft}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+          }}
+          placeholder="model name"
+        />
+      </div>
     );
   }
 
