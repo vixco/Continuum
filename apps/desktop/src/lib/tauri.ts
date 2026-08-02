@@ -8,10 +8,17 @@
 import type {
   Automation,
   AutomationInput,
+  CatalogEntry,
+  ChatEventPayload,
   ComponentHealth,
+  ConnectionTestReport,
   ContinuumConfig,
   ContinuumState,
+  Conversation,
+  ConversationSummary,
   LogEntry,
+  ProviderAddInput,
+  ProviderConnection,
   RepairEvent,
   ResourceConfig,
   ResourceProfile,
@@ -277,6 +284,32 @@ export const continuum = {
   startRuntime: () => invoke<void>("start_runtime"),
   isOnboardingComplete: () => invoke<boolean>("is_onboarding_complete", undefined, true),
   resetOnboarding: () => invoke<boolean>("reset_onboarding", undefined, false),
+  catalogList: () => invoke<CatalogEntry[]>("catalog_list", undefined, []),
+  providersList: () => invoke<ProviderConnection[]>("providers_list", undefined, []),
+  providerAdd: (input: ProviderAddInput) =>
+    invoke<ProviderConnection>("provider_add", { input }),
+  providerTest: (id: string) => invoke<ConnectionTestReport>("provider_test", { id }),
+  providerRefreshModels: (id: string) =>
+    invoke<string[]>("provider_refresh_models", { id }),
+  providerRemove: (id: string) => invoke<void>("provider_remove", { id }),
+  providerSetDefaultModel: (id: string, model: string) =>
+    invoke<void>("provider_set_default_model", { id, model }),
+  chatListConversations: () =>
+    invoke<ConversationSummary[]>("chat_list_conversations", undefined, []),
+  chatGetConversation: (id: string) =>
+    invoke<Conversation | null>("chat_get_conversation", { conversationId: id }, null),
+  chatCreateConversation: (providerId: string, model: string) =>
+    invoke<Conversation>("chat_create_conversation", { providerId, model }),
+  chatDeleteConversation: (id: string) =>
+    invoke<void>("chat_delete_conversation", { conversationId: id }),
+  chatRenameConversation: (id: string, title: string) =>
+    invoke<void>("chat_rename_conversation", { conversationId: id, title }),
+  chatSetConversationModel: (conversationId: string, providerId: string, model: string) =>
+    invoke<void>("chat_set_conversation_model", { conversationId, providerId, model }),
+  chatSendMessage: (conversationId: string, text: string) =>
+    invoke<void>("chat_send_message", { conversationId, text }),
+  chatCancel: (conversationId: string) => invoke<void>("chat_cancel", { conversationId }),
+  onChatEvent,
 };
 
 export interface RuntimeStatus {
@@ -295,6 +328,13 @@ export async function subscribeLogs(handler: (e: LogEntry) => void) {
 
 export async function subscribeRepair(handler: (e: RepairEvent) => void) {
   return listen<RepairEvent>("continuum:repair", handler);
+}
+
+/** Subscribes to streamed chat deltas/done/error events for all conversations. */
+export async function onChatEvent(
+  handler: (payload: ChatEventPayload) => void
+): Promise<() => void> {
+  return listen<ChatEventPayload>("continuum:chat", handler);
 }
 
 // --- Defaults (used when the dashboard renders outside Tauri, e.g. `pnpm dev`) ---
