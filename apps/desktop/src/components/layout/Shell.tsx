@@ -36,12 +36,7 @@ import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
 import { SettingsPage } from "@/components/layout/SettingsPage";
 import { StatusOrb } from "@/components/ui/primitives";
 import { bootstrapStore, teardownStore, useStore } from "@/lib/store";
-import {
-  continuum,
-  type RuntimeStatus,
-  type UpdateInfo,
-  windowControls,
-} from "@/lib/tauri";
+import { continuum, type RuntimeStatus, type UpdateInfo, windowControls } from "@/lib/tauri";
 import type { VoiceMode } from "@/lib/types";
 
 type TabId =
@@ -260,11 +255,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
   const paused = useStore((s) => s.state.system.paused);
   const version = useStore((s) => s.state.system.version);
 
-  const mode: VoiceMode = voice.muted
-    ? "muted"
-    : orchestrator.active
-      ? "thinking"
-      : voice.mode;
+  const mode: VoiceMode = voice.muted ? "muted" : orchestrator.active ? "thinking" : voice.mode;
 
   const { runtime, startRuntime, togglePause } = useRuntime();
   const [maximized, setMaximized] = useState(false);
@@ -418,7 +409,8 @@ function useRuntime() {
 }
 
 function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () => void }) {
-  if (state.phase === "idle" || state.phase === "current" || state.phase === "checking") return null;
+  if (state.phase === "idle" || state.phase === "current" || state.phase === "checking")
+    return null;
 
   const updateLabel = state.update ? `v${state.update.version}` : "update";
   return (
@@ -449,13 +441,7 @@ function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () 
   );
 }
 
-function Sidebar({
-  active,
-  onSelect,
-}: {
-  active: TabId;
-  onSelect: (tab: TabId) => void;
-}) {
+function Sidebar({ active, onSelect }: { active: TabId; onSelect: (tab: TabId) => void }) {
   return (
     <aside className="sidebar" aria-label="Main navigation">
       {NAV_GROUPS.map((group) => (

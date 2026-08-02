@@ -53,6 +53,24 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   compiler artifacts are cached across version bumps, dependency resolution is
   kept locked, and Tauri assets are collected from the actual root target.
 
+### Fixed
+
+- **CI format gate**: 9 dashboard files that `pnpm format` (Prettier `--check`)
+  flagged in the `build-desktop` job are reformatted; `prettier --write` was
+  applied so `pnpm format` now passes.
+- **Release `--locked` failure**: `cargo build --workspace --release --locked`
+  refused to run because `Cargo.lock` was out of sync with `Cargo.toml` after
+  the gateway/chat feature landed. `Cargo.lock` is regenerated so `--locked`
+  passes again (`cargo check --locked -p continuum-gateway` verified locally).
+- **Release speed**: the release workflow now installs **sccache**
+  (`mozilla-actions/sccache-action`) and sets `RUSTC_WRAPPER=sccache`, so the
+  whisper.cpp + llama.cpp + ort + lancedb native C/C++ compiles — the ~25 min
+  wall of every release — become cache hits after the first release. The
+  `cargo build` step also dropped `--workspace` (only the `continuum` and
+  `continuum-mcp` bins are shipped; the desktop crate builds in its own Tauri
+  step), and LLVM + ninja are pinned explicitly (mirrors `ci.yml`) so an image
+  change never silently breaks bindgen.
+
 ### Adaptive resource throttling (auto-detect PC specs → tune Continuum)
 
 Continuum now probes the host once at boot (CPU cores, RAM, GPU/VRAM, laptop-vs-desktop, AC-vs-battery) and resolves a concrete resource plan that tunes the triage LLM threads / GPU offload, vision CUDA EP, whisper threads, screen + context poll intervals, and worker concurrency. Default profile is `barely_notice` — a barely-noticeable CPU/RAM footprint with the GPU/VRAM used freely for quality (no model downgrades). Everything is overridable (non-negotiable #3).

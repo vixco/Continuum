@@ -117,7 +117,7 @@ export function Button({
         variant === "default" &&
           "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-purple/60 bg-accent-purple text-black shadow-sm shadow-accent-purple/25 hover:brightness-105 hover:shadow-accent-purple/40",
+          "border-accent-purple/60 bg-accent-purple text-black shadow-sm shadow-accent-purple/25 hover:shadow-accent-purple/40 hover:brightness-105",
         variant === "danger" &&
           "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&

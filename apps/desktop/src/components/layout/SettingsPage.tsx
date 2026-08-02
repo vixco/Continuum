@@ -67,7 +67,10 @@ export function SettingsPage({
             Install updates automatically
           </label>
           <Button size="sm" variant="default" onClick={onCheckForUpdates}>
-            <RefreshCw size={13} className={updateState.phase === "checking" ? "animate-spin" : ""} />
+            <RefreshCw
+              size={13}
+              className={updateState.phase === "checking" ? "animate-spin" : ""}
+            />
             Check for updates
           </Button>
         </div>
@@ -101,7 +104,9 @@ export function SettingsPage({
           <Row label="Backups retained" value={String(statePath.backups_retained)} />
           <Row
             label="Last backup"
-            value={statePath.last_backup_ts ? new Date(statePath.last_backup_ts).toLocaleString() : "-"}
+            value={
+              statePath.last_backup_ts ? new Date(statePath.last_backup_ts).toLocaleString() : "-"
+            }
           />
         </dl>
       </Card>
@@ -111,9 +116,7 @@ export function SettingsPage({
         subtitle="Re-runs the first-run wizard. Your models and memory are kept; only the onboarding marker is cleared."
       >
         <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-ink-muted">
-            Reset everything &amp; onboard again
-          </p>
+          <p className="text-sm text-ink-muted">Reset everything &amp; onboard again</p>
           <Button
             size="sm"
             variant="danger"
@@ -162,9 +165,8 @@ export function SettingsPage({
         }
       >
         <p className="text-sm leading-relaxed text-ink-muted">
-          This clears the onboarding marker and relaunches the setup wizard. Your
-          downloaded models, memory, and config are kept — you will just walk through
-          the wizard again. Continue?
+          This clears the onboarding marker and relaunches the setup wizard. Your downloaded models,
+          memory, and config are kept — you will just walk through the wizard again. Continue?
         </p>
       </Modal>
     </div>
