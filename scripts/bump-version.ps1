@@ -54,7 +54,7 @@ $targets = @(
     },
     @{
         Path    = Join-Path $repoRoot "Cargo.lock"
-        Find    = '(?ms)(\[\[package\]\]\s*\r?\nname = "kairo-(?:core|desktop|llm|mcp|vision)"\s*\r?\nversion = ")[^"]+(")'
+        Find    = '(?ms)(\[\[package\]\]\s*\r?\nname = "continuum-(?:core|desktop|gateway|llm|mcp|vision)"\s*\r?\nversion = ")[^"]+(")'
         Replace = '${1}' + $NewVersion + '${2}'
         Label   = "workspace packages in Cargo.lock"
     }
