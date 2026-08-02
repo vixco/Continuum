@@ -7,7 +7,7 @@ exec     ::= "{\"decision\":\"execute_simple\",\"action\":" ws str "}"
 wake     ::= "{\"decision\":\"wake_orchestrator\",\"reason\":" ws str wake_tail "}"
 
 # Optional suggested_skill hint — triage may add this when it knows a
-# Kairo skill probably applies. The orchestrator treats it as advisory.
+# Continuum skill probably applies. The orchestrator treats it as advisory.
 wake_tail ::= ( "," ws "\"suggested_skill\":" ws str )?
 
 str ::= "\"" ([^"\\] | "\\" ["\\/bfnrt])* "\""

@@ -1,5 +1,5 @@
 {
-  "name": "@kairo/desktop",
+  "name": "@continuum/desktop",
   "version": "0.1.0-alpha.3",
   "private": true,
   "engines": {

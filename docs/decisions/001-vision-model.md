@@ -3,11 +3,11 @@
 **Status:** Accepted
 **Date:** 2026-04-10
 **Layer:** 1 (Senses)
-**Crate:** `kairo-vision`
+**Crate:** `continuum-vision`
 
 ## Context
 
-Kairo's senses layer captures the primary monitor every 3 seconds at 1280x720, downscales to 384x384, and feeds the image to a local vision model that produces a one-sentence description. The model must:
+Continuum's senses layer captures the primary monitor every 3 seconds at 1280x720, downscales to 384x384, and feeds the image to a local vision model that produces a one-sentence description. The model must:
 
 - Run on CPU with inference under 3 seconds (the capture interval).
 - Be small enough to coexist with the triage LLM (Qwen 2.5 3B) in RAM.
@@ -43,17 +43,17 @@ Kairo's senses layer captures the primary monitor every 3 seconds at 1280x720, d
 
 Use **SmolVLM-256M via the `ort` crate** as the default vision model.
 
-The model files live in `~/.kairo-dev/models/vision/smolvlm-256m/` and are downloaded by `scripts/download-models.ps1`. The model name and path are configurable in `config.toml` under `[vision]`.
+The model files live in `~/.continuum-dev/models/vision/smolvlm-256m/` and are downloaded by `scripts/download-models.ps1`. The model name and path are configurable in `config.toml` under `[vision]`.
 
 ## Phase 1 Status
 
 - Vision encoder: loaded and validated. Produces image embeddings.
 - Autoregressive text decoder: **stubbed**. The full token-by-token decoding loop is planned for Phase 1.5. Until then, the stub model returns `"(no vision model loaded)"` as the description.
-- The `kairo-perception` binary gracefully falls back to the stub when model files are missing.
+- The `continuum-perception` binary gracefully falls back to the stub when model files are missing.
 
 ## Alternatives Available
 
-The vision model is pluggable via the `VisionModel` trait in `kairo-vision`. Users can switch by changing `[vision]` config:
+The vision model is pluggable via the `VisionModel` trait in `continuum-vision`. Users can switch by changing `[vision]` config:
 
 - **Moondream 2** -- recommended for users with a CUDA GPU, where the 1.8B size is not a bottleneck.
 - **Florence-2 base/large** -- available for OCR-heavy workflows.
@@ -64,7 +64,7 @@ GPU acceleration is disabled in Phase 1 (`gpu_enabled = false` in default config
 
 ## References
 
-- `crates/kairo-vision/src/onnx.rs` -- ONNX model loader
-- `crates/kairo-vision/src/lib.rs` -- `VisionModel` trait
-- `crates/kairo-core/src/senses/vision.rs` -- `VisionWatcher` that calls the model
-- `crates/kairo-core/src/config.rs` -- `VisionConfig` struct with defaults
+- `crates/continuum-vision/src/onnx.rs` -- ONNX model loader
+- `crates/continuum-vision/src/lib.rs` -- `VisionModel` trait
+- `crates/continuum-core/src/senses/vision.rs` -- `VisionWatcher` that calls the model
+- `crates/continuum-core/src/config.rs` -- `VisionConfig` struct with defaults

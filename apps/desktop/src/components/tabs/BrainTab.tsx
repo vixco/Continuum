@@ -5,7 +5,7 @@ import { clsx } from "clsx";
 import { Eye, Filter, MessageSquare, Users } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import { Button, Card, Select, Slider, Toggle } from "@/components/ui/primitives";
 
 export function BrainTab() {
@@ -55,7 +55,7 @@ export function BrainTab() {
             label="Capture interval (s)"
             value={config.screen.interval_secs}
             onChange={async (v) => {
-              const cfg = await kairo.updateScreenInterval(Math.round(v));
+              const cfg = await continuum.updateScreenInterval(Math.round(v));
               setConfig(cfg);
             }}
             min={1}
@@ -93,7 +93,7 @@ export function BrainTab() {
             label="Salience threshold"
             value={config.frame.salience_threshold}
             onChange={async (v) => {
-              const cfg = await kairo.updateTriageThreshold(v);
+              const cfg = await continuum.updateTriageThreshold(v);
               setConfig(cfg);
             }}
             min={0}

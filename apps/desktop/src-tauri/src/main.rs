@@ -1,6 +1,6 @@
-//! # Kairo Desktop
+//! # Continuum Desktop
 //!
-//! Tauri 2 backend for the Kairo dashboard. Hosts the kairo-core runtime
+//! Tauri 2 backend for the Continuum dashboard. Hosts the continuum-core runtime
 //! handles (state store, log buffer, automations, repair agent) and
 //! exposes them to the Next.js frontend via:
 //!
@@ -10,7 +10,7 @@
 //! The heavy runtime loop (senses + triage + orchestrator) is not booted by
 //! the dashboard process itself in this phase — llama-cpp-sys-2 does not
 //! play nicely with Tauri's default debug build on Windows. Instead the
-//! dashboard reads state the separate `kairo` binary publishes into the
+//! dashboard reads state the separate `continuum` binary publishes into the
 //! shared dev dir, plus whatever state updates arrive via the runtime
 //! bridge. See CLAUDE.md "Build workflow" and docs/dashboard.md.
 
@@ -29,13 +29,13 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-use kairo_core::logs::BufferLayer;
-use kairo_core::runtime::KairoRuntime;
+use continuum_core::logs::BufferLayer;
+use continuum_core::runtime::ContinuumRuntime;
 
 /// Shared app state held by Tauri.
 pub struct AppState {
-    pub runtime: KairoRuntime,
-    pub health: kairo_core::health::HealthRegistry,
+    pub runtime: ContinuumRuntime,
+    pub health: continuum_core::health::HealthRegistry,
 }
 
 fn main() {
@@ -52,10 +52,10 @@ fn main() {
         .expect("build tokio runtime");
     let _tokio_guard = tokio_rt.enter();
 
-    let runtime = KairoRuntime::init().expect("initialise Kairo runtime");
+    let runtime = ContinuumRuntime::init().expect("initialise Continuum runtime");
     let log_layer = BufferLayer::new(runtime.logs.clone());
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,kairo_core=debug,kairo_desktop=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,continuum_core=debug,continuum_desktop=debug"));
 
     let _ = tracing_subscriber::registry()
         .with(filter)
@@ -67,28 +67,25 @@ fn main() {
         .with(log_layer)
         .try_init();
 
-    let health = kairo_core::health::HealthRegistry::new();
+    let health = continuum_core::health::HealthRegistry::new();
     components::register_default(&health, &runtime);
 
     let dev_dir = runtime.dev_dir();
-    let backups_dir = dev_dir
-        .parent()
-        .map(|p| p.join(".kairo-backups"))
-        .unwrap_or_else(|| dev_dir.join(".kairo-backups"));
+    let backups_dir = continuum_core::config::continuum_backups_dir();
 
     // Background pollers — the EnterGuard above means tokio::spawn works here.
-    kairo_core::health::spawn_poller(
+    continuum_core::health::spawn_poller(
         health.clone(),
         runtime.state.clone(),
         30,
         runtime.shutdown_receiver(),
     );
 
-    kairo_core::health::backup::spawn_nightly(
+    continuum_core::health::backup::spawn_nightly(
         dev_dir.clone(),
         backups_dir.clone(),
-        kairo_core::health::backup::DEFAULT_BACKUP_HOUR,
-        kairo_core::health::backup::DEFAULT_RETENTION,
+        continuum_core::health::backup::DEFAULT_BACKUP_HOUR,
+        continuum_core::health::backup::DEFAULT_RETENTION,
         runtime.shutdown_receiver(),
         {
             let state = runtime.state.clone();
@@ -97,8 +94,8 @@ fn main() {
                 let state = state.clone();
                 let bd = bd.clone();
                 tokio::spawn(async move {
-                    let latest = kairo_core::health::backup::latest_backup_ts(&bd);
-                    let count = kairo_core::health::backup::count_backups(&bd);
+                    let latest = continuum_core::health::backup::latest_backup_ts(&bd);
+                    let count = continuum_core::health::backup::count_backups(&bd);
                     state.set_backup_status(latest, count).await;
                 });
             }
@@ -110,8 +107,8 @@ fn main() {
         let state = runtime.state.clone();
         let bd = backups_dir.clone();
         tokio::spawn(async move {
-            let latest = kairo_core::health::backup::latest_backup_ts(&bd);
-            let count = kairo_core::health::backup::count_backups(&bd);
+            let latest = continuum_core::health::backup::latest_backup_ts(&bd);
+            let count = continuum_core::health::backup::count_backups(&bd);
             state.set_backup_status(latest, count).await;
         });
     }
@@ -132,6 +129,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_config,
+            commands::get_resource_profile,
+            commands::update_resource_profile,
             commands::update_voice_volume,
             commands::update_voice_flag,
             commands::update_screen_interval,

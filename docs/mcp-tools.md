@@ -1,6 +1,6 @@
 # Phase 4 — MCP Tools
 
-Kairo's orchestrator (Claude Opus 4.6 via the `claude` CLI) can call Rust-native MCP tools at wake time. The tool server is a separate binary, `kairo-mcp`, spawned by the CLI via `--mcp-config`.
+Continuum's orchestrator (Claude Opus 4.6 via the `claude` CLI) can call Rust-native MCP tools at wake time. The tool server is a separate binary, `continuum-mcp`, spawned by the CLI via `--mcp-config`.
 
 This doc describes:
 
@@ -11,7 +11,7 @@ This doc describes:
 
 ## Tools
 
-All tools are addressed as `mcp__kairo__<name>` from the orchestrator's side. The server advertises `ProtocolVersion::V_2024_11_05`.
+All tools are addressed as `mcp__continuum__<name>` from the orchestrator's side. The server advertises `ProtocolVersion::V_2024_11_05`.
 
 ### Memory
 
@@ -21,7 +21,7 @@ Semantic (vector) search over past events — wakes, responses, remembered momen
 
 ```jsonc
 {
-  "name": "mcp__kairo__memory_query_episodic",
+  "name": "mcp__continuum__memory_query_episodic",
   "arguments": { "query": "SimCharts bug I fixed last week", "limit": 5 }
 }
 ```
@@ -33,7 +33,7 @@ Returns a JSON array of hits with `id`, `ts`, `kind`, `summary`, `importance`, `
 Lists semantic facts. Optional `prefix` narrows to a dotted key namespace (e.g. `project.`).
 
 ```jsonc
-{ "name": "mcp__kairo__memory_list_facts", "arguments": { "prefix": "project." } }
+{ "name": "mcp__continuum__memory_list_facts", "arguments": { "prefix": "project." } }
 ```
 
 Returns an array of `{ key, value, confidence, source, updated_at }`.
@@ -43,7 +43,7 @@ Returns an array of `{ key, value, confidence, source, updated_at }`.
 Fetches one fact by exact key.
 
 ```jsonc
-{ "name": "mcp__kairo__memory_get_fact", "arguments": { "key": "user.name" } }
+{ "name": "mcp__continuum__memory_get_fact", "arguments": { "key": "user.name" } }
 ```
 
 Returns a single object or `null` if the key isn't set.
@@ -54,7 +54,7 @@ Stores/updates a semantic fact.
 
 ```jsonc
 {
-  "name": "mcp__kairo__memory_set_fact",
+  "name": "mcp__continuum__memory_set_fact",
   "arguments": {
     "key": "user.preferred_language",
     "value": "nl",
@@ -63,7 +63,7 @@ Stores/updates a semantic fact.
 }
 ```
 
-- Keys starting with `system.` or `kairo.` are **rejected** — those are reserved for the runtime.
+- Keys starting with `system.` or `continuum.` are **rejected** — those are reserved for the runtime.
 - `source` is one of `user_stated` / `observed` / `inferred` (default). Confidence is clamped by source: inferred ≤ 0.7, observed ≤ 0.8, user_stated ≤ 0.9.
 
 ### System info
@@ -71,7 +71,7 @@ Stores/updates a semantic fact.
 #### `system_current_time`
 
 ```jsonc
-{ "name": "mcp__kairo__system_current_time", "arguments": {} }
+{ "name": "mcp__continuum__system_current_time", "arguments": {} }
 ```
 
 Returns `{ iso8601, tz_offset_minutes, epoch_ms }`.
@@ -81,7 +81,7 @@ Returns `{ iso8601, tz_offset_minutes, epoch_ms }`.
 Returns the foreground window's title + process name. Both empty if nothing focused.
 
 ```jsonc
-{ "name": "mcp__kairo__system_active_window", "arguments": {} }
+{ "name": "mcp__continuum__system_active_window", "arguments": {} }
 ```
 
 #### `system_clipboard_get`
@@ -89,7 +89,7 @@ Returns the foreground window's title + process name. Both empty if nothing focu
 Best-effort Windows clipboard read. `text` is `null` for empty clipboard, non-text content, or if another app holds the lock.
 
 ```jsonc
-{ "name": "mcp__kairo__system_clipboard_get", "arguments": {} }
+{ "name": "mcp__continuum__system_clipboard_get", "arguments": {} }
 ```
 
 ### Filesystem (read-only)
@@ -100,8 +100,8 @@ Reads up to 100 KB of a UTF-8 text file. Larger files get a truncation prefix: `
 
 ```jsonc
 {
-  "name": "mcp__kairo__fs_read_file",
-  "arguments": { "path": "F:\\TRYORVIA\\kairo-ai\\README.md" }
+  "name": "mcp__continuum__fs_read_file",
+  "arguments": { "path": "F:\\TRYORVIA\\continuum-ai\\README.md" }
 }
 ```
 
@@ -113,8 +113,8 @@ Lists up to 500 entries. Child entries that would themselves be denied are silen
 
 ```jsonc
 {
-  "name": "mcp__kairo__fs_list_dir",
-  "arguments": { "path": "F:\\TRYORVIA\\kairo-ai\\crates" }
+  "name": "mcp__continuum__fs_list_dir",
+  "arguments": { "path": "F:\\TRYORVIA\\continuum-ai\\crates" }
 }
 ```
 
@@ -128,7 +128,7 @@ HTTP GET only. Response body capped at 50 KB.
 
 ```jsonc
 {
-  "name": "mcp__kairo__web_fetch",
+  "name": "mcp__continuum__web_fetch",
   "arguments": { "url": "https://example.com/" }
 }
 ```
@@ -143,7 +143,7 @@ Shows a Windows toast via `tauri-winrt-notification`.
 
 ```jsonc
 {
-  "name": "mcp__kairo__system_notification",
+  "name": "mcp__continuum__system_notification",
   "arguments": { "title": "Build green", "body": "cargo test passed in 12s" }
 }
 ```
@@ -158,9 +158,9 @@ Shows a Windows toast via `tauri-winrt-notification`.
 A path is allowed iff **all three** checks pass:
 
 1. After canonicalization, the path starts with one of:
-   - The Kairo data directory (`~/.kairo-dev/`)
+   - The Continuum data directory (`~/.continuum-dev/`)
    - Any `project.*.dir` semantic fact value
-   - Any path in `[mcp.fs].extra_paths` from `~/.kairo-dev/config.toml`
+   - Any path in `[mcp.fs].extra_paths` from `~/.continuum-dev/config.toml`
 2. No component below the matched root matches `DENY_DIRS` (case-insensitive): `.ssh`, `.aws`, `.gnupg`, `.docker`, `.gradle`, `User Data`, `Profiles`, `Crashpad`, `keychain`, `secrets`, `private`, `node_modules`, `target`, `AppData`.
 3. The filename doesn't match `DENY_PATTERNS`: `*.pem`, `*.key`, `*.pfx`, `*.p12`, `*.ppk`, `*.pkcs12`, `*.crt`, `*.cer`, `*.der`, `*.jks`, `*.asc`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`, `.env`, `.env.*`, `.envrc`, `*.kdbx`, `*.1password`.
 
@@ -168,7 +168,7 @@ The deny list is hardcoded. It cannot be disabled or overridden from config.
 
 ### Reserved memory keys
 
-`memory_set_fact` rejects keys starting with `system.` or `kairo.` — those are managed by the runtime, not the orchestrator. Attempts to write to them return an `invalid_params` error explaining the reason.
+`memory_set_fact` rejects keys starting with `system.` or `continuum.` — those are managed by the runtime, not the orchestrator. Attempts to write to them return an `invalid_params` error explaining the reason.
 
 ### Tool-call audit
 
@@ -190,7 +190,7 @@ The audit is fire-and-forget (spawned as a detached tokio task) so the tool call
 
 ## Configuration
 
-Edit `~/.kairo-dev/config.toml`:
+Edit `~/.continuum-dev/config.toml`:
 
 ```toml
 [mcp.fs]
@@ -206,14 +206,14 @@ Paths support `~` expansion at load time. Denied dirs and patterns still apply i
 
 ### Prerequisites
 
-- `cargo build --release -p kairo-mcp` succeeded (binary at `target/release/kairo-mcp.exe`)
+- `cargo build --release -p continuum-mcp` succeeded (binary at `target/release/continuum-mcp.exe`)
 - `claude --version` prints a version (authenticated with `claude login`)
-- `~/.kairo-dev/` exists with at least an empty `semantic.sqlite`
+- `~/.continuum-dev/` exists with at least an empty `semantic.sqlite`
 
 ### One-shot protocol smoke test
 
 ```bash
-cargo test -p kairo-mcp --test protocol
+cargo test -p continuum-mcp --test protocol
 ```
 
 This spawns the binary, runs the MCP handshake, verifies all 11 tools are registered, and calls `system_current_time`. Expected: `test result: ok. 1 passed`.
@@ -222,23 +222,23 @@ This spawns the binary, runs the MCP handshake, verifies all 11 tools are regist
 
 ```bash
 # Point the CLI at the just-built binary.
-cat > /tmp/kairo-test.json <<'EOF'
+cat > /tmp/continuum-test.json <<'EOF'
 {
   "mcpServers": {
-    "kairo": {
+    "continuum": {
       "type": "stdio",
-      "command": "F:/TRYORVIA/kairo-ai/target/release/kairo-mcp.exe",
+      "command": "F:/TRYORVIA/continuum-ai/target/release/continuum-mcp.exe",
       "args": [],
-      "env": { "KAIRO_DATA_DIR": "F:/TRYORVIA/kairo-ai/target/test-kairo-data" }
+      "env": { "CONTINUUM_DATA_DIR": "F:/TRYORVIA/continuum-ai/target/test-continuum-data" }
     }
   }
 }
 EOF
 
 claude -p \
-  --mcp-config /tmp/kairo-test.json \
+  --mcp-config /tmp/continuum-test.json \
   --strict-mcp-config \
-  --allowedTools "mcp__kairo__*" \
+  --allowedTools "mcp__continuum__*" \
   --permission-mode default \
   --output-format json \
   "Call system_current_time and return only the iso8601 field."
@@ -246,27 +246,27 @@ claude -p \
 
 Expected `result` field: an ISO-8601 timestamp such as `2026-04-12T20:47:01.698257+02:00`.
 
-### End-to-end from Kairo Core
+### End-to-end from Continuum Core
 
 Run the main binary (this exercises spawn.rs → MCP config generation → orchestrator wake):
 
 ```bash
-cargo run --release --bin kairo
+cargo run --release --bin continuum
 ```
 
-Trigger a wake. In `~/.kairo/logs/orchestrator.log` (or stderr if running foreground), look for:
+Trigger a wake. In `~/.continuum/logs/orchestrator.log` (or stderr if running foreground), look for:
 
 ```
 INFO … MCP enabled for this wake mcp_bin=… mcp_config=…
-DEBUG MCP server "kairo": Successfully connected (transport: stdio)
-DEBUG MCP server "kairo": Connection established with capabilities: {"hasTools":true,…}
+DEBUG MCP server "continuum": Successfully connected (transport: stdio)
+DEBUG MCP server "continuum": Connection established with capabilities: {"hasTools":true,…}
 ```
 
 After the wake finishes, confirm the audit event:
 
 ```bash
-sqlite3 ~/.kairo-dev/semantic.sqlite "SELECT COUNT(*) FROM semantic_facts;"
-# Then, for episodic events, use the Kairo dashboard or a LanceDB client —
+sqlite3 ~/.continuum-dev/semantic.sqlite "SELECT COUNT(*) FROM semantic_facts;"
+# Then, for episodic events, use the Continuum dashboard or a LanceDB client —
 # the audit entry has kind='tool_call' and tags include the tool name.
 ```
 

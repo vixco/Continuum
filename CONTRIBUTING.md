@@ -1,12 +1,12 @@
-# Contributing to Kairo
+# Contributing to Continuum
 
-Kairo is open source and welcomes real contributions. This guide explains how to set up a development environment, pick something to work on, and get a PR merged.
+Continuum is open source and welcomes real contributions. This guide explains how to set up a development environment, pick something to work on, and get a PR merged.
 
-If you are reading this to use Kairo, not contribute to it, you probably want [README.md](./README.md) and the [docs](https://vixco.github.io/kairo-ai) instead.
+If you are reading this to use Continuum, not contribute to it, you probably want [README.md](./README.md) and the [docs](https://vixco.github.io/Continuum) instead.
 
 ## Code of conduct
 
-Be respectful, be constructive, be specific. Kairo is an ambitious project built in the open.
+Be respectful, be constructive, be specific. Continuum is an ambitious project built in the open.
 
 - Assume good faith. Most confusion is a documentation gap, not malice.
 - Prefer questions over assumptions.
@@ -19,7 +19,7 @@ Report issues privately to `toshan@toshan.nl` if you don't want them handled in 
 
 ### Prerequisites
 
-- **Windows 10 (1903+) or Windows 11.** macOS and Linux are not supported yet — see the [Windows-specific APIs](./ARCHITECTURE.md) Kairo leans on.
+- **Windows 10 (1903+) or Windows 11.** macOS and Linux are not supported yet — see the [Windows-specific APIs](./ARCHITECTURE.md) Continuum leans on.
 - **Rust stable** (toolchain pinned in `rust-toolchain.toml`). Install via [rustup](https://rustup.rs).
 - **Node.js 20+** and **pnpm 9+** (`npm install -g pnpm`).
 - **Claude Code CLI** (`npm install -g @anthropic-ai/claude-code`) and an active Claude Max or API subscription.
@@ -33,11 +33,11 @@ See [CLAUDE.md](./CLAUDE.md) for the canonical reference. The short version:
 
 ```bash
 # Runtime binary — release mode is the default (see CLAUDE.md for why)
-cargo run --release --bin kairo
+cargo run --release --bin continuum
 
 # Library tests and examples — debug is fine
-cargo test -p kairo-core
-cargo run --example voice_test -p kairo-core
+cargo test -p continuum-core
+cargo run --example voice_test -p continuum-core
 
 # Dashboard — debug is fine
 cd apps/desktop
@@ -53,7 +53,7 @@ Install once: drop `sccache.exe` into `~/.cargo/bin/`.
 
 ## How to pick an issue
 
-1. Browse the [issue tracker](https://github.com/vixco/kairo-ai/issues). Labels that are safe to grab:
+1. Browse the [issue tracker](https://github.com/vixco/Continuum/issues). Labels that are safe to grab:
    - `good first issue` — small, well-scoped, documented
    - `help wanted` — larger but still contained
    - `skill request` — bundled-skill additions (write a new `SKILL.md` workflow)
@@ -82,7 +82,7 @@ Install once: drop `sccache.exe` into `~/.cargo/bin/`.
 
 ## What we welcome
 
-Any PR that makes Kairo **more ambient, more local, or more self-reliant**. Specifically:
+Any PR that makes Continuum **more ambient, more local, or more self-reliant**. Specifically:
 
 - **Bug fixes** with regression tests.
 - **Performance improvements** with benchmarks showing the win.
@@ -101,7 +101,7 @@ These are not automatic rejections, but they need a clear justification in the P
 - **Breaking changes** to the MCP tool API (tool name, schema, or semantics). Versioned additions are fine.
 - Modifications to the four-layer architecture.
 - Adding telemetry or any new outbound network call.
-- Changes to the build workflow for `kairo.exe` (debug/release layering — see `CLAUDE.md`).
+- Changes to the build workflow for `continuum.exe` (debug/release layering — see `CLAUDE.md`).
 
 ## Coding standards
 
@@ -147,7 +147,7 @@ See the [skills docs](./docs/skills.md) and the five bundled skills in [`skills/
 
 ## Writing MCP tools
 
-MCP tools live in `crates/kairo-mcp/src/tools/`. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the existing surface and [CLAUDE.md](./CLAUDE.md#how-to-write-and-test-mcp-tools) for the template.
+MCP tools live in `crates/continuum-mcp/src/tools/`. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the existing surface and [CLAUDE.md](./CLAUDE.md#how-to-write-and-test-mcp-tools) for the template.
 
 A good MCP tool:
 
@@ -163,4 +163,4 @@ Only the maintainer cuts releases, but the process is documented in [docs/releas
 
 ## License
 
-By contributing to Kairo, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing to Continuum, you agree that your contributions will be licensed under the Apache License 2.0.

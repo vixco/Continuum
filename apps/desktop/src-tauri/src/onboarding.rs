@@ -5,7 +5,7 @@
 //! wizard can be torn out and re-run safely.
 //!
 //! The complete-onboarding marker is a single file at
-//! `<kairo-data-dir>/config/onboarding-complete`. Its presence indicates the
+//! `<continuum-data-dir>/config/onboarding-complete`. Its presence indicates the
 //! wizard has finished; deleting it re-triggers the wizard on next launch.
 
 use std::path::PathBuf;
@@ -14,6 +14,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::process::Command as TokioCommand;
+
+use continuum_core::config::env_or_legacy;
 
 use crate::AppState;
 
@@ -171,8 +173,8 @@ pub async fn list_audio_output_devices() -> Result<Vec<AudioDevice>, String> {
 }
 
 fn list_audio_devices(_input: bool) -> Vec<AudioDevice> {
-    // cpal lives in kairo-core behind the `runtime` feature. The desktop
-    // crate builds against kairo-core with `default-features = false`, so
+    // cpal lives in continuum-core behind the `runtime` feature. The desktop
+    // crate builds against continuum-core with `default-features = false`, so
     // the device enumeration surface isn't available here. The wizard
     // treats an empty list as "use system default" — the cost is the user
     // not seeing an explicit mic / speaker picker during onboarding, which
@@ -208,7 +210,7 @@ pub async fn download_model(
         .arg("Bypass")
         .arg("-File")
         .arg(&script_path)
-        .env("KAIRO_MODELS_DIR", &models_dir);
+        .env("CONTINUUM_MODELS_DIR", &models_dir);
     cmd.kill_on_drop(true);
 
     tracing::info!(
@@ -291,7 +293,7 @@ pub async fn run_diagnostics(app: State<'_, Arc<AppState>>) -> Result<Diagnostic
         } else if triage_4b.exists() {
             Some("Qwen 3 4B fallback".into())
         } else {
-            Some("Run kairo setup to download".into())
+            Some("Run continuum setup to download".into())
         },
     });
 
@@ -313,7 +315,7 @@ pub async fn run_diagnostics(app: State<'_, Arc<AppState>>) -> Result<Diagnostic
     });
 
     // 5. Piper TTS — check the standard install path and PATH.
-    let piper_from_env = std::env::var_os("KAIRO_PIPER_BIN").map(PathBuf::from);
+    let piper_from_env = env_or_legacy("CONTINUUM_PIPER_BIN", "KAIRO_PIPER_BIN").map(PathBuf::from);
     let piper_default = app
         .runtime
         .dev_dir()
@@ -407,7 +409,7 @@ pub async fn complete_onboarding(
 }
 
 async fn seed_semantic_memory(_app: &AppState, payload: &OnboardingPayload) -> Result<(), String> {
-    // The semantic store's concrete API is feature-gated in kairo-core. In
+    // The semantic store's concrete API is feature-gated in continuum-core. In
     // alpha we only log intent; actual writes land once the setter hook is
     // exposed through the runtime. See docs/memory.md for the eventual path.
     tracing::info!(

@@ -2,7 +2,7 @@
 
 Skills are prompt fragments packaged as Markdown files with YAML frontmatter. When a skill's triggers match the current context, its content is appended to the orchestrator's (or worker's) system prompt so the model follows its instructions for that turn.
 
-Skills are **not executable code**. They cannot grant tool access, make network calls, or change Kairo's own configuration. They instruct the model — tool permissions still flow through the orchestrator's allowlist.
+Skills are **not executable code**. They cannot grant tool access, make network calls, or change Continuum's own configuration. They instruct the model — tool permissions still flow through the orchestrator's allowlist.
 
 ## File format
 
@@ -12,7 +12,7 @@ Each skill lives in its own directory under `skills/`:
 skills/
 └── my-skill/
     ├── SKILL.md              # required
-    ├── templates/            # optional supporting files (not loaded by Kairo)
+    ├── templates/            # optional supporting files (not loaded by Continuum)
     └── ...
 ```
 
@@ -41,13 +41,13 @@ Headings, lists, code fences — anything valid in Markdown is fine.
 | `description`| yes      | One-sentence human-readable summary |
 | `triggers`   | no       | Array of case-insensitive substrings that activate the skill |
 | `source`     | no       | Badge shown in the dashboard — defaults to `"user"` |
-| `manual_only`| no       | If `true`, Kairo never auto-applies the skill; it's only used when explicitly forced |
+| `manual_only`| no       | If `true`, Continuum never auto-applies the skill; it's only used when explicitly forced |
 
 Unknown fields are ignored, so future extensions (`version`, `author`) won't break the loader.
 
 ## Trigger matching
 
-When the orchestrator wakes (or a worker spawns), Kairo builds a **match context** from:
+When the orchestrator wakes (or a worker spawns), Continuum builds a **match context** from:
 
 - The wake reason / task description
 - The audio transcript of the user's most recent utterance
@@ -63,7 +63,7 @@ After ranking, the matcher fills skills into the prompt until the token budget (
 
 **Keep it specific.** A skill that fires on `"help"` is useless. Triggers should be the exact phrasing the user would actually produce.
 
-**Front-load the procedure.** Start with a numbered list: `1. Gather context with mcp__kairo__memory_*`, `2. Do X`, `3. Output in this format`. The model reads top-down.
+**Front-load the procedure.** Start with a numbered list: `1. Gather context with mcp__continuum__memory_*`, `2. Do X`, `3. Output in this format`. The model reads top-down.
 
 **Specify the output shape.** `## Output format` with a concrete example leads to consistent results.
 
@@ -71,11 +71,11 @@ After ranking, the matcher fills skills into the prompt until the token budget (
 
 **Keep it under ~500 tokens when you can.** Multiple skills may stack; leave room for the orchestrator's own system prompt.
 
-**Don't grant authority the skill shouldn't grant.** A skill that says "if the user asks for a destructive operation, just do it" is wrong — it contradicts Kairo's guardrails, which always win.
+**Don't grant authority the skill shouldn't grant.** A skill that says "if the user asks for a destructive operation, just do it" is wrong — it contradicts Continuum's guardrails, which always win.
 
 ## Hot reload
 
-`skills.hot_reload = true` (the default) makes kairo-core re-scan `skills/` every 3 seconds. Files whose `mtime` has advanced are re-parsed, and deleted files drop from the cache on the next scan. No restart needed.
+`skills.hot_reload = true` (the default) makes continuum-core re-scan `skills/` every 3 seconds. Files whose `mtime` has advanced are re-parsed, and deleted files drop from the cache on the next scan. No restart needed.
 
 ## Dashboard CRUD
 
@@ -93,7 +93,7 @@ Disabled skills are kept on disk — they simply don't participate in matching. 
 |-------------------|------------------------------|---------|
 | `daily-briefing`  | morning, briefing, day plan  | Spoken morning overview under 60 seconds |
 | `code-review`     | review, PR, diff             | Structured review output with severity + line refs |
-| `project-context` | kairo, simcharts, polybot…   | Load project facts + recent episodic history |
+| `project-context` | continuum, simcharts, polybot…   | Load project facts + recent episodic history |
 | `email-draft`     | email, reply, draft, mail    | Concise email drafts matched to recipient's tone |
 | `file-organizer`  | organize, clean up, declutter| Propose-then-apply folder tidying, never deletes |
 
@@ -108,10 +108,10 @@ The triage layer can add `"suggested_skill": "<name>"` to a `wake_orchestrator` 
 vim skills/my-skill/SKILL.md
 
 # Test matching from the CLI
-cargo run --example skill_match_demo -p kairo-core -- "user wants a daily briefing"
+cargo run --example skill_match_demo -p continuum-core -- "user wants a daily briefing"
 
 # Run the full skills test suite
-cargo test -p kairo-core --test phase8_skills
+cargo test -p continuum-core --test phase8_skills
 
-# Verify hot reload works while kairo is running — edit the file and wait 3 s.
+# Verify hot reload works while continuum is running — edit the file and wait 3 s.
 ```

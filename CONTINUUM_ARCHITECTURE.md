@@ -17,7 +17,7 @@ world model are later input channels or products. They are not the core.
 
 ## Phase 0 boundary
 
-The repository started as the Apache-2.0 Kairo project. Phase 0 preserves the
+The repository started as the Apache-2.0 Continuum project. Phase 0 preserves the
 parts that are expensive and useful to rebuild while introducing a clean
 boundary for Continuum.
 
@@ -31,7 +31,7 @@ boundary for Continuum.
 
 ### Replace behind stable adapters
 
-- Kairo's string-key semantic memory becomes a migration input, not the new model
+- Continuum's string-key semantic memory becomes a migration input, not the new model
 - hardcoded project recognition is replaced by repository detection
 - Claude-specific orchestration becomes model-independent agent adapters
 - post-execution auditing becomes pre-execution policy enforcement
@@ -42,7 +42,7 @@ boundary for Continuum.
 - audio, TTS, wake word, and ambient vision features
 - hardware integrations
 - hosted accounts, sync, billing, and team collaboration
-- broad renaming of internal `kairo-*` crates before compatibility adapters exist
+- broad renaming of internal `continuum-*` crates before compatibility adapters exist
 
 ## Target architecture
 

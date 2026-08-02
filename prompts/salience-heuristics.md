@@ -29,7 +29,7 @@ stored in the raw log regardless of salience.
 ## Configuration
 
 The threshold and individual rule weights are configurable via
-`~/.kairo/config.toml` under the `[salience]` section. The dashboard exposes
+`~/.continuum/config.toml` under the `[salience]` section. The dashboard exposes
 these as sliders in the Brain tab.
 
 ## Future work

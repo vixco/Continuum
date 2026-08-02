@@ -1,5 +1,5 @@
-# Kairo bump-version.ps1
-# Updates the Kairo version number across every file that hard-codes it.
+# Continuum bump-version.ps1
+# Updates the Continuum version number across every file that hard-codes it.
 #
 # Usage:
 #   .\scripts\bump-version.ps1 -NewVersion 0.1.0-alpha.2
@@ -22,7 +22,7 @@ if ($NewVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$') {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-Write-Host "Kairo bump-version" -ForegroundColor Cyan
+Write-Host "Continuum bump-version" -ForegroundColor Cyan
 Write-Host "  repo: $repoRoot"
 Write-Host "  new:  $NewVersion"
 Write-Host ""

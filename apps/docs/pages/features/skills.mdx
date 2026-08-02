@@ -4,7 +4,7 @@ A skill is a `SKILL.md` file that tells the orchestrator how to handle a specifi
 
 ## Bundled skills
 
-Kairo ships five starter skills in `skills/`:
+Continuum ships five starter skills in `skills/`:
 
 - **`daily-briefing`** — spoken morning briefing from memory + overnight worker activity
 - **`code-review`** — structured review of a diff, PR, or file
@@ -40,7 +40,7 @@ The frontmatter `triggers` list is substring-matched against the wake text, the 
 
 ## Writing your own
 
-Create `skills/<name>/SKILL.md` in the Kairo repo root (for development) or in `~/.kairo/skills/<name>/SKILL.md` (for user-scoped skills). Kairo scans both locations at startup.
+Create `skills/<name>/SKILL.md` in the Continuum repo root (for development) or in `~/.continuum/skills/<name>/SKILL.md` (for user-scoped skills). Continuum scans both locations at startup.
 
 Good skills have:
 - A short, specific `description` — this is what the triage layer reads to decide when to suggest the skill.
@@ -50,7 +50,7 @@ Good skills have:
 
 ## Installing a skill from a URL
 
-Dashboard → Tools tab → "Install from URL" → paste a Git URL. Kairo runs `git clone --depth 1` into a temp directory, validates the `SKILL.md`, and moves it into `~/.kairo/skills/`.
+Dashboard → Tools tab → "Install from URL" → paste a Git URL. Continuum runs `git clone --depth 1` into a temp directory, validates the `SKILL.md`, and moves it into `~/.continuum/skills/`.
 
 ## Disabling a skill
 
@@ -58,10 +58,10 @@ Dashboard → Tools tab → toggle the skill off. Disabled skills are listed at 
 
 ## Skill budget
 
-The orchestrator prompt has a per-wake token budget for skill content (`skills.token_budget`, default 2000). If multiple skills match, Kairo ranks by trigger score and takes the top few until the budget is full. Forced skills (passed explicitly at wake time) bypass the budget.
+The orchestrator prompt has a per-wake token budget for skill content (`skills.token_budget`, default 2000). If multiple skills match, Continuum ranks by trigger score and takes the top few until the budget is full. Forced skills (passed explicitly at wake time) bypass the budget.
 
 ## Hot reload
 
-If `skills.hot_reload = true` (default), Kairo watches the `skills/` directory for changes and reloads skills on the fly. Parse errors surface in the Tools tab so you can see them while editing.
+If `skills.hot_reload = true` (default), Continuum watches the `skills/` directory for changes and reloads skills on the fly. Parse errors surface in the Tools tab so you can see them while editing.
 
-Note: the file watcher only watches the repo-root `skills/` today. User skills in `~/.kairo/skills/` are loaded at startup but not auto-reloaded. Restart Kairo after editing a user skill.
+Note: the file watcher only watches the repo-root `skills/` today. User skills in `~/.continuum/skills/` are loaded at startup but not auto-reloaded. Restart Continuum after editing a user skill.

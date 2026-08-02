@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "kairo": {
-      "command": "kairo-mcp",
+    "continuum": {
+      "command": "continuum-mcp",
       "args": [],
       "env": {}
     }

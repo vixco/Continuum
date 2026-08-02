@@ -1,18 +1,18 @@
 # Memory
 
-Kairo has three memory stores. You own all of them. They all live under `~/.kairo/memory/`.
+Continuum has three memory stores. You own all of them. They all live under `~/.continuum/memory/`.
 
 ## Raw log (SQLite)
 
 Every perception frame is written to `raw_log.sqlite`. This is the firehose: screenshots, audio transcripts, context, salience. Nightly rotation keeps `storage.retention_days` worth (default 30).
 
-You can browse the raw log from **Memory tab → Raw log**. You can `DELETE` rows directly — Kairo doesn't fight you.
+You can browse the raw log from **Memory tab → Raw log**. You can `DELETE` rows directly — Continuum doesn't fight you.
 
 ## Episodic memory (LanceDB vector store)
 
-Every `remember` decision, wake event, and tool call goes through the episodic distiller (runs every 15 minutes, configurable at `memory.distillation_*`). The distiller writes vectorised events to a LanceDB table under `~/.kairo/memory/episodic/`, using fastembed's BGE-small-en-v1.5 (384-dim, 66 MB, local).
+Every `remember` decision, wake event, and tool call goes through the episodic distiller (runs every 15 minutes, configurable at `memory.distillation_*`). The distiller writes vectorised events to a LanceDB table under `~/.continuum/memory/episodic/`, using fastembed's BGE-small-en-v1.5 (384-dim, 66 MB, local).
 
-When the orchestrator wakes, Kairo vector-searches episodic memory against the wake text and retrieves the top-K events as context.
+When the orchestrator wakes, Continuum vector-searches episodic memory against the wake text and retrieves the top-K events as context.
 
 You can:
 - Browse episodic events in **Memory tab → Episodic**
@@ -22,11 +22,11 @@ You can:
 
 ## Semantic memory (SQLite key-value + graph)
 
-Stable facts about you: `user.name`, `user.timezone`, `project.kairo.dir`, `preference.language`. Structured as a key-value store with optional graph edges for things like "this project is owned by this person".
+Stable facts about you: `user.name`, `user.timezone`, `project.continuum.dir`, `preference.language`. Structured as a key-value store with optional graph edges for things like "this project is owned by this person".
 
 Reserved prefixes:
-- `system.*` — written only by Kairo itself
-- `kairo.*` — version, install date, etc.
+- `system.*` — written only by Continuum itself
+- `continuum.*` — version, install date, etc.
 
 Everything else is writable from the orchestrator via `memory_set_fact` (with confidence clamping: inferred ≤0.7, observed ≤0.8, user_stated ≤0.9) or directly from the dashboard.
 
@@ -42,12 +42,12 @@ Dashboard → Memory tab → Wipe memory. Requires typing `WIPE` to confirm. Del
 
 ## First-run seeding
 
-On a fresh install, Kairo seeds five semantic facts automatically so the orchestrator has a sensible baseline:
+On a fresh install, Continuum seeds five semantic facts automatically so the orchestrator has a sensible baseline:
 
 - `user.timezone` — from the system
 - `user.language` — from the OS locale
 - `user.os` — e.g. "Windows 11"
-- `kairo.version` — e.g. `0.1.0-alpha.1`
-- `kairo.install_date` — ISO-8601 timestamp
+- `continuum.version` — e.g. `0.1.0-alpha.1`
+- `continuum.install_date` — ISO-8601 timestamp
 
 You can edit or delete these at any time.

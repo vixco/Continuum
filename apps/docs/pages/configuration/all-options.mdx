@@ -1,12 +1,12 @@
 # All config options reference
 
-Every setting Kairo reads, grouped by section. File: `~/.kairo/config/default-models.toml`.
+Every setting Continuum reads, grouped by section. File: `~/.continuum/config/default-models.toml`.
 
 ## `[vision]`
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `name` | string | `"SmolVLM-256M"` | human-facing label |
-| `model_path` | string | blank | search `~/.kairo/models/vision` if blank |
+| `model_path` | string | blank | search `~/.continuum/models/vision` if blank |
 | `gpu_enabled` | bool | auto | force ONNX-GPU |
 | `input_width` | int | 384 | vision input W |
 | `input_height` | int | 384 | vision input H |
@@ -97,9 +97,9 @@ See [Models](/configuration/models).
 
 | Var | Purpose |
 |---|---|
-| `KAIRO_MODELS_DIR` | override models root |
-| `KAIRO_PIPER_BIN` | override Piper binary path |
-| `KAIRO_DATA_DIR` | override `~/.kairo` root |
-| `KAIRO_MCP_BIN` | explicit `kairo-mcp.exe` path |
-| `KAIRO_WORKER_DRY_RUN` | set to `1` for worker transcript simulation |
+| `CONTINUUM_MODELS_DIR` | override models root |
+| `CONTINUUM_PIPER_BIN` | override Piper binary path |
+| `CONTINUUM_DATA_DIR` | override `~/.continuum` root |
+| `CONTINUUM_MCP_BIN` | explicit `continuum-mcp.exe` path |
+| `CONTINUUM_WORKER_DRY_RUN` | set to `1` for worker transcript simulation |
 | `ANTHROPIC_API_KEY` | passed through to Claude Code |

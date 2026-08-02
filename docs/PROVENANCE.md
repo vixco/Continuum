@@ -6,19 +6,19 @@ This file records repository evidence and release checks. It is not legal advice
 
 ## Repository lineage
 
-Continuum currently preserves the complete Git history of the Kairo donor repository.
+Continuum currently preserves the complete Git history of the Continuum donor repository.
 
 - The current `origin` is `https://github.com/vixco/Continuum.git`.
 - The first local commit is `1d144f31fd7b7ddd5c84e6b12f9f57b86a7d4e8e` (2026-04-10), titled `chore: initial repository scaffolding`.
-- That first commit already identifies the project as Kairo, sets the Cargo repository to `https://github.com/vixco/kairo-ai`, declares `Apache-2.0`, and adds the root `LICENSE` with `Copyright 2026 Toshan (vixco)`.
-- Commit `dc799d738c88d0d4040bdbfb6b42728942d149d3` explicitly records `Merge branch 'main' of https://github.com/vixco/kairo-ai`.
+- That first commit already identifies the project as Continuum, sets the Cargo repository to `https://github.com/vixco/Continuum`, declares `Apache-2.0`, and adds the root `LICENSE` with `Copyright 2026 Toshan (vixco)`.
+- Commit `dc799d738c88d0d4040bdbfb6b42728942d149d3` explicitly records `Merge branch 'main' of https://github.com/vixco/Continuum`.
 - `git shortlog -sne --all` reports 77 commits as `Toshan` and 2 as `T`; both aliases use the same GitHub noreply address, `93612321+vixco@users.noreply.github.com`. No other author email appears in the preserved history.
-- The root Cargo metadata still points to `vixco/kairo-ai`, and current source, docs, package names, prompts, and crate names still contain Kairo identity and design.
+- The root Cargo metadata still points to `vixco/Continuum`, and current source, docs, package names, prompts, and crate names still contain Continuum identity and design.
 
 These facts establish repository lineage, not ownership. The local evidence does **not** prove:
 
 - who owns every contribution or whether any work was contributed under a separate agreement;
-- the terms under which the repository moved from `vixco/kairo-ai` to `vixco/Continuum`;
+- the terms under which the repository moved from `vixco/Continuum` to `vixco/Continuum`;
 - the provenance and permitted use of AI-assisted output beyond the commit attribution;
 - that the GitHub account identity and the named copyright holder are legally the same person.
 
@@ -28,7 +28,7 @@ Before a public Continuum release, the maintainer should record the donor-to-Con
 
 The workspace and all five first-party Rust packages currently declare `Apache-2.0`. The root `LICENSE` has existed since the first commit. No inherited `NOTICE` file exists in Git history. Continuum now adds its own `NOTICE` to preserve the donor attribution without implying that it came from upstream.
 
-For source or binary redistribution of the inherited Kairo work, the project release process must at minimum preserve the conditions stated in section 4 of the checked-in Apache-2.0 text:
+For source or binary redistribution of the inherited Continuum work, the project release process must at minimum preserve the conditions stated in section 4 of the checked-in Apache-2.0 text:
 
 1. Ship a copy of the applicable license.
 2. Mark files that Continuum modifies with prominent change notices where required.
@@ -36,7 +36,7 @@ For source or binary redistribution of the inherited Kairo work, the project rel
 4. If a relevant upstream dependency or future donor adds a `NOTICE`, reproduce its applicable notices in a permitted location.
 5. Add Continuum attribution alongside inherited attribution; do not replace `Copyright 2026 Toshan (vixco)` without documented authority.
 
-Apache-2.0 does not grant trademark rights. The Kairo name, Continuum name, logos, and third-party product names need a separate naming and trademark review before release.
+Apache-2.0 does not grant trademark rights. The Continuum name, Continuum name, logos, and third-party product names need a separate naming and trademark review before release.
 
 ### Root license integrity repair
 
@@ -104,7 +104,7 @@ Claude Code, optional ElevenLabs access, Hugging Face hosting, and other network
 
 ## Release checklist
 
-1. **Freeze provenance:** tag the exact Git commit; preserve donor history; record the authorized Kairo-to-Continuum transition and all contributor identities/agreements known to the maintainer.
+1. **Freeze provenance:** tag the exact Git commit; preserve donor history; record the authorized Continuum-to-Continuum transition and all contributor identities/agreements known to the maintainer.
 2. **Validate first-party licensing:** compare `LICENSE` with canonical Apache-2.0 text, confirm the donor notice, mark modified files where required, and include applicable `LICENSE`/`NOTICE` materials in source and installers.
 3. **Generate dependency evidence:** regenerate the checked-in CycloneDX and pnpm license reports; add installer-level output; review every missing, copyleft, custom, dual-license, native, and binary result.
 4. **Clear external artifacts:** keep Lessac-derived voices excluded; resolve Piper/eSpeak archive obligations; pin every model/voice/binary by immutable revision and SHA-256; archive its exact license and attribution text.

@@ -3,11 +3,11 @@
 **Status:** Accepted
 **Date:** 2026-04-10
 **Layer:** 1 (Senses)
-**Crate:** `kairo-core` (senses::vision)
+**Crate:** `continuum-core` (senses::vision)
 
 ## Context
 
-Kairo captures the primary monitor every 3 seconds to feed the vision model. The capture must:
+Continuum captures the primary monitor every 3 seconds to feed the vision model. The capture must:
 
 - Work on Windows 10 and 11.
 - Produce no visible indicator (border, overlay, notification).
@@ -73,7 +73,7 @@ let screenshot = primary.capture_image()?;
 ## Tradeoffs
 
 - **Speed:** GDI capture takes ~15-30ms. At a 3-second interval this is <1% overhead. Not a concern.
-- **DirectX fullscreen:** GDI cannot capture DirectX exclusive fullscreen applications. This is not a concern for an ambient assistant -- users in exclusive fullscreen games are not expecting Kairo to describe their screen.
+- **DirectX fullscreen:** GDI cannot capture DirectX exclusive fullscreen applications. This is not a concern for an ambient assistant -- users in exclusive fullscreen games are not expecting Continuum to describe their screen.
 - **HDR:** GDI captures in SDR. HDR content will appear tone-mapped. Acceptable for Phase 1.
 
 ## Upgrade Path
@@ -82,5 +82,5 @@ If sub-10ms capture latency becomes important (e.g., for real-time screen sharin
 
 ## References
 
-- `crates/kairo-core/src/senses/vision.rs` -- `capture_primary_monitor()`, `downscale_screenshot()`, `save_screenshot()`
-- `crates/kairo-core/src/config.rs` -- `ScreenConfig` (interval, resolution, save flag)
+- `crates/continuum-core/src/senses/vision.rs` -- `capture_primary_monitor()`, `downscale_screenshot()`, `save_screenshot()`
+- `crates/continuum-core/src/config.rs` -- `ScreenConfig` (interval, resolution, save flag)

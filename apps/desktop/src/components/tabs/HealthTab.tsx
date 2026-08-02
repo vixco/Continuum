@@ -5,7 +5,7 @@ import { clsx } from "clsx";
 import { Archive, RefreshCcw, Wrench } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import { Button, Card, Modal, StatusBadge } from "@/components/ui/primitives";
 import type { ComponentHealth, RepairEvent } from "@/lib/types";
 
@@ -18,7 +18,7 @@ export function HealthTab() {
   const [selected, setSelected] = useState<ComponentHealth | null>(null);
 
   const refresh = useCallback(async () => {
-    setComponents(await kairo.getHealth());
+    setComponents(await continuum.getHealth());
   }, [setComponents]);
 
   useEffect(() => {
@@ -86,7 +86,7 @@ export function HealthTab() {
             variant="primary"
             onClick={async () => {
               clearRepair();
-              await kairo.triggerRepair(undefined);
+              await continuum.triggerRepair(undefined);
             }}
             disabled={health.repair_running}
             className="w-full"
@@ -106,7 +106,7 @@ export function HealthTab() {
               size="sm"
               variant="ghost"
               onClick={async () => {
-                await kairo.runBackupNow();
+                await continuum.runBackupNow();
                 await refresh();
               }}
               className="mt-2"
@@ -134,28 +134,28 @@ export function HealthTab() {
               </span>
             </div>
             <div>
-              <div className="kairo-label">Average response</div>
+              <div className="continuum-label">Average response</div>
               <div>{selected.avg_response_ms ?? 0} ms</div>
             </div>
             <div>
-              <div className="kairo-label">Errors (24h)</div>
+              <div className="continuum-label">Errors (24h)</div>
               <div>{selected.error_count_24h}</div>
             </div>
             {selected.last_error && (
               <div>
-                <div className="kairo-label">Last error</div>
+                <div className="continuum-label">Last error</div>
                 <div className="text-state-error">{selected.last_error}</div>
               </div>
             )}
             {selected.log_path && (
               <div>
-                <div className="kairo-label">Log path</div>
+                <div className="continuum-label">Log path</div>
                 <div className="font-mono text-xs text-ink-muted">{selected.log_path}</div>
               </div>
             )}
             {selected.recovery_note && (
               <div>
-                <div className="kairo-label">Recovery</div>
+                <div className="continuum-label">Recovery</div>
                 <div>{selected.recovery_note}</div>
               </div>
             )}
@@ -163,7 +163,7 @@ export function HealthTab() {
               size="sm"
               variant="default"
               onClick={async () => {
-                await kairo.restartComponent(selected.name);
+                await continuum.restartComponent(selected.name);
                 await refresh();
                 setSelected(null);
               }}

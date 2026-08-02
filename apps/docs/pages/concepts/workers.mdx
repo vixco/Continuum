@@ -8,7 +8,7 @@ When the orchestrator has a task too big to do inline — "fix small bugs in my 
 - **Priority:** `user_requested` > `orchestrator_spawned` > `scheduled`.
 - **Failure streak:** if 3 workers fail within 10 minutes, the pool refuses new spawns until an operator intervenes.
 
-The orchestrator asks the pool to spawn a worker via the `mcp__kairo__workers_spawn_worker` MCP tool. The tool writes a JSON intent file to `~/.kairo-dev/worker-intents/`; the main Kairo runtime picks it up on its next tick, spawns the supervisor, and writes live status snapshots back to `~/.kairo-dev/workers/<id>.json`.
+The orchestrator asks the pool to spawn a worker via the `mcp__continuum__workers_spawn_worker` MCP tool. The tool writes a JSON intent file to `~/.continuum-dev/worker-intents/`; the main Continuum runtime picks it up on its next tick, spawns the supervisor, and writes live status snapshots back to `~/.continuum-dev/workers/<id>.json`.
 
 ## Model selection
 
@@ -16,7 +16,7 @@ Each worker task has a `model_tier`:
 
 - `"power"` → always Claude Opus 4.6
 - `"budget"` → always Claude Sonnet 4.6
-- `"auto"` → Kairo picks based on task keywords:
+- `"auto"` → Continuum picks based on task keywords:
   - Opus: refactor, architect, debug-complex, migration
   - Sonnet: rename, format, summary, boilerplate
   - Tie: Opus
@@ -27,12 +27,12 @@ Your top-level `workers.mode` config (`auto`, `budget`, `power`) overrides the t
 
 Each worker gets:
 
-- Its own working directory (by default the Kairo state dir; the orchestrator can override when it spawns)
+- Its own working directory (by default the Continuum state dir; the orchestrator can override when it spawns)
 - A prompt composed from `prompts/worker-system.md` + any matched skill content for the task
-- A narrow tool allowlist (no `workers_*` — workers don't recursively spawn Kairo workers, though they *can* use Claude Code's built-in `Task` tool to spawn sub-agents)
+- A narrow tool allowlist (no `workers_*` — workers don't recursively spawn Continuum workers, though they *can* use Claude Code's built-in `Task` tool to spawn sub-agents)
 - An explicit wall-clock timeout (default 30 minutes)
 
-Workers do not have the Kairo `repair_*` tools, the orchestrator's write-side memory tools, or the `workers_*` spawning tools.
+Workers do not have the Continuum `repair_*` tools, the orchestrator's write-side memory tools, or the `workers_*` spawning tools.
 
 ## Watching workers live
 
@@ -54,10 +54,10 @@ If you're writing a skill that spawns a worker, give it:
 
 ## Idempotency and safety
 
-Workers can do real damage if you let them. Kairo's defaults:
+Workers can do real damage if you let them. Continuum's defaults:
 
-- **No writes outside allowlisted folders.** The `fs_*` tools enforce the permission config from `~/.kairo/config/default-permissions.toml`.
-- **No shell.** Kairo's MCP server does not expose a shell tool. Workers can still use Claude Code's built-in Bash tool — but that in turn respects Claude Code's permission system.
+- **No writes outside allowlisted folders.** The `fs_*` tools enforce the permission config from `~/.continuum/config/default-permissions.toml`.
+- **No shell.** Continuum's MCP server does not expose a shell tool. Workers can still use Claude Code's built-in Bash tool — but that in turn respects Claude Code's permission system.
 - **No destructive ops without confirmation.** The orchestrator prompt explicitly disallows `rm -rf`, `git push --force`, database drops, etc. without user sign-off at wake time.
 
-If you want stricter constraints, edit `config/default-permissions.toml` or your per-project `.kairo/permissions.toml`.
+If you want stricter constraints, edit `config/default-permissions.toml` or your per-project `.continuum/permissions.toml`.

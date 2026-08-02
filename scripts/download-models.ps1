@@ -1,5 +1,5 @@
-﻿# Kairo download-models.ps1
-# Downloads default model files for Kairo's local inference.
+﻿# Continuum download-models.ps1
+# Downloads default model files for Continuum's local inference.
 # Idempotent -- skips files that already exist with valid sizes.
 #
 # Uses curl.exe (ships with Windows 10+) instead of Invoke-WebRequest
@@ -8,11 +8,11 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "Kairo Model Downloader" -ForegroundColor Cyan
+Write-Host "Continuum Model Downloader" -ForegroundColor Cyan
 Write-Host "======================" -ForegroundColor Cyan
 Write-Host ""
 
-$ModelsBase = Join-Path $env:USERPROFILE ".kairo-dev\models"
+$ModelsBase = Join-Path $env:USERPROFILE ".continuum-dev\models"
 
 # Minimum file size (bytes) to consider a download valid.
 # Anything smaller is likely an error page saved as a file.
@@ -125,7 +125,7 @@ function Download-Sidecar {
 # SmolVLM-256M (Vision -- Layer 1)
 # ============================================================================
 # Source: HuggingFaceTB official repo (onnx-community is now auth-gated).
-# The kairo-vision crate expects: vision_encoder.onnx, embed_tokens.onnx,
+# The continuum-vision crate expects: vision_encoder.onnx, embed_tokens.onnx,
 # decoder.onnx, and tokenizer.json in the same directory.
 
 Write-Host "`n--- SmolVLM-256M (Vision) ---" -ForegroundColor Cyan
@@ -196,7 +196,7 @@ Download-Model `
 # Whisper medium (STT -- Layer 1 audio, default)
 # ============================================================================
 # medium (1.5 GB) is the default because whisper-small struggles with the
-# wake word "Kairo" -- it isn't in the vocab and small hallucinates real
+# wake word "Continuum" -- it isn't in the vocab and small hallucinates real
 # English words around it ("You're one guy at all", "Hey, can I have one?").
 # medium recognises uncommon proper nouns much more reliably, and the RTX
 # 3060 runs it in ~200 ms per 3-second clip.
@@ -222,7 +222,7 @@ Download-Model `
 # Piper TTS voices (Phase 5 -- voice)
 # ============================================================================
 # Piper voices are shipped as paired .onnx + .onnx.json files. Config sidecar
-# holds sample_rate, speaker table, inference params -- Kairo reads sample_rate
+# holds sample_rate, speaker table, inference params -- Continuum reads sample_rate
 # from it at engine init, so both files are required together.
 #
 # Voice repository: MIT. Dataset-specific terms still apply; English Norman
@@ -262,8 +262,8 @@ Download-Sidecar `
 # ============================================================================
 # The official rhasspy/piper Windows release zip (piper_windows_amd64.zip)
 # bundles piper.exe alongside the espeak-ng-data directory. We extract the
-# whole tree to ~/.kairo-dev/bin/piper/ and copy espeak-ng-data/ to the
-# location Kairo's config expects.
+# whole tree to ~/.continuum-dev/bin/piper/ and copy espeak-ng-data/ to the
+# location Continuum's config expects.
 #
 # Both the binary and espeak-ng-data come from the same archive -- this
 # guarantees version compatibility and avoids depending on the 404'd
@@ -276,7 +276,7 @@ Write-Host "`n--- Piper binary + espeak-ng-data (Windows) ---" -ForegroundColor 
 $EspeakDir = Join-Path $TtsDir "espeak-ng-data"
 $PiperZipUrl = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
 $FallbackEspeakUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2"
-$PiperBinRoot = Join-Path $env:USERPROFILE ".kairo-dev\bin\piper"
+$PiperBinRoot = Join-Path $env:USERPROFILE ".continuum-dev\bin\piper"
 $PiperExe = Join-Path $PiperBinRoot "piper.exe"
 
 $NeedsPiper  = -not (Test-Path $PiperExe)
@@ -287,8 +287,8 @@ if (-not $NeedsPiper -and -not $NeedsEspeak) {
     Write-Host "     piper.exe: $PiperExe" -ForegroundColor Gray
     Write-Host "     espeak-ng-data: $EspeakDir" -ForegroundColor Gray
 } else {
-    $zipPath = Join-Path $env:TEMP "kairo-piper-win-amd64.zip"
-    $extractRoot = Join-Path $env:TEMP "kairo-piper-extract"
+    $zipPath = Join-Path $env:TEMP "continuum-piper-win-amd64.zip"
+    $extractRoot = Join-Path $env:TEMP "continuum-piper-extract"
 
     Write-Host "[DL] Downloading Piper Windows release (~22 MB)..." -ForegroundColor Yellow
     Write-Host "     URL: $PiperZipUrl" -ForegroundColor Gray
@@ -322,9 +322,9 @@ if (-not $NeedsPiper -and -not $NeedsEspeak) {
             New-Item -ItemType Directory -Force -Path $PiperBinRoot | Out-Null
             Copy-Item -Path (Join-Path $piperSrcDir "*") -Destination $PiperBinRoot -Recurse -Force
             Write-Host "[OK] Piper binary installed at $PiperBinRoot" -ForegroundColor Green
-            Write-Host "     Set KAIRO_PIPER_BIN=$PiperExe or add $PiperBinRoot to PATH" -ForegroundColor Gray
+            Write-Host "     Set CONTINUUM_PIPER_BIN=$PiperExe or add $PiperBinRoot to PATH" -ForegroundColor Gray
 
-            # Copy espeak-ng-data to the location the Kairo config expects
+            # Copy espeak-ng-data to the location the Continuum config expects
             if (Test-Path $espeakSrc) {
                 if (Test-Path $EspeakDir) { Remove-Item -Recurse -Force $EspeakDir }
                 New-Item -ItemType Directory -Force -Path $EspeakDir | Out-Null

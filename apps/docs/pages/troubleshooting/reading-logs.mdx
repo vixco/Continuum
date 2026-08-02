@@ -2,7 +2,7 @@
 
 ## Where they live
 
-`~/.kairo/logs/` — per-component log files, rotated daily:
+`~/.continuum/logs/` — per-component log files, rotated daily:
 
 - `perception.log` — senses layer
 - `triage.log` — triage layer
@@ -10,7 +10,7 @@
 - `workers.log` — worker supervisor + pool
 - `voice.log` — wake detection, STT, TTS, playback
 - `memory.log` — raw log writes, episodic distillation, semantic writes
-- `mcp.log` — Kairo MCP server requests and responses
+- `mcp.log` — Continuum MCP server requests and responses
 - `repair.log` — repair agent sessions
 
 ## Format
@@ -38,10 +38,10 @@ Logs tab → filter by level, layer, component, free-text. Click any entry to ex
 
 ```powershell
 # Tail the orchestrator log
-Get-Content -Path "$env:USERPROFILE\.kairo\logs\orchestrator.log" -Wait -Tail 50
+Get-Content -Path "$env:USERPROFILE\.continuum\logs\orchestrator.log" -Wait -Tail 50
 
 # Find the last 5 errors across all logs
-Get-ChildItem "$env:USERPROFILE\.kairo\logs\*.log" | ForEach-Object {
+Get-ChildItem "$env:USERPROFILE\.continuum\logs\*.log" | ForEach-Object {
     Select-String -Path $_.FullName -Pattern '"level":"ERROR"' | Select-Object -Last 5
 }
 ```
@@ -54,11 +54,11 @@ Get-ChildItem "$env:USERPROFILE\.kairo\logs\*.log" | ForEach-Object {
 
 ## Noise reduction
 
-Set an env filter before launching Kairo:
+Set an env filter before launching Continuum:
 
 ```powershell
-$env:RUST_LOG = "info,kairo_core::senses::vision=warn,kairo_mcp=debug"
-kairo
+$env:RUST_LOG = "info,continuum_core::senses::vision=warn,continuum_mcp=debug"
+continuum
 ```
 
 ## Sharing logs with a bug report
@@ -66,4 +66,4 @@ kairo
 Please:
 1. Reproduce the bug.
 2. Copy only the relevant component's last ~50 lines.
-3. Redact anything sensitive — Kairo never phones home, but log lines can still contain things you didn't intend to share (foreground window titles, clipboard snippets, etc.).
+3. Redact anything sensitive — Continuum never phones home, but log lines can still contain things you didn't intend to share (foreground window titles, clipboard snippets, etc.).

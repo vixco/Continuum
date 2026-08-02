@@ -1,6 +1,6 @@
 # Writing MCP tools
 
-MCP tools are how the orchestrator and workers **do** things — read files, take screenshots, set memory facts, fetch URLs, spawn workers. They live in `crates/kairo-mcp/src/tools/`.
+MCP tools are how the orchestrator and workers **do** things — read files, take screenshots, set memory facts, fetch URLs, spawn workers. They live in `crates/continuum-mcp/src/tools/`.
 
 ## Anatomy of a tool
 
@@ -35,7 +35,7 @@ Every tool follows the same six-step recipe:
    }
    ```
 
-3. **Register the tool** in `crates/kairo-mcp/src/main.rs` via the rmcp builder. Name format: `mcp__kairo__<namespace>_<verb>`.
+3. **Register the tool** in `crates/continuum-mcp/src/main.rs` via the rmcp builder. Name format: `mcp__continuum__<namespace>_<verb>`.
 
 4. **Add a permission entry** in `config/default-permissions.toml`.
 
@@ -48,7 +48,7 @@ Every tool follows the same six-step recipe:
 Before your tool does anything non-trivial, check:
 
 - **Path allowlist** for fs / memory / config tools (`allowlist::ensure_path_allowed`).
-- **Reserved prefixes** for memory writes (`system.*`, `kairo.*` — only Kairo itself can set these).
+- **Reserved prefixes** for memory writes (`system.*`, `continuum.*` — only Continuum itself can set these).
 - **Value limits** — truncate strings, cap file sizes, clamp counts.
 - **Public IP only** for `web_fetch` (`private_ip::is_public`).
 - **Audit-log the call** — every tool fires a background tokio task that writes a `ToolCall` event to episodic memory with sanitised args + a result summary.
@@ -71,7 +71,7 @@ async fn read_file_respects_allowlist() {
 }
 ```
 
-For protocol-level coverage, see `crates/kairo-mcp/tests/protocol.rs` — it spawns the binary, drives JSON-RPC initialize → tools/list → tools/call over stdio, and asserts correctness end-to-end.
+For protocol-level coverage, see `crates/continuum-mcp/tests/protocol.rs` — it spawns the binary, drives JSON-RPC initialize → tools/list → tools/call over stdio, and asserts correctness end-to-end.
 
 ## Don't write these tools
 
@@ -83,4 +83,4 @@ Some categories of tools are explicit non-goals:
 
 ## Adding a new tool namespace
 
-If you're adding a whole family of tools (say, `calendar_*`), create `crates/kairo-mcp/src/tools/calendar.rs`, register the namespace in `main.rs`, and add a "Calendar tools" section to `docs/mcp-tools.md`. Follow the naming convention `mcp__kairo__<namespace>_<verb>`.
+If you're adding a whole family of tools (say, `calendar_*`), create `crates/continuum-mcp/src/tools/calendar.rs`, register the namespace in `main.rs`, and add a "Calendar tools" section to `docs/mcp-tools.md`. Follow the naming convention `mcp__continuum__<namespace>_<verb>`.

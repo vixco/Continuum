@@ -1,15 +1,15 @@
-# Kairo install.ps1
-# Installer for Kairo — the AI that knows when to act.
+# Continuum install.ps1
+# Installer for Continuum — the AI that knows when to act.
 #
 # Usage:
 #   # Install from GitHub release (default):
-#   irm https://raw.githubusercontent.com/vixco/kairo-ai/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/vixco/Continuum/main/scripts/install.ps1 | iex
 #
 #   # Or clone and run locally:
 #   .\scripts\install.ps1
 #   .\scripts\install.ps1 -FromSource          # build from source (requires Rust toolchain)
 #   .\scripts\install.ps1 -SkipModels          # skip the model download step
-#   .\scripts\install.ps1 -AutoStart           # also register Kairo to start with Windows
+#   .\scripts\install.ps1 -AutoStart           # also register Continuum to start with Windows
 #   .\scripts\install.ps1 -DesktopShortcut     # also create a desktop shortcut
 #   .\scripts\install.ps1 -Version v0.1.0-alpha.1   # pin a specific release tag
 #
@@ -23,7 +23,7 @@ param(
     [switch]$AutoStart,
     [switch]$DesktopShortcut,
     [string]$Version = "latest",
-    [string]$InstallDir = "$env:LOCALAPPDATA\Kairo"
+    [string]$InstallDir = "$env:LOCALAPPDATA\Continuum"
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,11 +58,11 @@ $buildNumber = (Get-CimInstance Win32_OperatingSystem).BuildNumber
 Write-Info "Windows $($winVersion.Major).$($winVersion.Minor) build $buildNumber"
 
 if ($winVersion.Major -lt 10) {
-    Write-Err "Kairo requires Windows 10 or 11. Detected: $($winVersion.Major).$($winVersion.Minor)"
+    Write-Err "Continuum requires Windows 10 or 11. Detected: $($winVersion.Major).$($winVersion.Minor)"
     exit 1
 }
 if ($winVersion.Major -eq 10 -and [int]$buildNumber -lt 18362) {
-    Write-Err "Kairo requires Windows 10 1903+ (build 18362) for Graphics Capture API. Detected build: $buildNumber"
+    Write-Err "Continuum requires Windows 10 1903+ (build 18362) for Graphics Capture API. Detected build: $buildNumber"
     exit 1
 }
 Write-Ok "Windows version supported"
@@ -85,7 +85,7 @@ try {
             Write-Ok "Node.js $nodeVer"
             $nodeOk = $true
         } else {
-            Write-Warn "Node.js $nodeVer found, but Kairo needs 18+. Install from https://nodejs.org"
+            Write-Warn "Node.js $nodeVer found, but Continuum needs 18+. Install from https://nodejs.org"
         }
     }
 } catch {
@@ -110,7 +110,7 @@ try {
 }
 if (-not $claudeOk) {
     Write-Warn "Claude Code CLI not found."
-    Write-Host "    -> Kairo drives Claude Code as a subprocess, so this is required." -ForegroundColor Yellow
+    Write-Host "    -> Continuum drives Claude Code as a subprocess, so this is required." -ForegroundColor Yellow
     $response = Read-Host "    -> Install now via 'npm install -g @anthropic-ai/claude-code'? [Y/n]"
     if ($response -ne "n" -and $response -ne "N") {
         Write-Info "Installing @anthropic-ai/claude-code globally..."
@@ -166,26 +166,26 @@ if ($FromSource) {
     }
 }
 
-# ---- Step 3: Create ~/.kairo/ directory layout ------------------------------
+# ---- Step 3: Create ~/.continuum/ directory layout ------------------------------
 
-Write-Header "Preparing ~/.kairo/ data directory"
+Write-Header "Preparing ~/.continuum/ data directory"
 
-$KairoData = Join-Path $env:USERPROFILE ".kairo"
+$ContinuumData = Join-Path $env:USERPROFILE ".continuum"
 $subdirs = @("config", "models", "models\vision", "models\triage", "models\stt", "models\tts",
              "logs", "memory", "backups", "bin", "worker-intents", "workers", "repair-intents")
 foreach ($sd in $subdirs) {
-    $full = Join-Path $KairoData $sd
+    $full = Join-Path $ContinuumData $sd
     if (-not (Test-Path $full)) {
         New-Item -ItemType Directory -Force -Path $full | Out-Null
     }
 }
-Write-Ok "Created $KairoData"
+Write-Ok "Created $ContinuumData"
 
 # Copy default config files (only if they don't already exist — we never clobber user config)
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 $defaultConfigDir = Join-Path $repoRoot "config"
-$userConfigDir = Join-Path $KairoData "config"
+$userConfigDir = Join-Path $ContinuumData "config"
 
 if (Test-Path $defaultConfigDir) {
     foreach ($cfg in Get-ChildItem $defaultConfigDir -File) {
@@ -199,9 +199,9 @@ if (Test-Path $defaultConfigDir) {
     }
 }
 
-# ---- Step 4: Install Kairo binary -------------------------------------------
+# ---- Step 4: Install Continuum binary -------------------------------------------
 
-Write-Header "Installing Kairo binary"
+Write-Header "Installing Continuum binary"
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -211,13 +211,13 @@ if ($FromSource) {
     Write-Step "Building from source (release, this may take ~10 minutes)..."
     Push-Location $repoRoot
     try {
-        cargo build --release --bin kairo
+        cargo build --release --bin continuum
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-        cargo build --release --bin kairo-mcp
-        if ($LASTEXITCODE -ne 0) { throw "cargo build kairo-mcp failed" }
-        Copy-Item "target\release\kairo.exe" (Join-Path $InstallDir "kairo.exe") -Force
-        Copy-Item "target\release\kairo-mcp.exe" (Join-Path $InstallDir "kairo-mcp.exe") -Force
-        Write-Ok "Built and installed kairo.exe + kairo-mcp.exe"
+        cargo build --release --bin continuum-mcp
+        if ($LASTEXITCODE -ne 0) { throw "cargo build continuum-mcp failed" }
+        Copy-Item "target\release\continuum.exe" (Join-Path $InstallDir "continuum.exe") -Force
+        Copy-Item "target\release\continuum-mcp.exe" (Join-Path $InstallDir "continuum-mcp.exe") -Force
+        Write-Ok "Built and installed continuum.exe + continuum-mcp.exe"
 
         Write-Step "Building desktop app (cargo tauri build)..."
         Push-Location (Join-Path $repoRoot "apps\desktop")
@@ -225,10 +225,10 @@ if ($FromSource) {
             pnpm install --frozen-lockfile
             pnpm tauri build
             if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed" }
-            $bundled = Get-ChildItem "src-tauri\target\release" -Filter "kairo-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $bundled = Get-ChildItem "src-tauri\target\release" -Filter "continuum-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($bundled) {
-                Copy-Item $bundled.FullName (Join-Path $InstallDir "kairo-desktop.exe") -Force
-                Write-Ok "Installed kairo-desktop.exe"
+                Copy-Item $bundled.FullName (Join-Path $InstallDir "continuum-desktop.exe") -Force
+                Write-Ok "Installed continuum-desktop.exe"
             }
         } finally {
             Pop-Location
@@ -239,16 +239,16 @@ if ($FromSource) {
 } else {
     # Download from GitHub releases
     Write-Step "Downloading release binary..."
-    $repo = "vixco/kairo-ai"
+    $repo = "vixco/Continuum"
     try {
         if ($Version -eq "latest") {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "kairo-installer" }
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "continuum-installer" }
         } else {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$Version" -Headers @{ "User-Agent" = "kairo-installer" }
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$Version" -Headers @{ "User-Agent" = "continuum-installer" }
         }
         Write-Ok "Found release $($release.tag_name)"
 
-        $asset = $release.assets | Where-Object { $_.name -match 'kairo-.*-windows.*\.zip$' } | Select-Object -First 1
+        $asset = $release.assets | Where-Object { $_.name -match 'continuum-.*-windows.*\.zip$' } | Select-Object -First 1
         if (-not $asset) {
             Write-Err "No Windows .zip asset in release $($release.tag_name)."
             Write-Host "    -> Fall back to: .\scripts\install.ps1 -FromSource" -ForegroundColor Yellow
@@ -256,7 +256,7 @@ if ($FromSource) {
         }
         $sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
 
-        $tmpZip = Join-Path $env:TEMP "kairo-release.zip"
+        $tmpZip = Join-Path $env:TEMP "continuum-release.zip"
         Write-Info "Downloading $($asset.name) (~$([math]::Round($asset.size / 1MB)) MB)..."
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpZip
 
@@ -264,7 +264,7 @@ if ($FromSource) {
         # from v0.1.0-alpha.2 onward). If the file is missing (older alpha)
         # we warn rather than abort so existing install flows don't break.
         if ($sumsAsset) {
-            $tmpSums = Join-Path $env:TEMP "kairo-SHA256SUMS.txt"
+            $tmpSums = Join-Path $env:TEMP "continuum-SHA256SUMS.txt"
             Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $tmpSums
             $expected = $null
             foreach ($line in Get-Content $tmpSums) {
@@ -295,7 +295,7 @@ if ($FromSource) {
         Write-Info "Extracting to $InstallDir..."
         Expand-Archive -Path $tmpZip -DestinationPath $InstallDir -Force
         Remove-Item $tmpZip -Force
-        Write-Ok "Kairo binary installed"
+        Write-Ok "Continuum binary installed"
     } catch {
         Write-Err "Release download failed: $($_.Exception.Message)"
         Write-Host "    -> Fall back to building from source: .\scripts\install.ps1 -FromSource" -ForegroundColor Yellow
@@ -319,14 +319,14 @@ if (-not $SkipModels) {
     Write-Header "Downloading default models"
     $modelScript = Join-Path $repoRoot "scripts\download-models.ps1"
     if (Test-Path $modelScript) {
-        # The shipped download script writes to ~/.kairo-dev/models/; redirect via env.
-        $env:KAIRO_MODELS_DIR = Join-Path $KairoData "models"
+        # The shipped download script writes to ~/.continuum-dev/models/; redirect via env.
+        $env:CONTINUUM_MODELS_DIR = Join-Path $ContinuumData "models"
         & $modelScript
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Some models failed to download. You can rerun 'kairo setup' later to retry."
+            Write-Warn "Some models failed to download. You can rerun 'continuum setup' later to retry."
         }
     } else {
-        Write-Warn "scripts/download-models.ps1 not found. Run 'kairo setup' after install to fetch models."
+        Write-Warn "scripts/download-models.ps1 not found. Run 'continuum setup' after install to fetch models."
     }
 } else {
     Write-Info "Skipping model download (-SkipModels)."
@@ -340,30 +340,30 @@ $wshell = New-Object -ComObject WScript.Shell
 
 # Start Menu shortcut
 $startMenu = [Environment]::GetFolderPath("Programs")
-$startLnk = Join-Path $startMenu "Kairo.lnk"
-$targetExe = Join-Path $InstallDir "kairo-desktop.exe"
+$startLnk = Join-Path $startMenu "Continuum.lnk"
+$targetExe = Join-Path $InstallDir "continuum-desktop.exe"
 if (-not (Test-Path $targetExe)) {
-    # Fall back to kairo.exe if the dashboard wasn't bundled in this install
-    $targetExe = Join-Path $InstallDir "kairo.exe"
+    # Fall back to continuum.exe if the dashboard wasn't bundled in this install
+    $targetExe = Join-Path $InstallDir "continuum.exe"
 }
 if (Test-Path $targetExe) {
     $s = $wshell.CreateShortcut($startLnk)
     $s.TargetPath = $targetExe
     $s.WorkingDirectory = $InstallDir
-    $s.Description = "Kairo — the AI that knows when to act"
+    $s.Description = "Continuum — the AI that knows when to act"
     $s.Save()
     Write-Ok "Start Menu shortcut created"
 } else {
-    Write-Warn "Kairo executable not found at $targetExe — skipping Start Menu shortcut"
+    Write-Warn "Continuum executable not found at $targetExe — skipping Start Menu shortcut"
 }
 
 # Desktop shortcut (optional)
 if ($DesktopShortcut -and (Test-Path $targetExe)) {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $dl = $wshell.CreateShortcut((Join-Path $desktop "Kairo.lnk"))
+    $dl = $wshell.CreateShortcut((Join-Path $desktop "Continuum.lnk"))
     $dl.TargetPath = $targetExe
     $dl.WorkingDirectory = $InstallDir
-    $dl.Description = "Kairo — the AI that knows when to act"
+    $dl.Description = "Continuum — the AI that knows when to act"
     $dl.Save()
     Write-Ok "Desktop shortcut created"
 }
@@ -371,7 +371,7 @@ if ($DesktopShortcut -and (Test-Path $targetExe)) {
 # Auto-start (optional)
 if ($AutoStart -and (Test-Path $targetExe)) {
     $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    New-ItemProperty -Path $runKey -Name "Kairo" -Value "`"$targetExe`"" -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name "Continuum" -Value "`"$targetExe`"" -PropertyType String -Force | Out-Null
     Write-Ok "Registered to start with Windows"
 }
 
@@ -379,25 +379,25 @@ if ($AutoStart -and (Test-Path $targetExe)) {
 
 $marker = Join-Path $userConfigDir "install-version"
 $release_tag = if ($FromSource) { "source-$(git -C $repoRoot rev-parse --short HEAD 2>$null)" } else { $Version }
-Set-Content -Path $marker -Value "kairo $release_tag installed $(Get-Date -Format o)"
+Set-Content -Path $marker -Value "continuum $release_tag installed $(Get-Date -Format o)"
 
 # ---- Summary ----------------------------------------------------------------
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor Green
-Write-Host "  Kairo installed successfully." -ForegroundColor Green
+Write-Host "  Continuum installed successfully." -ForegroundColor Green
 Write-Host "=============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Install dir: $InstallDir"
-Write-Host "  Data dir:    $KairoData"
+Write-Host "  Data dir:    $ContinuumData"
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor Cyan
-Write-Host "    1. Launch Kairo from the Start Menu or run 'kairo' from a new shell."
+Write-Host "    1. Launch Continuum from the Start Menu or run 'continuum' from a new shell."
 Write-Host "    2. The dashboard will open and guide you through first-run setup."
-Write-Host "    3. If anything needs a second look, run 'kairo setup' at any time."
+Write-Host "    3. If anything needs a second look, run 'continuum setup' at any time."
 Write-Host ""
-Write-Host "  Docs: https://vixco.github.io/kairo-ai" -ForegroundColor Gray
-Write-Host "  Issues: https://github.com/vixco/kairo-ai/issues" -ForegroundColor Gray
+Write-Host "  Docs: https://vixco.github.io/Continuum" -ForegroundColor Gray
+Write-Host "  Issues: https://github.com/vixco/Continuum/issues" -ForegroundColor Gray
 Write-Host ""
 
 exit 0

@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Kairo is broken or behaves incorrectly.
+description: Something in Continuum is broken or behaves incorrectly.
 title: "[bug]: "
 labels: ["bug", "triage"]
 body:
@@ -8,13 +8,13 @@ body:
       value: |
         Thanks for filing a bug. A good report saves everyone time — please fill in as much as you can.
 
-        Before filing: search [existing issues](https://github.com/vixco/kairo-ai/issues?q=is%3Aissue) in case someone already reported this.
+        Before filing: search [existing issues](https://github.com/vixco/Continuum/issues?q=is%3Aissue) in case someone already reported this.
 
   - type: input
-    id: kairo-version
+    id: continuum-version
     attributes:
-      label: Kairo version
-      description: Run `kairo --version` or check the dashboard topbar.
+      label: Continuum version
+      description: Run `continuum --version` or check the dashboard topbar.
       placeholder: "0.1.0-alpha.1"
     validations:
       required: true
@@ -40,7 +40,7 @@ body:
   - type: dropdown
     id: install-method
     attributes:
-      label: How did you install Kairo?
+      label: How did you install Continuum?
       options:
         - GitHub release (installer script)
         - Built from source
@@ -90,8 +90,8 @@ body:
       label: Steps to reproduce
       description: The more specific the better. "Sometimes it just breaks" is hard to act on.
       placeholder: |
-        1. Launch Kairo
-        2. Say "hey kairo"
+        1. Launch Continuum
+        2. Say "hey continuum"
         3. ...
     validations:
       required: true
@@ -101,8 +101,8 @@ body:
     attributes:
       label: Relevant logs
       description: |
-        Paste the last ~50 lines of `~/.kairo/logs/<component>.log` or copy from the dashboard Logs tab.
-        Please redact anything sensitive before pasting. Kairo never phones home, but log lines may contain things you didn't intend to share.
+        Paste the last ~50 lines of `~/.continuum/logs/<component>.log` or copy from the dashboard Logs tab.
+        Please redact anything sensitive before pasting. Continuum never phones home, but log lines may contain things you didn't intend to share.
       render: text
 
   - type: checkboxes
@@ -112,7 +112,7 @@ body:
       options:
         - label: I searched existing issues and this isn't a duplicate.
           required: true
-        - label: I tried restarting Kairo and the bug reproduces.
+        - label: I tried restarting Continuum and the bug reproduces.
           required: true
         - label: I redacted secrets, credentials, and personal data from the logs.
           required: true

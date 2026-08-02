@@ -5,7 +5,7 @@ import { clsx } from "clsx";
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 
 import { Button, Card, Select, Toggle } from "@/components/ui/primitives";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import type { SaveSkillInput, Skill } from "@/lib/types";
 
 const MCP_NAMESPACES: Array<{
@@ -89,7 +89,7 @@ export function ToolsTab() {
   async function refresh() {
     setLoading(true);
     try {
-      setSkills(await kairo.listSkills());
+      setSkills(await continuum.listSkills());
       setError(null);
     } catch (e) {
       setError(`Failed to load skills: ${e}`);
@@ -104,7 +104,7 @@ export function ToolsTab() {
 
   async function handleToggle(skill: Skill) {
     try {
-      await kairo.toggleSkill(skill.name, !skill.enabled);
+      await continuum.toggleSkill(skill.name, !skill.enabled);
       await refresh();
     } catch (e) {
       setError(`Toggle failed: ${e}`);
@@ -114,7 +114,7 @@ export function ToolsTab() {
   async function handleDelete(skill: Skill) {
     if (!confirm(`Delete skill '${skill.name}'? This removes the directory on disk.`)) return;
     try {
-      await kairo.deleteSkill(skill.name);
+      await continuum.deleteSkill(skill.name);
       await refresh();
     } catch (e) {
       setError(`Delete failed: ${e}`);
@@ -123,7 +123,7 @@ export function ToolsTab() {
 
   async function handleSave(input: SaveSkillInput) {
     try {
-      await kairo.saveSkill(input);
+      await continuum.saveSkill(input);
       setEditing(null);
       await refresh();
     } catch (e) {
@@ -134,7 +134,7 @@ export function ToolsTab() {
   async function handleInstall() {
     if (!installUrl.trim()) return;
     try {
-      await kairo.installSkillFromUrl(installUrl.trim());
+      await continuum.installSkillFromUrl(installUrl.trim());
       setInstallUrl("");
       await refresh();
     } catch (e) {
@@ -146,7 +146,7 @@ export function ToolsTab() {
     <div className="mx-auto max-w-6xl space-y-6">
       <Card
         title="MCP tools"
-        subtitle="Exposed to the orchestrator via kairo-mcp"
+        subtitle="Exposed to the orchestrator via continuum-mcp"
         actions={
           <Button size="sm" variant="default" disabled>
             <Plus size={12} /> Install server

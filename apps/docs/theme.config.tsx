@@ -10,10 +10,10 @@ const config: DocsThemeConfig = {
     </span>
   ),
   project: {
-    link: "https://github.com/vixco/kairo-ai",
+    link: "https://github.com/vixco/Continuum",
   },
   docsRepositoryBase:
-    "https://github.com/vixco/kairo-ai/tree/main/apps/docs",
+    "https://github.com/vixco/Continuum/tree/main/apps/docs",
   footer: {
     content: (
       <span>
@@ -30,9 +30,9 @@ const config: DocsThemeConfig = {
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       <meta
         name="description"
-        content="Kairo — the AI that knows when to act. A desktop-native, local-first ambient AI assistant for Windows."
+        content="Continuum — the AI that knows when to act. A desktop-native, local-first ambient AI assistant for Windows."
       />
-      <meta property="og:title" content="Kairo" />
+      <meta property="og:title" content="Continuum" />
       <meta
         property="og:description"
         content="The AI that knows when to act. A desktop-native, local-first ambient AI assistant for Windows."

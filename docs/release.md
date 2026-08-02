@@ -1,6 +1,6 @@
-# Releasing Kairo
+# Releasing Continuum
 
-This document is the canonical runbook for cutting a Kairo release. It's written for the maintainer, but contributors are welcome to read it so they know what's going to happen to their merged PR.
+This document is the canonical runbook for cutting a Continuum release. It's written for the maintainer, but contributors are welcome to read it so they know what's going to happen to their merged PR.
 
 ## Cadence
 
@@ -9,7 +9,7 @@ This document is the canonical runbook for cutting a Kairo release. It's written
 
 ## Versioning
 
-Kairo uses [SemVer](https://semver.org/) with explicit pre-release tags:
+Continuum uses [SemVer](https://semver.org/) with explicit pre-release tags:
 
 - `0.1.0-alpha.N` — first public releases. Expect breaking changes between alphas.
 - `0.1.0-beta.N` — feature-stable, bug-fixing phase. Config compatibility is preserved across betas.
@@ -18,7 +18,7 @@ Kairo uses [SemVer](https://semver.org/) with explicit pre-release tags:
 
 ## Pre-release checklist
 
-Run through this on a **clean Windows 10 or 11 VM** (or at least a fresh `~/.kairo/`) before tagging.
+Run through this on a **clean Windows 10 or 11 VM** (or at least a fresh `~/.continuum/`) before tagging.
 
 ### 1. Code readiness
 
@@ -52,12 +52,12 @@ Run through this on a **clean Windows 10 or 11 VM** (or at least a fresh `~/.kai
 
 On a clean VM:
 
-- [ ] `irm https://raw.githubusercontent.com/vixco/kairo-ai/<tag>/scripts/install.ps1 | iex`
+- [ ] `irm https://raw.githubusercontent.com/vixco/continuum-ai/<tag>/scripts/install.ps1 | iex`
   - Pick a moment when the release is already published so the tag URL resolves.
 - [ ] Onboarding wizard completes end-to-end (Claude check → models → voice → permissions → diagnostics → done).
-- [ ] `kairo setup` reports all green.
+- [ ] `continuum setup` reports all green.
 - [ ] Runtime starts, senses produce frames, triage decisions flow.
-- [ ] Say "hey kairo" — wake + orchestrator + voice reply works.
+- [ ] Say "hey continuum" — wake + orchestrator + voice reply works.
 - [ ] Dashboard opens, Home tab renders live state.
 - [ ] Trigger "Fix Issues" from the Health tab — repair agent starts.
 
@@ -65,8 +65,8 @@ On a clean VM:
 
 Run `scripts\uninstall.ps1` if present. Verify:
 
-- [ ] `%LOCALAPPDATA%\Kairo` is removed.
-- [ ] `~/.kairo/` is preserved (we never destroy user data without explicit confirmation).
+- [ ] `%LOCALAPPDATA%\Continuum` is removed.
+- [ ] `~/.continuum/` is preserved (we never destroy user data without explicit confirmation).
 - [ ] Start Menu shortcut is gone.
 - [ ] Registry `Run` entry is gone (if auto-start was enabled).
 
@@ -100,7 +100,7 @@ For an exceptional, explicitly reviewed release, tag locally:
 
 ```powershell
 # From a clean checkout of main at the commit you want to release
-git tag -a v0.1.0-alpha.N -m "Kairo 0.1.0-alpha.N"
+git tag -a v0.1.0-alpha.N -m "Continuum 0.1.0-alpha.N"
 ```
 
 Do **not** push the tag yet.
@@ -121,11 +121,11 @@ Pushing a manually-created tag is a fallback for the normal `main` push flow.
 The release workflow currently watches `main`; to use a manual tag fallback,
 run the workflow manually after the tag exists. A successful run:
 
-1. Builds `kairo.exe`, `kairo-mcp.exe`, and the Tauri desktop bundle in release mode on `windows-latest`.
+1. Builds `continuum.exe`, `continuum-mcp.exe`, and the Tauri desktop bundle in release mode on `windows-latest`.
 2. Runs the full test suite (last-chance verification).
 3. Produces:
-   - `kairo-<version>-windows-x64.zip` (portable) — `kairo.exe`, `kairo-mcp.exe`, `kairo-desktop.exe`, default configs.
-   - `kairo-<version>-windows-x64.msi` (Tauri 2 bundled installer).
+   - `continuum-<version>-windows-x64.zip` (portable) — `continuum.exe`, `continuum-mcp.exe`, `continuum-desktop.exe`, default configs.
+   - `continuum-<version>-windows-x64.msi` (Tauri 2 bundled installer).
 4. Creates and publishes a GitHub release with auto-generated changelog from commits since the previous tag.
 
 ### 4. Finalise the release
@@ -147,7 +147,7 @@ run the workflow manually after the tag exists. A successful run:
 
 ## Code signing
 
-As of 0.1.0-alpha.1, Kairo binaries are **not signed**. Windows SmartScreen will warn on first launch. The release notes should say this explicitly.
+As of 0.1.0-alpha.1, Continuum binaries are **not signed**. Windows SmartScreen will warn on first launch. The release notes should say this explicitly.
 
 ### Signing setup (when we have a cert)
 
@@ -171,7 +171,7 @@ For critical security fixes, prefer shipping a new patch release within 24 hours
 
 ## Post-1.0 changes to this runbook
 
-Once Kairo hits 1.0:
+Once Continuum hits 1.0:
 
 - Add a mandatory signed-build step.
 - Add `winget` publication (`winget submit`).

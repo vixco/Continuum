@@ -1,4 +1,4 @@
-# Kairo MCP tool permission tiers
+# Continuum MCP tool permission tiers
 #
 # Tiers:
 #   auto             — can be called without confirmation
@@ -6,10 +6,10 @@
 #   always-confirm   — requires confirmation on every call
 #   blocked          — cannot be called unless explicitly enabled by user
 #
-# Override in ~/.kairo/permissions.toml or ~/.kairo-dev/permissions.toml.
+# Override in ~/.continuum/permissions.toml or ~/.continuum-dev/permissions.toml.
 #
 # The tool names below MUST match the handlers registered in
-# `crates/kairo-mcp/src/server.rs`. When you add, rename, or remove a tool
+# `crates/continuum-mcp/src/server.rs`. When you add, rename, or remove a tool
 # there, update this file in the same commit (non-negotiable #7 — MCP tool
 # schemas are a public contract, bump a version if they shift).
 

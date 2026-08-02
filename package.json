@@ -1,5 +1,5 @@
 {
-  "name": "kairo-ai",
+  "name": "continuum",
   "private": true,
   "packageManager": "pnpm@10.11.1",
   "engines": {
@@ -8,8 +8,8 @@
   "scripts": {
     "dev": "pnpm --filter desktop dev",
     "build": "pnpm run build:desktop && pnpm run build:docs",
-    "build:desktop": "pnpm --filter @kairo/desktop build",
-    "build:docs": "pnpm --filter kairo-docs build",
-    "typecheck": "pnpm --filter @kairo/desktop typecheck"
+    "build:desktop": "pnpm --filter @continuum/desktop build",
+    "build:docs": "pnpm --filter continuum-docs build",
+    "typecheck": "pnpm --filter @continuum/desktop typecheck"
   }
 }

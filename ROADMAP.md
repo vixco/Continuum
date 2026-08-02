@@ -20,7 +20,7 @@ Deze verdeling is het startpunt. Wissel taken als ervaring of beschikbaarheid da
 
 ## Fase 0 — Fundament en productrichting
 
-**Doel:** van de Kairo-donor een reproduceerbare, eerlijke Continuum-basis maken.
+**Doel:** van de Continuum-donor een reproduceerbare, eerlijke Continuum-basis maken.
 
 ### Product en architectuur
 

@@ -5,7 +5,7 @@ import { clsx } from "clsx";
 import { AlertTriangle, Download, Search, Trash2 } from "lucide-react";
 
 import { useStore } from "@/lib/store";
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import {
   Button,
   Card,
@@ -78,7 +78,7 @@ function RawLogPanel() {
     >
       <EmptyState
         title="Raw log browsing is limited"
-        description="Full timeline view requires the kairo runtime to be running. It ships with Phase 6.5."
+        description="Full timeline view requires the continuum runtime to be running. It ships with Phase 6.5."
       />
     </Card>
   );
@@ -92,7 +92,7 @@ function EpisodicPanel() {
   async function search() {
     setLoading(true);
     try {
-      const r = await kairo.searchEpisodic(query, 20);
+      const r = await continuum.searchEpisodic(query, 20);
       setResults(r);
     } finally {
       setLoading(false);
@@ -118,7 +118,7 @@ function EpisodicPanel() {
       {results.length === 0 ? (
         <EmptyState
           title="No results"
-          description="Episodic search is wired through kairo-mcp. Run the main runtime to populate it."
+          description="Episodic search is wired through continuum-mcp. Run the main runtime to populate it."
         />
       ) : (
         <ul className="space-y-2">
@@ -141,7 +141,7 @@ function SemanticPanel() {
   const [wipeInput, setWipeInput] = useState("");
 
   useEffect(() => {
-    void kairo.listSemantic().then(setFacts);
+    void continuum.listSemantic().then(setFacts);
   }, []);
 
   const grouped = useMemo(() => {
@@ -156,10 +156,10 @@ function SemanticPanel() {
 
   async function addFact() {
     if (!newKey.trim() || !newValue.trim()) return;
-    await kairo.setSemantic(newKey.trim(), newValue.trim());
+    await continuum.setSemantic(newKey.trim(), newValue.trim());
     setNewKey("");
     setNewValue("");
-    const fresh = await kairo.listSemantic();
+    const fresh = await continuum.listSemantic();
     setFacts(fresh);
   }
 
@@ -177,7 +177,7 @@ function SemanticPanel() {
         {grouped.length === 0 ? (
           <EmptyState
             title="No semantic facts"
-            description="Run the kairo runtime and let Kairo observe for a while, or add facts manually above."
+            description="Run the continuum runtime and let Continuum observe for a while, or add facts manually above."
           />
         ) : (
           <div className="space-y-4">
@@ -196,8 +196,8 @@ function SemanticPanel() {
                           <button
                             className="text-state-error hover:opacity-80"
                             onClick={async () => {
-                              await kairo.deleteSemantic(f.key);
-                              setFacts(await kairo.listSemantic());
+                              await continuum.deleteSemantic(f.key);
+                              setFacts(await continuum.listSemantic());
                             }}
                           >
                             <Trash2 size={13} />
@@ -247,10 +247,10 @@ function SemanticPanel() {
               variant="danger"
               disabled={wipeInput !== "DELETE"}
               onClick={async () => {
-                await kairo.wipeMemory(wipeInput);
+                await continuum.wipeMemory(wipeInput);
                 setConfirmWipe(false);
                 setWipeInput("");
-                setFacts(await kairo.listSemantic());
+                setFacts(await continuum.listSemantic());
               }}
             >
               Confirm wipe

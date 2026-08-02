@@ -1,6 +1,6 @@
 # Phase 1 Smoke Test — 2026-04-10
 
-5-minute end-to-end test of `kairo-perception` with real vision, audio, and context.
+5-minute end-to-end test of `continuum-perception` with real vision, audio, and context.
 
 ## Environment
 
@@ -16,7 +16,7 @@
 ## Test run
 
 ```
-cargo run --bin kairo-perception
+cargo run --bin continuum-perception
 # ran for 5 minutes via timeout 300
 ```
 
@@ -33,7 +33,7 @@ cargo run --bin kairo-perception
 - **Inference time**: ~4-6 seconds per frame (encoder ~1.5s, decoder loop ~2-4s)
 - **Frame interval**: Effective ~6.5s (exceeds configured 3s due to CPU inference time)
 - **Quality note**: 256M q4 model produces repetitive, low-detail descriptions. This is expected for the model size. Descriptions recognize UI elements (search bars, backgrounds) but lack specificity. Upgrading to the full-precision model or a larger model will improve quality.
-- **Screenshots**: 49 JPEGs saved to `~/.kairo-dev/screenshots/2026-04-10/`, ~50 KB each
+- **Screenshots**: 49 JPEGs saved to `~/.continuum-dev/screenshots/2026-04-10/`, ~50 KB each
 
 ### Audio (microphone + VAD + whisper)
 
@@ -61,7 +61,7 @@ cargo run --bin kairo-perception
 ### Raw log (SQLite)
 
 - **Status**: Working
-- **Database**: `~/.kairo-dev/raw_log.sqlite` (16 KB after 5 minutes)
+- **Database**: `~/.continuum-dev/raw_log.sqlite` (16 KB after 5 minutes)
 - **Frames stored**: All frames written successfully with timestamps, descriptions, and screenshot paths
 
 ### Performance

@@ -21,15 +21,15 @@ padding.
 
 ## Gather context first
 
-1. Read the target file(s) with `Read` (or `mcp__kairo__fs_read_file`
+1. Read the target file(s) with `Read` (or `mcp__continuum__fs_read_file`
    when the allowlist permits it). If a diff is available, read both
    sides so you can compare.
-2. Check semantic memory with `mcp__kairo__memory_list_facts` prefix
+2. Check semantic memory with `mcp__continuum__memory_list_facts` prefix
    `"project."` for the current project — get stack, conventions,
    and style preferences so you don't fight the house style.
 3. If this review is for a PR (`pr:` or `#123` in the user's message),
    check for any recent episodic memory via
-   `mcp__kairo__memory_query_episodic` — the user may have already
+   `mcp__continuum__memory_query_episodic` — the user may have already
    discussed intent.
 
 ## What to check

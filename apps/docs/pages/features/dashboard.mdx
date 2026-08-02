@@ -1,6 +1,6 @@
 # Dashboard
 
-The Tauri 2 + Next.js desktop dashboard is where you inspect, configure, and manage Kairo. Eight tabs, all live-updating.
+The Tauri 2 + Next.js desktop dashboard is where you inspect, configure, and manage Continuum. Eight tabs, all live-updating.
 
 ## Home
 
@@ -40,8 +40,8 @@ Also exposes: backup status, last successful repair, rolling 24 h error rate per
 
 The dashboard process and the runtime process are separate. They communicate via:
 
-- `~/.kairo/state.json` — the runtime writes a snapshot every 2 s; the dashboard reads it
-- `~/.kairo/repair-intents/` — the repair agent writes intents; the runtime acts on them
+- `~/.continuum/state.json` — the runtime writes a snapshot every 2 s; the dashboard reads it
+- `~/.continuum/repair-intents/` — the repair agent writes intents; the runtime acts on them
 - Tauri `emit`/`listen` events for state / logs / repair bridging
 
-State can lag by up to 2 s after a config change. See [dashboard.md](https://github.com/vixco/kairo-ai/blob/main/docs/dashboard.md) for the full architecture.
+State can lag by up to 2 s after a config change. See [dashboard.md](https://github.com/vixco/Continuum/blob/main/docs/dashboard.md) for the full architecture.

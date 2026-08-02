@@ -1,0 +1,132 @@
+[package]
+name = "continuum-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Main orchestration runtime for Continuum — the four-layer cognitive engine"
+
+[features]
+# `runtime` is on by default so `cargo build -p continuum-core` and the continuum
+# binary work unchanged. The desktop app sets `default-features = false` to
+# avoid pulling llama-cpp + whisper into the Tauri build — it only needs
+# the state / log / health / config modules.
+default = ["runtime"]
+runtime = [
+    "dep:continuum-llm",
+    "dep:continuum-vision",
+    "dep:xcap",
+    "dep:sqlx",
+    "dep:lancedb",
+    "dep:fastembed",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:cpal",
+    "dep:whisper-rs",
+    "dep:rubato",
+    "dep:futures",
+]
+cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
+vulkan = ["runtime", "continuum-llm/vulkan"]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+image = { workspace = true }
+dirs = "6"
+toml = "0.8"
+parking_lot = "0.12"
+sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Optional (feature = "runtime"): heavy native deps
+continuum-vision = { path = "../continuum-vision", optional = true }
+continuum-llm = { path = "../continuum-llm", optional = true }
+xcap = { version = "0.8", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], optional = true }
+lancedb = { workspace = true, optional = true }
+fastembed = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
+cpal = { version = "0.17", optional = true }
+whisper-rs = { version = "0.16", optional = true }
+rubato = { version = "2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Power",
+    "Win32_System_LibraryLoader",
+] }
+
+[[bin]]
+name = "continuum"
+path = "src/bin/continuum.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "continuum-perception"
+path = "src/bin/continuum-perception.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "continuum-triage-bench"
+path = "src/bin/continuum-triage-bench.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "audio-probe"
+path = "src/bin/audio-probe.rs"
+required-features = ["runtime"]
+
+[[test]]
+name = "orchestrator_mock"
+path = "tests/orchestrator_mock.rs"
+required-features = ["runtime"]
+
+[[test]]
+name = "phase8_workers"
+path = "tests/phase8_workers.rs"
+required-features = ["runtime"]
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+required-features = ["runtime"]
+
+[[example]]
+name = "voice_demo"
+path = "examples/voice_demo.rs"
+required-features = ["runtime"]
+
+[[example]]
+name = "voice_test"
+path = "examples/voice_test.rs"
+required-features = ["runtime"]
+
+[[example]]
+name = "voice_latency_bench"
+path = "examples/voice_latency_bench.rs"
+required-features = ["runtime"]
+
+[[example]]
+name = "worker_demo"
+path = "examples/worker_demo.rs"
+required-features = ["runtime"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

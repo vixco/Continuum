@@ -21,14 +21,14 @@ overview. Produce a spoken briefing under 60 seconds (~120 words).
 
 Before speaking, call these tools in parallel and wait for all results:
 
-1. `mcp__kairo__system_current_time` — confirm the date and day-of-week.
-2. `mcp__kairo__memory_query_episodic` with query `"yesterday"` (limit 5) —
+1. `mcp__continuum__system_current_time` — confirm the date and day-of-week.
+2. `mcp__continuum__memory_query_episodic` with query `"yesterday"` (limit 5) —
    capture what the user did recently; look for unfinished items.
-3. `mcp__kairo__memory_list_facts` with prefix `"user."` (limit 20) —
+3. `mcp__continuum__memory_list_facts` with prefix `"user."` (limit 20) —
    read the user's routines, preferences, and today-relevant reminders.
-4. `mcp__kairo__memory_list_facts` with prefix `"schedule."` (limit 20) —
+4. `mcp__continuum__memory_list_facts` with prefix `"schedule."` (limit 20) —
    recurring events and commitments.
-5. `mcp__kairo__workers_worker_list` with `status="completed"` (limit 5) —
+5. `mcp__continuum__workers_worker_list` with `status="completed"` (limit 5) —
    any overnight worker runs with results the user should know about.
 
 If a calendar or email tool is present in the available-tools list, use it
@@ -61,6 +61,6 @@ pad.
 
 ## Write the briefing to memory
 
-After speaking, call `mcp__kairo__memory_set_fact` with key
+After speaking, call `mcp__continuum__memory_set_fact` with key
 `routine.last_briefing_at` and value `<now RFC3339>` so the next
 briefing can deduplicate if asked again within the hour.

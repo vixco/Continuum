@@ -210,8 +210,8 @@ export function Slider({
         step={step}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
-        style={{ ["--kairo-range-fill" as string]: `${fillPct}%` }}
-        className="kairo-range block w-full"
+        style={{ ["--continuum-range-fill" as string]: `${fillPct}%` }}
+        className="continuum-range block w-full"
       />
     </div>
   );
@@ -239,7 +239,7 @@ export function Select<T extends string>({
         value={value}
         onChange={(e) => onChange(e.target.value as T)}
         className={clsx(
-          "kairo-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
+          "continuum-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
           "transition-colors hover:border-bg-hover",
           "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20"
         )}

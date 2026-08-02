@@ -6988,10 +6988,10 @@
     },
     {
       "type": "library",
-      "name": "kairo-core",
+      "name": "continuum-core",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:cargo/kairo-core@0.1.0-alpha.2",
-      "bom-ref": "pkg:cargo/kairo-core@0.1.0-alpha.2",
+      "purl": "pkg:cargo/continuum-core@0.1.0-alpha.2",
+      "bom-ref": "pkg:cargo/continuum-core@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -7006,10 +7006,10 @@
     },
     {
       "type": "library",
-      "name": "kairo-desktop",
+      "name": "continuum-desktop",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:cargo/kairo-desktop@0.1.0-alpha.2",
-      "bom-ref": "pkg:cargo/kairo-desktop@0.1.0-alpha.2",
+      "purl": "pkg:cargo/continuum-desktop@0.1.0-alpha.2",
+      "bom-ref": "pkg:cargo/continuum-desktop@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -7024,10 +7024,10 @@
     },
     {
       "type": "library",
-      "name": "kairo-llm",
+      "name": "continuum-llm",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:cargo/kairo-llm@0.1.0-alpha.2",
-      "bom-ref": "pkg:cargo/kairo-llm@0.1.0-alpha.2",
+      "purl": "pkg:cargo/continuum-llm@0.1.0-alpha.2",
+      "bom-ref": "pkg:cargo/continuum-llm@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -7042,10 +7042,10 @@
     },
     {
       "type": "library",
-      "name": "kairo-mcp",
+      "name": "continuum-mcp",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:cargo/kairo-mcp@0.1.0-alpha.2",
-      "bom-ref": "pkg:cargo/kairo-mcp@0.1.0-alpha.2",
+      "purl": "pkg:cargo/continuum-mcp@0.1.0-alpha.2",
+      "bom-ref": "pkg:cargo/continuum-mcp@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -7060,10 +7060,10 @@
     },
     {
       "type": "library",
-      "name": "kairo-vision",
+      "name": "continuum-vision",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:cargo/kairo-vision@0.1.0-alpha.2",
-      "bom-ref": "pkg:cargo/kairo-vision@0.1.0-alpha.2",
+      "purl": "pkg:cargo/continuum-vision@0.1.0-alpha.2",
+      "bom-ref": "pkg:cargo/continuum-vision@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -19932,11 +19932,11 @@
     },
     {
       "type": "library",
-      "group": "kairo",
+      "group": "continuum",
       "name": "desktop",
       "version": "0.1.0-alpha.2",
-      "purl": "pkg:npm/%40kairo%2Fdesktop@0.1.0-alpha.2",
-      "bom-ref": "pkg:npm/%40kairo%2Fdesktop@0.1.0-alpha.2",
+      "purl": "pkg:npm/%40continuum%2Fdesktop@0.1.0-alpha.2",
+      "bom-ref": "pkg:npm/%40continuum%2Fdesktop@0.1.0-alpha.2",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -26331,10 +26331,10 @@
     {
       "type": "library",
       "group": "",
-      "name": "kairo-docs",
+      "name": "continuum-docs",
       "version": "0.1.0-alpha.1",
-      "purl": "pkg:npm/kairo-docs@0.1.0-alpha.1",
-      "bom-ref": "pkg:npm/kairo-docs@0.1.0-alpha.1",
+      "purl": "pkg:npm/continuum-docs@0.1.0-alpha.1",
+      "bom-ref": "pkg:npm/continuum-docs@0.1.0-alpha.1",
       "properties": [
         {
           "name": "continuum:ecosystem",
@@ -34060,7 +34060,7 @@
       ]
     },
     {
-      "ref": "pkg:cargo/kairo-core@0.1.0-alpha.2",
+      "ref": "pkg:cargo/continuum-core@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:cargo/anyhow@1.0.102",
         "pkg:cargo/arrow-array@57.3.0",
@@ -34072,8 +34072,8 @@
         "pkg:cargo/fastembed@5.13.2",
         "pkg:cargo/futures@0.3.32",
         "pkg:cargo/image@0.25.10",
-        "pkg:cargo/kairo-llm@0.1.0-alpha.2",
-        "pkg:cargo/kairo-vision@0.1.0-alpha.2",
+        "pkg:cargo/continuum-llm@0.1.0-alpha.2",
+        "pkg:cargo/continuum-vision@0.1.0-alpha.2",
         "pkg:cargo/lancedb@0.27.2",
         "pkg:cargo/parking_lot@0.12.5",
         "pkg:cargo/rubato@2.0.0",
@@ -34095,12 +34095,12 @@
       ]
     },
     {
-      "ref": "pkg:cargo/kairo-desktop@0.1.0-alpha.2",
+      "ref": "pkg:cargo/continuum-desktop@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:cargo/anyhow@1.0.102",
         "pkg:cargo/async-trait@0.1.89",
         "pkg:cargo/chrono@0.4.44",
-        "pkg:cargo/kairo-core@0.1.0-alpha.2",
+        "pkg:cargo/continuum-core@0.1.0-alpha.2",
         "pkg:cargo/serde@1.0.228",
         "pkg:cargo/serde_json@1.0.149",
         "pkg:cargo/tauri-build@2.5.6",
@@ -34116,7 +34116,7 @@
       ]
     },
     {
-      "ref": "pkg:cargo/kairo-llm@0.1.0-alpha.2",
+      "ref": "pkg:cargo/continuum-llm@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:cargo/anyhow@1.0.102",
         "pkg:cargo/encoding_rs@0.8.35",
@@ -34129,13 +34129,13 @@
       ]
     },
     {
-      "ref": "pkg:cargo/kairo-mcp@0.1.0-alpha.2",
+      "ref": "pkg:cargo/continuum-mcp@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:cargo/anyhow@1.0.102",
         "pkg:cargo/chrono@0.4.44",
         "pkg:cargo/dirs@6.0.0",
         "pkg:cargo/glob@0.3.3",
-        "pkg:cargo/kairo-core@0.1.0-alpha.2",
+        "pkg:cargo/continuum-core@0.1.0-alpha.2",
         "pkg:cargo/reqwest@0.12.28",
         "pkg:cargo/rmcp@1.4.0",
         "pkg:cargo/schemars@1.2.1",
@@ -34155,7 +34155,7 @@
       ]
     },
     {
-      "ref": "pkg:cargo/kairo-vision@0.1.0-alpha.2",
+      "ref": "pkg:cargo/continuum-vision@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:cargo/anyhow@1.0.102",
         "pkg:cargo/async-trait@0.1.89",
@@ -40372,7 +40372,7 @@
       ]
     },
     {
-      "ref": "pkg:npm/%40kairo%2Fdesktop@0.1.0-alpha.2",
+      "ref": "pkg:npm/%40continuum%2Fdesktop@0.1.0-alpha.2",
       "dependsOn": [
         "pkg:npm/%40tauri-apps%2Fapi@2.10.1",
         "pkg:npm/%40tauri-apps%2Fcli@2.10.1",
@@ -43349,7 +43349,7 @@
       ]
     },
     {
-      "ref": "pkg:npm/kairo-docs@0.1.0-alpha.1",
+      "ref": "pkg:npm/continuum-docs@0.1.0-alpha.1",
       "dependsOn": [
         "pkg:npm/%40types%2Fnode@22.19.17",
         "pkg:npm/%40types%2Freact@19.2.14",

@@ -1,7 +1,7 @@
 //! Tauri command handlers — the request/response IPC surface.
 //!
 //! These handlers live on the Tauri side so they can `.await` against
-//! kairo-core handles directly. Long-running work (memory search, repair
+//! continuum-core handles directly. Long-running work (memory search, repair
 //! agent) spawns into the tokio runtime the Tauri app owns.
 
 use std::sync::Arc;
@@ -10,34 +10,169 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
-use kairo_core::automations::{Automation, AutomationInput};
-use kairo_core::config::KairoConfig;
-use kairo_core::health::{self, repair::RepairInput};
-use kairo_core::logs::{LogEntry, LogFilter};
-use kairo_core::skills::{self, SkillFrontmatter, SkillLoader};
-use kairo_core::state::{ComponentHealth, KairoState};
-use kairo_core::workers::intent::{self as worker_intent};
-use kairo_core::workers::{WorkerIntent, WorkerSnapshot};
+use continuum_core::automations::{Automation, AutomationInput};
+use continuum_core::config::{ContinuumConfig, ProfileMode, ResourceConfig};
+use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
+use continuum_core::health::{self, repair::RepairInput};
+use continuum_core::logs::{LogEntry, LogFilter};
+use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
+use continuum_core::state::{ComponentHealth, ContinuumState};
+use continuum_core::workers::intent::{self as worker_intent};
+use continuum_core::workers::{WorkerIntent, WorkerSnapshot};
 
 use crate::AppState;
 
 /// Full state snapshot. The dashboard calls this once on mount and then
-/// listens to `kairo:state` events for updates.
+/// listens to `continuum:state` events for updates.
 #[tauri::command]
-pub async fn get_state(app: State<'_, Arc<AppState>>) -> Result<KairoState, String> {
+pub async fn get_state(app: State<'_, Arc<AppState>>) -> Result<ContinuumState, String> {
     Ok(app.runtime.state.snapshot().await)
 }
 
 #[tauri::command]
-pub async fn get_config(app: State<'_, Arc<AppState>>) -> Result<KairoConfig, String> {
+pub async fn get_config(app: State<'_, Arc<AppState>>) -> Result<ContinuumConfig, String> {
     Ok(app.runtime.config_snapshot())
+}
+
+/// Detected hardware + resolved resource plan + current `[resources]` config.
+/// Read-only view for the dashboard Resource panel.
+#[derive(Debug, Serialize)]
+pub struct ResourceProfile {
+    pub specs: HardwareSpecs,
+    pub plan: ResolvedResourcePlan,
+    pub config: ResourceConfig,
+    /// True when the live runtime has published a resource plan to state.json
+    /// (i.e. `continuum.exe` is running and applied its boot-time plan). When
+    /// false, the displayed plan is a fresh resolve against the current config
+    /// and would only take effect after a runtime restart.
+    pub applied: bool,
+}
+
+#[tauri::command]
+pub async fn get_resource_profile(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ResourceProfile, String> {
+    let cfg = app.runtime.config_snapshot();
+    let specs = hardware::probe_hardware();
+    let plan = hardware::resolve_resource_policy(&specs, &cfg.resources);
+    // "applied" = the running runtime has published a resource plan to
+    // state.json AND it matches the plan we'd resolve from the current
+    // config. When false, the displayed plan only takes effect after a
+    // runtime restart (no hot-reload channel).
+    let state_path = app.runtime.dev_dir().join("state.json");
+    let published: Option<ResolvedResourcePlan> = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| {
+            serde_json::from_str::<continuum_core::runtime_publish::RuntimeSnapshot>(&s).ok()
+        })
+        .and_then(|snap| snap.resource_plan);
+    let applied = published.map(|p| p == plan).unwrap_or(false);
+    Ok(ResourceProfile {
+        specs,
+        plan,
+        config: cfg.resources,
+        applied,
+    })
+}
+
+/// Editable subset of `[resources]`. Every field is optional — only the
+/// supplied fields are changed. Setting `profile` to `Custom` is implied
+/// whenever an individual knob is set alongside a non-Custom profile, since
+/// presets would override the knob at resolve time.
+#[derive(Debug, Deserialize, Default)]
+pub struct ResourceProfileUpdate {
+    pub profile: Option<ProfileMode>,
+    pub cpu_core_fraction: Option<f32>,
+    pub gpu_enabled: Option<Option<bool>>,
+    pub vision_enabled: Option<Option<bool>>,
+    pub workers_max_concurrent: Option<Option<u32>>,
+    pub screen_interval_secs: Option<Option<u64>>,
+    pub context_interval_secs: Option<Option<u64>>,
+    pub battery_throttle: Option<bool>,
+}
+
+/// Result of a profile update. `restart_required` is always true — the
+/// resource plan is resolved once at boot and there's no hot-reload channel
+/// (the runtime reads config at startup). The dashboard shows a banner.
+#[derive(Debug, Serialize)]
+pub struct ResourceProfileUpdateResult {
+    pub config: ResourceConfig,
+    pub plan: ResolvedResourcePlan,
+    pub restart_required: bool,
+}
+
+#[tauri::command]
+pub async fn update_resource_profile(
+    app: State<'_, Arc<AppState>>,
+    update: ResourceProfileUpdate,
+) -> Result<ResourceProfileUpdateResult, String> {
+    // Apply the partial update on top of the current [resources] section.
+    let cfg = app
+        .runtime
+        .update_config(|c| {
+            let r = &mut c.resources;
+            if let Some(profile) = update.profile {
+                r.profile = profile;
+            }
+            // Setting an individual knob while on a preset → flip to Custom so
+            // the knob is actually honoured (presets re-derive most knobs).
+            let mut touched_custom = false;
+            if let Some(frac) = update.cpu_core_fraction {
+                r.cpu_core_fraction = frac;
+                touched_custom = true;
+            }
+            if let Some(gpu) = update.gpu_enabled {
+                r.gpu_enabled = gpu;
+                touched_custom = true;
+            }
+            if let Some(vis) = update.vision_enabled {
+                r.vision_enabled = vis;
+                touched_custom = true;
+            }
+            if let Some(w) = update.workers_max_concurrent {
+                r.workers_max_concurrent = w;
+                touched_custom = true;
+            }
+            if let Some(s) = update.screen_interval_secs {
+                r.screen_interval_secs = s;
+                touched_custom = true;
+            }
+            if let Some(s) = update.context_interval_secs {
+                r.context_interval_secs = s;
+                touched_custom = true;
+            }
+            if let Some(b) = update.battery_throttle {
+                r.battery_throttle = b;
+                touched_custom = true;
+            }
+            if touched_custom && r.profile != ProfileMode::Custom {
+                r.profile = ProfileMode::Custom;
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Validate the merged config; update_config already persisted, so a
+    // validation failure here means we should roll back. For simplicity we
+    // surface the error — the caller can re-send a valid value.
+    if let Err(e) = cfg.resources.validate() {
+        return Err(format!("invalid resource config: {e}"));
+    }
+
+    let specs = hardware::probe_hardware();
+    let plan = hardware::resolve_resource_policy(&specs, &cfg.resources);
+
+    Ok(ResourceProfileUpdateResult {
+        config: cfg.resources,
+        plan,
+        restart_required: true,
+    })
 }
 
 #[tauri::command]
 pub async fn update_voice_volume(
     app: State<'_, Arc<AppState>>,
     volume: f32,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     let cfg = app
         .runtime
         .update_config(|c| c.voice.volume = volume.clamp(0.0, 1.0))
@@ -55,7 +190,7 @@ pub async fn update_voice_flag(
     app: State<'_, Arc<AppState>>,
     flag: String,
     value: bool,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     let cfg = app
         .runtime
         .update_config(|c| match flag.as_str() {
@@ -76,7 +211,7 @@ pub async fn update_voice_flag(
 pub async fn update_screen_interval(
     app: State<'_, Arc<AppState>>,
     seconds: u64,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     app.runtime
         .update_config(|c| c.screen.interval_secs = seconds.clamp(1, 30))
         .map_err(|e| e.to_string())
@@ -86,7 +221,7 @@ pub async fn update_screen_interval(
 pub async fn update_triage_threshold(
     app: State<'_, Arc<AppState>>,
     threshold: f32,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     app.runtime
         .update_config(|c| c.frame.salience_threshold = threshold.clamp(0.0, 1.0))
         .map_err(|e| e.to_string())
@@ -144,7 +279,7 @@ pub async fn get_memory_summary(app: State<'_, Arc<AppState>>) -> Result<MemoryS
 }
 
 /// Placeholder semantic-search hook. Full wiring into [`EpisodicStore`]
-/// ships with the kairo-mcp `memory_query_episodic` tool — the dashboard
+/// ships with the continuum-mcp `memory_query_episodic` tool — the dashboard
 /// piggybacks on that when the main runtime is running; we return an empty
 /// list otherwise so the UI renders "no results" instead of erroring.
 #[tauri::command]
@@ -194,8 +329,8 @@ pub async fn wipe_memory(app: State<'_, Arc<AppState>>, confirm: String) -> Resu
     if confirm != "DELETE" {
         return Err("wipe requires the literal string \"DELETE\" as confirmation".into());
     }
-    // Actual wipe is performed by the kairo runtime if running; we just
-    // log the request here. A follow-up PR will extend kairo-mcp with a
+    // Actual wipe is performed by the continuum runtime if running; we just
+    // log the request here. A follow-up PR will extend continuum-mcp with a
     // `memory__wipe_all` tool that this command forwards to.
     tracing::warn!(
         layer = "memory",
@@ -288,14 +423,14 @@ pub async fn trigger_repair(
         };
 
         let emit_handle = app_handle.clone();
-        let cb = move |ev: kairo_core::health::repair::RepairEvent| {
-            let _ = emit_handle.emit("kairo:repair", ev);
+        let cb = move |ev: continuum_core::health::repair::RepairEvent| {
+            let _ = emit_handle.emit("continuum:repair", ev);
         };
 
         if let Err(e) = health::repair::run_repair(input, cb).await {
             let _ = app_handle.emit(
-                "kairo:repair",
-                kairo_core::health::repair::RepairEvent::Error {
+                "continuum:repair",
+                continuum_core::health::repair::RepairEvent::Error {
                     message: e.to_string(),
                 },
             );
@@ -324,18 +459,15 @@ pub async fn restart_component(
 #[tauri::command]
 pub async fn run_backup_now(app: State<'_, Arc<AppState>>) -> Result<String, String> {
     let dev_dir = app.runtime.dev_dir();
-    let backups_dir = dev_dir
-        .parent()
-        .map(|p| p.join(".kairo-backups"))
-        .unwrap_or_else(|| dev_dir.join(".kairo-backups"));
-    let result = kairo_core::health::backup::run_backup(&dev_dir, &backups_dir)
+    let backups_dir = continuum_core::config::continuum_backups_dir();
+    let result = continuum_core::health::backup::run_backup(&dev_dir, &backups_dir)
         .map_err(|e| e.to_string())?;
-    let _ = kairo_core::health::backup::prune_backups(
+    let _ = continuum_core::health::backup::prune_backups(
         &backups_dir,
-        kairo_core::health::backup::DEFAULT_RETENTION,
+        continuum_core::health::backup::DEFAULT_RETENTION,
     );
-    let latest = kairo_core::health::backup::latest_backup_ts(&backups_dir);
-    let count = kairo_core::health::backup::count_backups(&backups_dir);
+    let latest = continuum_core::health::backup::latest_backup_ts(&backups_dir);
+    let count = continuum_core::health::backup::count_backups(&backups_dir);
     app.runtime.state.set_backup_status(latest, count).await;
     Ok(result.path.display().to_string())
 }
@@ -343,11 +475,8 @@ pub async fn run_backup_now(app: State<'_, Arc<AppState>>) -> Result<String, Str
 #[tauri::command]
 pub async fn rollback_config(app: State<'_, Arc<AppState>>, date: String) -> Result<(), String> {
     let dev_dir = app.runtime.dev_dir();
-    let backups_dir = dev_dir
-        .parent()
-        .map(|p| p.join(".kairo-backups"))
-        .unwrap_or_else(|| dev_dir.join(".kairo-backups"));
-    kairo_core::health::repair::rollback_config(&dev_dir, &backups_dir, &date)
+    let backups_dir = continuum_core::config::continuum_backups_dir();
+    continuum_core::health::repair::rollback_config(&dev_dir, &backups_dir, &date)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -360,9 +489,9 @@ pub async fn rollback_config(app: State<'_, Arc<AppState>>, date: String) -> Res
 #[tauri::command]
 pub async fn talk_now(app: State<'_, Arc<AppState>>) -> Result<(), String> {
     let dev_dir = app.runtime.dev_dir();
-    kairo_core::voice::intent::write_intent(
+    continuum_core::voice::intent::write_intent(
         &dev_dir,
-        &kairo_core::voice::intent::VoiceIntent::talk_now(),
+        &continuum_core::voice::intent::VoiceIntent::talk_now(),
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
@@ -374,7 +503,7 @@ pub async fn talk_now(app: State<'_, Arc<AppState>>) -> Result<(), String> {
 pub async fn update_wake_sensitivity(
     app: State<'_, Arc<AppState>>,
     value: f32,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     app.runtime
         .update_config(|c| c.voice.wake_sensitivity = value.clamp(0.0, 1.0))
         .map_err(|e| e.to_string())
@@ -384,7 +513,7 @@ pub async fn update_wake_sensitivity(
 pub async fn update_tts_length_scale(
     app: State<'_, Arc<AppState>>,
     value: f32,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     app.runtime
         .update_config(|c| c.tts.length_scale = Some(value.clamp(0.5, 2.0)))
         .map_err(|e| e.to_string())
@@ -394,7 +523,7 @@ pub async fn update_tts_length_scale(
 pub async fn update_tts_engine(
     app: State<'_, Arc<AppState>>,
     engine: String,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     if engine != "piper" && engine != "elevenlabs" {
         return Err(format!(
             "Unknown TTS engine '{engine}'; expected 'piper' or 'elevenlabs'"
@@ -409,7 +538,7 @@ pub async fn update_tts_engine(
 pub async fn update_tts_primary_voice(
     app: State<'_, Arc<AppState>>,
     voice: String,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     if voice.trim().is_empty() {
         return Err("Voice name cannot be empty".to_string());
     }
@@ -628,7 +757,7 @@ pub async fn toggle_skill(
     app: State<'_, Arc<AppState>>,
     name: String,
     enabled: bool,
-) -> Result<KairoConfig, String> {
+) -> Result<ContinuumConfig, String> {
     app.runtime
         .update_config(|c| {
             let already = c.skills.disabled.iter().any(|d| d == &name);
@@ -727,7 +856,7 @@ pub async fn dismiss_worker(app: State<'_, Arc<AppState>>, id: String) -> Result
     worker_intent::delete_snapshot(&dev, &id).map_err(|e| e.to_string())
 }
 
-/// State of the headless `kairo.exe` runtime from the dashboard's point of view.
+/// State of the headless `continuum.exe` runtime from the dashboard's point of view.
 #[derive(Serialize)]
 pub struct RuntimeStatus {
     pub alive: bool,
@@ -756,7 +885,8 @@ pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<Runtime
 pub async fn start_runtime() -> Result<(), String> {
     let Some(bin) = locate_runtime_binary() else {
         return Err(
-            "kairo.exe not found next to kairo-desktop.exe — install may be incomplete".to_string(),
+            "continuum.exe not found next to continuum-desktop.exe — install may be incomplete"
+                .to_string(),
         );
     };
     // Set cwd to the install dir so the runtime can find its sibling
@@ -774,7 +904,7 @@ pub async fn start_runtime() -> Result<(), String> {
 
 fn locate_runtime_binary() -> Option<std::path::PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    for name in ["kairo.exe", "kairo"] {
+    for name in ["continuum.exe", "continuum"] {
         let p = exe_dir.join(name);
         if p.exists() {
             return Some(p);

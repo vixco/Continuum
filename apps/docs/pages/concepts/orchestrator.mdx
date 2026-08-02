@@ -1,10 +1,10 @@
 # The orchestrator
 
-When triage decides a moment matters, Kairo wakes **Claude Opus 4.6** as the orchestrator via the official `claude` CLI in headless mode.
+When triage decides a moment matters, Continuum wakes **Claude Opus 4.6** as the orchestrator via the official `claude` CLI in headless mode.
 
 ## What "waking" actually means
 
-Kairo spawns a fresh subprocess:
+Continuum spawns a fresh subprocess:
 
 ```
 claude --print --output-format stream-json --input-format stream-json \
@@ -12,7 +12,7 @@ claude --print --output-format stream-json --input-format stream-json \
   --model claude-opus-4-6 \
   --append-system-prompt-file <orchestrator-system.md + matched-skill-content> \
   --mcp-config <generated-mcp-config.json> \
-  --allowedTools "mcp__kairo__*" \
+  --allowedTools "mcp__continuum__*" \
   --strict-mcp-config --permission-mode default
 ```
 
@@ -28,17 +28,17 @@ What Opus sees when it wakes:
 - The **triage reason** ("visible error for 12 seconds on idle Rust file")
 - Any **matched skill content** (see [Skills](/features/skills))
 
-Total: under 4000 tokens. Kairo's memory retrieval deliberately stays small to keep wake latency low.
+Total: under 4000 tokens. Continuum's memory retrieval deliberately stays small to keep wake latency low.
 
 ## Why a fresh subprocess every time
 
-See [ADR 005 — orchestrator lifecycle](https://github.com/vixco/kairo-ai/blob/main/docs/decisions/005-orchestrator-lifecycle.md).
+See [ADR 005 — orchestrator lifecycle](https://github.com/vixco/Continuum/blob/main/docs/decisions/005-orchestrator-lifecycle.md).
 
 Short version: process reuse tangles conversation state across unrelated wakes and creates memory leaks in Claude Code. A fresh subprocess per wake is slightly slower to start but makes every wake independent, recoverable, and easy to reason about.
 
 ## MCP tools
 
-On every wake, Kairo writes a per-wake `mcp-config.json` that points Claude Code at the Kairo MCP server. Opus sees 16+ tools:
+On every wake, Continuum writes a per-wake `mcp-config.json` that points Claude Code at the Continuum MCP server. Opus sees 16+ tools:
 
 - `memory_query_episodic`, `memory_list_facts`, `memory_get_fact`, `memory_set_fact`
 - `system_current_time`, `system_active_window`, `system_clipboard_get`, `system_notification`
@@ -49,11 +49,11 @@ On every wake, Kairo writes a per-wake `mcp-config.json` that points Claude Code
 
 Every tool call is audited — the arguments (sanitised) and the result summary are written to episodic memory as a `ToolCall` event.
 
-See the [MCP tools reference](https://github.com/vixco/kairo-ai/blob/main/docs/mcp-tools.md) for schemas and examples.
+See the [MCP tools reference](https://github.com/vixco/Continuum/blob/main/docs/mcp-tools.md) for schemas and examples.
 
 ## Streaming latency
 
-The whole point of `--output-format stream-json --include-partial-messages` is that Kairo gets `text_delta` events as Opus generates them. Sentence-level chunks flow into the TTS queue, so you hear the first sentence while Opus is still writing the fifth.
+The whole point of `--output-format stream-json --include-partial-messages` is that Continuum gets `text_delta` events as Opus generates them. Sentence-level chunks flow into the TTS queue, so you hear the first sentence while Opus is still writing the fifth.
 
 Fast-path wakes: 1–2 seconds from triage decision to first audible word.
 
@@ -65,6 +65,6 @@ The `rate_limit_event` stream-json event is parsed and surfaced in the Health ta
 
 ## When the orchestrator goes quiet
 
-- **Claude Code is not installed or not logged in** — Kairo reports a clear error at wake time and falls back to the triage `whisper` path (spoken suggestion, no deeper reasoning).
+- **Claude Code is not installed or not logged in** — Continuum reports a clear error at wake time and falls back to the triage `whisper` path (spoken suggestion, no deeper reasoning).
 - **Network is down** — same as above.
-- **You've paused Kairo from the tray** — perception still runs, triage still runs, but wake attempts are gated off.
+- **You've paused Continuum from the tray** — perception still runs, triage still runs, but wake attempts are gated off.

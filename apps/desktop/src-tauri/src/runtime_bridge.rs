@@ -1,16 +1,16 @@
-//! Bridge to the separately-running `kairo` runtime binary.
+//! Bridge to the separately-running `continuum` runtime binary.
 //!
-//! The headless `kairo` binary owns the llama-cpp-backed triage loop and
+//! The headless `continuum` binary owns the llama-cpp-backed triage loop and
 //! all perception watchers. In Phase 6 we route dashboard reads through
 //! the state store (populated by a small JSON file the binary writes to
-//! `~/.kairo-dev/state.json` on every meaningful update) and through a
+//! `~/.continuum-dev/state.json` on every meaningful update) and through a
 //! named pipe for control messages.
 //!
 //! For this initial landing, the bridge implements the **file-tail path
 //! only** — the dashboard's own state store stays authoritative for the
 //! in-process bits (automations, backups, config edits), while runtime
 //! flags (models loaded, current voice mode, etc.) are read from disk.
-//! When the `kairo` binary is not running, nothing is read, nothing
+//! When the `continuum` binary is not running, nothing is read, nothing
 //! breaks, and the dashboard falls back to `Unknown`/`Degrading` statuses.
 
 use std::path::PathBuf;
@@ -18,16 +18,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter};
 
-use kairo_core::runtime::KairoRuntime;
-use kairo_core::runtime_publish::RuntimeSnapshot;
-use kairo_core::state::{StateHandle, VoiceMode};
+use continuum_core::runtime::ContinuumRuntime;
+use continuum_core::runtime_publish::RuntimeSnapshot;
+use continuum_core::state::{StateHandle, VoiceMode};
 
-/// Spawn a ticker that reads `~/.kairo-dev/state.json` every 2 seconds
+/// Spawn a ticker that reads `~/.continuum-dev/state.json` every 2 seconds
 /// and pushes the flags into the state store. Harmless when the file
-/// doesn't exist; parse errors are emitted as a `kairo:runtime_error`
+/// doesn't exist; parse errors are emitted as a `continuum:runtime_error`
 /// event so the dashboard can surface "state.json is corrupt" rather than
 /// silently showing stale flags.
-pub fn spawn_ipc_listener(runtime: KairoRuntime, app: AppHandle) {
+pub fn spawn_ipc_listener(runtime: ContinuumRuntime, app: AppHandle) {
     let path = runtime.dev_dir().join("state.json");
     let state = runtime.state.clone();
     // One-shot latch so we don't spam the frontend on every tick while the
@@ -40,7 +40,7 @@ pub fn spawn_ipc_listener(runtime: KairoRuntime, app: AppHandle) {
             match tick_once(&path, &state).await {
                 Ok(()) => {
                     if last_was_err.swap(false, Ordering::AcqRel) {
-                        let _ = app.emit("kairo:runtime_error", serde_json::Value::Null);
+                        let _ = app.emit("continuum:runtime_error", serde_json::Value::Null);
                     }
                 }
                 Err(e) => {
@@ -48,7 +48,7 @@ pub fn spawn_ipc_listener(runtime: KairoRuntime, app: AppHandle) {
                     // but the UI should only toast once.
                     if !last_was_err.swap(true, Ordering::AcqRel) {
                         let _ = app.emit(
-                            "kairo:runtime_error",
+                            "continuum:runtime_error",
                             serde_json::json!({
                                 "path": path.display().to_string(),
                                 "error": e.to_string(),

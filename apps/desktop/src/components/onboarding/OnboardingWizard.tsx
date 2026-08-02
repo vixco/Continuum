@@ -1,4 +1,4 @@
-// OnboardingWizard — eight-step first-run flow for Kairo.
+// OnboardingWizard — eight-step first-run flow for Continuum.
 //
 // Mounted by Shell when `is_onboarding_complete` returns false. Uses the same
 // UI primitives and dark palette as the rest of the dashboard. Each step is a
@@ -11,10 +11,10 @@
 //   list_audio_input_devices() -> [{ name, id }]
 //   list_audio_output_devices()-> [{ name, id }]
 //   list_tts_voices()          -> [{ id, language, path }]
-//   download_model(name, url)  -> starts a download; progress via `kairo:onboarding:progress` event
+//   download_model(name, url)  -> starts a download; progress via `continuum:onboarding:progress` event
 //   run_diagnostics()          -> { checks: [{ name, status: "ok" | "fail" | "skip", detail }] }
 //   is_onboarding_complete()   -> bool
-//   complete_onboarding(payload) -> void  // persists ~/.kairo/config/onboarding-complete
+//   complete_onboarding(payload) -> void  // persists ~/.continuum/config/onboarding-complete
 
 "use client";
 
@@ -111,7 +111,7 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
           idx={idx}
           onBack={goBack}
           onNext={step === "done" ? finish : goNext}
-          nextLabel={step === "done" ? "Start Kairo" : "Next"}
+          nextLabel={step === "done" ? "Start Continuum" : "Next"}
           canBack={idx > 0 && step !== "done"}
         />
       </div>
@@ -193,24 +193,24 @@ function WizardFooter({
 
 function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
-    <StepContainer title="Welcome to Kairo">
+    <StepContainer title="Welcome to Continuum">
       <p className="text-ink-muted">
-        Kairo is an ambient AI assistant for Windows. It sees what you see, hears what you hear,
+        Continuum is an ambient AI assistant for Windows. It sees what you see, hears what you hear,
         remembers what matters, and acts only when the moment is right — powered by Claude Code and
         small local models.
       </p>
       <p className="text-ink-muted">
         This wizard takes about ten minutes. Most of that is a one-time model download that runs in
         the background while you configure the rest. You can rerun it later with{" "}
-        <code className="kairo-code">kairo setup</code>.
+        <code className="continuum-code">continuum setup</code>.
       </p>
-      <div className="kairo-card">
+      <div className="continuum-card">
         <h3 className="font-semibold">Before we start</h3>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-ink-muted">
           <li>Make sure you have a Claude Max or API subscription.</li>
           <li>Have a working microphone and speaker ready (optional but recommended).</li>
           <li>Expect ~6.5 GB of model downloads.</li>
-          <li>Nothing you enter is uploaded anywhere — Kairo is local-first.</li>
+          <li>Nothing you enter is uploaded anywhere — Continuum is local-first.</li>
         </ul>
       </div>
     </StepContainer>
@@ -267,11 +267,11 @@ function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer title="Claude Code check">
       <p className="text-ink-muted">
-        Kairo drives the official <code className="kairo-code">claude</code> CLI as a subprocess.
+        Continuum drives the official <code className="continuum-code">claude</code> CLI as a subprocess.
         Let&apos;s make sure it&apos;s installed and signed in.
       </p>
 
-      <div className="kairo-card">
+      <div className="continuum-card">
         <StatusRow
           label="Claude Code CLI installed"
           state={state === "checking" ? "pending" : result?.installed ? "ok" : "fail"}
@@ -298,22 +298,22 @@ function ClaudeStep({ onNext: _onNext }: { onNext: () => void }) {
 
       {state !== "ok" && (
         <div className="flex gap-3">
-          <button onClick={runCheck} className="kairo-button-primary">
+          <button onClick={runCheck} className="continuum-button-primary">
             Check again
           </button>
           {state === "missing" && (
-            <code className="kairo-code flex items-center px-3">
+            <code className="continuum-code flex items-center px-3">
               npm install -g @anthropic-ai/claude-code
             </code>
           )}
           {state === "unauth" && (
-            <code className="kairo-code flex items-center px-3">claude login</code>
+            <code className="continuum-code flex items-center px-3">claude login</code>
           )}
         </div>
       )}
 
       {result?.error && (
-        <div className="kairo-error">
+        <div className="continuum-error">
           <AlertCircle size={14} className="inline" /> {result.error}
         </div>
       )}
@@ -382,7 +382,7 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
       try {
         const event = await import("@tauri-apps/api/event");
         unsubscribe = await event.listen<{ model: string; percent: number }>(
-          "kairo:onboarding:progress",
+          "continuum:onboarding:progress",
           (e) => setProgress((p) => ({ ...p, [e.payload.model]: e.payload.percent }))
         );
       } catch {
@@ -395,11 +395,11 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
   return (
     <StepContainer title="Download models">
       <p className="text-ink-muted">
-        Kairo needs four sets of models to work. If you&apos;ve installed Kairo before, existing
-        models under <code className="kairo-code">~/.kairo/models</code> will be reused.
+        Continuum needs four sets of models to work. If you&apos;ve installed Continuum before, existing
+        models under <code className="continuum-code">~/.continuum/models</code> will be reused.
       </p>
 
-      <div className="kairo-card space-y-2">
+      <div className="continuum-card space-y-2">
         {MODELS.map((m) => {
           const pct = progress[m.key] ?? 0;
           const done = pct >= 100;
@@ -427,11 +427,11 @@ function ModelsStep({ onNext: _onNext }: { onNext: () => void }) {
       </div>
 
       <div className="flex gap-3">
-        <button onClick={downloadAll} disabled={running} className="kairo-button-primary">
+        <button onClick={downloadAll} disabled={running} className="continuum-button-primary">
           {running ? "Downloading..." : "Download all"}
         </button>
         <span className="text-xs text-ink-dim">
-          You can skip this step and run <code className="kairo-code">kairo setup</code> later.
+          You can skip this step and run <code className="continuum-code">continuum setup</code> later.
         </span>
       </div>
     </StepContainer>
@@ -466,12 +466,12 @@ function VoiceStep({
 
   return (
     <StepContainer title="Voice setup">
-      <div className="kairo-card space-y-4">
+      <div className="continuum-card space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <p className="font-medium">Wake word</p>
             <p className="text-xs text-ink-muted">
-              Default phrase: &quot;hey kairo&quot;. You can always use Ctrl+Shift+K as a
+              Default phrase: &quot;hey continuum&quot;. You can always use Ctrl+Shift+K as a
               push-to-talk.
             </p>
           </div>
@@ -523,7 +523,7 @@ function VoiceStep({
         </div>
       </div>
 
-      <div className="kairo-card space-y-3">
+      <div className="continuum-card space-y-3">
         <DevicePicker
           label="Microphone"
           icon={Mic}
@@ -589,12 +589,12 @@ function PermissionsStep({
   return (
     <StepContainer title="Permissions">
       <p className="text-ink-muted">
-        Decide where Kairo can read and write. By default, it has read-only access to your home
+        Decide where Continuum can read and write. By default, it has read-only access to your home
         directory and read-write in a projects folder you pick. Secrets, SSH keys, and browser
         profiles are always blocked.
       </p>
 
-      <div className="kairo-card">
+      <div className="continuum-card">
         <p className="font-medium">Mode</p>
         <div className="mt-2 flex gap-4 text-sm">
           {(["default", "custom"] as const).map((m) => (
@@ -611,7 +611,7 @@ function PermissionsStep({
       </div>
 
       {payload.permissions === "custom" && (
-        <div className="kairo-card">
+        <div className="continuum-card">
           <p className="font-medium">Additional read-write paths</p>
           <div className="mt-2 flex gap-2">
             <input
@@ -631,7 +631,7 @@ function PermissionsStep({
                   setNewPath("");
                 }
               }}
-              className="kairo-button-primary"
+              className="continuum-button-primary"
             >
               Add
             </button>
@@ -639,7 +639,7 @@ function PermissionsStep({
           <ul className="mt-2 space-y-1 text-sm text-ink-muted">
             {payload.extra_paths.map((p) => (
               <li key={p} className="flex justify-between">
-                <code className="kairo-code">{p}</code>
+                <code className="continuum-code">{p}</code>
                 <button
                   className="text-red-400 hover:underline"
                   onClick={() =>
@@ -657,10 +657,10 @@ function PermissionsStep({
         </div>
       )}
 
-      <div className="kairo-card">
+      <div className="continuum-card">
         <p className="font-medium">Always blocked</p>
         <p className="mt-1 text-xs text-ink-muted">
-          These paths Kairo never reads or writes, regardless of config:
+          These paths Continuum never reads or writes, regardless of config:
         </p>
         <ul className="mt-2 grid grid-cols-2 gap-1 text-xs text-ink-dim">
           {[
@@ -676,7 +676,7 @@ function PermissionsStep({
             "AppData (by default)",
           ].map((d) => (
             <li key={d}>
-              <code className="kairo-code">{d}</code>
+              <code className="continuum-code">{d}</code>
             </li>
           ))}
         </ul>
@@ -695,16 +695,16 @@ function PersonalStep({
   return (
     <StepContainer title="A little about you">
       <p className="text-ink-muted">
-        Anything you enter here gets written to Kairo&apos;s semantic memory so the orchestrator can
+        Anything you enter here gets written to Continuum&apos;s semantic memory so the orchestrator can
         use it. Everything is optional and editable later from the Memory tab.
       </p>
 
-      <div className="kairo-card space-y-3">
+      <div className="continuum-card space-y-3">
         <LabeledInput
           label="Name"
           value={payload.name ?? ""}
           onChange={(v) => setPayload({ ...payload, name: v })}
-          placeholder="How should Kairo address you?"
+          placeholder="How should Continuum address you?"
         />
         <LabeledInput
           label="Timezone"
@@ -786,14 +786,14 @@ function DiagnosticsStep() {
         let the repair agent attempt a fix.
       </p>
 
-      <div className="kairo-card space-y-1">
+      <div className="continuum-card space-y-1">
         {checks.map((c) => (
           <StatusRow key={c.name} label={c.name} state={c.status} detail={c.detail} />
         ))}
       </div>
 
       <div className="flex gap-3">
-        <button onClick={run} disabled={running} className="kairo-button-primary">
+        <button onClick={run} disabled={running} className="continuum-button-primary">
           {running ? "Running..." : "Re-run"}
         </button>
         {!allPass && !running && (
@@ -822,18 +822,18 @@ const INITIAL_CHECKS: DiagnosticCheck[] = [
 
 function DoneStep({ onStart: _onStart }: { onStart: () => void }) {
   return (
-    <StepContainer title="Kairo is ready">
+    <StepContainer title="Continuum is ready">
       <p className="text-ink-muted">
-        That&apos;s it. Kairo will run in the background from now on.
+        That&apos;s it. Continuum will run in the background from now on.
       </p>
-      <div className="kairo-card space-y-2 text-sm text-ink-muted">
+      <div className="continuum-card space-y-2 text-sm text-ink-muted">
         <p className="font-medium text-ink">A few things to try first:</p>
         <ul className="list-disc space-y-1 pl-5">
           <li>
-            Say <em>&quot;hey kairo, hello&quot;</em> — simplest end-to-end test.
+            Say <em>&quot;hey continuum, hello&quot;</em> — simplest end-to-end test.
           </li>
           <li>
-            Press <code className="kairo-code">Ctrl+Shift+K</code> to talk without the wake word.
+            Press <code className="continuum-code">Ctrl+Shift+K</code> to talk without the wake word.
           </li>
           <li>Left-click the tray icon to open this dashboard again.</li>
           <li>Right-click the tray icon for pause / mute / quit.</li>

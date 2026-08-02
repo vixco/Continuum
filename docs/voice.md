@@ -1,6 +1,6 @@
 # Voice pipeline
 
-Phase 5 is Kairo's full bidirectional voice loop. It is designed to be
+Phase 5 is Continuum's full bidirectional voice loop. It is designed to be
 local-first, low-latency, interruptible, and to feel like a presence
 rather than a tool. This document explains the pipeline end to end, every
 configurable knob, and how to diagnose things when they go wrong.
@@ -20,7 +20,7 @@ configurable knob, and how to diagnose things when they go wrong.
                   ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │  voice::wake::TranscriptWakeDetector                                 │
-│  Scans each transcript for "hey kairo" (configurable). Extracts the  │
+│  Scans each transcript for "hey continuum" (configurable). Extracts the  │
 │  text after the wake phrase as the initial utterance.                │
 │                                                                      │
 │  No access-key dependency, no extra model. Runs on the same whisper  │
@@ -69,9 +69,9 @@ configurable knob, and how to diagnose things when they go wrong.
 │  voice::tts::PiperVoiceBank → voice::tts::PiperEngine                │
 │  Piper invoked as a subprocess via stdin/stdout (UTF-8 in, 16-bit    │
 │  PCM out). Keeps ONNX Runtime out of the Rust dep graph, which       │
-│  would otherwise conflict with kairo-vision's `ort` build.           │
+│  would otherwise conflict with continuum-vision's `ort` build.           │
 │                                                                      │
-│  Binary resolution: KAIRO_PIPER_BIN → ~/.kairo-dev/bin/piper/ →      │
+│  Binary resolution: CONTINUUM_PIPER_BIN → ~/.continuum-dev/bin/piper/ →      │
 │  system PATH.                                                        │
 └─────────────────┬────────────────────────────────────────────────────┘
                   │ Vec<f32>
@@ -95,12 +95,12 @@ On top of the pipeline:
 
 - **Ambient mute** — when the context watcher reports an active call
   (Discord, Teams, Zoom, Meet), orchestrator responses and whisper
-  decisions are logged instead of spoken. Kairo goes silent; the user
+  decisions are logged instead of spoken. Continuum goes silent; the user
   stays in control of their call.
 
 - **Multilingual input, English output** — whisper transcribes any
   language (`audio.whisper_language = "auto"`) so the user can speak
-  Dutch, English, German, or anything else whisper covers. Kairo
+  Dutch, English, German, or anything else whisper covers. Continuum
   *understands* the transcript in its native language and *responds*
   through the English Piper voice. This is a conscious 2026-04 choice:
   the Dutch Piper voice (`nl_NL-mls-medium`) produces barely-intelligible
@@ -109,7 +109,7 @@ On top of the pipeline:
   `voice.language_detection_enabled = true` and add a
   `[tts.voices.<lang>]` section per language.
 
-- **Conversation follow-up** — after `do_wake` completes, Kairo sets a
+- **Conversation follow-up** — after `do_wake` completes, Continuum sets a
   `followup_until` deadline. Speech within that window starts a new voice
   session without re-triggering the wake word, so a back-and-forth
   conversation feels natural.
@@ -137,11 +137,11 @@ prints a summary at the end. Files land at:
 
 | Artifact | Path |
 |---|---|
-| Piper binary | `~/.kairo-dev/bin/piper/piper.exe` |
-| Piper EN voice | `~/.kairo-dev/models/tts/en_US-norman-medium.onnx` (+ `.json`) |
-| Piper NL voice | `~/.kairo-dev/models/tts/nl_NL-mls-medium.onnx` (+ `.json`) |
-| espeak-ng-data | `~/.kairo-dev/models/tts/espeak-ng-data/` |
-| Whisper small | `~/.kairo-dev/models/stt/whisper-small.bin` |
+| Piper binary | `~/.continuum-dev/bin/piper/piper.exe` |
+| Piper EN voice | `~/.continuum-dev/models/tts/en_US-norman-medium.onnx` (+ `.json`) |
+| Piper NL voice | `~/.continuum-dev/models/tts/nl_NL-mls-medium.onnx` (+ `.json`) |
+| espeak-ng-data | `~/.continuum-dev/models/tts/espeak-ng-data/` |
+| Whisper small | `~/.continuum-dev/models/stt/whisper-small.bin` |
 
 Both the Piper binary and espeak-ng-data come from the official Piper
 Windows release bundle (`piper_windows_amd64.zip`). That avoids the
@@ -154,13 +154,13 @@ The three bundled examples let you verify each layer independently.
 
 ```bash
 # 5A: TTS only — synthesises Dutch and English, plays through speakers.
-cargo run --example voice_test -p kairo-core
+cargo run --example voice_test -p continuum-core
 
 # 5C: end-to-end demo with typed transcripts.
-cargo run --example voice_demo -p kairo-core
+cargo run --example voice_demo -p continuum-core
 
 # 5C: latency benchmark against ARCHITECTURE.md targets.
-cargo run --example voice_latency_bench -p kairo-core
+cargo run --example voice_latency_bench -p continuum-core
 ```
 
 `voice_demo` is the fastest path to "does my wake detection + endpoint +
@@ -170,14 +170,14 @@ the microphone — you type transcripts at the prompt.
 For the real thing:
 
 ```bash
-cargo run --bin kairo
+cargo run --bin continuum
 ```
 
 which runs perception + triage + orchestrator + voice in one process.
 
 ## Configuration
 
-Voice configuration lives in `~/.kairo-dev/config.toml` (user override)
+Voice configuration lives in `~/.continuum-dev/config.toml` (user override)
 with defaults in `config/default-models.toml`. Most fields are under
 `[voice]` and `[tts]`.
 
@@ -187,7 +187,7 @@ with defaults in `config/default-models.toml`. Most fields are under
 |---|---|---|
 | `enabled` | `true` | Master switch for the voice-input path. |
 | `wake_word_enabled` | `true` | Require the wake phrase before a command is accepted. |
-| `wake_keyword` | `"hey kairo"` | Phrase Kairo listens for in whisper transcripts. Case-insensitive. |
+| `wake_keyword` | `"hey continuum"` | Phrase Continuum listens for in whisper transcripts. Case-insensitive. |
 | `wake_sensitivity` | `0.5` | Reserved for the future native Porcupine-style backend. |
 | `custom_keyword_path` | `""` | Reserved — path to a `.ppn` file for the native backend. |
 | `listen_timeout_ms` | `12000` | Max time a post-wake session stays open. |
@@ -195,12 +195,12 @@ with defaults in `config/default-models.toml`. Most fields are under
 | `min_utterance_chars` | `3` | Lower bound on utterance length before endpoint can fire. |
 | `barge_in_enabled` | `true` | Stop playback when fresh user speech arrives. |
 | `ambient_mute_enabled` | `true` | Stay silent while the user is in a call. |
-| `language_detection_enabled` | `false` | Route TTS voice by detected speech language. Disabled by default so Kairo always responds via the English voice. |
+| `language_detection_enabled` | `false` | Route TTS voice by detected speech language. Disabled by default so Continuum always responds via the English voice. |
 | `default_language` | `"en"` | Language used when detection is unavailable. |
 | `volume` | `0.8` | Master playback gain in `[0.0, 1.0]`. Applied in the cpal callback. |
 | `feedback_sounds` | `true` | Play chime/click/beep cues on state transitions. |
 | `hotkey` | `"Ctrl+Shift+K"` | Global toggle-listen shortcut (Windows). Empty disables. |
-| `conversation_followup_seconds` | `5` | Wake-free window after Kairo finishes speaking. `0` requires wake word every time. |
+| `conversation_followup_seconds` | `5` | Wake-free window after Continuum finishes speaking. `0` requires wake word every time. |
 
 ### `[tts]`
 
@@ -208,7 +208,7 @@ with defaults in `config/default-models.toml`. Most fields are under
 |---|---|---|
 | `enabled` | `true` | Master switch for speech output. |
 | `engine` | `"piper"` | `"piper"` (local, shipping) or `"elevenlabs"` (stub — falls back to Piper). |
-| `espeak_data_dir` | `~/.kairo-dev/models/tts/espeak-ng-data` | Phoneme dictionary installed by the download script. |
+| `espeak_data_dir` | `~/.continuum-dev/models/tts/espeak-ng-data` | Phoneme dictionary installed by the download script. |
 | `primary` | `"en"` | BCP-47 short code of the default voice. |
 | `voices.<lang>` | see defaults | Model + config paths per language, plus optional `speaker_id` for multi-speaker models. |
 | `length_scale` | unset | `<1.0` speeds up speech; `>1.0` slows it. `unset` uses the voice's native value. |
@@ -246,10 +246,10 @@ to Piper — it does **not** crash or produce silence.
 Run the latency benchmark to check your machine against these numbers:
 
 ```bash
-cargo run --example voice_latency_bench -p kairo-core
+cargo run --example voice_latency_bench -p continuum-core
 ```
 
-Set `KAIRO_BENCH_N=50` for a longer run, or `KAIRO_BENCH_LANG=nl` to
+Set `CONTINUUM_BENCH_N=50` for a longer run, or `CONTINUUM_BENCH_LANG=nl` to
 benchmark the Dutch voice.
 
 ## Self-healing hooks
@@ -272,21 +272,21 @@ component.
 
 ## Troubleshooting
 
-**Kairo doesn't speak.** Check `~/.kairo-dev/config.toml` — `tts.enabled`
+**Continuum doesn't speak.** Check `~/.continuum-dev/config.toml` — `tts.enabled`
 must be `true`, `voice.enabled` must be `true`, and `--no-tts` must not
-be set. Then verify the Piper binary at `~/.kairo-dev/bin/piper/piper.exe`
+be set. Then verify the Piper binary at `~/.continuum-dev/bin/piper/piper.exe`
 and the voice `.onnx` + `.onnx.json` files under
-`~/.kairo-dev/models/tts/`. Re-run `scripts/download-models.ps1` if any
+`~/.continuum-dev/models/tts/`. Re-run `scripts/download-models.ps1` if any
 are missing.
 
 **Piper fails with "phonemizer error".** The `espeak-ng-data` directory
 is missing or empty. Re-run the download script — it installs the
 dictionary alongside `piper.exe` from the same release bundle.
 
-**Wrong language on output.** Kairo is English-only by design right now
+**Wrong language on output.** Continuum is English-only by design right now
 (see the "Multilingual input, English output" note above). The user's
 speech is transcribed in whatever language they used, but the orchestrator
-and triage prompts instruct Kairo to respond in English so the English
+and triage prompts instruct Continuum to respond in English so the English
 TTS voice sounds natural. If you have a quality Dutch/other voice and
 want multilingual output, uncomment the `[tts.voices.<lang>]` section in
 the config, flip `voice.language_detection_enabled = true`, and drop the
@@ -306,17 +306,17 @@ If you need the wake word to work reliably in a noisy room, set
 `voice.wake_word_enabled = false` and use the hotkey instead.
 
 **Hotkey does nothing.** Another application may already own the chord.
-Check the Kairo log for `"Hotkey registration failed"`. Change
+Check the Continuum log for `"Hotkey registration failed"`. Change
 `voice.hotkey` to an unused combination (e.g. `"Ctrl+Alt+K"`).
 
 **Piper binary not found.** The runtime looks for piper in this order:
-`KAIRO_PIPER_BIN` env var → `~/.kairo-dev/bin/piper/piper.exe` →
-system PATH. Setting `KAIRO_PIPER_BIN` overrides everything.
+`CONTINUUM_PIPER_BIN` env var → `~/.continuum-dev/bin/piper/piper.exe` →
+system PATH. Setting `CONTINUUM_PIPER_BIN` overrides everything.
 
 **High synthesis latency.** The first synth call after startup is always
 slower (Piper process spin-up, espeak-ng dictionary load, ONNX warmup).
 Subsequent calls should be well under 400 ms for short sentences on
-typical hardware. If they aren't, check CPU contention: Kairo plus
+typical hardware. If they aren't, check CPU contention: Continuum plus
 background builds plus a video call is enough to blow the budget.
 
 **Audio crackling.** Happens when the PC can't keep up — usually the
@@ -325,23 +325,23 @@ the signal above the noise floor, or close background apps. If the
 problem persists, log a note in `docs/self-healing.md` and file an
 issue; the repair agent will eventually grow a dedicated playback probe.
 
-**Kairo speaks at the wrong moment during a call.** `ambient_mute_enabled`
+**Continuum speaks at the wrong moment during a call.** `ambient_mute_enabled`
 is a soft guard — the context watcher looks at foreground process names.
 If your call app isn't on the hard-coded list (Discord, Teams, Zoom,
-Meet), Kairo won't detect it. Add the process name in
+Meet), Continuum won't detect it. Add the process name in
 `senses::context::CALL_APPS` if you want to contribute it upstream.
 
 ## Architectural choices (and why)
 
 **Piper via subprocess, not `piper-rs`.** `piper-rs` pulls in its own
-`ort`/`ndarray` tree that conflicts with `kairo-vision`'s ONNX Runtime
+`ort`/`ndarray` tree that conflicts with `continuum-vision`'s ONNX Runtime
 link. Calling `piper.exe` over stdin/stdout is slower by ~50 ms process
 startup on the first call and 0 ms on the rest — well worth the clean
 dependency graph.
 
 **Transcript wake, not Porcupine.** Porcupine ships its own CPU-cheap
 wake-word models but requires an access key, which is an external
-dependency Kairo deliberately avoids per ROADMAP's local-first stance.
+dependency Continuum deliberately avoids per ROADMAP's local-first stance.
 The transcript detector is accurate enough for three-word wake phrases
 and adds zero new model/runtime overhead — whisper is running anyway.
 
@@ -361,7 +361,7 @@ chunks that align with natural human pauses.
 ## Extending
 
 **Adding a new voice.** Drop the `.onnx` and `.onnx.json` files under
-`~/.kairo-dev/models/tts/` and add an entry to `[tts.voices.<lang>]`.
+`~/.continuum-dev/models/tts/` and add an entry to `[tts.voices.<lang>]`.
 The voice bank discovers any language present at startup and routes to
 it when the language matches.
 

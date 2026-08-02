@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { CalendarPlus, Trash2 } from "lucide-react";
 
-import { kairo } from "@/lib/tauri";
+import { continuum } from "@/lib/tauri";
 import {
   Button,
   Card,
@@ -31,7 +31,7 @@ export function AutomationsTab() {
   }, []);
 
   async function refresh() {
-    setItems(await kairo.listAutomations());
+    setItems(await continuum.listAutomations());
   }
 
   function startCreate() {
@@ -58,9 +58,9 @@ export function AutomationsTab() {
 
   async function submit() {
     if (editingId) {
-      await kairo.updateAutomation(editingId, draft);
+      await continuum.updateAutomation(editingId, draft);
     } else {
-      await kairo.createAutomation(draft);
+      await continuum.createAutomation(draft);
     }
     setShowForm(false);
     await refresh();
@@ -70,7 +70,7 @@ export function AutomationsTab() {
     <div className="mx-auto max-w-5xl space-y-6">
       <Card
         title="Scheduled tasks"
-        subtitle="one-shot or recurring Kairo wakes"
+        subtitle="one-shot or recurring Continuum wakes"
         actions={
           <Button size="sm" variant="primary" onClick={startCreate}>
             <CalendarPlus size={12} /> New
@@ -105,7 +105,7 @@ export function AutomationsTab() {
                     <Toggle
                       checked={a.enabled}
                       onChange={async (v) => {
-                        await kairo.toggleAutomation(a.id, v);
+                        await continuum.toggleAutomation(a.id, v);
                         await refresh();
                       }}
                     />
@@ -120,7 +120,7 @@ export function AutomationsTab() {
                     <button
                       className="text-state-error hover:opacity-80"
                       onClick={async () => {
-                        await kairo.deleteAutomation(a.id);
+                        await continuum.deleteAutomation(a.id);
                         await refresh();
                       }}
                     >

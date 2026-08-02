@@ -6,9 +6,9 @@ Accepted (2026-04-11)
 
 ## Context
 
-The orchestrator is Claude Opus 4.6, invoked via the `claude` CLI in headless mode (`-p --output-format stream-json`). When the triage layer decides to wake the orchestrator, Kairo needs to send it a context package and get a streamed response.
+The orchestrator is Claude Opus 4.6, invoked via the `claude` CLI in headless mode (`-p --output-format stream-json`). When the triage layer decides to wake the orchestrator, Continuum needs to send it a context package and get a streamed response.
 
-The key architectural constraint: **each wake must be functionally independent**. Kairo's LanceDB episodic memory is the authoritative memory store, not Claude's implicit conversation history. Between wakes, Opus's accumulated context must NOT carry meaning — we supply all required context explicitly via the user message.
+The key architectural constraint: **each wake must be functionally independent**. Continuum's LanceDB episodic memory is the authoritative memory store, not Claude's implicit conversation history. Between wakes, Opus's accumulated context must NOT carry meaning — we supply all required context explicitly via the user message.
 
 Three options were considered:
 
@@ -53,7 +53,7 @@ claude -p \
 ```
 
 Flags rationale:
-- `--no-session-persistence`: Don't write session files to disk. Kairo manages its own memory via LanceDB and SQLite.
+- `--no-session-persistence`: Don't write session files to disk. Continuum manages its own memory via LanceDB and SQLite.
 - `--allowedTools ""`: No tool use in Phase 3. Opus can only respond with text. Tools come in Phase 4 (MCP).
 - `--permission-mode plan`: Restrictive mode since we're not giving tools anyway.
 - No `--input-format stream-json`: Not needed for single-turn. We write one user message to stdin, close stdin, read events until `result`.

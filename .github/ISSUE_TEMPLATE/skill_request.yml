@@ -1,5 +1,5 @@
 name: Skill request
-description: Propose a new bundled skill or a workflow Kairo should know how to handle.
+description: Propose a new bundled skill or a workflow Continuum should know how to handle.
 title: "[skill]: "
 labels: ["skill", "triage"]
 body:
@@ -44,7 +44,7 @@ body:
     id: refusal
     attributes:
       label: What's out of scope?
-      description: Explicit limits keep skills focused. What should Kairo *not* do when this skill is active?
+      description: Explicit limits keep skills focused. What should Continuum *not* do when this skill is active?
 
   - type: checkboxes
     id: willing

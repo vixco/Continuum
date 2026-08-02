@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Docs
-    url: https://vixco.github.io/kairo-ai
+    url: https://vixco.github.io/Continuum
     about: Read the user-facing docs before filing an issue.
   - name: Discussions
-    url: https://github.com/vixco/kairo-ai/discussions
+    url: https://github.com/vixco/Continuum/discussions
     about: For questions, ideas, or design conversations that aren't bugs or feature requests.

@@ -1,9 +1,9 @@
-// TypeScript mirrors of kairo-core's state structs. Kept flat to ease
+// TypeScript mirrors of continuum-core's state structs. Kept flat to ease
 // per-tab destructuring. Keep these in sync with:
-//   crates/kairo-core/src/state.rs
-//   crates/kairo-core/src/logs.rs
-//   crates/kairo-core/src/automations.rs
-//   crates/kairo-core/src/health/repair.rs
+//   crates/continuum-core/src/state.rs
+//   crates/continuum-core/src/logs.rs
+//   crates/continuum-core/src/automations.rs
+//   crates/continuum-core/src/health/repair.rs
 
 export type VoiceMode = "idle" | "listening" | "thinking" | "speaking" | "muted" | "error";
 
@@ -118,7 +118,7 @@ export interface RecentAction {
   detail: string | null;
 }
 
-export interface KairoState {
+export interface ContinuumState {
   perception: PerceptionState;
   triage: TriageState;
   orchestrator: OrchestratorState;
@@ -234,7 +234,7 @@ export interface WorkerSnapshot {
   error: string | null;
 }
 
-export interface KairoConfig {
+export interface ContinuumConfig {
   vision: {
     name: string;
     model_path: string;
@@ -323,4 +323,74 @@ export interface KairoConfig {
     token_budget: number;
     disabled: string[];
   };
+  resources: ResourceConfig;
+}
+
+// --- Adaptive resource policy (mirrors crates/continuum-core/src/hardware.rs
+//     + config.rs ResourceConfig). Keep in sync with the Rust structs. ---
+
+export type ProfileMode = "auto" | "barely_notice" | "balanced" | "performance" | "custom";
+
+export interface ResourceConfig {
+  profile: ProfileMode;
+  cpu_core_fraction: number;
+  cpu_min_threads: number;
+  cpu_max_threads: number;
+  ram_reserve_fraction: number;
+  gpu_enabled: boolean | null;
+  gpu_min_vram_mb: number;
+  battery_throttle: boolean;
+  battery_core_fraction: number;
+  vision_min_ram_mb: number;
+  vision_enabled: boolean | null;
+  workers_max_concurrent: number | null;
+  screen_interval_secs: number | null;
+  context_interval_secs: number | null;
+}
+
+export interface HardwareSpecs {
+  physical_cores: number;
+  logical_cores: number;
+  total_ram_mb: number;
+  cpu_brand: string;
+  has_cuda: boolean;
+  vram_mb: number | null;
+  on_battery: boolean;
+  is_laptop: boolean;
+}
+
+export interface ResolvedResourcePlan {
+  triage_threads: number;
+  triage_gpu_layers: number;
+  vision_enabled: boolean;
+  vision_gpu: boolean;
+  whisper_threads: number;
+  workers_max_concurrent: number;
+  screen_interval_secs: number;
+  context_interval_secs: number;
+}
+
+export interface ResourceProfile {
+  specs: HardwareSpecs;
+  plan: ResolvedResourcePlan;
+  config: ResourceConfig;
+  /** True when the running runtime has published a matching plan. */
+  applied: boolean;
+}
+
+export interface ResourceProfileUpdate {
+  profile?: ProfileMode;
+  cpu_core_fraction?: number;
+  gpu_enabled?: boolean | null;
+  vision_enabled?: boolean | null;
+  workers_max_concurrent?: number | null;
+  screen_interval_secs?: number | null;
+  context_interval_secs?: number | null;
+  battery_throttle?: boolean;
+}
+
+export interface ResourceProfileUpdateResult {
+  config: ResourceConfig;
+  plan: ResolvedResourcePlan;
+  restart_required: boolean;
 }

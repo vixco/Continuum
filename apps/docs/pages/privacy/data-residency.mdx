@@ -1,31 +1,31 @@
 # What stays local
 
-Kairo's privacy model is simple: **everything is local unless you ask the orchestrator to think**. Even then, only the relevant wake context goes to the cloud — never the raw stream.
+Continuum's privacy model is simple: **everything is local unless you ask the orchestrator to think**. Even then, only the relevant wake context goes to the cloud — never the raw stream.
 
 ## Always local
 
-- Screenshots (at `~/.kairo/memory/screenshots/` if you have `screen.save_screenshots = true`)
+- Screenshots (at `~/.continuum/memory/screenshots/` if you have `screen.save_screenshots = true`)
 - Microphone audio (never written to disk — only whisper transcripts are stored)
-- Whisper transcripts (at `~/.kairo/memory/raw_log.sqlite`)
+- Whisper transcripts (at `~/.continuum/memory/raw_log.sqlite`)
 - Vision model (SmolVLM-256M runs in-process)
 - Triage model (Qwen 3 8B runs in-process)
 - TTS synthesis (Piper subprocess)
-- Episodic memory (LanceDB at `~/.kairo/memory/episodic/`)
-- Semantic memory (SQLite at `~/.kairo/memory/semantic.sqlite`)
-- Logs (`~/.kairo/logs/`)
-- Backups (`~/.kairo-backups/`)
+- Episodic memory (LanceDB at `~/.continuum/memory/episodic/`)
+- Semantic memory (SQLite at `~/.continuum/memory/semantic.sqlite`)
+- Logs (`~/.continuum/logs/`)
+- Backups (`~/.continuum-backups/`)
 
 Nothing in this list is ever uploaded anywhere.
 
 ## Leaves your machine only when triage wakes Opus
 
-When triage decides `wake_orchestrator`, Kairo sends to the `claude` CLI (which sends it to Anthropic's API):
+When triage decides `wake_orchestrator`, Continuum sends to the `claude` CLI (which sends it to Anthropic's API):
 
 - The wake context (current frame + top-K retrieved memories + skill content + triage reason)
 - The orchestrator system prompt
 - Results of any tool calls Opus makes during the wake
 
-The wake context is capped at ~4000 tokens. It contains text and optionally a single screenshot if Opus requests it via `perception_*` tools (not exposed yet — see [KNOWN_ISSUES.md](https://github.com/vixco/kairo-ai/blob/main/KNOWN_ISSUES.md)).
+The wake context is capped at ~4000 tokens. It contains text and optionally a single screenshot if Opus requests it via `perception_*` tools (not exposed yet — see [KNOWN_ISSUES.md](https://github.com/vixco/Continuum/blob/main/KNOWN_ISSUES.md)).
 
 ## When workers run
 
@@ -37,7 +37,7 @@ If you enable the ElevenLabs TTS backend (stubbed in alpha, not enabled yet), TT
 
 ## Third-party endpoints
 
-Kairo makes outbound HTTP to exactly three kinds of endpoints:
+Continuum makes outbound HTTP to exactly three kinds of endpoints:
 
 1. **`api.anthropic.com`** via the `claude` CLI — when the orchestrator or a worker wakes.
 2. **GitHub / HuggingFace** during model download via `scripts/download-models.ps1`. Only at install time or when you explicitly trigger a reinstall.
@@ -50,4 +50,4 @@ No other outbound calls. The orchestrator's `web_fetch` tool is GET-only, capped
 - **Pause perception entirely** from the tray menu — senses go silent.
 - **Disable voice** → no mic capture.
 - **Disable screenshots** → vision still runs on the bitmap in memory but nothing hits disk.
-- **Disable model auto-download** → Kairo won't reach out to HuggingFace; bring your own models.
+- **Disable model auto-download** → Continuum won't reach out to HuggingFace; bring your own models.

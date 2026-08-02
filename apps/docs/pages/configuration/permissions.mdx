@@ -1,6 +1,6 @@
 # Permissions
 
-Kairo's permission model is about **filesystem access** and **tool access**. Config lives at `~/.kairo/config/default-permissions.toml`.
+Continuum's permission model is about **filesystem access** and **tool access**. Config lives at `~/.continuum/config/default-permissions.toml`.
 
 ## Filesystem allowlist
 
@@ -15,7 +15,7 @@ read_only_paths = [
 ]
 ```
 
-Plus a hardcoded deny list Kairo never touches:
+Plus a hardcoded deny list Continuum never touches:
 
 - `.ssh`, `.aws`, `.gnupg`, `.docker` directories
 - Browser profile directories (`User Data`, `Profiles`)
@@ -38,7 +38,7 @@ Override per-tool in `default-permissions.toml`:
 
 ```toml
 [tools]
-"mcp__kairo__system_notification" = "deny"   # no toasts, ever
+"mcp__continuum__system_notification" = "deny"   # no toasts, ever
 ```
 
 ## Confirmation prompts

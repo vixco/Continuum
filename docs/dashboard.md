@@ -1,8 +1,8 @@
 # Dashboard
 
-The Kairo dashboard is the Tauri desktop window that surfaces and
+The Continuum dashboard is the Tauri desktop window that surfaces and
 configures everything the four-layer runtime is doing. It's not the
-runtime itself — the `kairo` binary owns senses/triage/orchestrator —
+runtime itself — the `continuum` binary owns senses/triage/orchestrator —
 but it's where you spend time as a user.
 
 ## Architecture
@@ -11,7 +11,7 @@ Two processes cooperate:
 
 ```
 ┌────────────────────┐          ┌──────────────────────────┐
-│  kairo.exe          │          │  kairo-desktop.exe        │
+│  continuum.exe          │          │  continuum-desktop.exe        │
 │  (release only)     │          │  (Tauri 2 + Next.js 15)   │
 │                     │  writes  │                           │
 │  senses → triage →  │ ───────▶ │  reads state.json         │
@@ -21,16 +21,16 @@ Two processes cooperate:
 │                     │ ◀─────── │  backups                  │
 │                     │ intents  │                           │
 └────────────────────┘          └──────────────────────────┘
-        ~/.kairo-dev/                   ~/.kairo-dev/
+        ~/.continuum-dev/                   ~/.continuum-dev/
           state.json                      repair-intents/
           logs/                           automations.json
           config.toml                     config.toml
 ```
 
-- `kairo.exe` writes a small [`RuntimeSnapshot`](../crates/kairo-core/src/runtime_publish.rs)
+- `continuum.exe` writes a small [`RuntimeSnapshot`](../crates/continuum-core/src/runtime_publish.rs)
   JSON file every 2 s describing which models are loaded, the current
   voice mode, frame count and wake count.
-- `kairo-desktop.exe` embeds `kairo-core` (without the `runtime` feature),
+- `continuum-desktop.exe` embeds `continuum-core` (without the `runtime` feature),
   so it gets the state store, log buffer, automations, health registry,
   backup rotation, and repair agent — but none of the llama-cpp / whisper
   C++ build dependencies.
@@ -54,10 +54,10 @@ Two processes cooperate:
 
 | Topic           | Payload type                  | Purpose                                    |
 |-----------------|-------------------------------|--------------------------------------------|
-| `kairo:state`   | `KairoState` snapshot         | Any change to perception, triage, voice, etc. Debounced 150 ms. |
-| `kairo:log`     | `LogEntry`                    | Every tracing event the backend emits.     |
-| `kairo:repair`  | `RepairEvent`                 | Repair agent stream: text deltas, tool calls, stderr, completion. |
-| `kairo:control` | `{action: "pause" \| "resume" \| "voice-on" \| "voice-off"}` | Tray menu → frontend. |
+| `continuum:state`   | `ContinuumState` snapshot         | Any change to perception, triage, voice, etc. Debounced 150 ms. |
+| `continuum:log`     | `LogEntry`                    | Every tracing event the backend emits.     |
+| `continuum:repair`  | `RepairEvent`                 | Repair agent stream: text deltas, tool calls, stderr, completion. |
+| `continuum:control` | `{action: "pause" \| "resume" \| "voice-on" \| "voice-off"}` | Tray menu → frontend. |
 
 ## Status orb colors
 
@@ -76,9 +76,9 @@ cd apps/desktop
 pnpm install
 
 # Start the runtime separately in another terminal
-cargo run --release --bin kairo
+cargo run --release --bin continuum
 
-# Tauri dev — the backend embeds kairo-core without the runtime feature
+# Tauri dev — the backend embeds continuum-core without the runtime feature
 # so debug builds work without llama-cpp hassles.
 pnpm tauri dev
 ```
@@ -87,12 +87,12 @@ pnpm tauri dev
 
 | Path                                     | Owner               | Purpose |
 |------------------------------------------|---------------------|---------|
-| `~/.kairo-dev/config.toml`               | shared              | Runtime configuration |
-| `~/.kairo-dev/automations.json`          | dashboard           | Scheduled tasks |
-| `~/.kairo-dev/state.json`                | kairo runtime       | Live flags + voice mode (published every 2 s) |
-| `~/.kairo-dev/repair-intents/*.json`     | dashboard → runtime | Repair actions queued by the repair agent |
-| `~/.kairo-dev/repair-context.md`         | dashboard           | Written at the start of each repair session |
-| `~/.kairo-backups/<date>/kairo-<date>.zip` | dashboard          | Nightly config backup, 7-day rotation |
+| `~/.continuum-dev/config.toml`               | shared              | Runtime configuration |
+| `~/.continuum-dev/automations.json`          | dashboard           | Scheduled tasks |
+| `~/.continuum-dev/state.json`                | continuum runtime       | Live flags + voice mode (published every 2 s) |
+| `~/.continuum-dev/repair-intents/*.json`     | dashboard → runtime | Repair actions queued by the repair agent |
+| `~/.continuum-dev/repair-context.md`         | dashboard           | Written at the start of each repair session |
+| `~/.continuum-backups/<date>/continuum-<date>.zip` | dashboard          | Nightly config backup, 7-day rotation |
 
 ## Limitations
 

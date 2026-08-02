@@ -1,9 +1,9 @@
 [package]
-name = "kairo-desktop"
+name = "continuum-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kairo desktop app — Tauri 2 backend"
+description = "Continuum desktop app — Tauri 2 backend"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -23,6 +23,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-kairo-core = { path = "../../../crates/kairo-core", default-features = false }
+continuum-core = { path = "../../../crates/continuum-core", default-features = false }
+parking_lot = "0.12"
+sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 tempfile = "3"
 url = "2"

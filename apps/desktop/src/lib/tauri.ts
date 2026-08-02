@@ -9,10 +9,14 @@ import type {
   Automation,
   AutomationInput,
   ComponentHealth,
-  KairoConfig,
-  KairoState,
+  ContinuumConfig,
+  ContinuumState,
   LogEntry,
   RepairEvent,
+  ResourceConfig,
+  ResourceProfile,
+  ResourceProfileUpdate,
+  ResourceProfileUpdateResult,
   SaveSkillInput,
   SemanticFact,
   Skill,
@@ -140,19 +144,46 @@ export async function installPendingUpdate(
 
 // --- Commands ---
 
-export const kairo = {
+export const continuum = {
   checkForUpdate,
   installPendingUpdate,
-  getState: () => invoke<KairoState>("get_state", undefined, DEFAULT_STATE),
-  getConfig: () => invoke<KairoConfig>("get_config", undefined, DEFAULT_CONFIG),
+  getState: () => invoke<ContinuumState>("get_state", undefined, DEFAULT_STATE),
+  getConfig: () => invoke<ContinuumConfig>("get_config", undefined, DEFAULT_CONFIG),
+  getResourceProfile: () =>
+    invoke<ResourceProfile>("get_resource_profile", undefined, {
+      specs: {
+        physical_cores: 0,
+        logical_cores: 0,
+        total_ram_mb: 0,
+        cpu_brand: "",
+        has_cuda: false,
+        vram_mb: null,
+        on_battery: false,
+        is_laptop: false,
+      },
+      plan: {
+        triage_threads: 2,
+        triage_gpu_layers: 0,
+        vision_enabled: false,
+        vision_gpu: false,
+        whisper_threads: 2,
+        workers_max_concurrent: 1,
+        screen_interval_secs: 3,
+        context_interval_secs: 1,
+      },
+      config: DEFAULT_RESOURCE_CONFIG,
+      applied: false,
+    }),
+  updateResourceProfile: (update: ResourceProfileUpdate) =>
+    invoke<ResourceProfileUpdateResult>("update_resource_profile", { update }),
   updateVoiceVolume: (volume: number) =>
-    invoke<KairoConfig>("update_voice_volume", { volume }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_voice_volume", { volume }, DEFAULT_CONFIG),
   updateVoiceFlag: (flag: string, value: boolean) =>
-    invoke<KairoConfig>("update_voice_flag", { flag, value }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_voice_flag", { flag, value }, DEFAULT_CONFIG),
   updateScreenInterval: (seconds: number) =>
-    invoke<KairoConfig>("update_screen_interval", { seconds }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_screen_interval", { seconds }, DEFAULT_CONFIG),
   updateTriageThreshold: (threshold: number) =>
-    invoke<KairoConfig>("update_triage_threshold", { threshold }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_triage_threshold", { threshold }, DEFAULT_CONFIG),
   getLogs: (query?: {
     level?: string;
     layer?: string;
@@ -184,19 +215,19 @@ export const kairo = {
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   talkNow: () => invoke<void>("talk_now"),
   updateWakeSensitivity: (value: number) =>
-    invoke<KairoConfig>("update_wake_sensitivity", { value }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_wake_sensitivity", { value }, DEFAULT_CONFIG),
   updateTtsLengthScale: (value: number) =>
-    invoke<KairoConfig>("update_tts_length_scale", { value }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_tts_length_scale", { value }, DEFAULT_CONFIG),
   updateTtsEngine: (engine: string) =>
-    invoke<KairoConfig>("update_tts_engine", { engine }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_tts_engine", { engine }, DEFAULT_CONFIG),
   updateTtsPrimaryVoice: (voice: string) =>
-    invoke<KairoConfig>("update_tts_primary_voice", { voice }, DEFAULT_CONFIG),
+    invoke<ContinuumConfig>("update_tts_primary_voice", { voice }, DEFAULT_CONFIG),
   quit: () => invoke<void>("quit_app"),
   listSkills: () => invoke<Skill[]>("list_skills", undefined, []),
   saveSkill: (input: SaveSkillInput) => invoke<Skill>("save_skill", { input }),
   deleteSkill: (name: string) => invoke<void>("delete_skill", { name }),
   toggleSkill: (name: string, enabled: boolean) =>
-    invoke<KairoConfig>("toggle_skill", { name, enabled }),
+    invoke<ContinuumConfig>("toggle_skill", { name, enabled }),
   installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
   listWorkers: (limit?: number) => invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
   getWorker: (id: string) => invoke<WorkerSnapshot | null>("get_worker", { id }, null),
@@ -217,21 +248,21 @@ export interface RuntimeStatus {
   binary_path: string | null;
 }
 
-export async function subscribeState(handler: (s: KairoState) => void) {
-  return listen<KairoState>("kairo:state", handler);
+export async function subscribeState(handler: (s: ContinuumState) => void) {
+  return listen<ContinuumState>("continuum:state", handler);
 }
 
 export async function subscribeLogs(handler: (e: LogEntry) => void) {
-  return listen<LogEntry>("kairo:log", handler);
+  return listen<LogEntry>("continuum:log", handler);
 }
 
 export async function subscribeRepair(handler: (e: RepairEvent) => void) {
-  return listen<RepairEvent>("kairo:repair", handler);
+  return listen<RepairEvent>("continuum:repair", handler);
 }
 
 // --- Defaults (used when the dashboard renders outside Tauri, e.g. `pnpm dev`) ---
 
-export const DEFAULT_STATE: KairoState = {
+export const DEFAULT_STATE: ContinuumState = {
   perception: {
     last_frame_id: null,
     last_frame_ts: null,
@@ -303,7 +334,24 @@ export const DEFAULT_STATE: KairoState = {
   recent_actions: [],
 };
 
-export const DEFAULT_CONFIG: KairoConfig = {
+export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
+  profile: "barely_notice",
+  cpu_core_fraction: 0.3,
+  cpu_min_threads: 2,
+  cpu_max_threads: 8,
+  ram_reserve_fraction: 0.5,
+  gpu_enabled: null,
+  gpu_min_vram_mb: 3000,
+  battery_throttle: true,
+  battery_core_fraction: 0.2,
+  vision_min_ram_mb: 6144,
+  vision_enabled: null,
+  workers_max_concurrent: null,
+  screen_interval_secs: null,
+  context_interval_secs: null,
+};
+
+export const DEFAULT_CONFIG: ContinuumConfig = {
   vision: {
     name: "SmolVLM-256M",
     model_path: "",
@@ -340,7 +388,7 @@ export const DEFAULT_CONFIG: KairoConfig = {
   voice: {
     enabled: true,
     wake_word_enabled: true,
-    wake_keyword: "hey kairo",
+    wake_keyword: "hey continuum",
     wake_sensitivity: 0.5,
     custom_keyword_path: "",
     listen_timeout_ms: 12000,
@@ -388,4 +436,5 @@ export const DEFAULT_CONFIG: KairoConfig = {
     token_budget: 2000,
     disabled: [],
   },
+  resources: DEFAULT_RESOURCE_CONFIG,
 };
