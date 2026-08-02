@@ -864,26 +864,11 @@ pub struct RuntimeStatus {
     pub binary_path: Option<String>,
 }
 
-/// True if `continuum.exe` has touched `<dev_dir>/state.json` in the last
-/// 10 seconds. Shared freshness heuristic behind [`get_runtime_status`] and
-/// `chat.rs`'s "Background runtime: running/not running" system-prompt line
-/// — both need the same answer to the same question, so it lives in one
-/// place rather than being copy-pasted.
-pub(crate) fn runtime_state_fresh(dev_dir: &std::path::Path) -> bool {
-    let state_path = dev_dir.join("state.json");
-    std::fs::metadata(&state_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-        .map(|age| age.as_secs() < 10)
-        .unwrap_or(false)
-}
-
 #[tauri::command]
 pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<RuntimeStatus, String> {
     let dev_dir = app.runtime.dev_dir();
     let state_path = dev_dir.join("state.json");
-    let alive = runtime_state_fresh(&dev_dir);
+    let alive = crate::components::runtime_alive(&dev_dir);
     Ok(RuntimeStatus {
         alive,
         state_path: state_path.to_string_lossy().into_owned(),

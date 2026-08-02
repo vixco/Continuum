@@ -116,13 +116,34 @@ impl SecretStore for MemorySecretStore {
 }
 
 /// Shared Tauri-managed state for the chat feature: the provider store, the
-/// OS credential store, and in-flight stream cancellation tokens (populated
-/// and consumed by `chat_send_message` / `chat_cancel` in `chat.rs`).
+/// OS credential store, in-flight stream cancellation tokens, and
+/// per-conversation write locks (all populated/consumed by `chat.rs`).
 pub struct ChatState {
     pub providers: std::sync::Mutex<ProviderStore>,
     pub secrets: Box<dyn SecretStore>,
     pub inflight:
         std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// One `tokio::sync::Mutex` per conversation id, created on first use.
+    /// Guards every load-mutate-save sequence on a conversation's JSON file
+    /// so a `chat_send_message` save and a concurrent CRUD command (rename,
+    /// model change, delete) can't interleave and drop one of the writes.
+    pub conv_locks:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ChatState {
+    /// Returns the per-conversation write lock, creating it on first use.
+    /// The outer `std::sync::Mutex` guarding the map is only ever held for
+    /// this get-or-insert-clone — never across an `.await` — so the actual
+    /// cross-await serialization happens on the returned `tokio::sync::Mutex`,
+    /// which callers `.lock().await` around their load-mutate-save sequence.
+    pub fn conv_lock(&self, conversation_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.conv_locks.lock().expect("conv_locks lock");
+        locks
+            .entry(conversation_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 /// A catalog preset, shaped for the frontend "Add Provider" form.
@@ -493,6 +514,37 @@ mod tests {
         assert_eq!(s.get("x").expect("get").as_deref(), Some("sekrit"));
         s.delete("x").expect("delete");
         assert!(s.get("x").expect("get").is_none());
+    }
+
+    fn test_chat_state() -> ChatState {
+        ChatState {
+            providers: std::sync::Mutex::new(ProviderStore::new(std::env::temp_dir())),
+            secrets: Box::new(MemorySecretStore::default()),
+            inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+            conv_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn conv_lock_same_id_returns_same_arc() {
+        let chat_state = test_chat_state();
+        let a = chat_state.conv_lock("chat-1");
+        let b = chat_state.conv_lock("chat-1");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "same conversation id must yield the same lock instance"
+        );
+    }
+
+    #[test]
+    fn conv_lock_different_ids_return_different_arcs() {
+        let chat_state = test_chat_state();
+        let a = chat_state.conv_lock("chat-1");
+        let b = chat_state.conv_lock("chat-2");
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "different conversation ids must yield different lock instances"
+        );
     }
 
     // -- build_adapter -------------------------------------------------

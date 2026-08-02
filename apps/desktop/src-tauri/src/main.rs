@@ -126,6 +126,7 @@ fn main() {
         providers: std::sync::Mutex::new(providers::ProviderStore::new(dev_dir.clone())),
         secrets: Box::new(providers::KeyringSecretStore),
         inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+        conv_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     tauri::Builder::default()

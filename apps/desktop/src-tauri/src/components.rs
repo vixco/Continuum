@@ -34,8 +34,10 @@ fn install_dir() -> Option<PathBuf> {
 /// True if `continuum.exe` has touched `~/.continuum-dev/state.json` recently.
 /// Used to avoid screaming "Degrading" across every model/voice/orchestrator
 /// probe when the runtime simply isn't running (the common case for dashboard-only
-/// installs).
-fn runtime_alive(dev_dir: &Path) -> bool {
+/// installs). `pub(crate)` so `commands::get_runtime_status` and `chat.rs`'s
+/// "Background runtime: running/not running" system-prompt line share this
+/// one freshness check instead of each keeping their own copy.
+pub(crate) fn runtime_alive(dev_dir: &Path) -> bool {
     let state_path = dev_dir.join("state.json");
     let Ok(meta) = std::fs::metadata(&state_path) else {
         return false;
