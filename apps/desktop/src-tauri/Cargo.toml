@@ -38,3 +38,4 @@ sysinfo = { version = "0.33", default-features = false, features = ["system", "m
 tempfile = "3"
 tokio-util = "0.7"
 url = "2"
+uuid = { workspace = true }
