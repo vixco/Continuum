@@ -65,6 +65,21 @@ impl OpenAiCompatAdapter {
             }
         }
     }
+
+    /// Sends a request, bounding the whole round-trip (not just the TCP
+    /// connect) by `idle_timeout`. Without this, a server that accepts the
+    /// connection but never writes a response byte would hang `send()`
+    /// forever — `connect_timeout` alone does not cover that case.
+    async fn send_with_timeout(
+        &self,
+        rb: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, GatewayError> {
+        match tokio::time::timeout(self.idle_timeout, rb.send()).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(e)) => Err(self.map_send_error(e)),
+            Err(_) => Err(GatewayError::Timeout),
+        }
+    }
 }
 
 fn map_status(status: reqwest::StatusCode, retry_after: Option<u64>, body: String) -> GatewayError {
@@ -106,10 +121,8 @@ impl ChatProvider for OpenAiCompatAdapter {
 
     async fn list_models(&self) -> Result<Vec<String>, GatewayError> {
         let resp = self
-            .auth(self.client.get(format!("{}/models", self.base_url)))
-            .send()
-            .await
-            .map_err(|e| self.map_send_error(e))?;
+            .send_with_timeout(self.auth(self.client.get(format!("{}/models", self.base_url))))
+            .await?;
         if !resp.status().is_success() {
             let ra = retry_after(&resp);
             let status = resp.status();
@@ -127,9 +140,15 @@ impl ChatProvider for OpenAiCompatAdapter {
         struct ModelList {
             data: Vec<ModelEntry>,
         }
-        let list: ModelList = resp.json().await.map_err(|e| GatewayError::BadResponse {
-            detail: e.to_string(),
-        })?;
+        let list: ModelList = match tokio::time::timeout(self.idle_timeout, resp.json()).await {
+            Ok(Ok(list)) => list,
+            Ok(Err(e)) => {
+                return Err(GatewayError::BadResponse {
+                    detail: e.to_string(),
+                })
+            }
+            Err(_) => return Err(GatewayError::Timeout),
+        };
         Ok(list.data.into_iter().map(|m| m.id).collect())
     }
 
@@ -155,15 +174,13 @@ impl ChatProvider for OpenAiCompatAdapter {
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
         }
-        let resp = self
+        let rb = self
             .auth(
                 self.client
                     .post(format!("{}/chat/completions", self.base_url)),
             )
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| self.map_send_error(e))?;
+            .json(&body);
+        let resp = self.send_with_timeout(rb).await?;
         if !resp.status().is_success() {
             let ra = retry_after(&resp);
             let status = resp.status();
@@ -193,6 +210,21 @@ fn stream_events(
         let mut usage = TokenUsage::default();
         let mut stop_reason: Option<String> = None;
         loop {
+            // Eager check: if the token was already cancelled before this
+            // iteration started, don't race it against `bytes.next()` in
+            // the `select!` below — a fully-buffered response (small SSE
+            // bodies typically arrive in one TCP read) can make that read
+            // resolve synchronously too, which would non-deterministically
+            // let a stale chunk win over an already-requested cancellation.
+            if cancel.is_cancelled() {
+                let _ = tx
+                    .send(ChatEvent::Error {
+                        message: GatewayError::Cancelled.user_message(),
+                        retryable: false,
+                    })
+                    .await;
+                return;
+            }
             let chunk = tokio::select! {
                 _ = cancel.cancelled() => {
                     let _ = tx.send(ChatEvent::Error { message: GatewayError::Cancelled.user_message(), retryable: false }).await;
