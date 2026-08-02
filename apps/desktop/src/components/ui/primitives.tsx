@@ -224,6 +224,7 @@ export function Select<T extends string>({
   options,
   onChange,
   label,
+  className,
   ...props
 }: Omit<SelectHTMLAttributes<HTMLSelectElement>, "onChange" | "value"> & {
   value: T;
@@ -231,8 +232,10 @@ export function Select<T extends string>({
   onChange: (v: T) => void;
   label?: ReactNode;
 }) {
+  // The caller's className sizes the outer label (the select itself stays
+  // w-full inside it), so width utilities like `w-28` don't fight `w-full`.
   return (
-    <label className="block">
+    <label className={clsx("block", className)}>
       {label && <span className="mb-1.5 block text-xs text-ink-muted">{label}</span>}
       <select
         {...props}
