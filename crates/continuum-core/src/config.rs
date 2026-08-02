@@ -46,6 +46,9 @@ pub struct ContinuumConfig {
     /// concurrency so Continuum does not eat the whole machine. Per
     /// non-negotiable #3 every value here is overridable.
     pub resources: ResourceConfig,
+    /// Chat tab settings.
+    #[serde(default)]
+    pub chat: ChatConfig,
 }
 
 /// Resource-aware profile. Selects a baseline policy; `Custom` uses the
@@ -177,6 +180,38 @@ impl ResourceConfig {
         Ok(())
     }
 }
+
+/// Chat tab settings (`[chat]`). Every knob overridable (non-negotiable #3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Max output tokens per response.
+    pub max_tokens: u32,
+    /// Sampling temperature — only forwarded to OpenAI-compatible providers.
+    pub temperature: Option<f32>,
+    /// HTTP connect timeout.
+    pub connect_timeout_secs: u64,
+    /// Abort a stream after this many seconds without a delta.
+    pub stream_idle_timeout_secs: u64,
+    /// Overall timeout for claude-CLI sends.
+    pub cli_timeout_secs: u64,
+    /// Optional path to a custom system prompt file (overrides the built-in).
+    pub system_prompt_path: Option<String>,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: 8192,
+            temperature: None,
+            connect_timeout_secs: 10,
+            stream_idle_timeout_secs: 60,
+            cli_timeout_secs: 120,
+            system_prompt_path: None,
+        }
+    }
+}
+
 ///
 /// Every field is user-overridable via `config.toml` — per non-negotiable #3,
 /// there are no hardcoded model IDs or timeouts anywhere else in the runtime.
@@ -568,6 +603,7 @@ impl Default for ContinuumConfig {
             orchestrator: OrchestratorSection::default(),
             triage: TriageSection::default(),
             resources: ResourceConfig::default(),
+            chat: ChatConfig::default(),
         }
     }
 }
@@ -995,5 +1031,25 @@ interval_secs = 5
         assert_eq!(config.screen.interval_secs, 5);
         // Other fields should be defaults
         assert_eq!(config.frame.salience_threshold, 0.10);
+    }
+
+    #[test]
+    fn chat_config_defaults_and_parse() {
+        let cfg = ChatConfig::default();
+        assert_eq!(cfg.max_tokens, 8192);
+        assert_eq!(cfg.connect_timeout_secs, 10);
+        assert_eq!(cfg.stream_idle_timeout_secs, 60);
+        assert_eq!(cfg.cli_timeout_secs, 120);
+        assert!(cfg.temperature.is_none());
+        assert!(cfg.system_prompt_path.is_none());
+
+        let parsed: ContinuumConfig =
+            toml::from_str("[chat]\nmax_tokens = 2048\nstream_idle_timeout_secs = 30\n")
+                .expect("parse");
+        assert_eq!(parsed.chat.max_tokens, 2048);
+        assert_eq!(parsed.chat.stream_idle_timeout_secs, 30);
+        // Omitting [chat] entirely must also work:
+        let empty: ContinuumConfig = toml::from_str("").expect("parse empty");
+        assert_eq!(empty.chat.max_tokens, 8192);
     }
 }
