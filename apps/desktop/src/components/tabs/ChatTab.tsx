@@ -72,12 +72,20 @@ function ChatWorkspace() {
   // conversation is currently streaming - even if it isn't the one on
   // screen right now. See the `continuum:chat` subscription below.
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string | null>(null);
+  // Errors about a specific, already-open chat session (send failures,
+  // stream errors, reload failures, model-switch failures) are keyed by
+  // conversation id so a background conversation's failure can never
+  // clobber the banner of whatever conversation is actually on screen.
+  // `globalError` is the separate, single slot for failures that aren't
+  // about any one conversation (listing conversations, creating a new
+  // one, deleting one from the sidebar).
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [globalError, setGlobalError] = useState<string | null>(null);
   // Only ever set for a *send* failure (chatSendMessage rejecting, or a
-  // stream `error` event for a conversation whose last outgoing text we
-  // remember), and always scoped to the conversation the failed send
-  // belongs to - so Retry can never fire into the wrong chat, or linger
-  // next to an unrelated (load/delete/model-switch) error.
+  // retryable stream `error` event for a conversation whose last outgoing
+  // text we remember), and always scoped to the conversation the failed
+  // send belongs to - so Retry can never fire into the wrong chat, or
+  // linger next to an unrelated (load/delete/model-switch) error.
   const [retryInfo, setRetryInfo] = useState<{ conversationId: string; text: string } | null>(
     null
   );
@@ -105,28 +113,37 @@ function ChatWorkspace() {
     activeIdRef.current = activeId;
   }, [activeId]);
 
-  // Sets the error banner. `retry` defaults to null, which also clears
-  // out any stale retry left over from an earlier, unrelated send failure
-  // - so the Retry button can never appear next to a message it doesn't
-  // apply to. Only the two send-failure call sites pass a real `retry`.
-  const showError = useCallback(
-    (message: string, retry: { conversationId: string; text: string } | null = null) => {
-      setError(message);
-      setRetryInfo(retry);
+  // Sets a conversation-scoped error. `retry` defaults to null, which also
+  // clears out any stale retry left over from an earlier, unrelated send
+  // failure *for this same conversation* - so the Retry button can never
+  // appear next to a message it doesn't apply to. Only the two
+  // send-failure call sites pass a real `retry`.
+  const showConversationError = useCallback(
+    (id: string, message: string, retry: { conversationId: string; text: string } | null = null) => {
+      setErrors((e) => ({ ...e, [id]: message }));
+      setRetryInfo((r) => (retry ? retry : r?.conversationId === id ? null : r));
     },
     []
   );
+
+  // Sets the non-conversation error slot (listing/creating conversations,
+  // i.e. failures that aren't about any one already-open chat session).
+  // Never carries a retry.
+  const showGlobalError = useCallback((message: string) => {
+    setGlobalError(message);
+  }, []);
 
   const loadConversations = useCallback(async () => {
     try {
       const list = await continuum.chatListConversations();
       setConversations(list);
+      setGlobalError(null);
       return list;
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e));
+      showGlobalError(e instanceof Error ? e.message : String(e));
       return [];
     }
-  }, [showError]);
+  }, [showGlobalError]);
 
   const loadActive = useCallback(
     async (id: string) => {
@@ -134,10 +151,16 @@ function ChatWorkspace() {
         const conv = await continuum.chatGetConversation(id);
         if (activeIdRef.current === id) setActiveConv(conv);
       } catch (e) {
-        if (activeIdRef.current === id) showError(e instanceof Error ? e.message : String(e));
+        // Not gated on `activeIdRef.current === id`: the error belongs to
+        // conversation `id` regardless of whether the user has since
+        // switched away, so it's still correct to record it in that
+        // conversation's own scoped slot for whenever they look at it
+        // again. Only the *visible thread* (`setActiveConv` above) should
+        // stay pinned to whatever's actually still selected.
+        showConversationError(id, e instanceof Error ? e.message : String(e));
       }
     },
-    [showError]
+    [showConversationError]
   );
 
   // Initial load: providers + conversation list, then select the most
@@ -146,7 +169,7 @@ function ChatWorkspace() {
     void (async () => {
       const [provs, list] = await Promise.all([
         continuum.providersList().catch((e) => {
-          showError(e instanceof Error ? e.message : String(e));
+          showGlobalError(e instanceof Error ? e.message : String(e));
           return [] as ProviderConnection[];
         }),
         loadConversations(),
@@ -159,7 +182,7 @@ function ChatWorkspace() {
         void loadActive(list[0].id);
       }
     })();
-  }, [loadConversations, loadActive, showError]);
+  }, [loadConversations, loadActive, showGlobalError]);
 
   // Streaming subscription - mounted once for the lifetime of the tab.
   // Buffers by conversation id regardless of which one is active, so
@@ -194,8 +217,11 @@ function ChatWorkspace() {
       if (ev.type === "done") {
         setRetryInfo((r) => (r?.conversationId === id ? null : r));
       } else {
+        // Only offer Retry when the backend says this failure is worth
+        // retrying - and only then do we need last-sent text at all.
         const text = lastSentTextRef.current[id];
-        showError(ev.message, text ? { conversationId: id, text } : null);
+        const retry = ev.retryable && text ? { conversationId: id, text } : null;
+        showConversationError(id, ev.message, retry);
       }
     }).then((u) => {
       // The effect's cleanup can fire before this promise settles (fast
@@ -212,7 +238,7 @@ function ChatWorkspace() {
       disposed = true;
       unlisten?.();
     };
-  }, [loadActive, loadConversations, showError]);
+  }, [loadActive, loadConversations, showConversationError]);
 
   // Autoscroll the thread as new messages arrive or text streams in.
   useEffect(() => {
@@ -226,7 +252,6 @@ function ChatWorkspace() {
     activeIdRef.current = id;
     setActiveId(id);
     setActiveConv(null);
-    setError(null);
     void loadActive(id);
   }
 
@@ -234,7 +259,7 @@ function ChatWorkspace() {
     const pick = defaultProviderModel(providers);
     if (!pick) return;
     setCreating(true);
-    setError(null);
+    setGlobalError(null);
     try {
       const conv = await continuum.chatCreateConversation(pick.providerId, pick.model);
       await loadConversations();
@@ -242,7 +267,7 @@ function ChatWorkspace() {
       setActiveId(conv.id);
       setActiveConv(conv);
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e));
+      showGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
@@ -266,6 +291,15 @@ function ChatWorkspace() {
         delete next[id];
         return next;
       });
+      // Dead state for a conversation that no longer exists - drop its
+      // scoped error and any pending retry pointed at it.
+      setErrors((e) => {
+        if (!(id in e)) return e;
+        const next = { ...e };
+        delete next[id];
+        return next;
+      });
+      setRetryInfo((r) => (r?.conversationId === id ? null : r));
       delete lastSentTextRef.current[id];
       const list = await loadConversations();
       if (activeId === id) {
@@ -276,7 +310,11 @@ function ChatWorkspace() {
         if (next) void loadActive(next.id);
       }
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e));
+      // Deleting is a sidebar/list action the user takes regardless of
+      // which conversation is currently open, so - like loadConversations
+      // and newChat - a failure here goes to the global slot rather than
+      // a conversation-scoped one that might never be looked at again.
+      showGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setConfirmDeleteId(null);
       setDeletingId(null);
@@ -291,7 +329,7 @@ function ChatWorkspace() {
       await continuum.chatSetConversationModel(id, providerId, model);
       void loadConversations();
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e));
+      showConversationError(id, e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -299,7 +337,12 @@ function ChatWorkspace() {
     const trimmed = text.trim();
     if (!trimmed) return;
     lastSentTextRef.current[id] = trimmed;
-    setError(null);
+    setErrors((e) => {
+      if (!(id in e)) return e;
+      const next = { ...e };
+      delete next[id];
+      return next;
+    });
     setSendingId(id);
     try {
       await continuum.chatSendMessage(id, trimmed);
@@ -313,7 +356,10 @@ function ChatWorkspace() {
       // still the conversation on screen.
       if (activeIdRef.current === id) await loadActive(id);
     } catch (e) {
-      showError(e instanceof Error ? e.message : String(e), { conversationId: id, text: trimmed });
+      showConversationError(id, e instanceof Error ? e.message : String(e), {
+        conversationId: id,
+        text: trimmed,
+      });
     } finally {
       setSendingId((cur) => (cur === id ? null : cur));
     }
@@ -461,10 +507,12 @@ function ChatWorkspace() {
               )}
             </div>
 
-            {error && (
+            {(errors[activeConv.id] ?? globalError) && (
               <div className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-300">
-                <span className="min-w-0 flex-1 truncate">{error}</span>
-                {retryInfo && retryInfo.conversationId === activeId && (
+                <span className="min-w-0 flex-1 truncate">
+                  {errors[activeConv.id] ?? globalError}
+                </span>
+                {retryInfo && retryInfo.conversationId === activeConv.id && (
                   <Button size="sm" variant="ghost" onClick={retry}>
                     Retry
                   </Button>
