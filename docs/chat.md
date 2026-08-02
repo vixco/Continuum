@@ -121,7 +121,7 @@ All knobs live under `[chat]` in `~/.continuum-dev/config.toml`
 | `temperature` | unset | Sampling temperature. Only forwarded to OpenAI-compatible providers; ignored by the Anthropic and Claude CLI adapters. |
 | `connect_timeout_secs` | `10` | HTTP connect timeout for provider requests. |
 | `stream_idle_timeout_secs` | `60` | Abort a stream if no delta arrives for this many seconds. |
-| `cli_timeout_secs` | `120` | Overall timeout for a single Claude CLI send (spawn to `result` event). |
+| `cli_timeout_secs` | `120` | Idle timeout for a single Claude CLI send: max seconds allowed to pass WITHOUT a new line of CLI stdout before the send is aborted. Resets on every line, so it is not an overall/end-to-end timeout — a steadily-streaming long generation is never killed by this. |
 | `system_prompt_path` | unset | Path to a file that replaces the built-in system prompt (`apps/desktop/src-tauri/assets/chat-system-prompt.md`). The live-status footer is still appended after whatever text this file contains. |
 
 Example override:

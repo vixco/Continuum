@@ -103,6 +103,16 @@ function ChatWorkspace() {
   // Last text sent per conversation, so a mid-stream `error` event (which
   // carries no text of its own) can still populate `retryInfo` correctly.
   const lastSentTextRef = useRef<Record<string, string>>({});
+  // Tauri does not order `continuum:chat` events against the resolution of
+  // the `chatSendMessage` invoke - a fast stream (or an immediate
+  // pre-stream error) can emit its `done`/`error` event, which deletes this
+  // conversation's stream buffer entry below, before the invoke's `.then`
+  // in `sendMessage` runs. If that `.then` then unconditionally re-seeds
+  // the buffer, the conversation looks like it's streaming forever with
+  // nothing left to ever clear it. This set tracks conversation ids whose
+  // stream has already terminated so that seed can no-op instead; it's
+  // cleared for a conversation at the start of every new send.
+  const finishedStreamsRef = useRef<Set<string>>(new Set());
   const threadRef = useRef<HTMLDivElement>(null);
 
   const activeBuffer = activeId != null ? streamBuffers[activeId] : undefined;
@@ -205,6 +215,11 @@ function ChatWorkspace() {
       // the full conversation if it's the one currently on screen - the
       // assistant message (or aborted partial) is already persisted by
       // the time either event lands.
+      //
+      // Mark the stream terminated before touching the buffer, so the
+      // seed in `sendMessage` (see the ref comment above) can never
+      // re-open a buffer entry we're about to delete.
+      finishedStreamsRef.current.add(id);
       setStreamBuffers((b) => {
         if (!(id in b)) return b;
         const next = { ...b };
@@ -344,13 +359,26 @@ function ChatWorkspace() {
       return next;
     });
     setSendingId(id);
+    // This is a new send for `id` - any earlier termination recorded for
+    // it is stale. Clear it before the invoke so the seed below (once the
+    // invoke resolves) is judged against this send's outcome, not a
+    // previous one's.
+    finishedStreamsRef.current.delete(id);
     try {
       await continuum.chatSendMessage(id, trimmed);
       // This send succeeded - any earlier failed send for this same
       // conversation is no longer worth retrying.
       setRetryInfo((r) => (r?.conversationId === id ? null : r));
       // Seed the buffer so the pulse bubble shows before the first delta.
-      setStreamBuffers((b) => ({ ...b, [id]: "" }));
+      // Tauri doesn't order events vs. this invoke's response, so two
+      // things can already have happened by the time we get here: (a)
+      // deltas may have already landed - preserve them (`b[id] ?? ""`,
+      // never clobber with a bare ""), and (b) the stream may have
+      // already finished - skip seeding entirely then, or we'd resurrect
+      // a buffer key nothing will ever delete again.
+      if (!finishedStreamsRef.current.has(id)) {
+        setStreamBuffers((b) => ({ ...b, [id]: b[id] ?? "" }));
+      }
       // The user message is persisted before this resolves - reload now
       // rather than waiting for the first delta, but only if this is
       // still the conversation on screen.
