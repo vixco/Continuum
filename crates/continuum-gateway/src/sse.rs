@@ -3,6 +3,8 @@
 //! buffering. Event names are ignored — both the OpenAI and Anthropic
 //! streams carry everything we need in the `data:` JSON payload.
 
+#![allow(dead_code)] // TODO(task-4): remove — parser gets wired into the HTTP adapters
+
 pub struct SseParser {
     buf: String,
 }
