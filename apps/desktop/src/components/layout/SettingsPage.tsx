@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { RefreshCw, RotateCcw } from "lucide-react";
 
+import { IntegrationsPanel } from "@/components/continuum/IntegrationsPanel";
 import { ResourcePanel } from "@/components/continuum/ResourcePanel";
 import { Button, Card, Modal } from "@/components/ui/primitives";
 import { useStore } from "@/lib/store";
@@ -46,6 +47,8 @@ export function SettingsPage({
           runtime start.
         </p>
       </header>
+
+      <IntegrationsPanel />
 
       <ResourcePanel />
 
