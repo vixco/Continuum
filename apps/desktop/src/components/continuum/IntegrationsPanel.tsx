@@ -94,7 +94,10 @@ export function IntegrationsPanel() {
     (!showBaseUrl || form.baseUrl.trim().length > 0);
 
   async function submit(saveAnyway: boolean) {
-    if (!selectedPreset || !canSubmit) return;
+    if (!selectedPreset || !canSubmit) {
+      setModalError("Fill in the required fields first.");
+      return;
+    }
     setAdding(true);
     setModalError(null);
     try {
@@ -263,7 +266,12 @@ export function IntegrationsPanel() {
               {adding ? "Testing…" : "Test & save"}
             </Button>
             {testFailed && (
-              <Button size="sm" variant="danger" onClick={() => void submit(true)} disabled={adding}>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => void submit(true)}
+                disabled={adding || !canSubmit}
+              >
                 Save anyway
               </Button>
             )}
@@ -348,6 +356,10 @@ function ProviderRow({
   onRemoveClick: () => void;
   onSetDefaultModel: (model: string) => void;
 }) {
+  // A row's Test/Refresh/Remove are mutually exclusive - one in flight
+  // should block the others so, e.g., Remove can't fire while a Test is
+  // still resolving for the same connection.
+  const rowBusy = testBusy || refreshBusy || removeBusy;
   return (
     <li className="flex flex-col gap-2 py-3 text-sm sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0 flex-1">
@@ -380,17 +392,17 @@ function ProviderRow({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <ModelPicker conn={conn} busy={modelBusy} onSet={onSetDefaultModel} />
-        <Button size="sm" variant="ghost" disabled={testBusy} onClick={onTest}>
+        <ModelPicker conn={conn} busy={rowBusy || modelBusy} onSet={onSetDefaultModel} />
+        <Button size="sm" variant="ghost" disabled={rowBusy} onClick={onTest}>
           <Zap size={12} /> {testBusy ? "Testing…" : "Test"}
         </Button>
-        <Button size="sm" variant="ghost" disabled={refreshBusy} onClick={onRefresh}>
+        <Button size="sm" variant="ghost" disabled={rowBusy} onClick={onRefresh}>
           <RefreshCcw size={12} /> {refreshBusy ? "Refreshing…" : "Refresh"}
         </Button>
         <Button
           size="sm"
           variant={confirming ? "danger" : "ghost"}
-          disabled={removeBusy}
+          disabled={rowBusy}
           onClick={onRemoveClick}
         >
           <Trash2 size={12} /> {confirming ? "Really remove?" : "Remove"}
@@ -429,6 +441,7 @@ function ModelPicker({
   if (useFreeText) {
     return (
       <TextInput
+        aria-label="Default model"
         value={draft}
         onChange={setDraft}
         onBlur={commit}
@@ -445,6 +458,7 @@ function ModelPicker({
   return (
     <div className="w-40">
       <Select
+        aria-label="Default model"
         value={conn.default_model ?? conn.models[0]}
         options={conn.models.map((m) => ({ value: m, label: m }))}
         onChange={onSet}
