@@ -21,6 +21,7 @@ use crate::model::{
     NodeSummary, NodeType, Note, NoteDraft, Resolution, VaultInfo,
 };
 use crate::slug::slugify;
+use crate::watcher::{self, VaultWatcher};
 
 /// Tunables for a [`Vault`]. Every field is read from config and
 /// overridable via the dashboard (per house rule: never hardcode a
@@ -183,6 +184,25 @@ impl Vault {
             }
         }
         Ok(changed)
+    }
+
+    /// Start a debounced watch of this vault's directory for external
+    /// edits (Obsidian, another editor, or a second Continuum process
+    /// sharing the same vault). Batches of changed markdown paths arrive on
+    /// [`VaultWatcher::rx`]; feed them to [`Vault::reindex_paths`] to keep
+    /// the index in sync:
+    ///
+    /// ```ignore
+    /// let mut w = vault.watch()?;
+    /// while let Some(paths) = w.rx.recv().await {
+    ///     vault.reindex_paths(&paths).await?;
+    /// }
+    /// ```
+    ///
+    /// Uses `opts.watcher_debounce_ms` as the debounce window. Dropping the
+    /// returned [`VaultWatcher`] stops the watch.
+    pub fn watch(&self) -> Result<VaultWatcher> {
+        watcher::spawn(self.dir(), self.opts.watcher_debounce_ms)
     }
 
     /// Find a slug based on `base` that is not already used by an indexed
