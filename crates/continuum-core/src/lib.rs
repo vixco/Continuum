@@ -21,6 +21,7 @@
 // need llama-cpp / whisper / lancedb.
 pub mod automations;
 pub mod config;
+pub mod curator;
 pub mod hardware;
 pub mod health;
 pub mod logs;
