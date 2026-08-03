@@ -19,7 +19,7 @@ The ten tabs are grouped as:
 | Voice              | hybrid         | `continuum:state` + `update_voice_*` + `talk_now`             | Live status, live toggles; per-engine config (Piper / ElevenLabs) live.         |
 | Memory             | hybrid         | `search_episodic`, `list_semantic`, `set_semantic`            | List/CRUD live; episodic search is a stub pending episodic store handoff.       |
 | Brain              | hybrid         | `update_screen_interval`, `update_triage_threshold`           | Sliders live; layer-card model selects are explicitly disabled (see source).    |
-| Tools & Skills     | hybrid         | `list_mcp_tools` (this PR), `list_skills`, skill CRUD         | MCP namespace list live; per-tool permission UI is in-memory only.              |
+| Tools & Skills     | hybrid         | `list_mcp_tools`, local MCP server registry, `list_skills`, skill CRUD | Built-in namespace list and local stdio server install are live; per-tool permission UI is in-memory only. |
 | Automations        | live           | `list_automations` + `create_/update_/delete_/toggle_`        | Fully live.                                                                     |
 | Health             | live           | `get_health`, `trigger_repair`, `restart_component`           | Fully live; runtime bridge surfaces health on a 2 s poll.                       |
 | Logs               | live           | `get_logs` + `continuum:log` stream                           | Fully live; layer filter updated to real emitters in this PR.                  |

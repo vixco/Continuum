@@ -946,6 +946,69 @@ pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
     Ok(mcp_tool_manifest())
 }
 
+/// Input accepted by the local MCP-server registration flow.
+#[derive(Debug, Deserialize)]
+pub struct InstallMcpServerInput {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Return user-managed MCP servers that will be attached to the next agent run.
+#[tauri::command]
+pub async fn list_installed_mcp_servers(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<continuum_core::mcp_registry::McpServerRegistration>, String> {
+    continuum_core::mcp_registry::list_servers(&app.runtime.dev_dir()).map_err(|error| {
+        tracing::error!(
+            layer = "orchestrator",
+            component = "mcp_registry",
+            error = %error,
+            "Failed to list installed MCP servers"
+        );
+        error.to_string()
+    })
+}
+
+/// Register an already-installed local stdio MCP server after validating that
+/// its executable is available. No package manager or shell is invoked.
+#[tauri::command]
+pub async fn install_mcp_server(
+    app: State<'_, Arc<AppState>>,
+    input: InstallMcpServerInput,
+) -> Result<continuum_core::mcp_registry::McpServerRegistration, String> {
+    let InstallMcpServerInput {
+        name,
+        command,
+        args,
+    } = input;
+    let result =
+        continuum_core::mcp_registry::install_server(&app.runtime.dev_dir(), &name, &command, args);
+    match result {
+        Ok(server) => {
+            tracing::info!(
+                layer = "orchestrator",
+                component = "mcp_registry",
+                server = %server.name,
+                command = %server.command,
+                "Installed local MCP server registration"
+            );
+            Ok(server)
+        }
+        Err(error) => {
+            tracing::warn!(
+                layer = "orchestrator",
+                component = "mcp_registry",
+                server = %name,
+                error = %error,
+                "MCP server registration failed"
+            );
+            Err(error.to_string())
+        }
+    }
+}
+
 /// Single source of truth for the dashboard's MCP tool list. Keep in lockstep
 /// with the `#[tool]` functions in `crates/continuum-mcp/src/server.rs`.
 /// Wrapped in a function because `McpTool` owns `String`s, which can't be

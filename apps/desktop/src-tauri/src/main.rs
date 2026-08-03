@@ -185,6 +185,8 @@ fn main() {
             commands::pipe_health,
             commands::start_runtime,
             commands::list_mcp_tools,
+            commands::list_installed_mcp_servers,
+            commands::install_mcp_server,
             providers::catalog_list,
             providers::providers_list,
             providers::provider_add,
