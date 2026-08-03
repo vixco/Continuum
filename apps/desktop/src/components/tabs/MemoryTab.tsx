@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FolderOpen, RefreshCw, Search } from "lucide-react";
+import { FolderOpen, Plus, RefreshCw, Search } from "lucide-react";
 
 import { continuum, onMemoryEvent } from "@/lib/tauri";
 import { NODE_COLORS, NODE_TYPE_LABELS } from "@/lib/memoryTheme";
 import { MemoryGraph } from "@/components/memory/MemoryGraph";
+import { NotePanel } from "@/components/memory/NotePanel";
+import { NoteEditorOverlay, type OverlayMode } from "@/components/memory/NoteEditorOverlay";
 import { Button, Card, EmptyState, SearchInput } from "@/components/ui/primitives";
 import type {
   MemoryGraphData,
@@ -22,6 +24,7 @@ export function MemoryTab() {
   const [graph, setGraph] = useState<MemoryGraphData>(EMPTY_GRAPH);
   const [info, setInfo] = useState<MemoryVaultInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [overlayMode, setOverlayMode] = useState<OverlayMode | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -155,6 +158,13 @@ export function MemoryTab() {
         <Button size="sm" variant="ghost" onClick={() => void refresh()}>
           <RefreshCw size={13} />
         </Button>
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => setOverlayMode({ kind: "create", draft: { type: "note", title: "" } })}
+        >
+          <Plus size={13} /> New memory
+        </Button>
         <Button size="sm" onClick={() => void continuum.memoryOpenVault()}>
           <FolderOpen size={13} /> Open vault
         </Button>
@@ -167,12 +177,10 @@ export function MemoryTab() {
           selectedId={selectedId}
           dimIds={null}
           onSelect={setSelectedId}
-          onExpand={() => {
-            /* Task 13 opens the overlay editor here */
-          }}
-          onGhostClick={() => {
-            /* Task 13 opens the create flow here */
-          }}
+          onExpand={(id) => setOverlayMode({ kind: "edit", id })}
+          onGhostClick={(target) =>
+            setOverlayMode({ kind: "create", draft: { type: "note", title: target } })
+          }
         />
         {/* Legend */}
         <div className="absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-bg-border bg-bg-surface/90 px-3 py-2 text-[11px] text-ink-muted">
@@ -210,7 +218,28 @@ export function MemoryTab() {
             </Card>
           </div>
         )}
+        {selectedId && (
+          <NotePanel
+            noteId={selectedId}
+            onClose={() => setSelectedId(null)}
+            onExpand={() => setOverlayMode({ kind: "edit", id: selectedId })}
+            onChanged={() => void refresh()}
+            onNavigate={setSelectedId}
+          />
+        )}
       </div>
+
+      {overlayMode && (
+        <NoteEditorOverlay
+          mode={overlayMode}
+          onClose={() => setOverlayMode(null)}
+          onSaved={(id) => {
+            setOverlayMode(null);
+            setSelectedId(id);
+            void refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
