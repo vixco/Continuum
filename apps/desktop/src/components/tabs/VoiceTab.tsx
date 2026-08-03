@@ -56,7 +56,7 @@ export function VoiceTab() {
         <div className="mt-4 text-sm text-ink-muted">
           Hotkey: <Kbd>{config.voice.hotkey || "unset"}</Kbd>
           <span className="ml-2 text-xs text-ink-dim">
-            (rebind via config.toml - UI rebind komt later)
+            (rebind via config.toml - UI rebind coming later)
           </span>
         </div>
       </Card>
@@ -167,11 +167,11 @@ function RestartNotice() {
       <Info size={16} className="mt-0.5 shrink-0 text-state-warn" />
       <div>
         <div className="font-medium text-ink">
-          Voice-instellingen worden pas toegepast bij de volgende start van Continuum.
+          Voice settings will only take effect on the next Continuum start.
         </div>
         <div className="mt-0.5 text-xs text-ink-muted">
-          Wijzigingen hier worden opgeslagen, maar de daemon leest de config alleen bij opstart.
-          Sluit en herstart Continuum om ze actief te maken. (Live hot-reload komt in een latere
+          Changes here are saved, but the daemon only reads the config at startup.
+          Close and restart Continuum to apply them. (Live hot-reload will ship in a later
           update.)
         </div>
       </div>
