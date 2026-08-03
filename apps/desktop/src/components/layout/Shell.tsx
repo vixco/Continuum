@@ -8,10 +8,8 @@ import {
   Check,
   Database,
   Home,
-  Maximize2,
   MessagesSquare,
   Mic,
-  Minimize2,
   Minus,
   Pause,
   Play,
@@ -349,7 +347,9 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
           className="win-btn relative"
           onClick={() => void windowControls.toggleMaximize()}
         >
-          {maximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+          <span className="windows-caption-glyph" aria-hidden="true">
+            {maximized ? "\uE923" : "\uE922"}
+          </span>
         </button>
         <button
           type="button"
