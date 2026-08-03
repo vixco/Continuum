@@ -24,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 use continuum_vision::VisionModel;
 
 use continuum_core::config::{continuum_dev_dir, env_or_legacy, load_config, ContinuumConfig};
+use continuum_core::curator;
 use continuum_core::memory::distill::run_memory_distiller;
 use continuum_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use continuum_core::memory::raw_log::RawLog;
@@ -509,6 +510,36 @@ async fn main() -> Result<()> {
         "All layers running. Press Ctrl+C to stop."
     );
 
+    // --- Curator (Plan B): background memory extraction ---
+    // Watch channel carrying the latest per-frame activity signal — created
+    // before the main loop so the frame-handling arm can publish into it on
+    // every frame. Reuses the triage local model for extraction completions
+    // (never wakes the orchestrator for routine memory bookkeeping — see
+    // non-negotiable #4), so the curator only runs when triage loaded.
+    let (activity_tx, activity_rx) = watch::channel(curator::run::ActivitySignal::default());
+    // Task 11 wires this into the runtime snapshot publisher.
+    let _curator_status: Option<curator::SharedCuratorStatus> = if let Some(triage) = triage.clone()
+    {
+        let status: curator::SharedCuratorStatus = Default::default();
+        let llm: Arc<dyn curator::CuratorLlm> = Arc::new(triage);
+        tokio::spawn(curator::run::run_curator(
+            vault.clone(),
+            llm,
+            config.memory.curator.clone(),
+            status.clone(),
+            activity_rx.clone(),
+            shutdown_rx.clone(),
+        ));
+        Some(status)
+    } else {
+        tracing::info!(
+            layer = "memory",
+            component = "curator",
+            "curator disabled: no triage model loaded"
+        );
+        None
+    };
+
     // --- Runtime state publisher ---
     //
     // Writes `~/.continuum-dev/state.json` every 2 s so the dashboard (a
@@ -600,6 +631,17 @@ async fn main() -> Result<()> {
                 if let Ok(mut s) = runtime_state.lock() {
                     s.frame_count = frame_count;
                 }
+
+                // Curator (Plan B): publish the latest activity signal so the
+                // curator's project-aware context (Task 9) has fresh data
+                // between ticks. Send is a no-op if the curator never spawned
+                // (no triage model) — nothing is listening, that's fine.
+                let _ = activity_tx.send(curator::run::ActivitySignal {
+                    project_hint: None, // Task 9 fills project_hint
+                    process: frame.context.foreground_process_name.clone(),
+                    idle_seconds: frame.context.idle_seconds,
+                    ts: Some(frame.context.ts),
+                });
 
                 let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");

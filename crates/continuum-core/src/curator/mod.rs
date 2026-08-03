@@ -17,6 +17,7 @@
 //! the runtime binary.
 
 pub mod extract;
+pub mod run;
 
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +57,11 @@ pub type SharedCuratorStatus = Arc<Mutex<CuratorStatus>>;
 #[async_trait::async_trait]
 impl CuratorLlm for crate::triage::llm::TriageLayer {
     async fn complete(&self, prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
+        // `Self::complete` here resolves to `TriageLayer`'s own inherent
+        // `complete` method (see `triage/llm.rs`), not this trait method —
+        // if that inherent method were ever renamed to `complete` colliding
+        // ambiguously with this trait fn, this call becomes a silent
+        // infinite recursion instead of a compile error.
         Self::complete(self, prompt, max_tokens).await
     }
 }
@@ -80,6 +86,12 @@ impl MockLlm {
             replies: std::sync::Mutex::new(queue),
             calls: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Alias for [`MockLlm::new`] — reads better at extraction/run-loop
+    /// call sites that are literally scripting a sequence of LLM replies.
+    pub(crate) fn scripted(replies: Vec<String>) -> Self {
+        Self::new(replies)
     }
 
     /// Number of times `complete()` has been called so far.
