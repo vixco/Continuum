@@ -90,7 +90,10 @@ jobs:
           choco install ninja --no-progress --confirm --skip-if-not-installed
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0
+        # Pinned to a real tag: this action publishes only `v0.0.x` tags (no
+        # moving `v0` major ref), so `@v0` is unresolvable and fails the whole
+        # workflow run before any job starts. Bump explicitly when upgrading.
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
