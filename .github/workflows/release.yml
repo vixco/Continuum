@@ -11,7 +11,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.94.0"
-  CARGO_TARGET_DIR: target
+  # Keep every Cargo invocation in one workspace-level directory. Tauri runs
+  # Cargo from src-tauri, so a relative value creates a second target tree and
+  # leaves the asset assembly step looking in the wrong place.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # sccache wraps rustc/cc; mozilla-actions/sccache-action (run later) manages
   # SCCACHE_DIR + the GitHub Actions cache backing. These are plain values,
   # so workflow-level env is valid (no `runner` context needed here).
@@ -33,7 +36,10 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: windows-latest
+    # WiX 3.14's candle.exe currently fails to start on the VS 2026 image now
+    # served by windows-latest. Windows 2022 remains a supported hosted image
+    # and is the stable packaging environment for our MSI/NSIS release path.
+    runs-on: windows-2022
     # sccache wraps rustc/cc so whisper.cpp + llama.cpp + ort + lancedb native
     # compiles are cache hits across releases. First release is full speed;
     # every subsequent release reuses the C/C++ objects in seconds. The
@@ -89,7 +95,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # whisper-rs-sys bindgen needs libclang. windows-latest ships LLVM, but
+      # whisper-rs-sys bindgen needs libclang. windows-2022 ships LLVM, but
       # pin the path explicitly (mirrors ci.yml clippy-full) so an image change
       # never silently breaks the release build at the bindgen step.
       - name: Configure LLVM + ninja for bindgen / cmake
