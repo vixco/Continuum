@@ -330,3 +330,53 @@ async fn resolve_candidate_supersede_retry_after_partial_failure_is_idempotent()
         Some(new.frontmatter.id.as_str())
     );
 }
+
+#[tokio::test]
+async fn events_append_query_prune() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+    let old = chrono::Utc::now() - chrono::Duration::days(40);
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(old),
+            kind: "build".into(),
+            text: "old build".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: None,
+            kind: "error".into(),
+            text: "fresh error".into(),
+            project: Some("sidelife".into()),
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+
+    let all = vault
+        .events(&continuum_memory::EventRange::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].text, "old build"); // ascending
+
+    let recent = vault
+        .events(&continuum_memory::EventRange {
+            since: Some(chrono::Utc::now() - chrono::Duration::days(1)),
+            until: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].kind, "error");
+
+    assert_eq!(vault.prune_events(30).await.unwrap(), 1);
+    assert_eq!(vault.events(&Default::default()).await.unwrap().len(), 1);
+}

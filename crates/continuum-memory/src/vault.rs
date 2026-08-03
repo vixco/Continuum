@@ -17,8 +17,8 @@ use crate::error::{MemoryError, Result};
 use crate::frontmatter::{parse_document, render_document};
 use crate::index::{Index, IndexOutcome};
 use crate::model::{
-    Frontmatter, GraphData, GraphFilter, IndexStats, NodeStatus, NodeSummary, NodeType, Note,
-    NoteDraft, Resolution, VaultInfo,
+    Event, EventRange, Frontmatter, GraphData, GraphFilter, IndexStats, NewEvent, NodeStatus,
+    NodeSummary, NodeType, Note, NoteDraft, Resolution, VaultInfo,
 };
 use crate::slug::slugify;
 
@@ -547,5 +547,111 @@ impl Vault {
             );
         }
         Ok(archived)
+    }
+
+    /// Append a single event to the timeline. If `ts` is `None`, uses the
+    /// current UTC time. Timestamps are stored as RFC3339 strings. Events
+    /// are append-only and do not require `write_lock`.
+    pub async fn append_event(&self, event: NewEvent) -> Result<Event> {
+        let ts = event.ts.unwrap_or_else(Utc::now).to_rfc3339();
+        let result = sqlx::query_as::<_, (i64,)>(
+            "INSERT INTO events(ts, kind, text, project, node_id, \"ref\")
+             VALUES (?, ?, ?, ?, ?, ?)
+             RETURNING id",
+        )
+        .bind(&ts)
+        .bind(&event.kind)
+        .bind(&event.text)
+        .bind(&event.project)
+        .bind(&event.node_id)
+        .bind(&event.reference)
+        .fetch_one(self.index.pool())
+        .await?;
+
+        Ok(Event {
+            id: result.0,
+            ts,
+            kind: event.kind,
+            text: event.text,
+            project: event.project,
+            node_id: event.node_id,
+            reference: event.reference,
+        })
+    }
+
+    /// Query events within an optional time range, ordered ascending by
+    /// timestamp. `limit` defaults to 500 if not specified; `since` and
+    /// `until` are inclusive when provided.
+    pub async fn events(&self, range: &EventRange) -> Result<Vec<Event>> {
+        let limit = range.limit.unwrap_or(500);
+        let mut query =
+            "SELECT id, ts, kind, text, project, node_id, \"ref\" FROM events WHERE 1=1"
+                .to_string();
+        let mut args: Vec<String> = Vec::new();
+
+        if let Some(since) = range.since {
+            query.push_str(" AND ts >= ?");
+            args.push(since.to_rfc3339());
+        }
+        if let Some(until) = range.until {
+            query.push_str(" AND ts <= ?");
+            args.push(until.to_rfc3339());
+        }
+
+        query.push_str(" ORDER BY ts ASC LIMIT ?");
+
+        let mut qry = sqlx::query_as::<
+            _,
+            (
+                i64,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(&query);
+        for arg in args {
+            qry = qry.bind(arg);
+        }
+        qry = qry.bind(i64::from(limit));
+
+        let rows = qry.fetch_all(self.index.pool()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, ts, kind, text, project, node_id, reference)| Event {
+                id,
+                ts,
+                kind,
+                text,
+                project,
+                node_id,
+                reference,
+            })
+            .collect())
+    }
+
+    /// Delete events with timestamp older than `now - keep_days` days.
+    /// Returns the number of deleted rows. Timestamps are parsed as RFC3339.
+    pub async fn prune_events(&self, keep_days: i64) -> Result<u64> {
+        let cutoff = (Utc::now() - chrono::Duration::days(keep_days)).to_rfc3339();
+        let result = sqlx::query("DELETE FROM events WHERE ts < ?")
+            .bind(&cutoff)
+            .execute(self.index.pool())
+            .await?;
+
+        let deleted = result.rows_affected();
+        if deleted > 0 {
+            tracing::info!(
+                layer = "memory",
+                component = "vault",
+                deleted,
+                keep_days,
+                "pruned events"
+            );
+        }
+
+        Ok(deleted)
     }
 }
