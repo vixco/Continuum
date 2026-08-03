@@ -33,8 +33,13 @@ use continuum_core::state::{StateHandle, VoiceMode};
 /// Shared health-state slot for the `pipe_health` Tauri command. Written by
 /// the pipe server thread, read by the dashboard command. Module-level so
 /// the `pipe_health` command in `commands.rs` can read it without us
-/// threading it through `AppState`.
+/// threading it through `AppState`. Gated to Windows because the producer
+/// (`set_pipe_connected` / `set_pipe_last_error`) lives in the
+/// Windows-only pipe server; on other platforms the field is always
+/// `connected = false` and `last_error = None`.
+#[cfg(windows)]
 static PIPE_CONNECTED: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
 static PIPE_LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Spawn both bridge listeners. Returns immediately; runs on the tokio
@@ -85,11 +90,17 @@ pub fn spawn_ipc_listener(runtime: ContinuumRuntime, app: AppHandle) {
     // --- Named-pipe server (Windows only) -------------------------------
     // Best-effort: a failure here (e.g. the runtime never connects) must
     // not break the file-tail. We launch it on a dedicated OS thread
-    // because the std-only Win32 pipe API blocks on connect/read.
+    // because the std-only Win32 pipe API blocks on connect/read. To
+    // reach `StateHandle` (which is async) without spawning a second
+    // tokio runtime, we hand the dedicated thread a clone of the
+    // Tauri runtime's `Handle` and call `handle.block_on(...)` from
+    // the OS thread. AGENTS.md non-negotiable #4 forbids a second
+    // runtime; this is the canonical alternative.
+    let handle = tokio::runtime::Handle::current();
     std::thread::Builder::new()
         .name("continuum-pipe-server".into())
         .spawn(move || {
-            pipe::run_pipe_server(state, app);
+            pipe::run_pipe_server(state, app, handle);
         })
         .expect("spawn named-pipe thread");
 }
@@ -168,10 +179,12 @@ pub fn current_pipe_health() -> PipeHealth {
     }
 }
 
+#[cfg(windows)]
 fn set_pipe_connected(v: bool) {
     PIPE_CONNECTED.store(v, Ordering::Release);
 }
 
+#[cfg(windows)]
 fn set_pipe_last_error(msg: Option<String>) {
     if let Ok(mut g) = PIPE_LAST_ERROR.lock() {
         *g = msg;
@@ -196,9 +209,13 @@ mod pipe {
     /// local user. `\\.\pipe\Global\…` would expose it to other sessions.
     pub(super) const PIPE_NAME: &str = r"\\.\pipe\continuum-runtime";
 
-    pub(super) fn run_pipe_server(state: StateHandle, app: AppHandle) {
+    pub(super) fn run_pipe_server(
+        state: StateHandle,
+        app: AppHandle,
+        handle: tokio::runtime::Handle,
+    ) {
         loop {
-            if let Err(e) = serve_one_client(&state, &app) {
+            if let Err(e) = serve_one_client(&state, &app, &handle) {
                 let msg = e.to_string();
                 set_pipe_last_error(Some(msg.clone()));
                 tracing::warn!(
@@ -215,7 +232,11 @@ mod pipe {
         }
     }
 
-    fn serve_one_client(state: &StateHandle, app: &AppHandle) -> std::io::Result<()> {
+    fn serve_one_client(
+        state: &StateHandle,
+        app: &AppHandle,
+        handle: &tokio::runtime::Handle,
+    ) -> std::io::Result<()> {
         let server = create_pipe()?;
         // First-byte wait — blocks until a client connects or times out.
         // 5s is short enough to keep the latches fresh and long enough
@@ -244,14 +265,14 @@ mod pipe {
             }
             match serde_json::from_str::<RuntimeSnapshot>(line) {
                 Ok(snap) => {
-                    // Apply on a private current-thread tokio runtime
-                    // so we don't depend on the Tauri tokio context from
-                    // this OS thread. The apply path itself is cheap.
+                    // Apply on the Tauri tokio runtime via the captured
+                    // `Handle`. We deliberately avoid spawning a second
+                    // runtime here (AGENTS.md non-negotiable #4) — the
+                    // Tauri app's `new_multi_thread` runtime has many
+                    // workers, so blocking one of them from a dedicated
+                    // OS thread is fine.
                     let state = state.clone();
-                    let _ = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map(|rt| rt.block_on(apply_snapshot(&snap, &state)));
+                    handle.block_on(apply_snapshot(&snap, &state));
                 }
                 Err(e) => {
                     let msg = format!("malformed pipe payload: {e}");
@@ -382,7 +403,11 @@ mod pipe {
     /// Non-Windows placeholder. The file-tail is the only source of
     /// state on Linux/macOS — those platforms aren't supported in alpha
     /// but we keep the build clean.
-    pub(super) fn run_pipe_server(_state: StateHandle, _app: AppHandle) {
+    pub(super) fn run_pipe_server(
+        _state: StateHandle,
+        _app: AppHandle,
+        _handle: tokio::runtime::Handle,
+    ) {
         tracing::debug!(
             layer = "dashboard",
             component = "runtime_bridge",
