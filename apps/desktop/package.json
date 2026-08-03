@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test:logs": "node --experimental-strip-types --test tests/log-view.test.mjs",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check \"src/**/*.{ts,tsx,json}\"",
     "format:fix": "prettier --write \"src/**/*.{ts,tsx,json}\"",
