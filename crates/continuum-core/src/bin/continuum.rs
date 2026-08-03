@@ -23,12 +23,16 @@ use tracing_subscriber::EnvFilter;
 
 use continuum_vision::VisionModel;
 
-use continuum_core::config::{continuum_dev_dir, env_or_legacy, load_config, ContinuumConfig};
+use continuum_core::config::{
+    continuum_dev_dir, env_or_legacy, load_config, ContinuumConfig, CuratorConfig,
+};
 use continuum_core::curator;
 use continuum_core::memory::distill::run_memory_distiller;
 use continuum_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use continuum_core::memory::raw_log::RawLog;
-use continuum_core::memory::retrieval::retrieve_context;
+use continuum_core::memory::retrieval::{
+    infer_project_hint, retrieve_context, retrieve_vault_context,
+};
 use continuum_core::memory::semantic::SemanticStore;
 use continuum_core::orchestrator::spawn::{
     wake_orchestrator, OrchestratorConfig, OrchestratorEvent,
@@ -641,7 +645,7 @@ async fn main() -> Result<()> {
                 // between ticks. Send is a no-op if the curator never spawned
                 // (no triage model) — nothing is listening, that's fine.
                 let _ = activity_tx.send(curator::run::ActivitySignal {
-                    project_hint: None, // Task 9 fills project_hint
+                    project_hint: infer_project_hint(&frame),
                     process: frame.context.foreground_process_name.clone(),
                     idle_seconds: frame.context.idle_seconds,
                     ts: Some(frame.context.ts),
@@ -797,6 +801,8 @@ async fn main() -> Result<()> {
                                 let orch_cfg_clone = orch_config.clone();
                                 let semantic_clone = semantic.clone();
                                 let episodic_clone = episodic.clone();
+                                let vault_clone = vault.clone();
+                                let curator_cfg_clone = config.memory.curator.clone();
                                 let feedback_clone = feedback.clone();
                                 let frame_clone = frame.clone();
                                 let reason_clone = reason.clone();
@@ -822,6 +828,8 @@ async fn main() -> Result<()> {
                                             &orch_cfg_clone,
                                             &semantic_clone,
                                             &episodic_clone,
+                                            &vault_clone,
+                                            &curator_cfg_clone,
                                             wake_speech_opt.as_ref(),
                                             &skill_loader_clone,
                                             suggested_skill_clone.as_deref(),
@@ -845,6 +853,8 @@ async fn main() -> Result<()> {
                                                     &orch_cfg_clone,
                                                     &semantic_clone,
                                                     &episodic_clone,
+                                                    &vault_clone,
+                                                    &curator_cfg_clone,
                                                     wake_speech_opt.as_ref(),
                                                     &skill_loader_clone,
                                                     suggested_skill_clone.as_deref(),
@@ -985,6 +995,8 @@ async fn do_wake(
     config: &OrchestratorConfig,
     semantic: &Arc<SemanticStore>,
     episodic: &Arc<Mutex<EpisodicStore>>,
+    vault: &Arc<continuum_memory::Vault>,
+    curator_cfg: &CuratorConfig,
     speech: Option<&Arc<SpeechController>>,
     skill_loader: &SkillLoader,
     suggested_skill: Option<&str>,
@@ -995,21 +1007,53 @@ async fn do_wake(
 
     println!("\n--- CONTINUUM WAKING ---");
 
-    // 1. Memory context.
-    let memory_context = {
+    // 1. Memory context: episodic/semantic retrieval plus the memory vault
+    // (Plan B curator) — confirmed notes relevant to this frame, and any
+    // candidate notes that have sat unresolved long enough to nudge the
+    // orchestrator to review them. Vault retrieval never fails the wake —
+    // `retrieve_vault_context` swallows and logs its own errors.
+    let mut memory_context = {
         let mut ep = episodic.lock().await;
         retrieve_context(trigger_frame, &mut ep, semantic).await?
     };
+    let (vault_notes, pending_decisions) =
+        retrieve_vault_context(vault, trigger_frame, curator_cfg).await;
+    memory_context.vault_notes = vault_notes;
+    memory_context.pending_decisions = pending_decisions;
 
     tracing::debug!(
         layer = "orchestrator",
         component = "continuum",
         retrieval_ms = wake_start.elapsed().as_millis() as u64,
+        vault_notes = memory_context.vault_notes.len(),
+        pending_decisions = memory_context.pending_decisions.len(),
         "Memory retrieved"
     );
 
     // 2. Wake message.
     let user_message = build_wake_message(trigger_frame, history_frames, &memory_context, reason);
+
+    // Best-effort: mark the injected vault notes as recently used. Spawned
+    // so a slow/failing vault write never delays the wake itself; errors
+    // are logged inside `touch_last_used`/swallowed here.
+    if !memory_context.vault_notes.is_empty() {
+        let ids: Vec<String> = memory_context
+            .vault_notes
+            .iter()
+            .map(|n| n.id.clone())
+            .collect();
+        let vault_touch = vault.clone();
+        tokio::spawn(async move {
+            if let Err(e) = vault_touch.touch_last_used(&ids).await {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "continuum",
+                    error = %e.user_message(),
+                    "touch_last_used failed for wake-injected vault notes"
+                );
+            }
+        });
+    }
 
     // 3. Compose a dynamic system prompt — base file + matched skills +
     // any `suggested_skill` hint from the triage layer.

@@ -6,10 +6,13 @@
 //! Runs before every orchestrator wake-up. Target latency: under 200ms.
 
 use anyhow::Result;
-use tracing::debug;
+use chrono::{DateTime, Utc};
+use continuum_memory::{NodeStatus, NodeSummary, Sensitivity, Vault};
+use tracing::{debug, warn};
 
 use super::episodic::{EpisodicEvent, EpisodicStore};
 use super::semantic::{Fact, SemanticStore};
+use crate::config::CuratorConfig;
 use crate::senses::types::PerceptionFrame;
 
 // ---------------------------------------------------------------------------
@@ -27,6 +30,14 @@ pub struct MemoryContext {
     pub similar_events: Vec<EpisodicEvent>,
     /// Relevant semantic facts about the user and their context.
     pub relevant_facts: Vec<Fact>,
+    /// Confirmed, non-sensitive vault notes relevant to the current frame
+    /// (Plan B curator). Empty unless a caller fills it via
+    /// [`retrieve_vault_context`].
+    pub vault_notes: Vec<NodeSummary>,
+    /// Candidate vault notes that have sat unresolved long enough to nudge
+    /// the orchestrator to review them. Empty unless a caller fills it via
+    /// [`retrieve_vault_context`].
+    pub pending_decisions: Vec<NodeSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +99,95 @@ pub async fn retrieve_context(
     Ok(MemoryContext {
         similar_events,
         relevant_facts,
+        // Vault retrieval runs separately via `retrieve_vault_context` — it
+        // needs the `Vault` handle, which this function doesn't take.
+        vault_notes: Vec::new(),
+        pending_decisions: Vec::new(),
     })
+}
+
+/// Retrieves long-term vault context for a wake: confirmed, non-sensitive
+/// notes relevant to the current frame, plus candidate notes that have sat
+/// unresolved long enough that the orchestrator should be nudged to review
+/// them.
+///
+/// Every internal failure (vault search error, `pending()` error, an
+/// unparseable `created` timestamp on a candidate) is caught, logged, and
+/// treated as "no data" for that half of the result — a wake must never die
+/// because the vault is having trouble.
+pub async fn retrieve_vault_context(
+    vault: &Vault,
+    frame: &PerceptionFrame,
+    curator_cfg: &CuratorConfig,
+) -> (Vec<NodeSummary>, Vec<NodeSummary>) {
+    let query = build_query_from_frame(frame);
+
+    let mut notes = match vault.search(&query, 24).await {
+        Ok(results) => results,
+        Err(e) => {
+            warn!(
+                layer = "memory",
+                component = "retrieval",
+                error = %e.user_message(),
+                "vault search failed during wake retrieval; continuing without vault notes"
+            );
+            Vec::new()
+        }
+    };
+
+    notes.retain(|n| {
+        n.status == NodeStatus::Confirmed
+            && (n.sensitivity != Sensitivity::Sensitive || curator_cfg.include_sensitive_in_context)
+    });
+    notes.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    notes.truncate(curator_cfg.wake_vault_notes_max as usize);
+
+    let pending_all = match vault.pending().await {
+        Ok(results) => results,
+        Err(e) => {
+            warn!(
+                layer = "memory",
+                component = "retrieval",
+                error = %e.user_message(),
+                "vault pending() failed during wake retrieval; continuing without pending decisions"
+            );
+            Vec::new()
+        }
+    };
+
+    let cutoff = Utc::now() - chrono::Duration::minutes(30);
+    let mut pending: Vec<NodeSummary> = pending_all
+        .into_iter()
+        .filter(|n| match DateTime::parse_from_rfc3339(&n.created) {
+            Ok(created) => created.with_timezone(&Utc) < cutoff,
+            Err(e) => {
+                warn!(
+                    layer = "memory",
+                    component = "retrieval",
+                    id = %n.id,
+                    raw_created = %n.created,
+                    error = %e,
+                    "pending vault note has unparseable created timestamp; excluding from wake context"
+                );
+                false
+            }
+        })
+        .collect();
+    pending.truncate(curator_cfg.claude_batch as usize);
+
+    debug!(
+        layer = "memory",
+        component = "retrieval",
+        vault_note_count = notes.len(),
+        pending_count = pending.len(),
+        "Vault retrieval complete"
+    );
+
+    (notes, pending)
 }
 
 /// Builds a natural language query string from a perception frame.
@@ -122,24 +221,34 @@ fn build_query_from_frame(frame: &PerceptionFrame) -> String {
     }
 }
 
-/// Tries to infer a project prefix from the current frame context.
+/// Tries to infer a bare project hint (e.g. `"continuum"`) from the current
+/// frame context.
 ///
 /// Looks at the foreground window title and process to guess which project
-/// the user is working on.
-fn infer_project_prefix(frame: &PerceptionFrame) -> Option<String> {
+/// the user is working on. Used both for semantic-fact prefix lookups (via
+/// [`infer_project_prefix`]) and, unformatted, as the curator's
+/// `ActivitySignal::project_hint`.
+pub fn infer_project_hint(frame: &PerceptionFrame) -> Option<String> {
     let title = &frame.context.foreground_window_title;
 
     // Common patterns: "filename - ProjectName - Editor"
     // or file paths containing project names.
     if title.contains("continuum") {
-        Some("project.continuum.".to_string())
+        Some("continuum".to_string())
     } else if title.contains("simcharts") || title.contains("SimCharts") {
-        Some("project.simcharts.".to_string())
+        Some("simcharts".to_string())
     } else {
         // Could be extended with a lookup table from semantic memory,
         // but for now just return None for unknown projects.
         None
     }
+}
+
+/// Formats [`infer_project_hint`] as a `"project.<hint>."` semantic-fact key
+/// prefix. Thin legacy wrapper — kept private since nothing outside this
+/// module needs the formatted form.
+fn infer_project_prefix(frame: &PerceptionFrame) -> Option<String> {
+    infer_project_hint(frame).map(|hint| format!("project.{hint}."))
 }
 
 // ---------------------------------------------------------------------------
@@ -227,5 +336,177 @@ mod tests {
     fn test_infer_project_prefix_unknown() {
         let frame = test_frame("editor", None, "random-project - VS Code");
         assert_eq!(infer_project_prefix(&frame), None);
+    }
+
+    #[test]
+    fn test_infer_project_hint_continuum() {
+        let frame = test_frame("editor", None, "mod.rs - continuum-ai - VS Code");
+        assert_eq!(infer_project_hint(&frame), Some("continuum".to_string()));
+    }
+
+    #[test]
+    fn test_infer_project_hint_simcharts() {
+        let frame = test_frame("editor", None, "ProcedureLayer.tsx - SimCharts");
+        assert_eq!(infer_project_hint(&frame), Some("simcharts".to_string()));
+    }
+
+    #[test]
+    fn test_infer_project_hint_unknown() {
+        let frame = test_frame("editor", None, "random-project - VS Code");
+        assert_eq!(infer_project_hint(&frame), None);
+    }
+
+    // -----------------------------------------------------------------
+    // retrieve_vault_context (tempdir vault; exercises real search/pending)
+    // -----------------------------------------------------------------
+
+    use continuum_memory::{NodeType, NoteDraft, Source};
+
+    fn note_draft(
+        title: &str,
+        body: &str,
+        status: NodeStatus,
+        sensitivity: Sensitivity,
+    ) -> NoteDraft {
+        NoteDraft {
+            node_type: NodeType::Fact,
+            title: title.to_string(),
+            body: body.to_string(),
+            project: None,
+            status,
+            confidence: 0.9,
+            importance: 0.9,
+            source: Source::Observed,
+            source_ref: None,
+            sensitivity,
+            relations: vec![],
+            tags: vec![],
+        }
+    }
+
+    /// `test_frame` (shared with the module's other tests) hardcodes
+    /// `foreground_process_name` to `"Code.exe"`, which `build_query_from_frame`
+    /// always appends as `"App: Code.exe"` — an extra FTS AND-term that has
+    /// nothing to do with what this test is checking (status/sensitivity
+    /// filtering). Use an empty process name so the query is exactly the
+    /// description, keeping the fixture notes' bodies the only thing that
+    /// needs to match it.
+    fn vault_search_frame(description: &str) -> PerceptionFrame {
+        PerceptionFrame {
+            id: uuid::Uuid::new_v4(),
+            ts: Utc::now(),
+            screen: ScreenObservation {
+                description: description.to_string(),
+                foreground_app: String::new(),
+                has_error_visible: false,
+                confidence: 0.9,
+                screenshot_path: None,
+                ts: Utc::now(),
+            },
+            audio: None,
+            context: ContextObservation {
+                foreground_window_title: String::new(),
+                foreground_process_name: String::new(),
+                idle_seconds: 0,
+                in_call: false,
+                ts: Utc::now(),
+            },
+            salience_hint: 0.7,
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieve_vault_context_filters_status_and_sensitivity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        vault
+            .create(note_draft(
+                "Zorbatron setup",
+                "Zorbatron dashboard runs on port 4200 in dev",
+                NodeStatus::Confirmed,
+                Sensitivity::Internal,
+            ))
+            .await
+            .unwrap();
+        vault
+            .create(note_draft(
+                "Zorbatron secret",
+                "Zorbatron dashboard API key info",
+                NodeStatus::Confirmed,
+                Sensitivity::Sensitive,
+            ))
+            .await
+            .unwrap();
+        vault
+            .create(note_draft(
+                "Zorbatron draft idea",
+                "Zorbatron dashboard maybe needs a cache",
+                NodeStatus::Candidate,
+                Sensitivity::Internal,
+            ))
+            .await
+            .unwrap();
+
+        let frame = vault_search_frame("Zorbatron dashboard");
+
+        // Default config: sensitive notes excluded.
+        let cfg = CuratorConfig::default();
+        let (notes, _pending) = retrieve_vault_context(&vault, &frame, &cfg).await;
+        assert_eq!(
+            notes.len(),
+            1,
+            "only the confirmed, non-sensitive note should surface"
+        );
+        assert_eq!(notes[0].title, "Zorbatron setup");
+
+        // include_sensitive_in_context = true surfaces the sensitive note too.
+        let cfg_sensitive = CuratorConfig {
+            include_sensitive_in_context: true,
+            ..Default::default()
+        };
+        let (notes, _pending) = retrieve_vault_context(&vault, &frame, &cfg_sensitive).await;
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|n| n.title == "Zorbatron secret"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_vault_context_pending_only_older_than_30_minutes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let fresh = vault
+            .create(note_draft(
+                "Fresh candidate",
+                "just noticed",
+                NodeStatus::Candidate,
+                Sensitivity::Internal,
+            ))
+            .await
+            .unwrap();
+        let old = vault
+            .create(note_draft(
+                "Old candidate",
+                "sat around a while",
+                NodeStatus::Candidate,
+                Sensitivity::Internal,
+            ))
+            .await
+            .unwrap();
+
+        // Backdate `old`'s created timestamp: load, edit frontmatter.created,
+        // save. `save` re-stamps `updated`, but the pending-age filter reads
+        // `created`, so that's irrelevant here.
+        let mut old_note = vault.get(&old.frontmatter.id).await.unwrap();
+        old_note.frontmatter.created = Utc::now() - chrono::Duration::hours(1);
+        vault.save(&old_note).await.unwrap();
+
+        let frame = test_frame("irrelevant context", None, "x");
+        let cfg = CuratorConfig::default();
+        let (_notes, pending) = retrieve_vault_context(&vault, &frame, &cfg).await;
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, old.frontmatter.id);
+        assert_ne!(pending[0].id, fresh.frontmatter.id);
     }
 }

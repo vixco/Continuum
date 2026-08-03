@@ -7,6 +7,7 @@
 //! Target: under 600 tokens total for the user message.
 
 use chrono::{DateTime, Utc};
+use continuum_memory::Source;
 
 use crate::memory::retrieval::MemoryContext;
 use crate::senses::types::PerceptionFrame;
@@ -27,6 +28,8 @@ const MAX_FACTS: usize = 8;
 /// - Just before (compressed history)
 /// - Relevant memories (from episodic store)
 /// - What you know about the user (semantic facts)
+/// - Long-term memory (vault) (confirmed vault notes, Plan B curator)
+/// - Pending memory decisions (unresolved vault candidates, Plan B curator)
 /// - Why you were woken (triage reason)
 ///
 /// Target: under 600 tokens.
@@ -81,12 +84,67 @@ pub fn build_wake_message(
         }
     }
 
-    // Section 5: Why you were woken.
+    // Section 5: Long-term memory (vault) — confirmed notes (Plan B curator).
+    let vault_notes = &memory_context.vault_notes;
+    if !vault_notes.is_empty() {
+        msg.push_str("\n## Long-term memory (vault)\n");
+        for note in vault_notes {
+            let snippet_part = note
+                .snippet
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" — {s}"))
+                .unwrap_or_default();
+            msg.push_str(&format!(
+                "- [{}] {}{} (importance {:.1})\n",
+                note.node_type.as_str(),
+                note.title,
+                snippet_part,
+                note.importance
+            ));
+        }
+    }
+
+    // Section 6: Pending memory decisions — unresolved vault candidates old
+    // enough to nudge the orchestrator to review (Plan B curator). Last
+    // section before the wake reason.
+    let pending = &memory_context.pending_decisions;
+    if !pending.is_empty() {
+        msg.push_str("\n## Pending memory decisions\n");
+        for note in pending {
+            msg.push_str(&format!(
+                "- id: {} — [{}] \"{}\" (confidence {:.1}, source {})\n",
+                note.id,
+                note.node_type.as_str(),
+                note.title,
+                note.confidence,
+                source_label(note.source),
+            ));
+        }
+        msg.push_str(
+            "Resolve these with the memory_vault_resolve tool (confirm/reject/supersede) \
+             or improve them with memory_vault_save. Skip any you are unsure about.\n",
+        );
+    }
+
+    // Section 7: Why you were woken.
     msg.push_str("\n## Why you were woken\n");
     msg.push_str(wake_reason);
     msg.push('\n');
 
     msg
+}
+
+/// snake_case label for a [`Source`], matching its serde wire
+/// representation (e.g. `Source::Observed` → `"observed"`).
+/// continuum-memory doesn't expose a public `as_str()` for `Source` (unlike
+/// `NodeType`), so this round-trips through serde instead of duplicating
+/// the match arms here.
+fn source_label(source: Source) -> String {
+    serde_json::to_value(source)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Formats a perception frame as a multi-line description for the "Current moment" section.
@@ -201,6 +259,7 @@ mod tests {
     use crate::memory::semantic::{Fact, FactSource};
     use crate::senses::types::*;
     use chrono::Duration;
+    use continuum_memory::{NodeStatus, NodeSummary, NodeType, Sensitivity};
     use uuid::Uuid;
 
     fn test_frame(desc: &str, secs_ago: i64) -> PerceptionFrame {
@@ -256,7 +315,54 @@ mod tests {
                     updated_at: Utc::now(),
                 },
             ],
+            vault_notes: vec![],
+            pending_decisions: vec![],
         }
+    }
+
+    fn test_vault_note() -> NodeSummary {
+        NodeSummary {
+            id: "mem_vault1".to_string(),
+            slug: "prefers-dark-mode".to_string(),
+            title: "Prefers dark mode".to_string(),
+            node_type: NodeType::Preference,
+            status: NodeStatus::Confirmed,
+            project: None,
+            confidence: 1.0,
+            importance: 0.9,
+            source: Source::Observed,
+            sensitivity: Sensitivity::Internal,
+            created: Utc::now().to_rfc3339(),
+            updated: Utc::now().to_rfc3339(),
+            tags: vec![],
+            snippet: Some("User asked for dark theme everywhere".to_string()),
+        }
+    }
+
+    fn test_pending_note() -> NodeSummary {
+        NodeSummary {
+            id: "mem_pending1".to_string(),
+            slug: "switching-to-postgresql".to_string(),
+            title: "Switching to PostgreSQL".to_string(),
+            node_type: NodeType::Decision,
+            status: NodeStatus::Candidate,
+            project: None,
+            confidence: 0.6,
+            importance: 0.5,
+            source: Source::Observed,
+            sensitivity: Sensitivity::Internal,
+            created: (Utc::now() - Duration::hours(1)).to_rfc3339(),
+            updated: Utc::now().to_rfc3339(),
+            tags: vec![],
+            snippet: None,
+        }
+    }
+
+    fn test_memory_context_with_vault() -> MemoryContext {
+        let mut ctx = test_memory_context();
+        ctx.vault_notes = vec![test_vault_note()];
+        ctx.pending_decisions = vec![test_pending_note()];
+        ctx
     }
 
     #[test]
@@ -306,6 +412,45 @@ mod tests {
             "Wake message too long: {} chars (target < 3000)",
             msg.len()
         );
+    }
+
+    #[test]
+    fn test_build_wake_message_vault_sections_present() {
+        let trigger = test_frame("VS Code showing error in terminal", 0);
+        let memory = test_memory_context_with_vault();
+
+        let msg = build_wake_message(&trigger, &[], &memory, "User asked a question");
+
+        assert!(msg.contains("## Long-term memory (vault)"));
+        assert!(msg.contains("## Pending memory decisions"));
+        assert!(msg.contains("[preference] Prefers dark mode"));
+        assert!(msg.contains("id: mem_pending1"));
+        assert!(msg.contains("[decision] \"Switching to PostgreSQL\""));
+        assert!(msg.contains("source observed"));
+        assert!(msg.contains(
+            "Resolve these with the memory_vault_resolve tool (confirm/reject/supersede) \
+             or improve them with memory_vault_save. Skip any you are unsure about."
+        ));
+
+        // Pending section must come after the vault-notes section, and both
+        // before "Why you were woken" (contract: "LAST section before the
+        // wake reason").
+        let vault_idx = msg.find("## Long-term memory (vault)").unwrap();
+        let pending_idx = msg.find("## Pending memory decisions").unwrap();
+        let reason_idx = msg.find("## Why you were woken").unwrap();
+        assert!(vault_idx < pending_idx);
+        assert!(pending_idx < reason_idx);
+    }
+
+    #[test]
+    fn test_build_wake_message_vault_sections_absent_when_empty() {
+        let trigger = test_frame("idle desktop", 0);
+        let memory = test_memory_context();
+
+        let msg = build_wake_message(&trigger, &[], &memory, "Test wake");
+
+        assert!(!msg.contains("## Long-term memory (vault)"));
+        assert!(!msg.contains("## Pending memory decisions"));
     }
 
     #[test]
@@ -360,6 +505,8 @@ mod tests {
         let memory = MemoryContext {
             similar_events: vec![],
             relevant_facts: vec![],
+            vault_notes: vec![],
+            pending_decisions: vec![],
         };
 
         let msg = build_wake_message(&trigger, &[], &memory, "Test wake");
@@ -370,5 +517,7 @@ mod tests {
         assert!(!msg.contains("## Just before"));
         assert!(!msg.contains("## Relevant memories"));
         assert!(!msg.contains("## What you know about the user"));
+        assert!(!msg.contains("## Long-term memory (vault)"));
+        assert!(!msg.contains("## Pending memory decisions"));
     }
 }
