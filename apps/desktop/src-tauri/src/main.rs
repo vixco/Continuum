@@ -183,6 +183,7 @@ fn main() {
             commands::dismiss_worker,
             commands::get_runtime_status,
             commands::start_runtime,
+            commands::list_mcp_tools,
             providers::catalog_list,
             providers::providers_list,
             providers::provider_add,

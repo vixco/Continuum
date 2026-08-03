@@ -907,3 +907,145 @@ fn locate_runtime_binary() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+// --- MCP tool registry (static manifest) ---
+
+/// One entry in the static MCP-tool manifest the dashboard renders.
+///
+/// `continuum-mcp` runs as a separate process and exposes its tool list over
+/// the MCP protocol. Spawning it on every dashboard open just to ask "what
+/// tools do you have?" is wasteful — the tool surface is a published
+/// contract (see `AGENTS.md` "Never break the public API of `continuum-mcp`"),
+/// so we mirror the registered `#[tool]` functions in
+/// `crates/continuum-mcp/src/server.rs` as a static manifest. When the
+/// tool set changes, update both sides in the same commit.
+#[derive(Debug, Serialize)]
+pub struct McpTool {
+    pub namespace: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Return the static manifest of MCP tools the orchestrator can call. Grouped
+/// by namespace so the dashboard can render the existing "MCP tools" card
+/// without any further client-side aggregation.
+#[tauri::command]
+pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
+    Ok(MCP_TOOL_MANIFEST.to_vec())
+}
+
+/// Single source of truth for the dashboard's MCP tool list. Keep in lockstep
+/// with the `#[tool]` functions in `crates/continuum-mcp/src/server.rs`.
+const MCP_TOOL_MANIFEST: &[McpTool] = &[
+    // --- memory ---
+    McpTool {
+        namespace: "memory".into(),
+        name: "memory_query_episodic".into(),
+        description: "Vector search over past events".into(),
+    },
+    McpTool {
+        namespace: "memory".into(),
+        name: "memory_list_facts".into(),
+        description: "List semantic facts (optional prefix filter)".into(),
+    },
+    McpTool {
+        namespace: "memory".into(),
+        name: "memory_get_fact".into(),
+        description: "Fetch a single semantic fact by key".into(),
+    },
+    McpTool {
+        namespace: "memory".into(),
+        name: "memory_set_fact".into(),
+        description: "Write or update a semantic fact".into(),
+    },
+    // --- system ---
+    McpTool {
+        namespace: "system".into(),
+        name: "system_current_time".into(),
+        description: "Local wall-clock time + timezone".into(),
+    },
+    McpTool {
+        namespace: "system".into(),
+        name: "system_active_window".into(),
+        description: "Foreground window title + process name".into(),
+    },
+    McpTool {
+        namespace: "system".into(),
+        name: "system_clipboard_get".into(),
+        description: "Read current clipboard text".into(),
+    },
+    McpTool {
+        namespace: "system".into(),
+        name: "system_notification".into(),
+        description: "Show a Windows toast".into(),
+    },
+    // --- fs (read-only) ---
+    McpTool {
+        namespace: "fs".into(),
+        name: "fs_read_file".into(),
+        description: "Read up to 100 KB of a UTF-8 text file".into(),
+    },
+    McpTool {
+        namespace: "fs".into(),
+        name: "fs_list_dir".into(),
+        description: "List up to 500 entries of a directory".into(),
+    },
+    // --- web ---
+    McpTool {
+        namespace: "web".into(),
+        name: "web_fetch".into(),
+        description: "HTTP GET, 50 KB cap, public IPs only, no redirects".into(),
+    },
+    // --- repair (repair-agent only) ---
+    McpTool {
+        namespace: "repair".into(),
+        name: "repair_restart_component".into(),
+        description: "Queue a restart for a runtime subsystem".into(),
+    },
+    McpTool {
+        namespace: "repair".into(),
+        name: "repair_reinstall_model".into(),
+        description: "Re-download a model for a component".into(),
+    },
+    McpTool {
+        namespace: "repair".into(),
+        name: "repair_rollback_config".into(),
+        description: "Rollback config.toml from a dated backup".into(),
+    },
+    McpTool {
+        namespace: "repair".into(),
+        name: "repair_test_component".into(),
+        description: "Quick file-presence sanity check".into(),
+    },
+    McpTool {
+        namespace: "repair".into(),
+        name: "repair_escalate".into(),
+        description: "Surface a manual-intervention banner to the dashboard".into(),
+    },
+    // --- workers ---
+    McpTool {
+        namespace: "workers".into(),
+        name: "workers_spawn_worker".into(),
+        description: "Queue a new Claude Code worker".into(),
+    },
+    McpTool {
+        namespace: "workers".into(),
+        name: "workers_worker_status".into(),
+        description: "Poll a worker's snapshot".into(),
+    },
+    McpTool {
+        namespace: "workers".into(),
+        name: "workers_worker_cancel".into(),
+        description: "Stop a running or queued worker".into(),
+    },
+    McpTool {
+        namespace: "workers".into(),
+        name: "workers_worker_wait".into(),
+        description: "Block until a worker reaches a terminal state".into(),
+    },
+    McpTool {
+        namespace: "workers".into(),
+        name: "workers_worker_list".into(),
+        description: "List recent worker snapshots".into(),
+    },
+];
