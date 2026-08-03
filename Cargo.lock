@@ -1334,6 +1334,7 @@ dependencies = [
  "chrono",
  "continuum-core",
  "continuum-gateway",
+ "continuum-memory",
  "cpal",
  "dirs",
  "futures-util",
