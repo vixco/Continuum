@@ -16,6 +16,16 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Continuous all-monitor live context**: independent 200 ms capture workers
+  for every connected display feed a bounded ordered FIFO with explicit drop
+  accounting; luma change detection selects local vision work without pausing
+  capture. A privacy-filtered, source-attributed `live-context.json` projection
+  combines monitor summaries with foreground window, coarse idle/active input,
+  and local terminal/project metadata. The Brain tab exposes consent/cadence
+  controls and health, while the read-only `system_live_context` MCP tool gives
+  image-incompatible agents one compact shared current world-state. Screenshot
+  persistence remains off by default and raw keys, pointer data, clipboard data,
+  and terminal text are excluded.
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
   `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
   Claude Code CLI — plus a static provider catalog covering ~18 presets such

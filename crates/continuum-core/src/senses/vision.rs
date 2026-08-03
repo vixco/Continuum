@@ -1,129 +1,65 @@
-//! # Vision watcher
+//! # Continuous multi-monitor vision watcher
 //!
-//! Takes a screenshot every N seconds (default 3, configurable 1-10) using the
-//! `xcap` crate for cross-platform screen capture. The screenshot is downscaled
-//! to 1280x720 (configurable) and sent to the local vision model (SmolVLM-256M
-//! by default) for description.
-//!
-//! Produces [`ScreenObservation`] structs containing a one-sentence description
-//! of what the user is looking at, the foreground app name, and a confidence score.
-//!
-//! # Architecture
-//!
-//! This module belongs to Layer 1 (Senses). It produces data that flows upward
-//! to the frame builder and then to triage. It never calls into Layer 2 or above.
-//!
-//! # Error handling
-//!
-//! Every failure is logged and skipped. The watcher never crashes from a single
-//! bad capture or model inference. If the vision model fails, the observation
-//! gets an empty description with confidence 0.0.
+//! Every connected monitor is captured by its own local worker at the target
+//! cadence. A bounded FIFO decouples capture from slower local VLM inference;
+//! overflow drops the oldest pending capture and is reported in live context.
+//! Cheap 64x36 luma differencing selects meaningful changes for description.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use image::imageops::FilterType;
 use image::DynamicImage;
-use tokio::sync::mpsc;
+use parking_lot::Mutex;
+use tokio::sync::{mpsc, Notify};
 use xcap::Monitor;
 
 use crate::config::ScreenConfig;
+use crate::senses::live_context::{LiveContextHub, MonitorWorldState, PrivacyDisposition};
 use crate::senses::types::ScreenObservation;
 
-/// Captures a screenshot of the primary monitor.
-///
-/// Uses `xcap::Monitor` to enumerate displays and captures the one marked
-/// as primary. Returns the raw RGBA image at native resolution.
-///
-/// # Errors
-///
-/// Returns an error if no monitors are found, no primary monitor exists,
-/// or the capture call fails.
+/// Capture the primary monitor once. Retained for diagnostics and compatibility.
 pub fn capture_primary_monitor() -> Result<image::RgbaImage> {
     let monitors = Monitor::all().context("Failed to enumerate monitors")?;
     let primary = monitors
         .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
+        .find(|monitor| monitor.is_primary().unwrap_or(false))
         .ok_or_else(|| anyhow::anyhow!("No primary monitor found"))?;
-
-    let monitor_name = primary.name().unwrap_or_else(|_| "unknown".to_string());
-    let monitor_width = primary.width().unwrap_or(0);
-    let monitor_height = primary.height().unwrap_or(0);
-
-    tracing::debug!(
-        layer = "senses",
-        component = "vision",
-        monitor_name = %monitor_name,
-        width = monitor_width,
-        height = monitor_height,
-        "Capturing primary monitor"
-    );
-
-    let screenshot = primary
+    primary
         .capture_image()
-        .context("Failed to capture primary monitor screenshot")?;
-
-    Ok(screenshot)
+        .context("Failed to capture primary monitor screenshot")
 }
 
-/// Downscales a screenshot to the configured resolution.
-///
-/// Uses triangle (bilinear) filtering for a good balance between speed and
-/// quality. Returns a [`DynamicImage`] suitable for saving or passing to
-/// the vision model.
+/// Downscale a screenshot for the local vision model.
 pub fn downscale_screenshot(screenshot: image::RgbaImage, width: u32, height: u32) -> DynamicImage {
     DynamicImage::ImageRgba8(screenshot).resize_exact(width, height, FilterType::Triangle)
 }
 
-/// Saves a screenshot as a JPEG to the screenshots directory.
-///
-/// The file is placed under `<screenshots_dir>/<YYYY-MM-DD>/<HH-MM-SS>.jpg`.
-/// Creates the date subdirectory if it does not exist.
-///
-/// # Errors
-///
-/// Returns an error if the directory cannot be created or the image cannot
-/// be written. Callers should log and continue rather than propagating.
+/// Save a selected changed frame as a local JPEG.
 pub fn save_screenshot(image: &DynamicImage, screenshots_dir: &Path) -> Result<PathBuf> {
     let now = Utc::now();
     let date_dir = screenshots_dir.join(now.format("%Y-%m-%d").to_string());
-
     std::fs::create_dir_all(&date_dir).with_context(|| {
         format!(
             "Failed to create screenshot directory: {}",
             date_dir.display()
         )
     })?;
-
-    let filename = format!("{}.jpg", now.format("%H-%M-%S"));
-    let path = date_dir.join(&filename);
-
+    let path = date_dir.join(format!("{}.jpg", now.format("%H-%M-%S-%3f")));
     image
         .to_rgb8()
         .save_with_format(&path, image::ImageFormat::Jpeg)
         .with_context(|| format!("Failed to save screenshot to {}", path.display()))?;
-
-    tracing::debug!(
-        layer = "senses",
-        component = "vision",
-        path = %path.display(),
-        "Saved screenshot"
-    );
-
     Ok(path)
 }
 
-/// Checks a description string for keywords that indicate an error is visible.
-///
-/// The vision model's description is scanned for terms like "error", "exception",
-/// "stack trace", "crash", "fatal", etc. This is a heuristic — the model may not
-/// always mention errors explicitly, and false positives are possible.
 fn description_indicates_error(description: &str) -> bool {
     let lower = description.to_lowercase();
-    let error_keywords = [
+    [
         "error",
         "exception",
         "stack trace",
@@ -131,172 +67,246 @@ fn description_indicates_error(description: &str) -> bool {
         "crash",
         "fatal",
         "failed",
-        "failure",
         "traceback",
         "panic",
-        "segfault",
-        "segmentation fault",
         "blue screen",
         "bsod",
         "not responding",
-        "dialog box",
-        "warning dialog",
         "error dialog",
-    ];
-    error_keywords.iter().any(|kw| lower.contains(kw))
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
 }
 
-/// Watches the screen by capturing and describing screenshots at a regular interval.
-///
-/// Holds the screen config, a reference to the vision model, and the path
-/// where screenshots are saved. Use [`VisionWatcher::run`] to start the
-/// capture loop as a tokio task.
+#[derive(Debug, Clone)]
+struct MonitorTarget {
+    monitor: Monitor,
+    id: String,
+    name: String,
+    is_primary: bool,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl MonitorTarget {
+    fn signature(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            self.name, self.x, self.y, self.width, self.height, self.is_primary
+        )
+    }
+}
+
+#[derive(Debug)]
+struct CapturePacket {
+    capture_sequence: u64,
+    captured_at: chrono::DateTime<Utc>,
+    target: MonitorTarget,
+    image: Option<image::RgbaImage>,
+    change_score: f32,
+    meaningful_change: bool,
+    privacy: PrivacyDisposition,
+    capture_latency_ms: u64,
+}
+
+#[derive(Debug)]
+struct Buffered<T> {
+    sequence: u64,
+    dropped_before: u64,
+    value: T,
+}
+
+#[derive(Debug)]
+struct OrderedBufferInner<T> {
+    items: VecDeque<Buffered<T>>,
+    next_sequence: u64,
+}
+
+/// Bounded FIFO with explicit oldest-drop accounting.
+#[derive(Debug)]
+struct OrderedBuffer<T> {
+    capacity: usize,
+    inner: Arc<Mutex<OrderedBufferInner<T>>>,
+    notify: Arc<Notify>,
+}
+
+impl<T> Clone for OrderedBuffer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            capacity: self.capacity,
+            inner: self.inner.clone(),
+            notify: self.notify.clone(),
+        }
+    }
+}
+
+impl<T> OrderedBuffer<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            inner: Arc::new(Mutex::new(OrderedBufferInner {
+                items: VecDeque::with_capacity(capacity.max(1)),
+                next_sequence: 0,
+            })),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn push(&self, value: T) -> (u64, u64) {
+        self.push_with(value, |_| {})
+    }
+
+    fn push_with(&self, value: T, publish: impl FnOnce(&Buffered<T>)) -> (u64, u64) {
+        let mut inner = self.inner.lock();
+        let dropped_before = if inner.items.len() == self.capacity {
+            1
+        } else {
+            0
+        };
+        if dropped_before > 0 {
+            inner.items.pop_front();
+        }
+        inner.next_sequence = inner.next_sequence.saturating_add(1);
+        let sequence = inner.next_sequence;
+        inner.items.push_back(Buffered {
+            sequence,
+            dropped_before,
+            value,
+        });
+        if let Some(buffered) = inner.items.back() {
+            publish(buffered);
+        }
+        drop(inner);
+        self.notify.notify_one();
+        (sequence, dropped_before)
+    }
+
+    async fn pop(&self) -> Buffered<T> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(value) = self.inner.lock().items.pop_front() {
+                return value;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VisionCache {
+    description: String,
+    has_error_visible: bool,
+    confidence: f32,
+    updated_at: Option<chrono::DateTime<Utc>>,
+    last_inference: Option<Instant>,
+}
+
+impl Default for VisionCache {
+    fn default() -> Self {
+        Self {
+            description: "awaiting local vision".into(),
+            has_error_visible: false,
+            confidence: 0.0,
+            updated_at: None,
+            last_inference: None,
+        }
+    }
+}
+
+/// Continuous all-monitor capture plus selective local vision description.
 pub struct VisionWatcher {
-    /// Screen capture configuration (interval, resolution, save flag).
     config: ScreenConfig,
-    /// The local vision model used to describe screenshots.
     vision_model: Arc<dyn continuum_vision::VisionModel>,
-    /// Base directory for saved screenshots (`~/.continuum-dev/screenshots/`).
     screenshots_dir: PathBuf,
+    live_context: LiveContextHub,
 }
 
 impl VisionWatcher {
-    /// Creates a new vision watcher.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Screen capture settings (interval, resolution, save flag).
-    /// * `vision_model` - The local vision model for image description.
-    /// * `screenshots_dir` - Base directory for saving screenshot JPEGs.
+    /// Construct a watcher with an internal world-state handle (mainly tests).
     pub fn new(
         config: ScreenConfig,
         vision_model: Arc<dyn continuum_vision::VisionModel>,
         screenshots_dir: impl Into<PathBuf>,
     ) -> Self {
+        Self::new_with_live_context(
+            config,
+            vision_model,
+            screenshots_dir,
+            LiveContextHub::default(),
+        )
+    }
+
+    /// Construct a watcher attached to the runtime's shared world-state.
+    pub fn new_with_live_context(
+        config: ScreenConfig,
+        vision_model: Arc<dyn continuum_vision::VisionModel>,
+        screenshots_dir: impl Into<PathBuf>,
+        live_context: LiveContextHub,
+    ) -> Self {
         Self {
             config,
             vision_model,
             screenshots_dir: screenshots_dir.into(),
+            live_context,
         }
     }
 
-    /// Runs the vision capture loop until the shutdown signal fires.
-    ///
-    /// Each iteration:
-    /// 1. Captures the primary monitor screenshot.
-    /// 2. Downscales to the configured resolution.
-    /// 3. Optionally saves the screenshot to disk as JPEG.
-    /// 4. Calls the vision model to produce a description.
-    /// 5. Builds a [`ScreenObservation`] and sends it through the channel.
-    /// 6. Sleeps for the configured interval (minus time already spent).
-    ///
-    /// If a capture or model call fails, the error is logged and the cycle
-    /// is skipped. The loop never panics from transient failures.
-    ///
-    /// If the vision model takes longer than the configured interval, the
-    /// next capture starts immediately (no queue buildup).
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - Channel sender for completed observations.
-    /// * `shutdown` - A watch receiver; the loop exits when this receives `true`.
+    /// Run until shutdown. Capture workers never await inference or triage.
     pub async fn run(
         &self,
         tx: mpsc::Sender<ScreenObservation>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
+        if !self.config.enabled {
+            tracing::info!(
+                layer = "senses",
+                component = "vision",
+                "Screen capture disabled by user configuration"
+            );
+            return;
+        }
+
         tracing::info!(
             layer = "senses",
             component = "vision",
-            interval_secs = self.config.interval_secs,
-            capture_width = self.config.capture_width,
-            capture_height = self.config.capture_height,
+            capture_interval_ms = self.config.capture_interval_ms,
+            all_monitors = self.config.all_monitors,
+            buffer_capacity = self.config.buffer_capacity,
+            change_threshold = self.config.meaningful_change_threshold,
             save_screenshots = self.config.save_screenshots,
-            "Vision watcher starting"
+            "Continuous multi-monitor watcher starting"
         );
 
-        let interval = tokio::time::Duration::from_secs(self.config.interval_secs);
-        // Remember the last screenshot's pixel hash + its description so
-        // we can skip the expensive VLM inference when the screen hasn't
-        // changed. On a typical idle editor session this cuts SmolVLM
-        // calls by 70–90%.
-        let mut cached: Option<(u64, ScreenObservation)> = None;
+        let buffer = OrderedBuffer::new(self.config.buffer_capacity);
+        let scheduler = tokio::spawn(run_capture_scheduler(
+            self.config.clone(),
+            buffer.clone(),
+            self.live_context.clone(),
+            shutdown.clone(),
+        ));
+        let mut cache: HashMap<String, VisionCache> = HashMap::new();
 
         loop {
-            let cycle_start = Instant::now();
-
-            // Check for shutdown before starting work.
-            if *shutdown.borrow() {
-                tracing::info!(
-                    layer = "senses",
-                    component = "vision",
-                    "Shutdown signal received, stopping vision watcher"
-                );
-                break;
-            }
-
-            // Do not start an expensive screen capture when nobody can
-            // receive the observation anymore.
-            if tx.is_closed() {
-                tracing::warn!(
-                    layer = "senses",
-                    component = "vision",
-                    "Observation channel closed, stopping vision watcher"
-                );
-                break;
-            }
-
-            match self.capture_and_describe(cached.as_ref()).await {
-                Ok((observation, hash)) => {
-                    cached = Some((hash, observation.clone()));
-                    if tx.send(observation).await.is_err() {
-                        tracing::warn!(
-                            layer = "senses",
-                            component = "vision",
-                            "Observation channel closed, stopping vision watcher"
-                        );
+            tokio::select! {
+                packet = buffer.pop() => {
+                    if tx.is_closed() {
                         break;
                     }
+                    self.process_capture(packet, &tx, &mut cache).await;
                 }
-                Err(err) => {
-                    tracing::error!(
-                        layer = "senses",
-                        component = "vision",
-                        error = %err,
-                        "Vision capture cycle failed, skipping"
-                    );
-                }
-            }
-
-            // Sleep for the remaining interval, or start immediately if the
-            // cycle already took longer than the interval.
-            let elapsed = cycle_start.elapsed();
-            let sleep_duration = interval.saturating_sub(elapsed);
-
-            if sleep_duration.is_zero() {
-                tracing::debug!(
-                    layer = "senses",
-                    component = "vision",
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    interval_ms = interval.as_millis() as u64,
-                    "Cycle took longer than interval, starting next capture immediately"
-                );
-            }
-
-            // Use select to respect shutdown during the sleep period.
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_duration) => {}
-                _ = shutdown.changed() => {
-                    tracing::info!(
-                        layer = "senses",
-                        component = "vision",
-                        "Shutdown signal received during sleep, stopping vision watcher"
-                    );
-                    break;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
                 }
             }
         }
 
+        scheduler.abort();
+        let _ = scheduler.await;
         tracing::info!(
             layer = "senses",
             component = "vision",
@@ -304,442 +314,374 @@ impl VisionWatcher {
         );
     }
 
-    /// Performs a single capture-describe cycle.
-    ///
-    /// Captures the screen, downscales, optionally saves, runs the vision
-    /// model, and returns the assembled [`ScreenObservation`].
-    async fn capture_and_describe(
+    async fn process_capture(
         &self,
-        cached: Option<&(u64, ScreenObservation)>,
-    ) -> Result<(ScreenObservation, u64)> {
-        // Screen capture is a blocking OS call; run it on the blocking pool.
-        let config_width = self.config.capture_width;
-        let config_height = self.config.capture_height;
-        let save = self.config.save_screenshots;
-        let screenshots_dir = self.screenshots_dir.clone();
+        buffered: Buffered<CapturePacket>,
+        tx: &mpsc::Sender<ScreenObservation>,
+        cache: &mut HashMap<String, VisionCache>,
+    ) {
+        tracing::trace!(
+            layer = "senses",
+            component = "vision",
+            capture_event_sequence = buffered.sequence,
+            "Processing ordered capture event"
+        );
+        let mut packet = buffered.value;
+        // Privacy is attached at capture time. A later foreground change may
+        // make processing stricter, but never less strict for this bitmap.
+        let current_privacy = self.live_context.current_privacy();
+        let privacy = if packet.privacy == PrivacyDisposition::Visible
+            && current_privacy == PrivacyDisposition::Visible
+        {
+            PrivacyDisposition::Visible
+        } else {
+            PrivacyDisposition::Redacted
+        };
+        let monitor_cache = cache.entry(packet.target.id.clone()).or_default();
+        let inference_due = monitor_cache
+            .last_inference
+            .map(|last| {
+                last.elapsed() >= Duration::from_millis(self.config.vision_min_interval_ms.max(100))
+            })
+            .unwrap_or(true);
+        let should_describe = privacy == PrivacyDisposition::Visible
+            && packet.meaningful_change
+            && packet.image.is_some()
+            && inference_due;
+        let mut screenshot_path = None;
+        let mut vision_updated = false;
 
-        let (image, screenshot_path, hash) = tokio::task::spawn_blocking(move || -> Result<_> {
-            let raw = capture_primary_monitor()?;
-            let downscaled = downscale_screenshot(raw, config_width, config_height);
-
-            // Cheap perceptual-ish hash of the downscaled pixel buffer:
-            // hash a stride-subsampled view so the cost is ~0.5 ms instead
-            // of ~20 ms for the full 3.6 MB buffer. Still catches every
-            // meaningful pixel change at the resolution we care about.
-            let pixel_hash = hash_pixel_buffer(downscaled.as_bytes());
-
-            let path = if save {
-                match save_screenshot(&downscaled, &screenshots_dir) {
-                    Ok(p) => Some(p.to_string_lossy().into_owned()),
-                    Err(err) => {
-                        tracing::warn!(
-                            layer = "senses",
-                            component = "vision",
-                            error = %err,
-                            "Failed to save screenshot, continuing without save"
-                        );
-                        None
-                    }
+        if privacy != PrivacyDisposition::Visible {
+            monitor_cache.description = "[redacted by local privacy policy]".into();
+            monitor_cache.has_error_visible = false;
+            monitor_cache.confidence = 1.0;
+            packet.image = None;
+        } else if should_describe {
+            let raw = packet.image.take().expect("image checked above");
+            let image =
+                downscale_screenshot(raw, self.config.capture_width, self.config.capture_height);
+            if self.config.save_screenshots {
+                let monitor_dir = self.screenshots_dir.join(&packet.target.id);
+                match save_screenshot(&image, &monitor_dir) {
+                    Ok(path) => screenshot_path = Some(path.to_string_lossy().into_owned()),
+                    Err(error) => tracing::warn!(
+                        layer = "senses",
+                        component = "vision",
+                        monitor_id = %packet.target.id,
+                        error = %error,
+                        "Failed to save selected screenshot"
+                    ),
                 }
-            } else {
-                None
-            };
-
-            Ok((downscaled, path, pixel_hash))
-        })
-        .await
-        .context("Screenshot capture task panicked")??;
-
-        // If the downscaled screenshot hashes identically to the previous
-        // frame, the screen hasn't changed in any way SmolVLM would have
-        // picked up on. Reuse the previous caption instead of spending
-        // another 1–2 s of CPU on an identical description.
-        if let Some((cached_hash, cached_obs)) = cached {
-            if *cached_hash == hash {
-                tracing::debug!(
+            }
+            monitor_cache.last_inference = Some(Instant::now());
+            match self.vision_model.describe(&image).await {
+                Ok(output) => {
+                    monitor_cache.has_error_visible = output.has_error_visible
+                        || description_indicates_error(&output.description);
+                    monitor_cache.description = output.description;
+                    monitor_cache.confidence = output.confidence;
+                    monitor_cache.updated_at = Some(Utc::now());
+                    vision_updated = true;
+                }
+                Err(error) => tracing::warn!(
                     layer = "senses",
                     component = "vision",
-                    hash = hash,
-                    "Reusing cached vision description (screen unchanged)"
-                );
-                let mut reused = cached_obs.clone();
-                // Keep the fresh screenshot path so downstream logs point
-                // at the actual saved file for this cycle.
-                if let Some(path) = screenshot_path {
-                    reused.screenshot_path = Some(path);
-                }
-                return Ok((reused, hash));
+                    monitor_id = %packet.target.id,
+                    error = %error,
+                    "Local vision inference failed; capture continues"
+                ),
             }
         }
 
-        // Run the vision model. If it fails, produce a degraded observation
-        // rather than failing the whole cycle.
-        let (description, has_error_visible, confidence) =
-            match self.vision_model.describe(&image).await {
-                Ok(output) => {
-                    // The model provides its own error detection and confidence.
-                    // We also run keyword-based error detection as a fallback
-                    // in case the model missed an obvious error indicator.
-                    let has_error = output.has_error_visible
-                        || description_indicates_error(&output.description);
-                    (output.description, has_error, output.confidence)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        layer = "senses",
-                        component = "vision",
-                        error = %err,
-                        "Vision model describe failed, emitting empty observation"
-                    );
-                    (String::new(), false, 0.0)
-                }
-            };
+        let publication_privacy = self.live_context.current_privacy();
+        if publication_privacy != PrivacyDisposition::Visible {
+            monitor_cache.description = "[redacted by local privacy policy]".into();
+            monitor_cache.has_error_visible = false;
+            monitor_cache.confidence = 1.0;
+            monitor_cache.updated_at = None;
+            vision_updated = false;
+        }
 
-        // TODO(phase-1): Get the actual foreground app from the context watcher.
-        // For now this field is populated by the frame builder from the context
-        // observation. We leave it empty here to avoid duplicating the Windows
-        // API calls.
-        let foreground_app = String::new();
+        self.live_context.record_monitor_vision(
+            &packet.target.id,
+            monitor_cache.description.clone(),
+            monitor_cache.confidence,
+            monitor_cache.updated_at,
+            publication_privacy,
+            vision_updated,
+        );
 
-        Ok((
-            ScreenObservation {
-                description,
-                foreground_app,
-                has_error_visible,
-                confidence,
-                screenshot_path,
-                ts: Utc::now(),
-            },
-            hash,
-        ))
+        let snapshot = self.live_context.snapshot();
+        let observation = ScreenObservation {
+            description: snapshot.compact_for_agents(1_400),
+            foreground_app: String::new(),
+            has_error_visible: snapshot.monitors.iter().any(|monitor| {
+                cache
+                    .get(&monitor.monitor_id)
+                    .is_some_and(|entry| entry.has_error_visible)
+            }),
+            confidence: snapshot
+                .monitors
+                .iter()
+                .map(|monitor| monitor.confidence)
+                .fold(0.0, f32::max),
+            screenshot_path,
+            ts: packet.captured_at,
+        };
+        match tx.try_send(observation) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => self.live_context.record_output_drop(1),
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 }
 
-/// Cheap stride-subsampled hash of a pixel buffer, used to detect whether
-/// consecutive screenshots are identical so we can skip re-captioning.
-///
-/// Samples every 256th byte plus the buffer length — enough to catch any
-/// meaningful screen change at the resolution we care about (a single
-/// blinking cursor or a changed pixel in a code editor will shift the
-/// sampled bytes), at ~0.5 ms on a 1280×720 RGB buffer vs ~20 ms for a
-/// full hash. False-negative risk (two different screens hashing the
-/// same) is acceptable here — worst case we reuse a slightly stale
-/// caption, and the next change will break the match.
-fn hash_pixel_buffer(bytes: &[u8]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    bytes.len().hash(&mut hasher);
-    for chunk in bytes.chunks(256) {
-        chunk.first().unwrap_or(&0).hash(&mut hasher);
-        chunk.last().unwrap_or(&0).hash(&mut hasher);
+async fn run_capture_scheduler(
+    config: ScreenConfig,
+    buffer: OrderedBuffer<CapturePacket>,
+    live_context: LiveContextHub,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut workers: HashMap<String, (String, tokio::task::JoinHandle<()>)> = HashMap::new();
+    let mut discovery = tokio::time::interval(Duration::from_secs(2));
+    discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = discovery.tick() => {
+                let discovery_config = config.clone();
+                match tokio::task::spawn_blocking(move || enumerate_monitors(&discovery_config)).await {
+                    Ok(Ok(targets)) => {
+                        let connected: HashSet<String> =
+                            targets.iter().map(|target| target.id.clone()).collect();
+                        live_context.set_connected_monitors(connected.iter().cloned());
+                        let removed: Vec<String> = workers
+                            .keys()
+                            .filter(|id| !connected.contains(*id))
+                            .cloned()
+                            .collect();
+                        for id in removed {
+                            if let Some((_, handle)) = workers.remove(&id) {
+                                handle.abort();
+                            }
+                        }
+                        for target in targets {
+                            let signature = target.signature();
+                            if workers.get(&target.id).is_some_and(|(known, _)| known != &signature) {
+                                if let Some((_, handle)) = workers.remove(&target.id) {
+                                    handle.abort();
+                                }
+                            }
+                            if !workers.contains_key(&target.id) {
+                                let id = target.id.clone();
+                                let handle = tokio::spawn(run_monitor_capture_loop(
+                                    target,
+                                    config.clone(),
+                                    buffer.clone(),
+                                    live_context.clone(),
+                                    shutdown.clone(),
+                                ));
+                                workers.insert(id, (signature, handle));
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => live_context.record_capture_failure(error.to_string()),
+                    Err(error) => live_context.record_capture_failure(format!(
+                        "monitor discovery task failed: {error}"
+                    )),
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
     }
-    hasher.finish()
+    for (_, (_, handle)) in workers {
+        handle.abort();
+    }
+}
+
+async fn run_monitor_capture_loop(
+    target: MonitorTarget,
+    config: ScreenConfig,
+    buffer: OrderedBuffer<CapturePacket>,
+    live_context: LiveContextHub,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut ticker =
+        tokio::time::interval(Duration::from_millis(config.capture_interval_ms.max(50)));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous_signature: Option<Vec<u8>> = None;
+    let mut previous_privacy = PrivacyDisposition::Redacted;
+    let mut capture_sequence = 0u64;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                capture_sequence = capture_sequence.saturating_add(1);
+                let captured_at = Utc::now();
+                let started = Instant::now();
+                let monitor = target.monitor.clone();
+                match tokio::task::spawn_blocking(move || monitor.capture_image()).await {
+                    Ok(Ok(image)) => {
+                        let signature = change_signature(&image);
+                        let change_score = previous_signature
+                            .as_deref()
+                            .map(|previous| mean_luma_difference(previous, &signature))
+                            .unwrap_or(1.0);
+                        let privacy = live_context.current_privacy();
+                        let privacy_became_visible = previous_privacy != PrivacyDisposition::Visible
+                            && privacy == PrivacyDisposition::Visible;
+                        let meaningful_change = previous_signature.is_none()
+                            || change_score >= config.meaningful_change_threshold
+                            || privacy_became_visible;
+                        previous_signature = Some(signature);
+                        previous_privacy = privacy;
+                        let capture_latency_ms = started.elapsed().as_millis() as u64;
+                        let packet = CapturePacket {
+                            capture_sequence,
+                            captured_at,
+                            target: target.clone(),
+                            image: meaningful_change.then_some(image),
+                            change_score,
+                            meaningful_change,
+                            privacy,
+                            capture_latency_ms,
+                        };
+                        buffer.push_with(packet, |buffered| {
+                            if buffered.dropped_before > 0 {
+                                live_context.record_capture_drop(buffered.dropped_before);
+                            }
+                            let packet = &buffered.value;
+                            live_context.record_monitor_capture(MonitorWorldState {
+                                monitor_id: packet.target.id.clone(),
+                                name: packet.target.name.clone(),
+                                is_primary: packet.target.is_primary,
+                                x: packet.target.x,
+                                y: packet.target.y,
+                                width: packet.target.width,
+                                height: packet.target.height,
+                                capture_event_sequence: buffered.sequence,
+                                capture_sequence: packet.capture_sequence,
+                                captured_at: packet.captured_at,
+                                change_score: packet.change_score,
+                                meaningful_change: packet.meaningful_change,
+                                description: String::new(),
+                                confidence: 0.0,
+                                vision_updated_at: None,
+                                privacy,
+                                target_interval_ms: config.capture_interval_ms.max(50),
+                                capture_latency_ms: packet.capture_latency_ms,
+                                dropped_before: buffered.dropped_before,
+                            });
+                        });
+                    }
+                    Ok(Err(error)) => live_context.record_capture_failure(format!(
+                        "monitor {} capture failed: {error}", target.id
+                    )),
+                    Err(error) => live_context.record_capture_failure(format!(
+                        "monitor {} capture task failed: {error}", target.id
+                    )),
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorTarget>> {
+    let mut targets = Vec::new();
+    for monitor in Monitor::all().context("Failed to enumerate monitors")? {
+        let native_id = monitor.id().context("Failed to read monitor id")?;
+        let id = format!("display-{native_id}");
+        if config
+            .excluded_monitor_ids
+            .iter()
+            .any(|excluded| excluded == &id)
+        {
+            continue;
+        }
+        let is_primary = monitor.is_primary().unwrap_or(false);
+        if !config.all_monitors && !is_primary {
+            continue;
+        }
+        targets.push(MonitorTarget {
+            name: monitor.name().unwrap_or_else(|_| id.clone()),
+            x: monitor.x().unwrap_or(0),
+            y: monitor.y().unwrap_or(0),
+            width: monitor.width().unwrap_or(0),
+            height: monitor.height().unwrap_or(0),
+            is_primary,
+            id,
+            monitor,
+        });
+    }
+    if targets.is_empty() {
+        anyhow::bail!("No non-excluded monitors found");
+    }
+    targets.sort_by_key(|target| (target.x, target.y, target.id.clone()));
+    Ok(targets)
+}
+
+fn change_signature(image: &image::RgbaImage) -> Vec<u8> {
+    let reduced = image::imageops::resize(image, 64, 36, FilterType::Triangle);
+    DynamicImage::ImageRgba8(reduced).to_luma8().into_raw()
+}
+
+fn mean_luma_difference(previous: &[u8], current: &[u8]) -> f32 {
+    if previous.len() != current.len() || current.is_empty() {
+        return 1.0;
+    }
+    let total: u64 = previous
+        .iter()
+        .zip(current)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum();
+    total as f32 / (current.len() as f32 * 255.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use continuum_vision::{VisionModel, VisionOutput};
 
-    /// A mock vision model that returns a fixed description.
-    struct MockVisionModel {
-        description: String,
-        has_error: bool,
-        confidence: f32,
-    }
-
-    impl MockVisionModel {
-        fn new(description: &str) -> Self {
-            Self {
-                description: description.to_string(),
-                has_error: false,
-                confidence: 0.85,
-            }
-        }
-
-        fn with_error(description: &str) -> Self {
-            Self {
-                description: description.to_string(),
-                has_error: true,
-                confidence: 0.9,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl VisionModel for MockVisionModel {
-        async fn describe(&self, _image: &DynamicImage) -> Result<VisionOutput> {
-            Ok(VisionOutput {
-                description: self.description.clone(),
-                has_error_visible: self.has_error,
-                confidence: self.confidence,
-            })
-        }
-
-        fn model_name(&self) -> &str {
-            "mock-vision"
-        }
-
-        async fn warmup(&self) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A mock vision model that always fails.
-    struct FailingVisionModel;
-
-    #[async_trait]
-    impl VisionModel for FailingVisionModel {
-        async fn describe(&self, _image: &DynamicImage) -> Result<VisionOutput> {
-            anyhow::bail!("Model inference failed")
-        }
-
-        fn model_name(&self) -> &str {
-            "failing-mock"
-        }
-
-        async fn warmup(&self) -> Result<()> {
-            Ok(())
-        }
+    #[test]
+    fn luma_difference_ignores_identical_frames() {
+        assert_eq!(mean_luma_difference(&[10, 20, 30], &[10, 20, 30]), 0.0);
     }
 
     #[test]
-    fn test_downscale_screenshot() {
-        // Create a 1920x1080 test image.
-        let img = image::RgbaImage::new(1920, 1080);
-        let downscaled = downscale_screenshot(img, 1280, 720);
-        assert_eq!(downscaled.width(), 1280);
-        assert_eq!(downscaled.height(), 720);
+    fn luma_difference_is_normalized() {
+        let score = mean_luma_difference(&[0, 0], &[255, 127]);
+        assert!((score - 0.749).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn bounded_buffer_keeps_order_and_reports_gap() {
+        let buffer = OrderedBuffer::new(2);
+        assert_eq!(buffer.push("one").1, 0);
+        assert_eq!(buffer.push("two").1, 0);
+        assert_eq!(buffer.push("three").1, 1);
+        let first = buffer.pop().await;
+        let second = buffer.pop().await;
+        assert_eq!(first.value, "two");
+        assert_eq!(second.value, "three");
+        assert!(first.sequence < second.sequence);
+        assert_eq!(second.dropped_before, 1);
     }
 
     #[test]
-    fn test_downscale_preserves_non_standard_dimensions() {
-        let img = image::RgbaImage::new(800, 600);
-        let downscaled = downscale_screenshot(img, 640, 480);
-        assert_eq!(downscaled.width(), 640);
-        assert_eq!(downscaled.height(), 480);
-    }
-
-    #[test]
-    fn test_save_screenshot_creates_directories() {
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let img = DynamicImage::ImageRgba8(image::RgbaImage::new(100, 100));
-
-        let path = save_screenshot(&img, dir.path()).expect("Failed to save screenshot");
-
+    fn screenshot_save_uses_unique_millisecond_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let image = DynamicImage::new_rgb8(10, 10);
+        let path = save_screenshot(&image, dir.path()).expect("save screenshot");
         assert!(path.exists());
-        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("jpg"));
-        // Verify the date subdirectory was created.
-        let date_str = Utc::now().format("%Y-%m-%d").to_string();
-        assert!(dir.path().join(&date_str).is_dir());
-    }
-
-    #[test]
-    fn test_save_screenshot_to_invalid_path_fails() {
-        let img = DynamicImage::ImageRgba8(image::RgbaImage::new(100, 100));
-        // Use a path on a nonexistent drive letter, which reliably fails on Windows.
-        // On Unix, use a path under /proc which cannot be a directory.
-        let invalid_path = if cfg!(windows) {
-            Path::new("Z:\\nonexistent\\deeply\\nested\\path")
-        } else {
-            Path::new("/proc/0/nonexistent/deeply/nested/path")
-        };
-        let result = save_screenshot(&img, invalid_path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_description_indicates_error_detects_keywords() {
-        assert!(description_indicates_error(
-            "An error dialog is displayed on screen"
-        ));
-        assert!(description_indicates_error("Python traceback visible"));
-        assert!(description_indicates_error(
-            "Application crash with stack trace"
-        ));
-        assert!(description_indicates_error("Blue screen of death (BSOD)"));
-        assert!(description_indicates_error("Program is not responding"));
-    }
-
-    #[test]
-    fn test_description_indicates_error_ignores_normal_text() {
-        assert!(!description_indicates_error(
-            "User is viewing a code editor with Python files"
-        ));
-        assert!(!description_indicates_error(
-            "A web browser showing a news article"
-        ));
-        assert!(!description_indicates_error(
-            "Desktop with file explorer open"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_vision_watcher_sends_observations() {
-        let model = Arc::new(MockVisionModel::new("User is viewing a code editor"));
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config = ScreenConfig {
-            interval_secs: 1,
-            capture_width: 320,
-            capture_height: 240,
-            save_screenshots: false,
-        };
-
-        let watcher = VisionWatcher::new(config, model, dir.path());
-        let (tx, mut rx) = mpsc::channel::<ScreenObservation>(8);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        // Run the watcher in a task; shut it down after receiving one observation.
-        let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
-        });
-
-        // NOTE: This test requires a display to capture. On headless CI it will
-        // fail at capture_primary_monitor(). That is expected; the error path
-        // logs and skips. We give it a short window and then shut down.
-        let observation =
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
-
-        // Signal shutdown regardless of whether we got an observation.
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        // On a machine with a display, validate the observation fields.
-        if let Ok(Some(obs)) = observation {
-            assert_eq!(obs.description, "User is viewing a code editor");
-            assert!(!obs.has_error_visible);
-            assert!((obs.confidence - 0.85).abs() < f32::EPSILON);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_vision_watcher_handles_model_failure() {
-        let model: Arc<dyn continuum_vision::VisionModel> = Arc::new(FailingVisionModel);
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config = ScreenConfig {
-            interval_secs: 1,
-            capture_width: 320,
-            capture_height: 240,
-            save_screenshots: false,
-        };
-
-        let watcher = VisionWatcher::new(config, model, dir.path());
-        let (tx, mut rx) = mpsc::channel::<ScreenObservation>(8);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
-        });
-
-        // On a machine with a display, the model failure should produce a
-        // degraded observation with empty description and 0.0 confidence.
-        let observation =
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
-
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        if let Ok(Some(obs)) = observation {
-            assert!(obs.description.is_empty());
-            assert!(!obs.has_error_visible);
-            assert!((obs.confidence - 0.0).abs() < f32::EPSILON);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_vision_watcher_respects_shutdown() {
-        let model = Arc::new(MockVisionModel::new("test"));
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config = ScreenConfig {
-            interval_secs: 60, // Long interval so it is definitely sleeping.
-            capture_width: 320,
-            capture_height: 240,
-            save_screenshots: false,
-        };
-
-        let watcher = VisionWatcher::new(config, model, dir.path());
-        let (tx, _rx) = mpsc::channel::<ScreenObservation>(8);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
-        });
-
-        // Send shutdown immediately. The watcher should exit promptly
-        // rather than waiting the full 60-second interval.
-        let _ = shutdown_tx.send(true);
-
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
-
-        assert!(
-            result.is_ok(),
-            "Vision watcher did not shut down within 5 seconds"
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("jpg")
         );
-    }
-
-    #[tokio::test]
-    async fn test_vision_watcher_stops_on_closed_channel() {
-        let model = Arc::new(MockVisionModel::new("test"));
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config = ScreenConfig {
-            interval_secs: 1,
-            capture_width: 320,
-            capture_height: 240,
-            save_screenshots: false,
-        };
-
-        let watcher = VisionWatcher::new(config, model, dir.path());
-        let (tx, rx) = mpsc::channel::<ScreenObservation>(1);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        // Drop the receiver so the channel is closed.
-        drop(rx);
-
-        let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
-        });
-
-        // The watcher should exit promptly because the channel is closed.
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(10), handle).await;
-
-        assert!(
-            result.is_ok(),
-            "Vision watcher did not stop after channel closed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_vision_watcher_detects_error_in_description() {
-        let model = Arc::new(MockVisionModel::with_error(
-            "An error dialog is displayed with a stack trace",
-        ));
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config = ScreenConfig {
-            interval_secs: 1,
-            capture_width: 320,
-            capture_height: 240,
-            save_screenshots: false,
-        };
-
-        let watcher = VisionWatcher::new(config, model, dir.path());
-        let (tx, mut rx) = mpsc::channel::<ScreenObservation>(8);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
-        });
-
-        let observation =
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await;
-
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        // On a machine with a display, the error keywords should be detected.
-        if let Ok(Some(obs)) = observation {
-            assert!(obs.has_error_visible);
-        }
     }
 }

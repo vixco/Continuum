@@ -56,6 +56,48 @@ The triage layer recognises spoken phrases like "Continuum, something is broken"
 
 ---
 
+## Continuous Live Context
+
+Component: `live_context`
+
+Logs:
+
+- `layer = "senses"`, `component = "vision"` for monitor discovery, capture,
+  change selection, and local vision failures.
+- `layer = "senses"`, `component = "live_context"` for projection publication.
+- `~/.continuum-dev/live-context.json` contains bounded health counters and the
+  last capture timestamp; it never contains raw screenshot bytes or raw input.
+
+Health check:
+
+- Healthy when capture is enabled, connected monitors are represented, the last
+  capture is recent, and there is no sustained buffer loss.
+- Degrading when no monitor is represented, more than 10% of capture events
+  were dropped, or more than 10% exceeded the configured capture deadline.
+  Drops and cadence misses are explicit overload evidence, not hidden pauses.
+- Error/restart-required when `LiveContextHealth::should_restart()` detects a
+  sustained capture stall or repeated capture failures.
+
+Recovery:
+
+1. Confirm **Brain → Continuous local context** is enabled and the intended
+   monitor IDs are not in `screen.excluded_monitor_ids`.
+2. Inspect `live-context.json` health counters and recent source-attributed
+   events. If drops rise, increase `screen.buffer_capacity`, increase
+   `screen.vision_min_interval_ms`, or relax capture cadence.
+3. Restart the Continuum runtime to re-enumerate displays and restart all
+   monitor workers. Hot-plug discovery normally repairs topology within 2 s.
+4. Persistent xcap failures require checking the interactive Windows desktop
+   session and display drivers; do not delete local user data.
+
+Runtime proof boundary: unit tests cover event ordering, bounded oldest-drop
+behavior, compact projection limits, privacy classification, and restart logic.
+CI compilation/integration tests validate wiring. Actual simultaneous cadence
+across multiple physical Windows monitors requires a live machine with multiple
+displays and is not established by unit tests alone.
+
+---
+
 ## Memory Distiller
 
 Component: `memory/distiller`

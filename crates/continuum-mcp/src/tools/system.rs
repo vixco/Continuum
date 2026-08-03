@@ -2,6 +2,7 @@
 //!
 //! - [`current_time`] — ISO timestamp + timezone offset
 //! - [`active_window`] — foreground window title and process name
+//! - [`live_context`] — compact shared local world-state
 //! - [`clipboard_get`] — Windows clipboard text read (best-effort)
 //! - [`show_notification`] — Windows toast via `tauri-winrt-notification`
 //!
@@ -11,6 +12,8 @@
 //! into `None`/empty values — the MCP layer decides how to surface them, and
 //! per CLAUDE.md these tools must never crash.
 
+use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -49,6 +52,19 @@ pub struct ClipboardResponse {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LiveContextResponse {
+    /// False before the runtime has published its first snapshot.
+    pub available: bool,
+    /// True when the published snapshot is older than ten seconds.
+    pub stale: bool,
+    /// Compact source-attributed text for models without image input.
+    pub compact: Option<String>,
+    /// Full structured world-state when available.
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub state: Option<continuum_core::senses::live_context::LiveWorldState>,
+}
+
 // ---------------------------------------------------------------------------
 // current_time
 // ---------------------------------------------------------------------------
@@ -72,6 +88,37 @@ pub fn active_window() -> ActiveWindowResponse {
         title,
         process_name,
     }
+}
+
+/// Read the runtime's atomically-published shared live world-state.
+pub fn live_context(data_dir: &Path) -> Result<LiveContextResponse, String> {
+    let path = data_dir.join("live-context.json");
+    if !path.exists() {
+        return Ok(LiveContextResponse {
+            available: false,
+            stale: false,
+            compact: None,
+            state: None,
+        });
+    }
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if metadata.len() > 2 * 1024 * 1024 {
+        return Err("live-context.json exceeds the 2 MiB safety cap".into());
+    }
+    let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let state: continuum_core::senses::live_context::LiveWorldState =
+        serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    let stale = chrono::Utc::now()
+        .signed_duration_since(state.generated_at)
+        .num_seconds()
+        > 10;
+    let compact = Some(state.compact_for_agents(4_000));
+    Ok(LiveContextResponse {
+        available: true,
+        stale,
+        compact,
+        state: Some(state),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,5 +317,31 @@ mod tests {
     #[test]
     fn clip_short_strings_are_unchanged() {
         assert_eq!(clip("hi", 10), "hi");
+    }
+
+    #[test]
+    fn live_context_is_unavailable_before_runtime_publish() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let response = live_context(dir.path()).expect("unavailable response");
+        assert!(!response.available);
+        assert!(response.state.is_none());
+    }
+
+    #[test]
+    fn live_context_round_trips_the_shared_projection() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hub = continuum_core::senses::live_context::LiveContextHub::default();
+        continuum_core::senses::live_context::write_snapshot(
+            &dir.path().join("live-context.json"),
+            &hub.snapshot(),
+        )
+        .expect("publish live context");
+        let response = live_context(dir.path()).expect("read live context");
+        assert!(response.available);
+        assert!(!response.stale);
+        assert!(response
+            .compact
+            .as_deref()
+            .is_some_and(|text| text.starts_with("live-context/v1")));
     }
 }

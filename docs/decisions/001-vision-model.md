@@ -1,13 +1,17 @@
 # ADR-001: SmolVLM-256M as Default Vision Model
 
-**Status:** Accepted
+**Status:** Accepted for the local model; capture cadence context superseded 2026-08-04
 **Date:** 2026-04-10
 **Layer:** 1 (Senses)
 **Crate:** `continuum-vision`
 
 ## Context
 
-Continuum's senses layer captures the primary monitor every 3 seconds at 1280x720, downscales to 384x384, and feeds the image to a local vision model that produces a one-sentence description. The model must:
+Continuum originally captured the primary monitor every 3 seconds at 1280x720.
+The continuous live-context foundation now captures all connected monitors on
+independent 200 ms target loops, then sends only meaningful changes to this
+local model on its own slower inference cadence. The model decision remains
+accepted. The model must:
 
 - Run on CPU with inference under 3 seconds (the capture interval).
 - Be small enough to coexist with the triage LLM (Qwen 2.5 3B) in RAM.

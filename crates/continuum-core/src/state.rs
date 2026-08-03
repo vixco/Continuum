@@ -56,6 +56,10 @@ pub struct PerceptionState {
     pub last_salience: f32,
     pub has_error_visible: bool,
     pub frames_today: u64,
+    pub monitor_count: usize,
+    pub capture_events: u64,
+    pub dropped_capture_events: u64,
+    pub last_capture_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -275,6 +279,23 @@ impl StateHandle {
             s.perception.last_salience = frame.salience_hint;
             s.perception.has_error_visible = frame.screen.has_error_visible;
             s.perception.frames_today = s.perception.frames_today.saturating_add(1);
+        }
+        self.notify(StateEvent::Perception);
+    }
+
+    pub async fn set_live_context_status(
+        &self,
+        monitor_count: usize,
+        capture_events: u64,
+        dropped_capture_events: u64,
+        last_capture_at: Option<DateTime<Utc>>,
+    ) {
+        {
+            let mut state = self.inner.write().await;
+            state.perception.monitor_count = monitor_count;
+            state.perception.capture_events = capture_events;
+            state.perception.dropped_capture_events = dropped_capture_events;
+            state.perception.last_capture_at = last_capture_at;
         }
         self.notify(StateEvent::Perception);
     }

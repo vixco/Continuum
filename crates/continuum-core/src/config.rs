@@ -281,14 +281,28 @@ pub struct VisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScreenConfig {
-    /// Interval between captures in seconds (1-10).
+    /// Master consent boundary for local screen capture.
+    pub enabled: bool,
+    /// Legacy coarse interval retained for backwards-compatible config/UI reads.
     pub interval_secs: u64,
+    /// Target cadence per monitor. Defaults to 200 ms (5 captures/second).
+    pub capture_interval_ms: u64,
     /// Width to downscale captured images to.
     pub capture_width: u32,
     /// Height to downscale captured images to.
     pub capture_height: u32,
     /// Whether to save screenshots to disk.
     pub save_screenshots: bool,
+    /// Capture every connected monitor rather than only the primary display.
+    pub all_monitors: bool,
+    /// Stable xcap monitor ids the user explicitly excluded.
+    pub excluded_monitor_ids: Vec<String>,
+    /// Bounded local capture-event queue capacity.
+    pub buffer_capacity: usize,
+    /// Mean luma-difference threshold that triggers local vision processing.
+    pub meaningful_change_threshold: f32,
+    /// Minimum delay between expensive local VLM calls for one monitor.
+    pub vision_min_interval_ms: u64,
 }
 
 /// Configuration for the audio pipeline.
@@ -343,6 +357,14 @@ pub struct AudioConfig {
 pub struct ContextConfig {
     /// Polling interval in seconds.
     pub poll_interval_secs: u64,
+    /// Replace sensitive foreground titles before they enter shared context.
+    pub redact_sensitive_titles: bool,
+    /// Process names that suppress visual processing while foreground.
+    pub sensitive_process_names: Vec<String>,
+    /// Case-insensitive title fragments that suppress visual processing.
+    pub sensitive_title_keywords: Vec<String>,
+    /// Processes classified as terminal activity without capturing terminal text.
+    pub terminal_process_names: Vec<String>,
 }
 
 /// Configuration for the perception frame builder.
@@ -676,10 +698,17 @@ impl Default for VisionConfig {
 impl Default for ScreenConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             interval_secs: 3,
+            capture_interval_ms: 200,
             capture_width: 1280,
             capture_height: 720,
-            save_screenshots: true,
+            save_screenshots: false,
+            all_monitors: true,
+            excluded_monitor_ids: Vec::new(),
+            buffer_capacity: 64,
+            meaningful_change_threshold: 0.025,
+            vision_min_interval_ms: 2_000,
         }
     }
 }
@@ -732,6 +761,30 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: 1,
+            redact_sensitive_titles: true,
+            sensitive_process_names: vec![
+                "1password.exe".into(),
+                "bitwarden.exe".into(),
+                "keepass.exe".into(),
+                "keepassxc.exe".into(),
+                "credentialuibroker.exe".into(),
+            ],
+            sensitive_title_keywords: vec![
+                "password".into(),
+                "passkey".into(),
+                "two-factor".into(),
+                "2fa".into(),
+                "private key".into(),
+                "seed phrase".into(),
+            ],
+            terminal_process_names: vec![
+                "windowsterminal.exe".into(),
+                "powershell.exe".into(),
+                "pwsh.exe".into(),
+                "cmd.exe".into(),
+                "bash.exe".into(),
+                "wsl.exe".into(),
+            ],
         }
     }
 }

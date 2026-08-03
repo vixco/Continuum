@@ -218,6 +218,39 @@ pub async fn update_screen_interval(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct LiveContextConfigUpdate {
+    pub enabled: Option<bool>,
+    pub capture_interval_ms: Option<u64>,
+    pub all_monitors: Option<bool>,
+    pub save_screenshots: Option<bool>,
+}
+
+/// Persist the visible consent/performance boundary for continuous context.
+/// The headless runtime applies the change on restart.
+#[tauri::command]
+pub async fn update_live_context_config(
+    app: State<'_, Arc<AppState>>,
+    update: LiveContextConfigUpdate,
+) -> Result<ContinuumConfig, String> {
+    app.runtime
+        .update_config(|config| {
+            if let Some(enabled) = update.enabled {
+                config.screen.enabled = enabled;
+            }
+            if let Some(interval_ms) = update.capture_interval_ms {
+                config.screen.capture_interval_ms = interval_ms.clamp(50, 5_000);
+            }
+            if let Some(all_monitors) = update.all_monitors {
+                config.screen.all_monitors = all_monitors;
+            }
+            if let Some(save_screenshots) = update.save_screenshots {
+                config.screen.save_screenshots = save_screenshots;
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn update_triage_threshold(
     app: State<'_, Arc<AppState>>,
@@ -1046,6 +1079,11 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             namespace: "system".into(),
             name: "system_active_window".into(),
             description: "Foreground window title + process name".into(),
+        },
+        McpTool {
+            namespace: "system".into(),
+            name: "system_live_context".into(),
+            description: "Shared local monitor/window/activity/project world-state".into(),
         },
         McpTool {
             namespace: "system".into(),

@@ -41,6 +41,14 @@ pub struct RuntimeSnapshot {
     #[serde(default)]
     pub frame_count: u64,
     #[serde(default)]
+    pub monitor_count: usize,
+    #[serde(default)]
+    pub capture_event_count: u64,
+    #[serde(default)]
+    pub dropped_capture_event_count: u64,
+    #[serde(default)]
+    pub last_capture_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     pub wake_count: u64,
     #[serde(default)]
     pub last_update: String,

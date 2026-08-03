@@ -143,6 +143,14 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
     if let Some(ref t) = snap.partial_transcript {
         state.set_partial_transcript(t).await;
     }
+    state
+        .set_live_context_status(
+            snap.monitor_count,
+            snap.capture_event_count,
+            snap.dropped_capture_event_count,
+            snap.last_capture_at,
+        )
+        .await;
 }
 
 /// Snapshot of the named-pipe health. Surfaced by the `pipe_health`

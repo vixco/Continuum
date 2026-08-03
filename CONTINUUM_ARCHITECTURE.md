@@ -73,6 +73,28 @@ Local sources
 The event store is authoritative. The world model is a rebuildable projection.
 Embeddings help retrieval, but never decide whether a fact is current or true.
 
+### Continuous live context
+
+Layer 1 continuously captures every connected monitor through an independent
+local worker (200 ms target cadence by default). Capture events enter one
+bounded, globally ordered FIFO; when downstream vision work falls behind, the
+oldest pending image is dropped and the gap is recorded instead of silently
+stopping capture. Cheap luma differencing keeps unchanged frames out of the
+local vision model while preserving capture timestamps and counters.
+
+The senses layer projects monitor descriptions, foreground application/window,
+coarse keyboard/mouse activity (idle/active only), and local terminal/project
+metadata into `~/.continuum-dev/live-context.json`. This compact, versioned,
+source-attributed projection is the shared current world-state consumed by
+triage and exposed read-only to planner/executor/verifier/safety agents through
+`system_live_context`; agents do not independently process raw screenshots.
+
+Capture and vision remain local by default. Screen observation is explicitly
+configurable in the Brain tab, screenshot persistence is opt-in, configured
+sensitive applications/titles are redacted before vision or publication, and
+no key values, pointer coordinates, clipboard contents, or terminal text enter
+the live-context contract.
+
 ## Domain model
 
 The first typed entities are:

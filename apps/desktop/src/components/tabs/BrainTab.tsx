@@ -12,6 +12,7 @@ export function BrainTab() {
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
   const system = useStore((s) => s.state.system);
+  const perception = useStore((s) => s.state.perception);
   const [testing, setTesting] = useState<string | null>(null);
 
   async function testLayer(name: string) {
@@ -39,7 +40,21 @@ export function BrainTab() {
           </Button>
         }
       >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="flex flex-col justify-end gap-2 rounded-md border border-bg-border bg-bg-raised/40 px-3 py-2">
+            <Toggle
+              checked={config.screen.enabled}
+              onChange={async (enabled) => {
+                const cfg = await continuum.updateLiveContextConfig({ enabled });
+                setConfig(cfg);
+              }}
+              label="Continuous local context"
+            />
+            <p className="text-[11px] leading-4 text-ink-dim">
+              All displays, processed locally. Raw keys, pointer positions, and clipboard text are
+              never collected.
+            </p>
+          </div>
           <Select
             label="Model"
             value={config.vision.name}
@@ -52,17 +67,32 @@ export function BrainTab() {
             ]}
           />
           <Slider
-            label="Capture interval (s)"
-            value={config.screen.interval_secs}
+            label="Capture cadence"
+            value={config.screen.capture_interval_ms}
             onChange={async (v) => {
-              const cfg = await continuum.updateScreenInterval(Math.round(v));
+              const cfg = await continuum.updateLiveContextConfig({
+                capture_interval_ms: Math.round(v),
+                all_monitors: true,
+              });
               setConfig(cfg);
             }}
-            min={1}
-            max={10}
-            step={1}
-            format={(v) => `${Math.round(v)}s`}
+            min={100}
+            max={2000}
+            step={100}
+            format={(v) => `${Math.round(v)}ms / monitor`}
           />
+        </div>
+        <div className="mt-3 rounded-md border border-bg-border bg-bg-deep px-3 py-2 text-xs text-ink-muted">
+          <span className="font-medium text-ink">All connected monitors</span>
+          <span className="ml-1 font-mono text-ink-muted">({perception.monitor_count} live)</span>
+          <span className="mx-2 text-ink-dim">•</span>
+          bounded ordered buffer ({config.screen.buffer_capacity} events)
+          <span className="mx-2 text-ink-dim">•</span>
+          local vision at meaningful changes only
+          <span className="mx-2 text-ink-dim">•</span>
+          dropped: {perception.dropped_capture_events}
+          <span className="mx-2 text-ink-dim">•</span>
+          restart runtime after changing capture settings
         </div>
         <ModelStatus
           loaded={system.vision_model_loaded}

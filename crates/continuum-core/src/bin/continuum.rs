@@ -36,6 +36,7 @@ use continuum_core::orchestrator::wake_context::build_wake_message;
 use continuum_core::senses::audio::AudioWatcher;
 use continuum_core::senses::context::ContextWatcher;
 use continuum_core::senses::frame::PerceptionFrameBuilder;
+use continuum_core::senses::live_context::{self, LiveContextHub};
 use continuum_core::senses::types::{
     AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation,
 };
@@ -351,7 +352,14 @@ async fn main() -> Result<()> {
     });
 
     // --- Perception channels ---
-    let (screen_tx, screen_rx) = mpsc::channel::<ScreenObservation>(16);
+    let live_context = LiveContextHub::new(config.screen.buffer_capacity.saturating_mul(4));
+    live_context::spawn_publisher(
+        live_context.clone(),
+        dev_dir.join("live-context.json"),
+        Duration::from_millis(200),
+        shutdown_rx.clone(),
+    );
+    let (screen_tx, screen_rx) = mpsc::channel::<ScreenObservation>(64);
     let (audio_tx, audio_rx) = mpsc::channel::<AudioObservation>(16);
     let (ctx_tx, ctx_rx) = mpsc::channel::<ContextObservation>(64);
     let (frame_tx, mut frame_rx) = mpsc::channel::<PerceptionFrame>(32);
@@ -359,10 +367,11 @@ async fn main() -> Result<()> {
     // --- Vision ---
     let vision_model = init_vision_model(&config, &resource_plan).await;
 
-    let vision_watcher = VisionWatcher::new(
+    let vision_watcher = VisionWatcher::new_with_live_context(
         config.screen.clone(),
         vision_model,
         PathBuf::from(&config.storage.screenshots_dir),
+        live_context.clone(),
     );
     let vision_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
@@ -379,8 +388,11 @@ async fn main() -> Result<()> {
     // --- Context ---
     let context_watcher = ContextWatcher::new(config.context.clone());
     let context_shutdown = shutdown_rx.clone();
+    let context_live_context = live_context.clone();
     tokio::spawn(async move {
-        let _ = context_watcher.run(ctx_tx, context_shutdown).await;
+        let _ = context_watcher
+            .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
+            .await;
     });
 
     // --- Frame builder ---
@@ -477,6 +489,10 @@ async fn main() -> Result<()> {
                 voice_mode: Some("idle".to_string()),
                 partial_transcript: None,
                 frame_count: 0,
+                monitor_count: 0,
+                capture_event_count: 0,
+                dropped_capture_event_count: 0,
+                last_capture_at: None,
                 wake_count: 0,
                 hardware_specs: Some(hardware_specs.clone()),
                 resource_plan: Some(resource_plan.clone()),
@@ -549,6 +565,11 @@ async fn main() -> Result<()> {
                 frame_count += 1;
                 if let Ok(mut s) = runtime_state.lock() {
                     s.frame_count = frame_count;
+                    let world = live_context.snapshot();
+                    s.monitor_count = world.monitors.len();
+                    s.capture_event_count = world.health.capture_events;
+                    s.dropped_capture_event_count = world.health.dropped_capture_events;
+                    s.last_capture_at = world.health.last_capture_at;
                 }
 
                 let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");

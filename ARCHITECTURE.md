@@ -123,7 +123,26 @@ The senses layer runs as a dedicated subprocess inside Continuum Core. It has on
 
 ### Vision watcher
 
-Takes a screenshot every *N* seconds (default 3, configurable 1–10) using GDI (BitBlt) via the `xcap` crate. GDI was chosen over the Windows Graphics Capture API because WGC shows a yellow border on Windows 10 (the `IsBorderRequired = false` flag is Windows 11 only), which is unacceptable for ambient 3-second polling. The screenshot is downscaled to 1280×720 and sent to a small local vision model.
+Enumerates every connected monitor through `xcap` and gives each display an
+independent capture worker with a stable `display-<xcap id>` identity. The
+default target is one capture per monitor every 200 ms. A bounded ordered FIFO
+decouples capture from local vision inference: overload drops the oldest pending
+image, increments explicit degradation counters, and never silently pauses the
+capture loop. A cheap 64×36 luma difference selects meaningful changes; only
+selected changes are downscaled and sent to the local vision model.
+
+Visual summaries join foreground-window, coarse idle/active input, and local
+terminal/project events in the shared `live-context.json` projection. The
+existing `ScreenObservation` carries a compact version of that projection into
+triage, while `system_live_context` makes the same source-attributed state
+available to agent roles that do not accept images. Sensitive foreground
+applications/titles fail closed to redacted context, and screenshot persistence
+is disabled unless the user explicitly enables it.
+
+Capture uses GDI (BitBlt) via the `xcap` crate. GDI was chosen over the Windows
+Graphics Capture API because WGC shows a yellow border on Windows 10 (the
+`IsBorderRequired = false` flag is Windows 11 only), which is unacceptable for
+ambient polling.
 
 **Default model:** SmolVLM-256M (256M parameters, ~2–3 seconds per image on CPU, ~500 MB RAM). SmolVLM was chosen over Moondream 2 because it has HuggingFace-maintained ONNX exports (Moondream's ONNX exports are fragile across revisions) and is 8× smaller, resulting in faster CPU inference. It runs via ONNX Runtime through the `ort` crate.
 
