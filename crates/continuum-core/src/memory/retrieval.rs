@@ -162,19 +162,25 @@ pub async fn retrieve_vault_context(
     let cutoff = Utc::now() - chrono::Duration::minutes(30);
     let mut pending: Vec<NodeSummary> = pending_all
         .into_iter()
-        .filter(|n| match DateTime::parse_from_rfc3339(&n.created) {
-            Ok(created) => created.with_timezone(&Utc) < cutoff,
-            Err(e) => {
-                warn!(
-                    layer = "memory",
-                    component = "retrieval",
-                    id = %n.id,
-                    raw_created = %n.created,
-                    error = %e,
-                    "pending vault note has unparseable created timestamp; excluding from wake context"
-                );
-                false
-            }
+        .filter(|n| {
+            // Mirrors the `notes` sensitivity gate above: a hand-edited vault
+            // is schema-legal for a Sensitive candidate, and it must not
+            // leak into the wake message unless the operator opted in.
+            (n.sensitivity != Sensitivity::Sensitive || curator_cfg.include_sensitive_in_context)
+                && match DateTime::parse_from_rfc3339(&n.created) {
+                    Ok(created) => created.with_timezone(&Utc) < cutoff,
+                    Err(e) => {
+                        warn!(
+                            layer = "memory",
+                            component = "retrieval",
+                            id = %n.id,
+                            raw_created = %n.created,
+                            error = %e,
+                            "pending vault note has unparseable created timestamp; excluding from wake context"
+                        );
+                        false
+                    }
+                }
         })
         .collect();
     pending.truncate(curator_cfg.claude_batch as usize);
@@ -508,5 +514,47 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, old.frontmatter.id);
         assert_ne!(pending[0].id, fresh.frontmatter.id);
+    }
+
+    #[tokio::test]
+    async fn retrieve_vault_context_pending_sensitivity_gated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let sensitive = vault
+            .create(note_draft(
+                "Sensitive candidate",
+                "salary negotiation notes",
+                NodeStatus::Candidate,
+                Sensitivity::Sensitive,
+            ))
+            .await
+            .unwrap();
+
+        // Backdate past the 30-minute pending-age cutoff, same as the
+        // age-only test above.
+        let mut note = vault.get(&sensitive.frontmatter.id).await.unwrap();
+        note.frontmatter.created = Utc::now() - chrono::Duration::hours(1);
+        vault.save(&note).await.unwrap();
+
+        let frame = test_frame("irrelevant context", None, "x");
+
+        // Default config: sensitive candidate excluded even though it's old
+        // enough to otherwise qualify.
+        let cfg = CuratorConfig::default();
+        let (_notes, pending) = retrieve_vault_context(&vault, &frame, &cfg).await;
+        assert!(
+            pending.is_empty(),
+            "sensitive candidate must not leak into pending decisions by default"
+        );
+
+        // include_sensitive_in_context = true surfaces it.
+        let cfg_sensitive = CuratorConfig {
+            include_sensitive_in_context: true,
+            ..Default::default()
+        };
+        let (_notes, pending) = retrieve_vault_context(&vault, &frame, &cfg_sensitive).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, sensitive.frontmatter.id);
     }
 }
