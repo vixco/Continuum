@@ -16,6 +16,7 @@
 //! schema for its state store. The runtime watchers are only compiled with
 //! the `runtime` feature.
 
+pub mod live_context;
 pub mod types;
 
 #[cfg(feature = "runtime")]

@@ -360,6 +360,17 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
+        description = "Return Continuum's compact, ordered, source-attributed local live world-state: every connected monitor's latest local vision summary plus safe foreground-window, coarse input-activity, terminal, project, and degradation context. No raw screenshots, key values, pointer coordinates, or clipboard content."
+    )]
+    async fn system_live_context(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("system_live_context", &Value::Null, || async {
+            systool::live_context(&self.state.data_dir)
+                .map_err(|error| McpError::internal_error(error, None))
+        })
+        .await
+    }
+
+    #[tool(
         description = "Read the current Windows clipboard text. Returns null if the clipboard is empty, holds non-text data, or is locked by another app. Best-effort — never blocks."
     )]
     async fn system_clipboard_get(&self) -> Result<CallToolResult, McpError> {

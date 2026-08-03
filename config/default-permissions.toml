@@ -27,6 +27,7 @@ memory_set_fact       = "session-approved"
 [system]
 system_current_time   = "auto"
 system_active_window  = "auto"
+system_live_context   = "auto"
 system_clipboard_get  = "session-approved"
 system_notification   = "auto"
 

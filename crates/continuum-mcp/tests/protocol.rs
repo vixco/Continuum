@@ -5,7 +5,7 @@
 //!
 //! 1. `initialize` request → verify server capabilities advertise tools
 //! 2. `notifications/initialized` → enter ready state
-//! 3. `tools/list` → verify all 11 Continuum tools are registered
+//! 3. `tools/list` → verify the complete Continuum tool registry
 //! 4. `tools/call` on `system_current_time` → verify a valid ISO-8601
 //!    timestamp is returned
 //!
@@ -30,6 +30,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "memory_set_fact",
     "system_current_time",
     "system_active_window",
+    "system_live_context",
     "system_clipboard_get",
     "fs_read_file",
     "fs_list_dir",

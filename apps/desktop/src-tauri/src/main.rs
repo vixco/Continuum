@@ -145,6 +145,7 @@ fn main() {
             commands::update_voice_volume,
             commands::update_voice_flag,
             commands::update_screen_interval,
+            commands::update_live_context_config,
             commands::update_triage_threshold,
             commands::get_logs,
             commands::get_memory_summary,

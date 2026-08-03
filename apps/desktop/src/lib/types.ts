@@ -20,6 +20,10 @@ export interface PerceptionState {
   last_salience: number;
   has_error_visible: boolean;
   frames_today: number;
+  monitor_count: number;
+  capture_events: number;
+  dropped_capture_events: number;
+  last_capture_at: string | null;
 }
 
 export interface TriageState {
@@ -252,10 +256,17 @@ export interface ContinuumConfig {
     input_height: number;
   };
   screen: {
+    enabled: boolean;
     interval_secs: number;
+    capture_interval_ms: number;
     capture_width: number;
     capture_height: number;
     save_screenshots: boolean;
+    all_monitors: boolean;
+    excluded_monitor_ids: string[];
+    buffer_capacity: number;
+    meaningful_change_threshold: number;
+    vision_min_interval_ms: number;
   };
   audio: {
     enabled: boolean;
@@ -267,7 +278,13 @@ export interface ContinuumConfig {
     device_name: string;
     device_index: number | null;
   };
-  context: { poll_interval_secs: number };
+  context: {
+    poll_interval_secs: number;
+    redact_sensitive_titles: boolean;
+    sensitive_process_names: string[];
+    sensitive_title_keywords: string[];
+    terminal_process_names: string[];
+  };
   frame: { interval_secs: number; salience_threshold: number };
   storage: {
     db_path: string;

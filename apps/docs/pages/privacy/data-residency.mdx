@@ -4,7 +4,8 @@ Continuum's privacy model is simple: **everything is local unless you ask the or
 
 ## Always local
 
-- Screenshots (at `~/.continuum/memory/screenshots/` if you have `screen.save_screenshots = true`)
+- Selected screenshots (local only and disabled by default; written only when `screen.save_screenshots = true`)
+- Compact `live-context.json` world-state (visual descriptions and safe structured activity; no raw images or raw keyboard/mouse events)
 - Microphone audio (never written to disk — only whisper transcripts are stored)
 - Whisper transcripts (at `~/.continuum/memory/raw_log.sqlite`)
 - Vision model (SmolVLM-256M runs in-process)

@@ -227,6 +227,12 @@ export const continuum = {
     invoke<ContinuumConfig>("update_voice_flag", { flag, value }, DEFAULT_CONFIG),
   updateScreenInterval: (seconds: number) =>
     invoke<ContinuumConfig>("update_screen_interval", { seconds }, DEFAULT_CONFIG),
+  updateLiveContextConfig: (update: {
+    enabled?: boolean;
+    capture_interval_ms?: number;
+    all_monitors?: boolean;
+    save_screenshots?: boolean;
+  }) => invoke<ContinuumConfig>("update_live_context_config", { update }, DEFAULT_CONFIG),
   updateTriageThreshold: (threshold: number) =>
     invoke<ContinuumConfig>("update_triage_threshold", { threshold }, DEFAULT_CONFIG),
   getLogs: (query?: {
@@ -355,6 +361,10 @@ export const DEFAULT_STATE: ContinuumState = {
     last_salience: 0,
     has_error_visible: false,
     frames_today: 0,
+    monitor_count: 0,
+    capture_events: 0,
+    dropped_capture_events: 0,
+    last_capture_at: null,
   },
   triage: {
     last_decision: null,
@@ -452,10 +462,17 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     input_height: 384,
   },
   screen: {
+    enabled: true,
     interval_secs: 3,
+    capture_interval_ms: 200,
     capture_width: 1280,
     capture_height: 720,
-    save_screenshots: true,
+    save_screenshots: false,
+    all_monitors: true,
+    excluded_monitor_ids: [],
+    buffer_capacity: 64,
+    meaningful_change_threshold: 0.025,
+    vision_min_interval_ms: 2000,
   },
   audio: {
     enabled: true,
@@ -467,7 +484,33 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     device_name: "",
     device_index: null,
   },
-  context: { poll_interval_secs: 1 },
+  context: {
+    poll_interval_secs: 1,
+    redact_sensitive_titles: true,
+    sensitive_process_names: [
+      "1password.exe",
+      "bitwarden.exe",
+      "keepass.exe",
+      "keepassxc.exe",
+      "credentialuibroker.exe",
+    ],
+    sensitive_title_keywords: [
+      "password",
+      "passkey",
+      "two-factor",
+      "2fa",
+      "private key",
+      "seed phrase",
+    ],
+    terminal_process_names: [
+      "windowsterminal.exe",
+      "powershell.exe",
+      "pwsh.exe",
+      "cmd.exe",
+      "bash.exe",
+      "wsl.exe",
+    ],
+  },
   frame: { interval_secs: 3, salience_threshold: 0.1 },
   storage: { db_path: "", screenshots_dir: "", retention_days: 30 },
   memory: {

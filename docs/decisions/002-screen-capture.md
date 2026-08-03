@@ -1,19 +1,25 @@
 # ADR-002: xcap with GDI Backend for Screen Capture
 
-**Status:** Accepted
+**Status:** Accepted for capture backend; cadence/topology superseded 2026-08-04
 **Date:** 2026-04-10
 **Layer:** 1 (Senses)
 **Crate:** `continuum-core` (senses::vision)
 
 ## Context
 
-Continuum captures the primary monitor every 3 seconds to feed the vision model. The capture must:
+Continuum originally captured only the primary monitor every 3 seconds. The
+continuous live-context foundation now uses the same accepted `xcap` backend
+for every connected monitor at a configurable 200 ms target cadence, with
+bounded buffering and change-selected local vision. The original constraints
+below are retained as the historical backend decision.
+
+The capture must:
 
 - Work on Windows 10 and 11.
 - Produce no visible indicator (border, overlay, notification).
 - Return an `image::RgbaImage` for downstream processing.
 - Complete in under 50ms (well within the 3-second budget).
-- Support multi-monitor setups (capture primary only).
+- Support stable identities and concurrent capture for all connected monitors.
 
 ## The Yellow Border Problem
 

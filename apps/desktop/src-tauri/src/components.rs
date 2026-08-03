@@ -64,6 +64,10 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
         cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
+    registry.register(LiveContextCheck {
+        cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
+    });
     registry.register(TriageCheck {
         state: state.clone(),
         dev_dir: dev_dir.clone(),
@@ -142,6 +146,76 @@ struct VisionCheck {
     state: Arc<RwLock<StateHandle>>,
     cfg: Arc<ContinuumConfig>,
     dev_dir: PathBuf,
+}
+
+struct LiveContextCheck {
+    cfg: Arc<ContinuumConfig>,
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for LiveContextCheck {
+    fn name(&self) -> &str {
+        "live_context"
+    }
+    fn log_path(&self) -> Option<String> {
+        Some("~/.continuum-dev/logs/continuum.log".into())
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some(
+            "Restart the vision/context components; reduce capture cadence or increase screen.buffer_capacity if drops persist."
+                .into(),
+        )
+    }
+    async fn probe(&self) -> HealthResult {
+        if !self.cfg.screen.enabled {
+            return HealthResult::healthy(1);
+        }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
+        let path = self.dev_dir.join("live-context.json");
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) => return HealthResult::degrading(error.to_string(), 1),
+        };
+        let state: continuum_core::senses::live_context::LiveWorldState =
+            match serde_json::from_str(&contents) {
+                Ok(state) => state,
+                Err(error) => return HealthResult::error(error.to_string(), 1),
+            };
+        let interval =
+            std::time::Duration::from_millis(self.cfg.screen.capture_interval_ms.max(50));
+        if state
+            .health
+            .should_restart(chrono::Utc::now(), true, interval)
+        {
+            return HealthResult::error("multi-monitor capture stalled", 1);
+        }
+        if state.monitors.is_empty() {
+            return HealthResult::degrading("no monitor captures published yet", 1);
+        }
+        let total = state.health.capture_events.max(1);
+        if state.health.dropped_capture_events.saturating_mul(10) > total {
+            return HealthResult::degrading(
+                format!(
+                    "capture buffer dropped {} of {} event(s)",
+                    state.health.dropped_capture_events, total
+                ),
+                1,
+            );
+        }
+        if state.health.capture_deadline_misses.saturating_mul(10) > total {
+            return HealthResult::degrading(
+                format!(
+                    "capture missed the configured cadence {} of {} event(s)",
+                    state.health.capture_deadline_misses, total
+                ),
+                1,
+            );
+        }
+        HealthResult::healthy(1)
+    }
 }
 
 #[async_trait]

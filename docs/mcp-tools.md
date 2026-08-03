@@ -4,7 +4,7 @@ Continuum's orchestrator (Claude Opus 4.6 via the `claude` CLI) can call Rust-na
 
 This doc describes:
 
-1. [The 11 tools](#tools) — what they do, their schemas, and example calls
+1. [The tools](#tools) — what they do, their schemas, and example calls
 2. [Security model](#security-model) — allowlist, deny list, reserved memory keys, audit
 3. [Configuration](#configuration) — the `[mcp.fs].extra_paths` opt-in
 4. [Verifying your install](#verifying-your-install) — E2E smoke test runbook
@@ -90,6 +90,19 @@ Best-effort Windows clipboard read. `text` is `null` for empty clipboard, non-te
 
 ```jsonc
 { "name": "mcp__continuum__system_clipboard_get", "arguments": {} }
+```
+
+#### `system_live_context`
+
+Reads the local `live-context.json` projection shared by triage and all agent
+roles. Returns `available`, `stale`, a compact source-attributed text form, and
+the versioned structured state. Raw screenshots, key values, pointer data,
+clipboard contents, and terminal text are not part of this contract. The tool
+is read-only and reports unavailable before the runtime publishes its first
+snapshot.
+
+```jsonc
+{ "name": "mcp__continuum__system_live_context", "arguments": {} }
 ```
 
 ### Filesystem (read-only)
@@ -216,7 +229,9 @@ Paths support `~` expansion at load time. Denied dirs and patterns still apply i
 cargo test -p continuum-mcp --test protocol
 ```
 
-This spawns the binary, runs the MCP handshake, verifies all 11 tools are registered, and calls `system_current_time`. Expected: `test result: ok. 1 passed`.
+This spawns the binary, runs the MCP handshake, verifies the complete expected
+tool registry, and calls `system_current_time`. Expected:
+`test result: ok. 1 passed`.
 
 ### Real-wake test via claude CLI
 

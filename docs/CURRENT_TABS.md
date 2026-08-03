@@ -18,7 +18,7 @@ The ten tabs are grouped as:
 | Chat               | live           | `chat_*` Tauri commands, `~/.continuum-dev/chats/*.json`     | Fully live. Streams deltas over `continuum:chat`.                              |
 | Voice              | hybrid         | `continuum:state` + `update_voice_*` + `talk_now`             | Live status, live toggles; per-engine config (Piper / ElevenLabs) live.         |
 | Memory             | hybrid         | `search_episodic`, `list_semantic`, `set_semantic`            | List/CRUD live; episodic search is a stub pending episodic store handoff.       |
-| Brain              | hybrid         | `update_screen_interval`, `update_triage_threshold`           | Sliders live; layer-card model selects are explicitly disabled (see source).    |
+| Brain              | hybrid         | `update_live_context_config`, `update_triage_threshold`       | Live capture consent/cadence/all-monitor status and triage controls; layer-card model selects remain disabled. |
 | Tools & Skills     | hybrid         | `list_mcp_tools`, local MCP server registry, `list_skills`, skill CRUD | Built-in namespace list and local stdio server install are live; per-tool permission UI is in-memory only. |
 | Automations        | live           | `list_automations` + `create_/update_/delete_/toggle_`        | Fully live.                                                                     |
 | Health             | live           | `get_health`, `trigger_repair`, `restart_component`           | Fully live; runtime bridge surfaces health on a 2 s poll.                       |
