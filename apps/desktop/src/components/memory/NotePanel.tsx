@@ -154,8 +154,11 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
         onChanged();
       } catch (e) {
         // Roll back the optimistic update - a failed save must not leave
-        // the UI showing an unsaved value as though it persisted.
-        setNote(previous);
+        // the UI showing an unsaved value as though it persisted. Guarded
+        // by identity: if a concurrent persist() already moved state past
+        // `updated` (i.e. a later save succeeded), that newer state wins -
+        // this rollback only undoes its own optimistic write.
+        setNote((cur) => (cur === updated ? previous : cur));
         setSaveError(e instanceof Error ? e.message : String(e));
       }
     },
