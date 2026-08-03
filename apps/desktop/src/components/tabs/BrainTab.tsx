@@ -155,7 +155,6 @@ export function BrainTab() {
             max={16000}
             step={500}
             format={(v) => `${Math.round(v)} tokens`}
-            title="Token budget is set in the orchestrator prompt template; not user-editable yet."
           />
         </div>
         <ModelStatus
@@ -199,7 +198,6 @@ export function BrainTab() {
             max={10}
             step={1}
             format={(v) => `${Math.round(v)}`}
-            title="Edit config.toml under [workers].max_concurrent; runtime restart required."
           />
           <Select
             label="Default worker model"
