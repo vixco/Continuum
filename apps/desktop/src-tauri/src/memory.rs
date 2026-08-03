@@ -2,7 +2,7 @@
 //! lazily (first command) so a broken vault degrades the Memory tab, not
 //! the whole app. Layer: memory, component: dashboard.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use continuum_memory::{
@@ -64,6 +64,15 @@ impl MemoryState {
     pub fn with_opts(mut self, opts: VaultOptions) -> Self {
         self.opts = opts;
         self
+    }
+
+    /// The configured vault directory, independent of whether the vault has
+    /// (successfully) opened. Used by [`memory_open_vault`] so "show me the
+    /// vault folder" — the one recovery affordance for a corrupted/locked
+    /// index (see `components.rs`'s `MemoryVaultCheck::recovery_note`) —
+    /// doesn't itself depend on the index being healthy.
+    pub(crate) fn vault_dir(&self) -> &Path {
+        &self.vault_dir
     }
 
     /// Opens the vault on first call and returns the cached handle on every
@@ -292,16 +301,26 @@ pub async fn memory_rebuild_index(
     rebuild_inner(&state).await
 }
 
-/// Opens the vault directory in the OS file explorer. Opens the vault
-/// first (rather than just reading the configured path) so the directory
-/// is guaranteed to exist — `Vault::open_with` creates it on first use.
+/// Opens the vault directory in the OS file explorer. Deliberately does
+/// NOT go through `state.vault()` — this command is the recovery
+/// affordance for a corrupted/locked index (`recovery_note` on
+/// `MemoryVaultCheck` in `components.rs` tells the user to delete
+/// `.continuum/index.db` by hand), so it must keep working even when the
+/// vault fails to open. Instead it works directly off the configured path,
+/// creating the directory if it doesn't exist yet (ignoring
+/// `AlreadyExists` — a benign race with a concurrent opener) so there's
+/// always something for the OS to show.
 #[tauri::command]
 pub async fn memory_open_vault(
     state: State<'_, Arc<MemoryState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let vault = state.vault().await?;
-    let dir = vault.dir().to_path_buf();
+    let dir = state.vault_dir().to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("Could not create {}: {e}", dir.display()));
+        }
+    }
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
@@ -412,5 +431,19 @@ mod tests {
         let (_tmp, s) = state().await;
         let err = get_note_inner(&s, "mem_missing").await.unwrap_err();
         assert!(err.contains("mem_missing"));
+    }
+
+    /// `vault_dir()` must return the constructor's path without requiring
+    /// (or triggering) vault init — it's `memory_open_vault`'s way of
+    /// finding the folder to show the user even when the index is broken,
+    /// so it has to work on a `MemoryState` that has never called
+    /// `.vault()`. Regression test for the "open vault" recovery
+    /// affordance depending on a healthy index (fix round 1).
+    #[tokio::test]
+    async fn vault_dir_available_before_vault_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let s = MemoryState::new(vault_dir.clone(), tmp.path().join("semantic.sqlite"));
+        assert_eq!(s.vault_dir(), vault_dir.as_path());
     }
 }
