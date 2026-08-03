@@ -49,6 +49,22 @@ pub struct Vault {
     dir: PathBuf,
     index: Index,
     opts: VaultOptions,
+    /// Serializes the multi-step write sequences of `create` (slug-check →
+    /// write → index), `save`, `delete`, `resolve_candidate`, and
+    /// `sweep_expired` against each other, *within this process*. Without
+    /// it, two concurrent callers could both pass a slug-uniqueness check
+    /// before either has written, then race to atomically write the same
+    /// path — the second write silently destroys the first note (the
+    /// index then reads it as an id-rewrite of the same path and purges
+    /// the first note's rows with no error surfaced anywhere). Reads
+    /// (`get`, `search`, `graph`, `pending`, …) never take this lock and
+    /// stay fully concurrent. One coarse lock for the whole vault is
+    /// intentional: these are small, rare operations, and a single lock
+    /// keeps the reasoning simple. It does NOT cover cross-process races
+    /// (e.g. the desktop dashboard and the runtime both writing the same
+    /// vault directory at once) — those are instead caught after the fact
+    /// by the index's deterministic slug-collision quarantine.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 /// Atomically write `content` to `path`: write to a `.tmp` sibling, then
@@ -130,6 +146,7 @@ impl Vault {
             dir: dir.to_path_buf(),
             index,
             opts,
+            write_lock: tokio::sync::Mutex::new(()),
         };
         let stats = vault.rebuild_index().await?;
 
@@ -194,16 +211,20 @@ impl Vault {
     /// unique slug, assigns a fresh `mem_<ulid>` id, writes the markdown
     /// file atomically, and indexes it. `slugify` always maps onto a
     /// filename-safe slug inside the type folder (it strips path
-    /// separators and `.`/`..` segments), so the written file can never
-    /// land outside the vault.
+    /// separators and `.`/`..` segments, falling back to `"note"` if
+    /// nothing alphanumeric survives — it can never produce an empty
+    /// slug), so the written file can never land outside the vault.
+    ///
+    /// Holds `write_lock` across the entire slug-check → write → index
+    /// sequence so two concurrent `create` calls for the same title can
+    /// never both pick the same slug (see the field doc on `write_lock`).
     pub async fn create(&self, draft: NoteDraft) -> Result<Note> {
+        let _guard = self.write_lock.lock().await;
+
         if draft.title.trim().is_empty() {
             return Err(MemoryError::Invalid("title must not be empty".into()));
         }
         let base_slug = slugify(&draft.title);
-        if base_slug.is_empty() {
-            return Err(MemoryError::Invalid("title must not be empty".into()));
-        }
 
         let folder = self.dir.join(draft.node_type.folder());
         let slug = self.find_unique_slug(&base_slug, &folder).await?;
@@ -281,6 +302,16 @@ impl Vault {
     /// a type change is a deliberate non-goal of this call. Always stamps
     /// `updated = now`.
     pub async fn save(&self, note: &Note) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.save_locked(note).await
+    }
+
+    /// Body of `save`, factored out so callers that already hold
+    /// `write_lock` for a larger multi-note sequence (`resolve_candidate`,
+    /// `sweep_expired`) can persist a note without re-locking — `write_lock`
+    /// is not reentrant, so calling the public `save` from inside one of
+    /// those would deadlock.
+    async fn save_locked(&self, note: &Note) -> Result<()> {
         let id = &note.frontmatter.id;
         let rel = self
             .index
@@ -300,6 +331,7 @@ impl Vault {
 
     /// Delete a note by id: removes the markdown file and its index entry.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
         let rel = self
             .index
             .get_node_path(id)
@@ -339,8 +371,16 @@ impl Vault {
     /// `id` does not currently have [`NodeStatus::Candidate`] status. For
     /// [`Resolution::Supersede`], the superseded partner is loaded (and
     /// must exist — a missing partner errors before anything is written)
-    /// before either note is saved.
+    /// before either note is saved, and `replaces` must not equal `id` (a
+    /// note cannot supersede itself).
+    ///
+    /// Holds `write_lock` across the whole read-modify-write sequence
+    /// (including both saves in the `Supersede` case) so a concurrent
+    /// writer can never observe or interleave with a half-applied
+    /// resolution.
     pub async fn resolve_candidate(&self, id: &str, r: Resolution) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+
         let mut note = self.get(id).await?;
         if note.frontmatter.status != NodeStatus::Candidate {
             return Err(MemoryError::Invalid(format!(
@@ -352,13 +392,19 @@ impl Vault {
         match r {
             Resolution::Confirm => {
                 note.frontmatter.status = NodeStatus::Confirmed;
-                self.save(&note).await?;
+                self.save_locked(&note).await?;
             }
             Resolution::Reject => {
                 note.frontmatter.status = NodeStatus::Rejected;
-                self.save(&note).await?;
+                self.save_locked(&note).await?;
             }
             Resolution::Supersede { replaces } => {
+                if replaces == id {
+                    return Err(MemoryError::Invalid(
+                        "a note cannot supersede itself".into(),
+                    ));
+                }
+
                 // Load the partner before writing anything: if it does not
                 // exist, this call must fail cleanly with no side effects.
                 let mut partner = self.get(&replaces).await?;
@@ -368,8 +414,21 @@ impl Vault {
                 partner.frontmatter.status = NodeStatus::Superseded;
                 partner.frontmatter.superseded_by = Some(id.to_string());
 
-                self.save(&note).await?;
-                self.save(&partner).await?;
+                // Write the PARTNER first, then the candidate. If the
+                // process dies (or a write errors) between the two, the
+                // candidate is still sitting in the pending queue with
+                // status `candidate` — visible, and retriable. The
+                // opposite order (candidate first) would leave a
+                // `confirmed` note pointing at a partner that has no idea
+                // it was superseded: an invisible inconsistency nothing
+                // would ever surface. A retried call after a partial
+                // failure here is safe: it reloads the already-superseded
+                // partner and writes back the same status/superseded_by
+                // (an idempotent no-op change other than `updated`), then
+                // completes by saving the candidate — no special-casing
+                // needed, and no error on the "already superseded" partner.
+                self.save_locked(&partner).await?;
+                self.save_locked(&note).await?;
             }
         }
 
@@ -427,7 +486,15 @@ impl Vault {
     /// only sort correctly when every note uses the exact same
     /// zero-padding and offset representation, which hand-edited
     /// frontmatter cannot be trusted to preserve.
+    ///
+    /// Holds `write_lock` for the whole sweep (coarse, but sweeps are rare
+    /// and small) so it can't interleave archive-writes with another
+    /// writer. A note that vanishes between the query and its archive
+    /// write (e.g. concurrently deleted) is skipped with a `debug!` log
+    /// rather than aborting the rest of the batch.
     pub async fn sweep_expired(&self) -> Result<u64> {
+        let _guard = self.write_lock.lock().await;
+
         let now = Utc::now();
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT id, expires FROM nodes \
@@ -452,10 +519,22 @@ impl Vault {
                 }
             };
             if expires < now {
-                let mut note = self.get(&id).await?;
-                note.frontmatter.status = NodeStatus::Archived;
-                self.save(&note).await?;
-                archived += 1;
+                match self.get(&id).await {
+                    Ok(mut note) => {
+                        note.frontmatter.status = NodeStatus::Archived;
+                        self.save_locked(&note).await?;
+                        archived += 1;
+                    }
+                    Err(MemoryError::NotFound(_)) => {
+                        tracing::debug!(
+                            layer = "memory",
+                            component = "vault",
+                            id = %id,
+                            "sweep_expired: note vanished mid-sweep, skipping"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 
