@@ -16,6 +16,8 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use chrono::Utc;
+use continuum_core::memory::semantic::{Fact, FactSource, SemanticStore};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -490,6 +492,128 @@ async fn vault_tools_round_trip() {
     assert!(contents.contains("\"raw_log\""));
     assert!(contents.contains("\"episodic\""));
     assert!(contents.contains("\"events\""));
+
+    // ---- Clean shutdown ----
+    drop(stdin);
+    let _ = timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+/// Fix round 1 (review finding, HIGH): `memory_get_fact`/`memory_list_facts`
+/// must fall back to the legacy semantic store not only when the vault has
+/// no matching note, but also when the vault itself is unusable (unopenable
+/// directory, disk full, unrecoverable index corruption, ...) — the
+/// contract is vault-FIRST, legacy-FALLBACK on any vault miss, not just "no
+/// match". This is the deterministic injection the review asked for:
+/// `CONTINUUM_VAULT_DIR` is pointed at a plain FILE (not a directory), so
+/// `Vault::open`'s `create_dir_all` fails every time the server tries to
+/// lazily open the vault, while a legacy `semantic.sqlite` seeded directly
+/// (via `continuum_core::memory::semantic::SemanticStore`, a regular
+/// dependency of this crate and therefore usable directly from an
+/// integration test) still answers the query.
+#[tokio::test]
+async fn memory_get_fact_falls_back_when_vault_is_unopenable() {
+    let bin = mcp_bin();
+    assert!(
+        bin.exists(),
+        "continuum-mcp binary not found at {}; run `cargo build -p continuum-mcp` first",
+        bin.display()
+    );
+
+    let data_dir = tempdir().expect("tempdir");
+
+    // Seed the legacy store directly, the way this fact would have landed
+    // there before the vault redirect (or via a pre-vault install).
+    let semantic_path = data_dir.path().join("semantic.sqlite");
+    {
+        let store = SemanticStore::open(&semantic_path.to_string_lossy())
+            .await
+            .expect("open legacy semantic store");
+        store
+            .upsert_fact(&Fact {
+                key: "user.name".to_string(),
+                value: "Toshan".to_string(),
+                confidence: 0.9,
+                source: FactSource::UserStated,
+                source_frame_id: None,
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("seed legacy fact");
+    }
+
+    // A regular file where the vault dir is expected: `Vault::open`'s
+    // `create_dir_all(dir)` errors on this (path exists and is not a
+    // directory), so every `self.vault().await` call in the server fails.
+    let vault_file = data_dir.path().join("vault-is-actually-a-file");
+    std::fs::write(&vault_file, b"not a directory").expect("write vault placeholder file");
+
+    let mut child = Command::new(&bin)
+        .env("CONTINUUM_DATA_DIR", data_dir.path())
+        .env("CONTINUUM_VAULT_DIR", &vault_file)
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn continuum-mcp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+
+    send_json(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "continuum-mcp-test", "version": env!("CARGO_PKG_VERSION") }
+            }
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert_eq!(init_resp["id"], 1);
+
+    send_json(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await;
+
+    let get_resp = call_tool(
+        &mut stdin,
+        &mut reader,
+        2,
+        "memory_get_fact",
+        json!({ "key": "user.name" }),
+    )
+    .await;
+    assert!(
+        !is_tool_error(&get_resp),
+        "memory_get_fact should still succeed via the legacy fallback when the vault is \
+         unopenable: {get_resp}"
+    );
+    let fact = tool_output(&get_resp);
+    assert_eq!(fact["key"], "user.name");
+    assert_eq!(fact["value"], "Toshan");
+
+    // memory_list_facts (no prefix) must fall back the same way.
+    let list_resp = call_tool(&mut stdin, &mut reader, 3, "memory_list_facts", json!({})).await;
+    assert!(
+        !is_tool_error(&list_resp),
+        "memory_list_facts should still succeed via the legacy fallback when the vault is \
+         unopenable: {list_resp}"
+    );
+    let facts = tool_output(&list_resp);
+    let facts = facts.as_array().expect("list result is not an array");
+    assert!(
+        facts.iter().any(|f| f["key"] == "user.name"),
+        "expected the legacy-seeded fact in memory_list_facts output: {facts:?}"
+    );
 
     // ---- Clean shutdown ----
     drop(stdin);
