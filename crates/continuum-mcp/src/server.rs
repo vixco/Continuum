@@ -269,7 +269,7 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "List facts — stable knowledge about the user, projects, preferences. Pass an optional key prefix (e.g. 'project.') to narrow results. Facts are stored at dotted keys like 'user.name' or 'project.simcharts.dir'. Reads the memory vault first; falls back to the legacy semantic store only when the vault has no matching facts."
+        description = "List facts — stable knowledge about the user, projects, preferences. Pass an optional key prefix (e.g. 'project.') to narrow results. Facts are stored at dotted keys like 'user.name' or 'project.simcharts.dir'. Reads the memory vault first; falls back to the legacy semantic store when the vault has no matching facts, or when the vault itself is unavailable (e.g. an unopenable vault directory)."
     )]
     async fn memory_list_facts(
         &self,
@@ -277,9 +277,30 @@ impl ContinuumMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("memory_list_facts", &req, || async {
             let limit = req.limit.unwrap_or(50).min(200);
-            let vault = self.vault().await?;
-            let vault_facts =
-                memtool::vault_list_facts(vault, req.prefix.as_deref(), limit).await?;
+
+            // Vault-first, legacy-fallback — on ANY vault miss, not just
+            // "no match": a vault that fails to open or read (disk full, a
+            // permission change, an unrecoverable index failure) must not
+            // hard-fail this read tool when the legacy store can still
+            // serve it. Only a genuine legacy-store failure below is
+            // allowed to propagate as an error.
+            let vault_attempt: Result<Vec<FactView>, McpError> = async {
+                let vault = self.vault().await?;
+                memtool::vault_list_facts(vault, req.prefix.as_deref(), limit).await
+            }
+            .await;
+            let vault_facts = match vault_attempt {
+                Ok(facts) => facts,
+                Err(e) => {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "memory",
+                        error = %e.message,
+                        "memory_list_facts: vault read failed, falling back to legacy semantic store"
+                    );
+                    Vec::new()
+                }
+            };
             if !vault_facts.is_empty() {
                 return Ok(vault_facts);
             }
@@ -308,16 +329,31 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Fetch a single fact by its dotted key. Returns null if not found. Prefer this over memory_list_facts when you know the exact key. Reads the memory vault first; falls back to the legacy semantic store only when the vault has no note for that key."
+        description = "Fetch a single fact by its dotted key. Returns null if not found. Prefer this over memory_list_facts when you know the exact key. Reads the memory vault first; falls back to the legacy semantic store when the vault has no note for that key, or when the vault itself is unavailable (e.g. an unopenable vault directory)."
     )]
     async fn memory_get_fact(
         &self,
         Parameters(req): Parameters<MemoryGetFactRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("memory_get_fact", &req, || async {
-            let vault = self.vault().await?;
-            if let Some(view) = memtool::vault_get_fact(vault, &req.key).await? {
-                return Ok(Some(view));
+            // Same vault-first/legacy-fallback-on-any-miss contract as
+            // memory_list_facts above — see that handler's comment.
+            let vault_attempt: Result<Option<FactView>, McpError> = async {
+                let vault = self.vault().await?;
+                memtool::vault_get_fact(vault, &req.key).await
+            }
+            .await;
+            match vault_attempt {
+                Ok(Some(view)) => return Ok(Some(view)),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "memory",
+                        error = %e.message,
+                        "memory_get_fact: vault read failed, falling back to legacy semantic store"
+                    );
+                }
             }
 
             let s = self
