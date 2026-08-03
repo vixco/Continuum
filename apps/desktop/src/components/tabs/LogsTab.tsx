@@ -17,17 +17,28 @@ const LEVELS = [
   { value: "trace", label: "trace" },
 ];
 
+// Layer filter — every entry below maps to a `tracing` `layer=` value that
+// the runtime + desktop + mcp processes actually emit. Adding a new layer
+// here is cheap; adding a `#[tracing::instrument(layer = "...")]` somewhere
+// the dashboard never filters against is a foot-gun. Keep these in lockstep
+// with `crate::logs::*` constants.
 const LAYERS = [
   { value: "", label: "All layers" },
-  { value: "senses", label: "senses" },
-  { value: "triage", label: "triage" },
-  { value: "orchestrator", label: "orchestrator" },
-  { value: "workers", label: "workers" },
-  { value: "voice", label: "voice" },
-  { value: "memory", label: "memory" },
-  { value: "health", label: "health" },
-  { value: "system", label: "system" },
+  { value: "config", label: "config" },
   { value: "dashboard", label: "dashboard" },
+  { value: "desktop", label: "desktop" },
+  { value: "hardware", label: "hardware" },
+  { value: "health", label: "health" },
+  { value: "mcp", label: "mcp" },
+  { value: "memory", label: "memory" },
+  { value: "orchestrator", label: "orchestrator" },
+  { value: "senses", label: "senses" },
+  { value: "skills", label: "skills" },
+  { value: "system", label: "system" },
+  { value: "triage", label: "triage" },
+  { value: "vision", label: "vision" },
+  { value: "voice", label: "voice" },
+  { value: "workers", label: "workers" },
 ];
 
 const LEVEL_STYLE: Record<string, string> = {
