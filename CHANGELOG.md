@@ -35,8 +35,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   empty — they light up once the curator pipeline, Plan B, starts writing
   candidates and events), saved filter views, full-text search, and a
   vault-actions menu (rebuild index / import legacy memory / wipe derived
-  data — vault markdown is never deleted). One-shot, idempotent migration
-  (`migrate_legacy_semantic`, surfaced as "Import legacy memory") converts
+  data — vault markdown is never deleted by it, though the wipe itself is
+  currently a stub that validates confirmation and logs the request rather
+  than clearing raw log/episodic/events data; a follow-up
+  `memory__wipe_all` MCP tool will back the real wipe). One-shot,
+  idempotent migration (`migrate_legacy_semantic`, surfaced as "Import
+  legacy memory") converts
   the old flat-file `semantic.sqlite` key/value store into vault `fact`
   notes without ever modifying the legacy database; the runtime's existing
   semantic MCP tools keep working against it unchanged until the curator

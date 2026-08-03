@@ -95,9 +95,15 @@ a broken/locked vault degrades only this tab, never app startup.
   markdown — safe any time, see `docs/memory.md`'s troubleshooting section),
   **Import legacy memory** (shown only when a pre-vault `semantic.sqlite`
   still exists; runs the idempotent migration and shows a result banner),
-  and **Wipe derived memory data** (danger row, requires typing `DELETE` —
-  clears the raw perception log/episodic/events, *never* the vault
-  markdown). A separate **Open vault** button in the topbar opens the vault
+  and **Wipe derived memory data** (danger row, requires typing `DELETE`).
+  It never touches vault markdown — but as of this writing `wipe_memory`
+  (`apps/desktop/src-tauri/src/commands.rs`) is a stub: it validates the
+  `DELETE` confirmation, logs the request, and marks the distiller for a
+  re-pass, without yet actually clearing the raw log/episodic/events data.
+  The real wipe is forwarded to the `continuum` runtime once
+  `continuum-mcp` gains a `memory__wipe_all` tool (follow-up work); today
+  the button only records that a wipe was requested. A separate **Open
+  vault** button in the topbar opens the vault
   folder in the OS file explorer; it works even when the index has failed
   to open, since it's the primary recovery affordance for a broken index.
 

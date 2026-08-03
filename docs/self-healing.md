@@ -86,7 +86,9 @@ Logs:
 
 - `layer = "memory"`, `component = "vault"` for note read/write/delete and index rebuild events.
 - `layer = "memory"`, `component = "watcher"` for file-watcher batches and watcher startup failures.
-- Structured events at `~/.continuum/logs/memory.log` per house rules.
+- Structured `tracing` events, same as every other component — no dedicated
+  log file; visible via stdout and the dashboard's Logs tab (in-memory ring
+  buffer, see "Tabs" in `docs/dashboard.md`).
 
 Health check (`MemoryVaultCheck` in `apps/desktop/src-tauri/src/components.rs`, registered via `register_memory`):
 

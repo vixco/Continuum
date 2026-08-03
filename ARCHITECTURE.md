@@ -556,20 +556,21 @@ When the orchestrator wakes up, Continuum Core runs a two-step retrieval:
 
 The top 3 episodic memories, plus all relevant semantic facts (selected by
 tag and key matching), are added to the orchestrator's context. The
-orchestrator never sees the raw log directly unless it explicitly queries
-`memory_recent`. **Vault notes are not yet part of wake-context retrieval**
-— that FTS + graph-neighborhood injection (`wake_vault_notes_max`,
-sensitivity filtering) is part of Plan B; today the vault is a manual,
-desktop-first store.
+orchestrator never sees the raw log directly — no MCP tool exposes it today;
+only the episodic top-3 (`memory_query_episodic`) and semantic facts
+(`memory_list_facts` / `memory_get_fact`) reach the wake context. **Vault
+notes are not yet part of wake-context retrieval** — that FTS +
+graph-neighborhood injection (`wake_vault_notes_max`, sensitivity filtering)
+is part of Plan B; today the vault is a manual, desktop-first store.
 
 ### Memory writing
 
-The orchestrator can write to memory via the MCP tools (`memory_write`,
-`memory_fact_set`). When something important is discussed or decided, it
-writes a note. Over time, Continuum's memory grows organically without
-manual curation. These tools target the raw log / episodic / legacy
-semantic stores described above; writing to the **vault** today happens
-through the Memory tab (create/edit a note) or the legacy migration —
+The orchestrator can write to memory via the `memory_set_fact` MCP tool —
+when something important is discussed or decided, it upserts a semantic
+fact (confidence clamped by source; see `docs/mcp-tools.md`). That is the
+only memory-writing tool that exists today: there is no generic "write a
+note" tool, and writing to the **vault** currently happens through the
+Memory tab (create/edit a note) or the legacy migration —
 orchestrator-driven vault writes (`memory_vault_save`,
 `memory_vault_resolve`, …) are part of Plan B.
 
@@ -649,8 +650,11 @@ detail/edit panel; expand it to a full-screen markdown editor. Floating
 curator cards (empty until Plan B ships) and a bottom timeline scrub strip
 sit over the graph; the topbar has search, type/status/project filters,
 saved views, and a "…" vault-actions menu (rebuild the derived index, import
-the legacy semantic store, wipe derived memory data). "Wipe" only clears
-derived/perception data — vault markdown is never deleted by it. See
+the legacy semantic store, wipe derived memory data). "Wipe" never deletes
+vault markdown — but the underlying `wipe_memory` command is currently a
+stub that validates the confirmation and logs the request without yet
+clearing the raw log/episodic/events stores; the actual clear ships with a
+follow-up `memory__wipe_all` MCP tool it will forward to. See
 `docs/dashboard.md` for the full tab breakdown.
 
 ### Tools
