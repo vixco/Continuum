@@ -449,11 +449,13 @@ impl AudioWatcher {
 
     /// Loads a whisper model from the given file path.
     fn load_whisper_model(model_path: &str, use_gpu: bool) -> Result<WhisperContext> {
-        let mut params = WhisperContextParameters::default();
         // Only effective when Continuum is built with the `cuda` feature;
         // otherwise whisper.cpp falls back to CPU. Honours the resolved
         // resource plan's GPU decision.
-        params.use_gpu = use_gpu;
+        let params = WhisperContextParameters {
+            use_gpu,
+            ..Default::default()
+        };
         let ctx = WhisperContext::new_with_params(model_path, params)
             .context("Failed to initialize WhisperContext")?;
         Ok(ctx)
