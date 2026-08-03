@@ -526,9 +526,13 @@ async fn main() -> Result<()> {
             vault.clone(),
             llm,
             config.memory.curator.clone(),
+            config.memory.vault.clone(),
             status.clone(),
             activity_rx.clone(),
             shutdown_rx.clone(),
+            dev_dir.clone(),
+            raw_log.clone(),
+            episodic.clone(),
         ));
         Some(status)
     } else {

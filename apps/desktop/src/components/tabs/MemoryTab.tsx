@@ -451,7 +451,7 @@ export function MemoryTab() {
                     }}
                     className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-xs text-state-error hover:bg-state-error/10"
                   >
-                    <AlertTriangle size={13} /> Wipe derived data (records request)
+                    <AlertTriangle size={13} /> Wipe derived data
                   </button>
                 </div>
                 <p className="mt-2 border-t border-bg-border pt-2 text-[10px] text-ink-dim">
@@ -640,9 +640,9 @@ export function MemoryTab() {
         }
       >
         <p className="text-sm text-ink-muted">
-          This records a wipe request for derived data (raw log, episodic, events). The actual wipe
-          ships with the runtime&apos;s <code className="text-xs">memory__wipe_all</code> tool.
-          Vault markdown is never deleted.
+          Timeline events and the derived index are wiped immediately. Raw log and episodic memory
+          are wiped when the runtime processes the request — at its next start or its next daily
+          hygiene tick. Vault markdown is never deleted.
         </p>
         <p className="mt-2 text-sm">
           Type <span className="font-mono text-state-error">DELETE</span> to confirm. This action is

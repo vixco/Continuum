@@ -19,6 +19,7 @@ use continuum_core::state::{ComponentHealth, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
 use continuum_core::workers::{WorkerIntent, WorkerSnapshot};
 
+use crate::memory::MemoryState;
 use crate::AppState;
 
 /// Full state snapshot. The dashboard calls this once on mount and then
@@ -277,27 +278,75 @@ pub async fn get_memory_summary(app: State<'_, Arc<AppState>>) -> Result<MemoryS
     })
 }
 
-/// Wipes derived memory data (raw log rows, distillation state) that the
-/// headless runtime maintains. This never touches the memory vault's
-/// markdown notes — the vault is user-owned, Obsidian-compatible source of
-/// truth and is only ever edited through the vault commands (`memory_*`,
-/// see `memory.rs`) or by the user directly on disk. `wipe_memory` exists
-/// for clearing the raw-log/episodic pipeline the orchestrator distills
-/// from, not for deleting vault notes.
+/// Atomically writes the wipe-request contract file
+/// (`curator::run::process_wipe_request` in continuum-core, Task 7) into
+/// `dev_dir`: `<dev_dir>/wipe-request.json` =
+/// `{"requested_at": "<rfc3339>", "scopes": ["raw_log", "episodic", "events"]}`.
+/// Written to a `.tmp` sibling first and renamed into place so a reader
+/// (the runtime's boot drain or daily hygiene tick) never observes a
+/// partially-written file — `std::fs::rename` is atomic on the same
+/// filesystem, which `dev_dir` always is here (both paths are under the
+/// same `dev_dir`).
+fn write_wipe_request_file(dev_dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dev_dir)
+        .map_err(|e| format!("Could not create {}: {e}", dev_dir.display()))?;
+
+    let payload = serde_json::json!({
+        "requested_at": chrono::Utc::now().to_rfc3339(),
+        "scopes": ["raw_log", "episodic", "events"],
+    });
+    let final_path = dev_dir.join("wipe-request.json");
+    let tmp_path = dev_dir.join("wipe-request.json.tmp");
+
+    std::fs::write(&tmp_path, payload.to_string())
+        .map_err(|e| format!("Could not write {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &final_path)
+        .map_err(|e| format!("Could not finalize {}: {e}", final_path.display()))?;
+
+    Ok(())
+}
+
+/// Requests a wipe of derived memory data (raw log rows, episodic
+/// memories, and the vault's timeline events) that the headless runtime
+/// maintains. This never touches the memory vault's markdown notes — the
+/// vault is the user-owned, Obsidian-compatible source of truth and is
+/// only ever edited through the vault commands (`memory_*`, see
+/// `memory.rs`) or by the user directly on disk.
+///
+/// The dashboard process cannot reach into the separate `continuum`
+/// runtime process to wipe `RawLog`/`EpisodicStore` directly, so this
+/// records the request as `<dev_dir>/wipe-request.json`
+/// (`write_wipe_request_file`) for the runtime to drain — at its next boot
+/// or the next daily hygiene tick (`curator::run::process_wipe_request`).
+/// What this command *can* do immediately, since it holds a vault handle:
+/// it clears the vault's own timeline events (`prune_events(0)`) and
+/// rebuilds the derived index, rather than leaving that piece waiting on
+/// the runtime too.
 #[tauri::command]
-pub async fn wipe_memory(app: State<'_, Arc<AppState>>, confirm: String) -> Result<(), String> {
+pub async fn wipe_memory(
+    memory: State<'_, Arc<MemoryState>>,
+    confirm: String,
+) -> Result<(), String> {
+    wipe_memory_inner(&memory, &confirm).await
+}
+
+pub(crate) async fn wipe_memory_inner(state: &MemoryState, confirm: &str) -> Result<(), String> {
     if confirm != "DELETE" {
         return Err("wipe requires the literal string \"DELETE\" as confirmation".into());
     }
-    // Actual wipe is performed by the continuum runtime if running; we just
-    // log the request here. A follow-up PR will extend continuum-mcp with a
-    // `memory__wipe_all` tool that this command forwards to.
+
     tracing::warn!(
         layer = "memory",
         component = "dashboard",
         "User requested memory wipe via dashboard"
     );
-    app.runtime.state.mark_distill().await;
+
+    write_wipe_request_file(state.dev_dir())?;
+
+    let vault = state.vault().await?;
+    vault.prune_events(0).await.map_err(|e| e.user_message())?;
+    vault.rebuild_index().await.map_err(|e| e.user_message())?;
+
     Ok(())
 }
 
@@ -866,4 +915,83 @@ fn locate_runtime_binary() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn state() -> (tempfile::TempDir, MemoryState) {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = MemoryState::new(
+            tmp.path().join("vault"),
+            tmp.path().join("semantic.sqlite"),
+            tmp.path().join("dev"),
+        );
+        s.vault().await.unwrap(); // force init
+        (tmp, s)
+    }
+
+    /// Task 7's real derived-data wipe path: `wipe_memory` must write the
+    /// `wipe-request.json` contract file into `dev_dir` (for the headless
+    /// runtime's boot drain / daily hygiene tick to pick up — it owns
+    /// `RawLog`/`EpisodicStore`, which this dashboard process cannot touch
+    /// directly) *and* clear the piece it can reach immediately: the
+    /// vault's own timeline events, via `prune_events(0)`.
+    #[tokio::test]
+    async fn wipe_memory_writes_request_and_clears_events() {
+        let (tmp, s) = state().await;
+        let vault = s.vault().await.unwrap();
+        vault
+            .append_event(continuum_memory::NewEvent {
+                ts: None,
+                kind: "distilled".to_string(),
+                text: "an event".to_string(),
+                project: None,
+                node_id: None,
+                reference: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            vault
+                .events(&continuum_memory::EventRange::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        wipe_memory_inner(&s, "DELETE").await.unwrap();
+
+        let request_path = tmp.path().join("dev").join("wipe-request.json");
+        assert!(request_path.exists());
+        let raw = std::fs::read_to_string(&request_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["scopes"],
+            serde_json::json!(["raw_log", "episodic", "events"])
+        );
+        assert!(parsed["requested_at"].is_string());
+
+        // The piece this command can reach directly (vault events) is
+        // cleared right away, in-app — no need to wait on the runtime.
+        assert_eq!(
+            vault
+                .events(&continuum_memory::EventRange::default())
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn wipe_memory_rejects_wrong_confirmation() {
+        let (tmp, s) = state().await;
+        let err = wipe_memory_inner(&s, "not delete").await.unwrap_err();
+        assert!(err.contains("DELETE"));
+        // No request file, no side effects, on a rejected confirmation.
+        assert!(!tmp.path().join("dev").join("wipe-request.json").exists());
+    }
 }

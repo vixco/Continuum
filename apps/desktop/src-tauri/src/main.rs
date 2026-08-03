@@ -82,12 +82,11 @@ fn main() {
     let cfg = runtime.config_snapshot();
     let vault_dir = cfg.memory.vault.resolve_vault_dir(&dev_dir);
     let memory_state = Arc::new(
-        memory::MemoryState::new(vault_dir, dev_dir.join("semantic.sqlite")).with_opts(
-            continuum_memory::VaultOptions {
+        memory::MemoryState::new(vault_dir, dev_dir.join("semantic.sqlite"), dev_dir.clone())
+            .with_opts(continuum_memory::VaultOptions {
                 watcher_debounce_ms: cfg.memory.vault.watcher_debounce_ms,
                 graph_max_nodes: cfg.memory.vault.graph_max_nodes,
-            },
-        ),
+            }),
     );
     components::register_memory(&health, memory_state.clone());
 

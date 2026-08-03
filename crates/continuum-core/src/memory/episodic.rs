@@ -687,6 +687,43 @@ impl EpisodicStore {
         Ok(events)
     }
 
+    /// Wipes every episodic event — the derived-data wipe path
+    /// (`curator::run::process_wipe_request`). Drops the underlying LanceDB
+    /// table (if one has been created yet) and eagerly recreates it empty
+    /// with the same schema [`Self::open`] would lazily create on first
+    /// insert, so the store is immediately usable afterward rather than
+    /// leaving `self.table` as `None` until the next [`Self::insert_event`]
+    /// call (which would make [`Self::event_count`] and
+    /// [`Self::search_similar`] both silently answer "0 / empty" in a way
+    /// indistinguishable from "table never existed", instead of reflecting
+    /// the wipe having actually run).
+    pub async fn wipe_all(&mut self) -> Result<()> {
+        if self.table.is_some() {
+            self.db
+                .drop_table(TABLE_NAME, &[])
+                .await
+                .context("Failed to drop episodic table")?;
+            self.table = None;
+        }
+
+        let schema = Self::table_schema();
+        let table = self
+            .db
+            .create_empty_table(TABLE_NAME, schema)
+            .execute()
+            .await
+            .context("Failed to recreate episodic table")?;
+        self.table = Some(table);
+
+        info!(
+            layer = "memory",
+            component = "episodic",
+            "Wiped episodic memory table"
+        );
+
+        Ok(())
+    }
+
     /// Returns the total number of events in the store.
     pub async fn event_count(&self) -> Result<usize> {
         let table = match &self.table {
@@ -824,5 +861,45 @@ mod tests {
         let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
         let results = store.search_similar("anything", 5).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_wipe_all_clears_events_and_store_stays_usable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().to_str().unwrap();
+
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
+        store
+            .insert_event(&make_event("First event", EventKind::Remember))
+            .await
+            .unwrap();
+        store
+            .insert_event(&make_event("Second event", EventKind::Wake))
+            .await
+            .unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 2);
+
+        store.wipe_all().await.unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 0);
+
+        // Store must still be usable after the wipe, not left in a
+        // "table missing" state.
+        store
+            .insert_event(&make_event("Post-wipe event", EventKind::Remember))
+            .await
+            .unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_wipe_all_on_never_written_store_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().to_str().unwrap();
+
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 0);
+
+        store.wipe_all().await.unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 0);
     }
 }
