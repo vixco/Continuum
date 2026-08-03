@@ -419,7 +419,16 @@ Every tool has a strict permission model. Destructive operations (repair intents
 
 ## Memory system
 
-Memory is arguably the hardest part of Continuum and what separates it from every chatbot. Continuum uses three stores for three kinds of memory, mirroring the cognitive science distinction between raw experience, episodic memory, and semantic knowledge.
+Memory is arguably the hardest part of Continuum and what separates it from every chatbot. Continuum stores memory in four places, three of them unchanged since the early phases and one — the **memory vault** — that replaced the original flat key/value "semantic memory" store:
+
+| Store | Kind of memory | Source of truth | Status |
+|---|---|---|---|
+| Raw log (SQLite) | Everything the senses produce, verbatim | itself | unchanged |
+| Episodic memory (LanceDB) | Distilled "things worth remembering" from the day, vector-searchable | itself | unchanged |
+| **Memory vault (markdown + derived SQLite index)** | Structured, linked, user-ownable knowledge (decisions, facts, people, projects, preferences, …) | **the markdown files** — the index is fully derived and disposable | current (Plan A, shipped) |
+| ~~Semantic memory (flat key/value SQLite)~~ | Legacy stable facts (`user.name`, `project.x.stack`, …) | itself | **legacy** — superseded by the vault, migrated on request, retired once the curator (Plan B) lands |
+
+The vault is described in full in `docs/memory.md`; this section covers how all four stores relate.
 
 ### Raw log (SQLite)
 
@@ -466,11 +475,50 @@ Stored in a LanceDB table with vector indexing. Retrieved via semantic similarit
 
 **Retention:** no automatic deletion. The user can delete entries manually or apply retention rules.
 
-### Semantic memory (structured JSON/graph)
+### Memory vault (markdown, source of truth)
 
-Stable facts about the user, their projects, their relationships, their preferences. This is the equivalent of "things Continuum just knows about you."
+The vault replaces the old flat key/value semantic store with an
+Obsidian-like, user-ownable knowledge base: **markdown files on disk are the
+source of truth**; a derived SQLite index (`vault/.continuum/index.db`,
+FTS5 + graph tables + an event timeline) makes them searchable and
+graph-shaped, and is fully rebuildable from the markdown at any time — a
+missing or corrupt index is just deleted and regenerated, never a data-loss
+event.
 
-Stored as a single SQLite table plus a graph structure for relationships:
+Ten node types (`project | goal | task | decision | person | preference |
+fact | error | session | note`), a status lifecycle (`candidate → confirmed
+| rejected | superseded | archived`), typed `relations:` frontmatter edges
+plus untyped `[[wiki-link]]` mentions, atomic (tmp+rename) writes, and
+per-file quarantine for unparsable frontmatter. Full schema, config, and
+troubleshooting: `docs/memory.md`.
+
+`crates/continuum-memory` is a new, dependency-light crate (`sqlx`,
+`serde`/`serde_yaml`, `ulid`, `notify`, `chrono` — no llama/whisper/lancedb).
+**Both processes link it directly**: the `continuum` runtime and
+`continuum-desktop` each open the same vault directory in-process rather
+than one talking to the other over IPC, so the dashboard's Memory tab is
+fully functional (browse/search/edit/create/migrate) even when the runtime
+isn't running. Cross-process change propagation is a debounced file-watcher
+in each process — an edit made by one process (or by hand, or in Obsidian)
+is picked up and reindexed by the other without polling.
+
+The vault ships as **Plan A**: crate, index, watcher, migration, the
+Tauri command surface, and the graph-centric Memory tab rebuild (see
+"Dashboard" below) are all live today. The **curator** — a background
+pipeline (local triage LLM + batched orchestrator review) that continuously
+turns perception into proposed vault candidates, plus the MCP tools that let
+the orchestrator read/write the vault directly — is **Plan B** and has not
+been built yet (tracked as a follow-up plan once written, alongside
+`docs/superpowers/plans/…-plan-b`). Until then, `memory.curator` config
+exists and is honored by config loading (per non-negotiable #3, nothing is
+hardcoded ahead of being wired up) but nothing reads it at runtime, and the
+vault only changes through the desktop UI, the file-watcher picking up
+external edits, or the one-shot legacy migration below.
+
+### Semantic memory (legacy, superseded by the vault)
+
+Before the vault existed, "things Continuum just knows about you" lived in
+a flat SQLite key/value table plus a typed-edge table:
 
 ```sql
 CREATE TABLE semantic_facts (
@@ -489,7 +537,15 @@ CREATE TABLE semantic_edges (
 );
 ```
 
-Examples of keys: `user.name`, `user.location`, `project.simcharts.repo_path`, `project.simcharts.stack`, `contact.jan.email`, `routine.morning_start_time`.
+This store is **legacy**: `crates/continuum-memory::migrate_legacy_semantic`
+(exposed as the Memory tab's "Import legacy memory" action) converts every
+row into a vault `fact` note, idempotently, without ever modifying or
+deleting the original database. The orchestrator's existing MCP tools
+(`memory_list_facts`, `memory_get_fact`, `memory_set_fact`, below) keep
+reading and writing this store exactly as before — no breaking change mid
+transition — until the curator (Plan B) lands and takes over fact writing
+through the new `memory_vault_*` MCP tools, at which point semantic-store
+writes retire for good.
 
 ### Memory retrieval flow
 
@@ -498,11 +554,24 @@ When the orchestrator wakes up, Continuum Core runs a two-step retrieval:
 1. **Vector search** in episodic memory using the current perception frame as the query (embedded via fastembed). Returns top 10.
 2. **Re-rank** via the triage LLM: "Which of these 10 memories are most relevant to the current situation?" Returns top 3.
 
-The top 3 episodic memories, plus all relevant semantic facts (selected by tag and key matching), are added to the orchestrator's context. The orchestrator never sees the raw log directly unless it explicitly queries `memory_recent`.
+The top 3 episodic memories, plus all relevant semantic facts (selected by
+tag and key matching), are added to the orchestrator's context. The
+orchestrator never sees the raw log directly unless it explicitly queries
+`memory_recent`. **Vault notes are not yet part of wake-context retrieval**
+— that FTS + graph-neighborhood injection (`wake_vault_notes_max`,
+sensitivity filtering) is part of Plan B; today the vault is a manual,
+desktop-first store.
 
 ### Memory writing
 
-The orchestrator can write to memory via the MCP tools (`memory_write`, `memory_fact_set`). When something important is discussed or decided, it writes a note. Over time, Continuum's memory grows organically without manual curation.
+The orchestrator can write to memory via the MCP tools (`memory_write`,
+`memory_fact_set`). When something important is discussed or decided, it
+writes a note. Over time, Continuum's memory grows organically without
+manual curation. These tools target the raw log / episodic / legacy
+semantic stores described above; writing to the **vault** today happens
+through the Memory tab (create/edit a note) or the legacy migration —
+orchestrator-driven vault writes (`memory_vault_save`,
+`memory_vault_resolve`, …) are part of Plan B.
 
 ---
 
@@ -574,7 +643,15 @@ Model configuration for all four layers with dropdowns, test buttons, and a visu
 
 ### Memory
 
-Three tabs for raw log, episodic memory, and semantic facts. Browsable, searchable, editable. Includes a prominent "wipe all memory" button.
+Graph-centric: a full-bleed force-directed graph of the vault (`docs/memory.md`)
+is the page itself, not a sub-tab. Click a node to open a docked, resizable
+detail/edit panel; expand it to a full-screen markdown editor. Floating
+curator cards (empty until Plan B ships) and a bottom timeline scrub strip
+sit over the graph; the topbar has search, type/status/project filters,
+saved views, and a "…" vault-actions menu (rebuild the derived index, import
+the legacy semantic store, wipe derived memory data). "Wipe" only clears
+derived/perception data — vault markdown is never deleted by it. See
+`docs/dashboard.md` for the full tab breakdown.
 
 ### Tools
 
@@ -758,7 +835,7 @@ continuum-ai/
 │   │       ├── memory/
 │   │       │   ├── raw_log.rs
 │   │       │   ├── episodic.rs
-│   │       │   └── semantic.rs
+│   │       │   └── semantic.rs       # legacy — see "Memory system"; migrates into the vault
 │   │       ├── voice/
 │   │       │   ├── wake.rs
 │   │       │   ├── stt.rs
@@ -766,6 +843,19 @@ continuum-ai/
 │   │       ├── health/
 │   │       │   └── repair.rs
 │   │       └── config.rs
+│   │
+│   ├── continuum-memory/             # Memory vault: markdown source of truth + derived SQLite index
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── vault.rs          # the Vault façade (create/get/save/delete/graph/search/…)
+│   │       ├── index.rs          # derived SQLite index (nodes/edges/FTS5/events/quarantine)
+│   │       ├── watcher.rs        # debounced file-watcher, cross-process change propagation
+│   │       ├── migrate.rs        # one-shot legacy semantic.sqlite → vault migration
+│   │       ├── frontmatter.rs    # YAML frontmatter parse/render, wiki-link extraction
+│   │       ├── slug.rs
+│   │       ├── model.rs          # wire types (Note, Frontmatter, GraphData, …)
+│   │       └── error.rs
 │   │
 │   ├── continuum-mcp/                # MCP server exposing Windows tools
 │   │   ├── Cargo.toml

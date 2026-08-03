@@ -6,6 +6,57 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Memory vault + graph-centric Memory tab (Plan A)**: a new
+  `crates/continuum-memory` crate (dependency-light: `sqlx`/SQLite,
+  `serde_yaml`, `ulid`, `notify` — no llama/whisper/lancedb) implements an
+  Obsidian-like memory vault — markdown files with YAML frontmatter are the
+  **source of truth**; a derived SQLite index
+  (`vault/.continuum/index.db`: nodes, edges, FTS5 full-text, an event
+  timeline, and a quarantine table) is always fully rebuildable and is
+  rebuilt on every open, so a missing/corrupt index self-heals rather than
+  losing data. Ten node types, a `candidate → confirmed | rejected |
+  superseded | archived` status lifecycle, typed `relations:` edges plus
+  untyped `[[wiki-link]]` mentions with ghost-node fallback for unresolved
+  targets, atomic (tmp+rename) writes, and per-file quarantine for broken
+  frontmatter. Both `continuum.exe` and `continuum-desktop` link the crate
+  **directly** and open the same vault in-process (no IPC between them);
+  cross-process change propagation is a debounced file-watcher, so external
+  edits (including opening the vault in Obsidian) are picked up live. New
+  `apps/desktop/src-tauri/src/memory.rs` exposes 13 Tauri commands
+  (`memory_graph`, `memory_search`, `memory_get_note`, `memory_create_note`,
+  `memory_save_note`, `memory_delete_note`, `memory_resolve_candidate`,
+  `memory_pending`, `memory_events`, `memory_vault_info`,
+  `memory_migrate_legacy`, `memory_rebuild_index`, `memory_open_vault`) and
+  a `continuum:memory` event topic for live updates. The Memory tab is
+  fully rebuilt around a force-directed graph (`force-graph`, new frontend
+  dependency) as the main surface: a docked resizable note panel that
+  promotes to a full-screen markdown editor overlay, a floating curator-card
+  stack and a bottom timeline scrub strip (both wired up and currently
+  empty — they light up once the curator pipeline, Plan B, starts writing
+  candidates and events), saved filter views, full-text search, and a
+  vault-actions menu (rebuild index / import legacy memory / wipe derived
+  data — vault markdown is never deleted). One-shot, idempotent migration
+  (`migrate_legacy_semantic`, surfaced as "Import legacy memory") converts
+  the old flat-file `semantic.sqlite` key/value store into vault `fact`
+  notes without ever modifying the legacy database; the runtime's existing
+  semantic MCP tools keep working against it unchanged until the curator
+  (Plan B) retires them. New `[memory.vault]` (`vault_dir`,
+  `watcher_debounce_ms`, `events_retention_days`, `graph_max_nodes`) and
+  `[memory.curator]` (`enabled`, `interval_minutes`,
+  `max_candidates_per_pass`, `auto_confirm_threshold`, `discard_floor`,
+  `claude_batch`, `session_summary_idle_minutes`, `wake_vault_notes_max`,
+  `include_sensitive_in_context`) config sections — the curator section is
+  configurable now per non-negotiable #3 even though nothing reads it until
+  Plan B ships. A new `memory_vault` health probe
+  (`apps/desktop/src-tauri/src/components.rs`) reports Degrading when notes
+  are quarantined and Error when the vault fails to open; recovery
+  procedures are documented in `docs/self-healing.md`. **Internal breaking
+  change to the dashboard IPC surface**: the prior fixture-backed stub
+  commands (`search_episodic`, `delete_episodic`, `list_semantic`,
+  `set_semantic`, `delete_semantic`) and their `tauri.ts`/`types.ts`
+  wrappers are removed outright — pre-alpha, no external consumers, no
+  compat shim. See `docs/memory.md` (new) and the updated "Memory system"
+  section of `ARCHITECTURE.md`.
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
   `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
   Claude Code CLI — plus a static provider catalog covering ~18 presets such
