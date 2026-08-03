@@ -15,12 +15,13 @@ pub mod frontmatter; // Task 2
 pub mod index; // Task 3
 pub mod model;
 pub mod slug; // Task 2
-              // pub mod vault;         // Task 5
-              // pub mod watcher;       // Task 7
-              // pub mod migrate;       // Task 8
+pub mod vault; // Task 5
+               // pub mod watcher;       // Task 7
+               // pub mod migrate;       // Task 8
 
 pub use error::{MemoryError, Result};
 pub use model::*;
+pub use vault::{Vault, VaultOptions};
 
 #[cfg(test)]
 mod fts_gate {
