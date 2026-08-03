@@ -182,6 +182,7 @@ fn main() {
             commands::cancel_worker,
             commands::dismiss_worker,
             commands::get_runtime_status,
+            commands::pipe_health,
             commands::start_runtime,
             commands::list_mcp_tools,
             providers::catalog_list,
