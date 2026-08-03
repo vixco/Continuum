@@ -154,10 +154,17 @@ No adapter may become the authoritative owner of project memory.
 
 ## Desktop UI contract
 
-The six approved reference screens define the visual contract for the desktop
-app. The shell contains real navigation for Home, Projects, Memory, Agents,
-Permissions, Timeline, and Settings. Agents contains both Handoff/Relay and
-Context Compiler/Launch Pad views.
+The Continuum shell exposes real navigation for ten tabs, grouped as:
+
+- **Daily**: Home, Chat, Voice, Memory
+- **Configure**: Brain, Tools & Skills, Automations
+- **Advanced**: Health, Logs
+- **Settings** (system-level)
+
+The four-layer pipeline (Senses, Triage, Orchestrator, Workers) is reflected
+in the Brain tab. The full per-tab status, scope (live / fixture / hybrid),
+and known gaps is tracked in `docs/CURRENT_TABS.md` — that file is the
+source of truth for what each tab actually does today.
 
 Phase 0 may display fixture data. Fixture data must stay isolated from runtime
 state and must not be presented as a live integration. The visual language is:
@@ -179,7 +186,7 @@ Tauri updater after its artifact signature has been verified.
 
 1. Make CI and dependency installation reproducible and blocking.
 2. Ship the approved Continuum shell with fixture-backed tabs.
-3. Add `continuum-domain`, `continuum-store`, and schema migrations.
+3. Add schema migrations against the typed world model.
 4. Implement project detection and `continuum context --project current`.
 5. Implement Codex/Claude handoff with evidence capture.
 6. Enforce permission policy on brokered actions.
