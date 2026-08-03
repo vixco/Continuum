@@ -107,8 +107,19 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
   }, []);
 
   const load = useCallback(async () => {
+    // Clear stale content up front - before the await - so the panel can
+    // never keep showing (and, via a slider release/blur in the gap,
+    // saving against) the *previous* note while a new noteId's fetch is
+    // still in flight. Render is gated on `loading` alone below, mirroring
+    // NoteEditorOverlay, so none of this stale state is ever visible.
     setLoading(true);
     setError(null);
+    setNote(null);
+    setConfidence(0);
+    setImportance(0);
+    setTagsDraft("");
+    setProjectDraft("");
+    setRelations([]);
     try {
       const n = await continuum.memoryGetNote(noteId);
       setNote(n);
@@ -131,7 +142,10 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
 
   const persist = useCallback(
     async (patch: Partial<MemoryFrontmatter>) => {
-      if (!note) return;
+      // Belt-and-braces alongside the stale-clear in `load`: never let a
+      // save target anything but the note currently on screen.
+      if (!note || note.frontmatter.id !== noteId) return;
+      const previous = note;
       const updated: MemoryNote = { ...note, frontmatter: { ...note.frontmatter, ...patch } };
       setNote(updated);
       setSaveError(null);
@@ -139,10 +153,13 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
         await continuum.memorySaveNote(updated);
         onChanged();
       } catch (e) {
+        // Roll back the optimistic update - a failed save must not leave
+        // the UI showing an unsaved value as though it persisted.
+        setNote(previous);
         setSaveError(e instanceof Error ? e.message : String(e));
       }
     },
-    [note, onChanged]
+    [note, noteId, onChanged]
   );
 
   // Resize: drag the left-edge handle. `dragRightEdgeRef` is the panel's
@@ -238,7 +255,7 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 pl-5">
-        {loading && !note ? (
+        {loading ? (
           <div className="py-8 text-center text-xs text-ink-dim">Loading…</div>
         ) : error ? (
           <div className="space-y-2 py-8 text-center">
@@ -359,6 +376,7 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
                       className="w-16 shrink-0"
                       onMouseUp={commitRelations}
                       onTouchEnd={commitRelations}
+                      onBlur={commitRelations}
                     >
                       <Slider
                         value={r.confidence}
