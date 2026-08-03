@@ -16,21 +16,32 @@ pub struct ParsedDoc {
 /// Parse a full markdown document (frontmatter fence required).
 pub fn parse_document(text: &str) -> Result<ParsedDoc> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let rest = text
-        .strip_prefix("---\r\n")
-        .or_else(|| text.strip_prefix("---\n"))
-        .ok_or_else(|| MemoryError::Parse("missing opening --- fence".into()))?;
+
+    // Find the opening fence: first line must be "---" (tolerating trailing whitespace).
+    let rest = {
+        let first_line = text
+            .split_inclusive('\n')
+            .next()
+            .ok_or_else(|| MemoryError::Parse("missing opening --- fence".into()))?;
+        if first_line.trim_end() == "---" {
+            let consumed = first_line.len();
+            text[consumed..].to_string()
+        } else {
+            return Err(MemoryError::Parse("missing opening --- fence".into()));
+        }
+    };
+
     // Find the closing fence on its own line.
     let mut yaml_end = None;
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed == "---" {
+        if line.trim_end() == "---" {
             yaml_end = Some((offset, offset + line.len()));
             break;
         }
         offset += line.len();
     }
+
     let (yaml_to, body_from) =
         yaml_end.ok_or_else(|| MemoryError::Parse("missing closing --- fence".into()))?;
     let yaml = &rest[..yaml_to];
@@ -118,5 +129,29 @@ mod tests {
     fn wiki_links_dedup_and_strip_alias() {
         let links = extract_wiki_links("See [[A]] then [[B|alias]] then [[A]] and [[ C ]].");
         assert_eq!(links, vec!["A".to_string(), "B".into(), "C".into()]);
+    }
+
+    #[test]
+    fn parse_tolerates_trailing_spaces_on_fences() {
+        let src = "--- \nid: mem_1\ntype: fact\ntitle: T\ncreated: 2026-08-01T10:00:00Z\n--- \t\nBody here.\n";
+        let doc = parse_document(src).unwrap();
+        assert_eq!(doc.frontmatter.id, "mem_1");
+        assert_eq!(doc.body, "Body here.\n");
+    }
+
+    #[test]
+    fn parse_closing_fence_at_eof_with_no_trailing_newline() {
+        let src = "---\nid: mem_1\ntype: fact\ntitle: T\ncreated: 2026-08-01T10:00:00Z\n---";
+        let doc = parse_document(src).unwrap();
+        assert_eq!(doc.frontmatter.id, "mem_1");
+        assert_eq!(doc.body, "");
+    }
+
+    #[test]
+    fn parse_with_only_frontmatter_no_body_line() {
+        let src = "---\nid: mem_1\ntype: fact\ntitle: T\ncreated: 2026-08-01T10:00:00Z\n---\n";
+        let doc = parse_document(src).unwrap();
+        assert_eq!(doc.frontmatter.id, "mem_1");
+        assert_eq!(doc.body, "");
     }
 }
