@@ -17,11 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use continuum_core::memory::{
-    episodic::EpisodicStore,
-    semantic::{Fact, SemanticStore},
-};
+use continuum_core::memory::{episodic::EpisodicStore, semantic::SemanticStore};
+use continuum_memory::Vault;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -37,7 +34,9 @@ use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
-    MemoryQueryEpisodicRequest, MemorySetFactRequest, SetFactResponse,
+    MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultGetRequest,
+    MemoryVaultResolveRequest, MemoryVaultSaveRequest, MemoryVaultSearchRequest,
+    MemoryWipeAllRequest, SetFactResponse,
 };
 use crate::tools::repair::{
     self as repairtool, EscalateRequest, ReinstallRequest, RestartRequest, RollbackRequest,
@@ -58,6 +57,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_extra_paths: Vec<PathBuf>,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
+    pub(crate) vault: OnceCell<Vault>,
 }
 
 /// The main MCP server. Cloneable because rmcp can fan out the handler across
@@ -108,6 +108,7 @@ impl ContinuumMcpServer {
                 fs_extra_paths: mcp_cfg.fs.extra_paths,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
+                vault: OnceCell::new(),
             }),
             tool_router: Self::tool_router(),
         })
@@ -163,6 +164,41 @@ impl ContinuumMcpServer {
             })
             .await?;
         Ok(cell.lock().await)
+    }
+
+    /// Resolves the memory vault directory: the `CONTINUUM_VAULT_DIR`
+    /// environment variable if set to a non-blank value, else
+    /// `<data_dir>/vault` — matching `MemoryVaultConfig::resolve_vault_dir`'s
+    /// own default (empty `vault_dir` -> `<dev_dir>/vault`).
+    ///
+    /// The MCP server does not load the full `ContinuumConfig` today (only
+    /// the `[mcp]` section, via `crate::config::load`), so a non-default
+    /// `config.memory.vault.vault_dir` set for the runtime/dashboard is
+    /// invisible here. `CONTINUUM_VAULT_DIR` is the escape hatch — set it in
+    /// the MCP server's spawn environment to match. Documented as a known
+    /// limitation in `docs/mcp-tools.md`.
+    fn vault_dir(&self) -> PathBuf {
+        match std::env::var("CONTINUUM_VAULT_DIR") {
+            Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+            _ => self.state.data_dir.join("vault"),
+        }
+    }
+
+    /// Returns a reference to the memory vault, opening it if not yet
+    /// opened. See [`Self::vault_dir`] for how the directory is resolved.
+    pub(crate) async fn vault(&self) -> Result<&Vault, McpError> {
+        self.state
+            .vault
+            .get_or_try_init(|| async {
+                let dir = self.vault_dir();
+                Vault::open(&dir).await.map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to open vault at {}: {e}", dir.display()),
+                        None,
+                    )
+                })
+            })
+            .await
     }
 
     /// Shared wrapper: serialize args for audit, run the body, audit the
@@ -233,7 +269,7 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "List semantic facts — stable knowledge about the user, projects, preferences. Pass an optional key prefix (e.g. 'project.') to narrow results. Facts are stored at dotted keys like 'user.name' or 'project.simcharts.dir'."
+        description = "List facts — stable knowledge about the user, projects, preferences. Pass an optional key prefix (e.g. 'project.') to narrow results. Facts are stored at dotted keys like 'user.name' or 'project.simcharts.dir'. Reads the memory vault first; falls back to the legacy semantic store only when the vault has no matching facts."
     )]
     async fn memory_list_facts(
         &self,
@@ -241,6 +277,13 @@ impl ContinuumMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("memory_list_facts", &req, || async {
             let limit = req.limit.unwrap_or(50).min(200);
+            let vault = self.vault().await?;
+            let vault_facts =
+                memtool::vault_list_facts(vault, req.prefix.as_deref(), limit).await?;
+            if !vault_facts.is_empty() {
+                return Ok(vault_facts);
+            }
+
             let s = self
                 .semantic()
                 .await
@@ -265,13 +308,18 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Fetch a single semantic fact by its dotted key. Returns null if not found. Prefer this over memory_list_facts when you know the exact key."
+        description = "Fetch a single fact by its dotted key. Returns null if not found. Prefer this over memory_list_facts when you know the exact key. Reads the memory vault first; falls back to the legacy semantic store only when the vault has no note for that key."
     )]
     async fn memory_get_fact(
         &self,
         Parameters(req): Parameters<MemoryGetFactRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("memory_get_fact", &req, || async {
+            let vault = self.vault().await?;
+            if let Some(view) = memtool::vault_get_fact(vault, &req.key).await? {
+                return Ok(Some(view));
+            }
+
             let s = self
                 .semantic()
                 .await
@@ -286,7 +334,7 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Store or update a semantic fact Continuum has learned. Keys starting with 'system.' or 'continuum.' are reserved and rejected. Confidence is clamped by source: inferred ≤0.7, observed ≤0.8, user_stated ≤0.9."
+        description = "Store or update a fact Continuum has learned. Keys starting with 'system.' or 'continuum.' are reserved and rejected. Confidence is clamped by source: inferred ≤0.7, observed ≤0.8, user_stated ≤0.9. Writes a `type: fact` note into the memory vault (title derived from the key, tagged with the key's first segment) — a second call with the same key updates that note instead of creating a duplicate. Does NOT write to the legacy semantic store."
     )]
     async fn memory_set_fact(
         &self,
@@ -309,27 +357,251 @@ impl ContinuumMcpServer {
             // reinforcement logic can raise them over time.
             let confidence = memtool::clamp_confidence(source, 0.9);
 
-            let fact = Fact {
-                key: req.key.clone(),
-                value: req.value.clone(),
-                confidence,
-                source,
-                source_frame_id: None,
-                updated_at: Utc::now(),
-            };
+            let title = memtool::title_from_key(&req.key);
+            let tag = memtool::tag_from_key(&req.key);
+            let source_ref = format!("mcp:set_fact:{}", req.key);
 
-            let s = self
-                .semantic()
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            s.upsert_fact(&fact)
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            let vault = self.vault().await?;
+            let existing_id = memtool::find_existing_note_id(vault, &title).await?;
+
+            if let Some(id) = existing_id {
+                let mut note = vault
+                    .get(&id)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+                note.frontmatter.status = continuum_memory::NodeStatus::Confirmed;
+                note.body = req.value.clone();
+                note.frontmatter.confidence = confidence;
+                note.frontmatter.source = continuum_memory::Source::AgentRun;
+                note.frontmatter.source_ref = Some(source_ref);
+                if !note.frontmatter.tags.iter().any(|t| t == &tag) {
+                    note.frontmatter.tags.push(tag);
+                }
+                vault
+                    .save(&note)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+            } else {
+                let draft = continuum_memory::NoteDraft {
+                    node_type: continuum_memory::NodeType::Fact,
+                    title,
+                    body: req.value.clone(),
+                    project: None,
+                    status: continuum_memory::NodeStatus::Confirmed,
+                    confidence,
+                    importance: 0.5,
+                    source: continuum_memory::Source::AgentRun,
+                    source_ref: Some(source_ref),
+                    sensitivity: Default::default(),
+                    relations: vec![],
+                    tags: vec![tag],
+                };
+                vault
+                    .create(draft)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+            }
 
             Ok(SetFactResponse {
                 key: req.key.clone(),
                 stored: true,
                 confidence,
+            })
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Vault memory tools (memory_vault_*) — direct access to the memory
+    // vault's full node model. See docs/memory.md.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Full-text search over the memory vault (titles, bodies, tags). Optional `types` (e.g. [\"fact\",\"decision\"]) and `project` (exact slug) filters are applied after the text match. Returns up to `limit` (default 10, max 100) NodeSummary rows ordered by search rank."
+    )]
+    async fn memory_vault_search(
+        &self,
+        Parameters(req): Parameters<MemoryVaultSearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("memory_vault_search", &req, || async {
+            let vault = self.vault().await?;
+            let limit = req.limit.unwrap_or(10).min(100);
+            let needs_filter = req.types.is_some() || req.project.is_some();
+            let fetch_n = if needs_filter {
+                limit.saturating_mul(5).max(50)
+            } else {
+                limit
+            };
+            let mut hits = vault
+                .search(&req.query, fetch_n)
+                .await
+                .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+            if let Some(types) = &req.types {
+                hits.retain(|h| {
+                    types
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(h.node_type.as_str()))
+                });
+            }
+            if let Some(project) = &req.project {
+                hits.retain(|h| h.project.as_deref() == Some(project.as_str()));
+            }
+            hits.truncate(limit as usize);
+            Ok(hits)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Fetch a single vault note by id: full frontmatter, body, and backlinks (other notes with a resolved edge pointing at this one). Errors if the id doesn't exist."
+    )]
+    async fn memory_vault_get(
+        &self,
+        Parameters(req): Parameters<MemoryVaultGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("memory_vault_get", &req, || async {
+            let vault = self.vault().await?;
+            vault
+                .get(&req.id)
+                .await
+                .map_err(|e| memtool::vault_err_to_mcp(&e))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Create or update a confirmed vault note (status: confirmed, source: agent_run). `type` is one of project|goal|task|decision|person|preference|fact|error|session|note. If a note with the same title already exists (case-insensitive), it is UPDATED in place instead of creating a duplicate — omitted optional fields (confidence, importance, project, relations, tags, source_ref) leave the existing note's values untouched on an update."
+    )]
+    async fn memory_vault_save(
+        &self,
+        Parameters(req): Parameters<MemoryVaultSaveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let req_clone = req.clone();
+        self.run_tool("memory_vault_save", &req, || async {
+            let req = req_clone;
+            let node_type = continuum_memory::NodeType::parse(&req.r#type).ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "unknown vault node type \"{}\" (expected one of project|goal|task|\
+                         decision|person|preference|fact|error|session|note)",
+                        req.r#type
+                    ),
+                    None,
+                )
+            })?;
+            let relations: Option<Vec<continuum_memory::Relation>> = req.relations.map(|rs| {
+                rs.into_iter()
+                    .map(|r| continuum_memory::Relation {
+                        to: r.to,
+                        rel: r.rel,
+                        confidence: r.confidence.unwrap_or(1.0),
+                    })
+                    .collect()
+            });
+
+            let vault = self.vault().await?;
+            let existing_id = memtool::find_existing_note_id(vault, &req.title).await?;
+
+            if let Some(id) = existing_id {
+                let mut note = vault
+                    .get(&id)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+                note.frontmatter.status = continuum_memory::NodeStatus::Confirmed;
+                note.frontmatter.node_type = node_type;
+                note.body = req.body;
+                note.frontmatter.source = continuum_memory::Source::AgentRun;
+                if let Some(project) = req.project {
+                    note.frontmatter.project = Some(project);
+                }
+                if let Some(confidence) = req.confidence {
+                    note.frontmatter.confidence = confidence.clamp(0.0, 1.0);
+                }
+                if let Some(importance) = req.importance {
+                    note.frontmatter.importance = importance.clamp(0.0, 1.0);
+                }
+                if let Some(relations) = relations {
+                    note.frontmatter.relations = relations;
+                }
+                if let Some(tags) = req.tags {
+                    note.frontmatter.tags = tags;
+                }
+                if let Some(source_ref) = req.source_ref {
+                    note.frontmatter.source_ref = Some(source_ref);
+                }
+                vault
+                    .save(&note)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+                Ok(memtool::VaultSaveResponse { id, updated: true })
+            } else {
+                let draft = continuum_memory::NoteDraft {
+                    node_type,
+                    title: req.title,
+                    body: req.body,
+                    project: req.project,
+                    status: continuum_memory::NodeStatus::Confirmed,
+                    confidence: req.confidence.unwrap_or(0.5).clamp(0.0, 1.0),
+                    importance: req.importance.unwrap_or(0.5).clamp(0.0, 1.0),
+                    source: continuum_memory::Source::AgentRun,
+                    source_ref: req.source_ref,
+                    sensitivity: Default::default(),
+                    relations: relations.unwrap_or_default(),
+                    tags: req.tags.unwrap_or_default(),
+                };
+                let note = vault
+                    .create(draft)
+                    .await
+                    .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+                Ok(memtool::VaultSaveResponse {
+                    id: note.frontmatter.id,
+                    updated: false,
+                })
+            }
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Resolve a candidate vault note. `action` is one of confirm|reject|supersede. \"supersede\" requires `replaces` (the id of the node this one supersedes) and confirms this note while flipping the replaced note to status=superseded. Errors if `id` is not currently a candidate."
+    )]
+    async fn memory_vault_resolve(
+        &self,
+        Parameters(req): Parameters<MemoryVaultResolveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("memory_vault_resolve", &req, || async {
+            let resolution = memtool::parse_resolution(&req.action, req.replaces.clone())?;
+            let vault = self.vault().await?;
+            vault
+                .resolve_candidate(&req.id, resolution)
+                .await
+                .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+            Ok(memtool::VaultResolveResponse {
+                id: req.id.clone(),
+                ok: true,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Request a wipe of derived memory data (raw perception log, episodic memory, and the vault's timeline events). Requires `confirm` to equal the literal string \"WIPE\". Writes a request file the running continuum runtime drains at its next boot or daily hygiene tick; this tool only queues the request. Vault markdown notes are NEVER deleted by this or any wipe path."
+    )]
+    async fn memory_wipe_all(
+        &self,
+        Parameters(req): Parameters<MemoryWipeAllRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("memory_wipe_all", &req, || async {
+            if req.confirm != "WIPE" {
+                return Err(McpError::invalid_params(
+                    "confirm must equal the literal string \"WIPE\"",
+                    None,
+                ));
+            }
+            let path = memtool::write_wipe_request(&self.state.data_dir)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            Ok(memtool::WipeAllResponse {
+                path: path.display().to_string(),
             })
         })
         .await
@@ -628,9 +900,9 @@ impl ServerHandler for ContinuumMcpServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Continuum MCP server — exposes memory, system info, filesystem (read-only), \
-                 web fetch, and notification tools to the orchestrator. Every tool call \
-                 is audited to episodic memory.",
+                "Continuum MCP server — exposes memory (facts + the memory vault), system info, \
+                 filesystem (read-only), web fetch, and notification tools to the orchestrator. \
+                 Every tool call is audited to episodic memory.",
             )
     }
 }

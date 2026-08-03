@@ -66,6 +66,78 @@ Stores/updates a semantic fact.
 - Keys starting with `system.` or `continuum.` are **rejected** — those are reserved for the runtime.
 - `source` is one of `user_stated` / `observed` / `inferred` (default). Confidence is clamped by source: inferred ≤ 0.7, observed ≤ 0.8, user_stated ≤ 0.9.
 
+> **Vault redirect.** `memory_set_fact` no longer writes to the legacy `semantic.sqlite` store — its request/response schema is unchanged, but internally it now writes a `type: fact` note into the memory vault (see [Vault memory](#vault-memory) below and `docs/memory.md`): title `key.replacen('.', ": ", 1)` (e.g. `user.preferred_language` → `user: preferred_language`), tagged with the key's first `.`-segment, `source: agent_run`, `source_ref: "mcp:set_fact:<key>"`. A second `memory_set_fact` call with the same key updates that note in place rather than creating a duplicate. `memory_get_fact` and `memory_list_facts` read the vault first (using the same key↔title mapping, or a tag-prefix search for `memory_list_facts`'s `prefix`) and only fall back to a legacy `semantic.sqlite` read when the vault has no matching note — for facts written before this redirect shipped, or never migrated (see `docs/memory.md`'s migration section).
+
+### Vault memory
+
+Direct access to the memory vault — the markdown-note store described in `docs/memory.md`. Unlike `memory_set_fact`'s narrow key/value shape, these tools work with the vault's full node model: typed nodes (`project`, `goal`, `task`, `decision`, `person`, `preference`, `fact`, `error`, `session`, `note`), a status lifecycle (`candidate → confirmed | rejected | superseded | archived`), typed relations, and tags.
+
+#### `memory_vault_search`
+
+Full-text search over titles/bodies/tags. Optional `types` and `project` filters are applied after the text match.
+
+```jsonc
+{
+  "name": "mcp__continuum__memory_vault_search",
+  "arguments": { "query": "SimCharts lobby", "types": ["decision"], "limit": 5 }
+}
+```
+
+Returns a JSON array of node summaries: `{ id, slug, title, type, status, project, confidence, importance, source, sensitivity, created, updated, tags, snippet }`.
+
+#### `memory_vault_get`
+
+Fetches a single note by id: full frontmatter, body, and backlinks (other notes with a resolved edge pointing at this one).
+
+```jsonc
+{ "name": "mcp__continuum__memory_vault_get", "arguments": { "id": "mem_01j8f3a6k2..." } }
+```
+
+Errors (`invalid_params`) if the id doesn't exist.
+
+#### `memory_vault_save`
+
+Creates a confirmed note (`status: confirmed`, `source: agent_run`) — or, if a note with the same title already exists (case-insensitive), updates it in place instead of creating a duplicate.
+
+```jsonc
+{
+  "name": "mcp__continuum__memory_vault_save",
+  "arguments": {
+    "type": "decision",
+    "title": "Lobby creation must be manual",
+    "body": "Automatic lobby creation caused duplicate rooms; always require a manual click.",
+    "project": "sidelife",
+    "confidence": 0.9,
+    "tags": ["lobby", "unity"]
+  }
+}
+```
+
+Returns `{ id, updated }` (`updated: true` when an existing note was matched and edited rather than a new one created). On an update, omitted optional fields (`confidence`, `importance`, `project`, `relations`, `tags`, `source_ref`) leave the existing note's values untouched — only fields explicitly present in the call are overwritten. `type`, `title`, and `body` are always applied.
+
+#### `memory_vault_resolve`
+
+Resolves a candidate note. `action` is `confirm` | `reject` | `supersede`; `supersede` requires `replaces` (the id of the node this one supersedes).
+
+```jsonc
+{
+  "name": "mcp__continuum__memory_vault_resolve",
+  "arguments": { "id": "mem_01j9...", "action": "supersede", "replaces": "mem_01j7..." }
+}
+```
+
+Errors if `id` is not currently a candidate, or if `action` is `"supersede"` without `replaces`.
+
+#### `memory_wipe_all`
+
+Requests a wipe of derived memory data (raw perception log, episodic memory, the vault's timeline events). Requires `confirm` to equal the literal string `"WIPE"`.
+
+```jsonc
+{ "name": "mcp__continuum__memory_wipe_all", "arguments": { "confirm": "WIPE" } }
+```
+
+Writes `<data_dir>/wipe-request.json` (atomic tmp+rename) with `{ requested_at, scopes: ["raw_log", "episodic", "events"] }` — the same contract the dashboard's "Wipe derived data" action and the runtime's daily hygiene tick use. This tool only **queues** the request; the running `continuum` runtime drains it at its next boot or daily hygiene tick. Vault markdown notes are **never** deleted by this or any other wipe path.
+
 ### System info
 
 #### `system_current_time`
@@ -201,6 +273,12 @@ extra_paths = [
 ```
 
 Paths support `~` expansion at load time. Denied dirs and patterns still apply inside these roots — adding `~/` as an extra root does **not** let `fs_read_file` touch `~/.ssh/id_rsa`.
+
+### Vault directory (known limitation)
+
+The MCP server does not load the full `ContinuumConfig` today — only the `[mcp]` section (via `crate::config::load`). This means it cannot see a non-default `config.memory.vault.vault_dir` set for the runtime/dashboard; the `memory_vault_*` tools and the vault-backed `memory_set_fact`/`memory_get_fact`/`memory_list_facts` paths default to `<data_dir>/vault`, matching `MemoryVaultConfig::resolve_vault_dir`'s own default for an empty `vault_dir`.
+
+If you've set a non-default `vault_dir` in `config.toml`, set the `CONTINUUM_VAULT_DIR` environment variable to the same absolute path in the MCP server's spawn environment (the `--mcp-config` JSON's `env` block — same place `CONTINUUM_DATA_DIR` is set) — otherwise the vault tools will silently open the wrong directory instead of erroring.
 
 ## Verifying your install
 

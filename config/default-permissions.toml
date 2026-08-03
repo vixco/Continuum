@@ -22,6 +22,17 @@ memory_list_facts     = "auto"
 memory_get_fact       = "auto"
 memory_set_fact       = "session-approved"
 
+# Vault tools (direct access to the memory vault's full node model — see
+# docs/memory.md). Reads are safe; writes require confirmation for the same
+# reason memory_set_fact does. memory_wipe_all is the most destructive tool
+# in the whole server (queues a wipe of raw log + episodic memory + vault
+# timeline events), so it always requires confirmation, every call.
+memory_vault_search   = "auto"
+memory_vault_get      = "auto"
+memory_vault_save     = "session-approved"
+memory_vault_resolve  = "session-approved"
+memory_wipe_all       = "always-confirm"
+
 # --- System info tools ---
 # All read-only. Clipboard read can leak secrets, so gate it once per session.
 [system]
