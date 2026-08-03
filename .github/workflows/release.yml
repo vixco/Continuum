@@ -188,6 +188,17 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --bin continuum --bin continuum-mcp
 
+      # `target` is restored from cache, including old Tauri bundles. Remove
+      # only packaged outputs so asset assembly can never select an installer
+      # from an earlier version while retaining the expensive compiler cache.
+      - name: Clear stale Tauri bundles
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $env:CARGO_TARGET_DIR "release\bundle"
+          if (Test-Path -LiteralPath $bundleRoot) {
+            Remove-Item -LiteralPath $bundleRoot -Recurse -Force
+          }
+
       - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop
         env:
@@ -221,8 +232,16 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
 
           $bundleRoot = "target\release\bundle"
-          $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*-setup.exe" | Select-Object -First 1
-          if (-not $nsis) { throw "Tauri did not produce an NSIS setup executable" }
+          $versionPattern = [Regex]::Escape($version)
+          $nsisCandidates = @(
+            Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" |
+              Where-Object { $_.Name -match "_$versionPattern(?:_|-)" }
+          )
+          if ($nsisCandidates.Count -ne 1) {
+            $found = @(Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" -ErrorAction SilentlyContinue).Name -join ", "
+            throw "Expected exactly one NSIS installer for $version; found: $found"
+          }
+          $nsis = $nsisCandidates[0]
           $nsisSig = Get-Item "$($nsis.FullName).sig" -ErrorAction SilentlyContinue
           if (-not $nsisSig) { throw "Tauri did not produce an updater signature for $($nsis.Name)" }
 
@@ -231,6 +250,10 @@ jobs:
           Copy-Item $nsis.FullName $installerName
           Copy-Item $nsisSig.FullName $signatureName
           $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
+          $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
+          if ($signatureText -notmatch $versionPattern) {
+            throw "Updater signature does not identify the expected version $version. Refusing to publish mismatched metadata."
+          }
           $latest = [ordered]@{
             version = $version
             notes = "Automatic Continuum release $tag. See the GitHub release notes for details."
