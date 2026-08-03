@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,8 +80,8 @@ fn description_indicates_error(description: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct MonitorTarget {
-    monitor: Monitor,
+struct MonitorDescriptor {
+    native_id: u32,
     id: String,
     name: String,
     is_primary: bool,
@@ -90,7 +91,7 @@ struct MonitorTarget {
     height: u32,
 }
 
-impl MonitorTarget {
+impl MonitorDescriptor {
     fn signature(&self) -> String {
         format!(
             "{}:{}:{}:{}:{}:{}",
@@ -103,7 +104,7 @@ impl MonitorTarget {
 struct CapturePacket {
     capture_sequence: u64,
     captured_at: chrono::DateTime<Utc>,
-    target: MonitorTarget,
+    target: MonitorDescriptor,
     image: Option<image::RgbaImage>,
     change_score: f32,
     meaningful_change: bool,
@@ -442,7 +443,19 @@ async fn run_capture_scheduler(
     live_context: LiveContextHub,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut workers: HashMap<String, (String, tokio::task::JoinHandle<()>)> = HashMap::new();
+    struct CaptureWorker {
+        signature: String,
+        cancel: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    }
+
+    async fn stop_worker(worker: CaptureWorker) {
+        worker.cancel.store(true, Ordering::Release);
+        let _ = tokio::task::spawn_blocking(move || worker.handle.join()).await;
+    }
+
+    let global_shutdown = Arc::new(AtomicBool::new(false));
+    let mut workers: HashMap<String, CaptureWorker> = HashMap::new();
     let mut discovery = tokio::time::interval(Duration::from_secs(2));
     discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -460,27 +473,43 @@ async fn run_capture_scheduler(
                             .cloned()
                             .collect();
                         for id in removed {
-                            if let Some((_, handle)) = workers.remove(&id) {
-                                handle.abort();
+                            if let Some(worker) = workers.remove(&id) {
+                                stop_worker(worker).await;
                             }
                         }
                         for target in targets {
                             let signature = target.signature();
-                            if workers.get(&target.id).is_some_and(|(known, _)| known != &signature) {
-                                if let Some((_, handle)) = workers.remove(&target.id) {
-                                    handle.abort();
+                            if workers.get(&target.id).is_some_and(|worker| worker.signature != signature) {
+                                if let Some(worker) = workers.remove(&target.id) {
+                                    stop_worker(worker).await;
                                 }
                             }
                             if !workers.contains_key(&target.id) {
                                 let id = target.id.clone();
-                                let handle = tokio::spawn(run_monitor_capture_loop(
-                                    target,
-                                    config.clone(),
-                                    buffer.clone(),
-                                    live_context.clone(),
-                                    shutdown.clone(),
-                                ));
-                                workers.insert(id, (signature, handle));
+                                let worker_config = config.clone();
+                                let worker_buffer = buffer.clone();
+                                let worker_context = live_context.clone();
+                                let worker_shutdown = global_shutdown.clone();
+                                let cancel = Arc::new(AtomicBool::new(false));
+                                let worker_cancel = cancel.clone();
+                                let handle = std::thread::Builder::new()
+                                    .name(format!("continuum-capture-{id}"))
+                                    .spawn(move || run_monitor_capture_loop(
+                                        target,
+                                        worker_config,
+                                        worker_buffer,
+                                        worker_context,
+                                        worker_shutdown,
+                                        worker_cancel,
+                                    ));
+                                match handle {
+                                    Ok(handle) => {
+                                        workers.insert(id, CaptureWorker { signature, cancel, handle });
+                                    }
+                                    Err(error) => live_context.record_capture_failure(format!(
+                                        "monitor {id} worker thread failed to start: {error}"
+                                    )),
+                                }
                             }
                         }
                     }
@@ -497,103 +526,119 @@ async fn run_capture_scheduler(
             }
         }
     }
-    for (_, (_, handle)) in workers {
-        handle.abort();
+    global_shutdown.store(true, Ordering::Release);
+    for (_, worker) in workers {
+        stop_worker(worker).await;
     }
 }
 
-async fn run_monitor_capture_loop(
-    target: MonitorTarget,
+fn run_monitor_capture_loop(
+    target: MonitorDescriptor,
     config: ScreenConfig,
     buffer: OrderedBuffer<CapturePacket>,
     live_context: LiveContextHub,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
 ) {
-    let mut ticker =
-        tokio::time::interval(Duration::from_millis(config.capture_interval_ms.max(50)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let cadence = Duration::from_millis(config.capture_interval_ms.max(50));
+    let monitor = match monitor_by_native_id(target.native_id) {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            live_context.record_capture_failure(format!(
+                "monitor {} could not initialize on its capture thread: {error}",
+                target.id
+            ));
+            return;
+        }
+    };
     let mut previous_signature: Option<Vec<u8>> = None;
     let mut previous_privacy = PrivacyDisposition::Redacted;
     let mut capture_sequence = 0u64;
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                capture_sequence = capture_sequence.saturating_add(1);
-                let captured_at = Utc::now();
-                let started = Instant::now();
-                let monitor = target.monitor.clone();
-                match tokio::task::spawn_blocking(move || monitor.capture_image()).await {
-                    Ok(Ok(image)) => {
-                        let signature = change_signature(&image);
-                        let change_score = previous_signature
-                            .as_deref()
-                            .map(|previous| mean_luma_difference(previous, &signature))
-                            .unwrap_or(1.0);
-                        let privacy = live_context.current_privacy();
-                        let privacy_became_visible = previous_privacy != PrivacyDisposition::Visible
-                            && privacy == PrivacyDisposition::Visible;
-                        let meaningful_change = previous_signature.is_none()
-                            || change_score >= config.meaningful_change_threshold
-                            || privacy_became_visible;
-                        previous_signature = Some(signature);
-                        previous_privacy = privacy;
-                        let capture_latency_ms = started.elapsed().as_millis() as u64;
-                        let packet = CapturePacket {
-                            capture_sequence,
-                            captured_at,
-                            target: target.clone(),
-                            image: meaningful_change.then_some(image),
-                            change_score,
-                            meaningful_change,
-                            privacy,
-                            capture_latency_ms,
-                        };
-                        buffer.push_with(packet, |buffered| {
-                            if buffered.dropped_before > 0 {
-                                live_context.record_capture_drop(buffered.dropped_before);
-                            }
-                            let packet = &buffered.value;
-                            live_context.record_monitor_capture(MonitorWorldState {
-                                monitor_id: packet.target.id.clone(),
-                                name: packet.target.name.clone(),
-                                is_primary: packet.target.is_primary,
-                                x: packet.target.x,
-                                y: packet.target.y,
-                                width: packet.target.width,
-                                height: packet.target.height,
-                                capture_event_sequence: buffered.sequence,
-                                capture_sequence: packet.capture_sequence,
-                                captured_at: packet.captured_at,
-                                change_score: packet.change_score,
-                                meaningful_change: packet.meaningful_change,
-                                description: String::new(),
-                                confidence: 0.0,
-                                vision_updated_at: None,
-                                privacy,
-                                target_interval_ms: config.capture_interval_ms.max(50),
-                                capture_latency_ms: packet.capture_latency_ms,
-                                dropped_before: buffered.dropped_before,
-                            });
-                        });
+    while !shutdown.load(Ordering::Acquire) && !cancel.load(Ordering::Acquire) {
+        capture_sequence = capture_sequence.saturating_add(1);
+        let captured_at = Utc::now();
+        let started = Instant::now();
+        match monitor.capture_image() {
+            Ok(image) => {
+                let signature = change_signature(&image);
+                let change_score = previous_signature
+                    .as_deref()
+                    .map(|previous| mean_luma_difference(previous, &signature))
+                    .unwrap_or(1.0);
+                let privacy = live_context.current_privacy();
+                let privacy_became_visible = previous_privacy != PrivacyDisposition::Visible
+                    && privacy == PrivacyDisposition::Visible;
+                let meaningful_change = previous_signature.is_none()
+                    || change_score >= config.meaningful_change_threshold
+                    || privacy_became_visible;
+                previous_signature = Some(signature);
+                previous_privacy = privacy;
+                let capture_latency_ms = started.elapsed().as_millis() as u64;
+                let packet = CapturePacket {
+                    capture_sequence,
+                    captured_at,
+                    target: target.clone(),
+                    image: meaningful_change.then_some(image),
+                    change_score,
+                    meaningful_change,
+                    privacy,
+                    capture_latency_ms,
+                };
+                buffer.push_with(packet, |buffered| {
+                    if buffered.dropped_before > 0 {
+                        live_context.record_capture_drop(buffered.dropped_before);
                     }
-                    Ok(Err(error)) => live_context.record_capture_failure(format!(
-                        "monitor {} capture failed: {error}", target.id
-                    )),
-                    Err(error) => live_context.record_capture_failure(format!(
-                        "monitor {} capture task failed: {error}", target.id
-                    )),
-                }
+                    let packet = &buffered.value;
+                    live_context.record_monitor_capture(MonitorWorldState {
+                        monitor_id: packet.target.id.clone(),
+                        name: packet.target.name.clone(),
+                        is_primary: packet.target.is_primary,
+                        x: packet.target.x,
+                        y: packet.target.y,
+                        width: packet.target.width,
+                        height: packet.target.height,
+                        capture_event_sequence: buffered.sequence,
+                        capture_sequence: packet.capture_sequence,
+                        captured_at: packet.captured_at,
+                        change_score: packet.change_score,
+                        meaningful_change: packet.meaningful_change,
+                        description: String::new(),
+                        confidence: 0.0,
+                        vision_updated_at: None,
+                        privacy,
+                        target_interval_ms: config.capture_interval_ms.max(50),
+                        capture_latency_ms: packet.capture_latency_ms,
+                        dropped_before: buffered.dropped_before,
+                    });
+                });
             }
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-            }
+            Err(error) => live_context
+                .record_capture_failure(format!("monitor {} capture failed: {error}", target.id)),
+        }
+
+        let deadline = started + cadence;
+        while !shutdown.load(Ordering::Acquire)
+            && !cancel.load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(50)),
+            );
         }
     }
 }
 
-fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorTarget>> {
+fn monitor_by_native_id(native_id: u32) -> Result<Monitor> {
+    Monitor::all()
+        .context("Failed to enumerate monitors on capture thread")?
+        .into_iter()
+        .find(|monitor| monitor.id().is_ok_and(|id| id == native_id))
+        .ok_or_else(|| anyhow::anyhow!("monitor id {native_id} is no longer connected"))
+}
+
+fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorDescriptor>> {
     let mut targets = Vec::new();
     for monitor in Monitor::all().context("Failed to enumerate monitors")? {
         let native_id = monitor.id().context("Failed to read monitor id")?;
@@ -609,7 +654,8 @@ fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorTarget>> {
         if !config.all_monitors && !is_primary {
             continue;
         }
-        targets.push(MonitorTarget {
+        targets.push(MonitorDescriptor {
+            native_id,
             name: monitor.name().unwrap_or_else(|_| id.clone()),
             x: monitor.x().unwrap_or(0),
             y: monitor.y().unwrap_or(0),
@@ -617,7 +663,6 @@ fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorTarget>> {
             height: monitor.height().unwrap_or(0),
             is_primary,
             id,
-            monitor,
         });
     }
     if targets.is_empty() {
