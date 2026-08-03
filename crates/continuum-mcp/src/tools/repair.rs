@@ -158,7 +158,7 @@ pub fn test(data_dir: &Path, target: RepairTarget) -> TestResponse {
             },
             Some("binary on disk check".into()),
         ),
-        RepairTarget::Memory => file_status(data_dir.join("semantic.sqlite")),
+        RepairTarget::Memory => memory_status(data_dir),
         RepairTarget::ContextWatcher => (
             "unknown".into(),
             Some("context_watcher has no file to probe; call restart instead".into()),
@@ -191,6 +191,49 @@ fn file_status(path: PathBuf) -> (String, Option<String>) {
     } else {
         ("error".into(), Some(format!("missing: {}", path.display())))
     }
+}
+
+/// Health check for `RepairTarget::Memory`: the memory vault is the
+/// authoritative store now (see `docs/memory.md`), so this checks the
+/// vault directory exists and has a derived index (`.continuum/index.db`)
+/// — both are created by `Vault::open`/`open_with` on first use, so their
+/// absence means the vault has never been opened against this data dir (or
+/// was deleted). The legacy `semantic.sqlite` file (still read as a
+/// fallback by `memory_get_fact`/`memory_list_facts` — see `tools/memory.rs`)
+/// is folded in as a cheap secondary note rather than affecting `status`;
+/// it is no longer the primary thing being health-checked here.
+fn memory_status(data_dir: &Path) -> (String, Option<String>) {
+    let vault_dir = data_dir.join("vault");
+    let index_path = vault_dir.join(".continuum").join("index.db");
+    let (status, note) = if !vault_dir.exists() {
+        (
+            "error".to_string(),
+            Some(format!("missing: {}", vault_dir.display())),
+        )
+    } else if !index_path.exists() {
+        (
+            "degrading".to_string(),
+            Some(format!(
+                "vault dir exists but index is missing: {}",
+                index_path.display()
+            )),
+        )
+    } else {
+        ("healthy".to_string(), Some(vault_dir.display().to_string()))
+    };
+
+    let legacy = data_dir.join("semantic.sqlite");
+    let note = if legacy.exists() {
+        Some(format!(
+            "{} (legacy semantic.sqlite also present: {})",
+            note.unwrap_or_default(),
+            legacy.display()
+        ))
+    } else {
+        note
+    };
+
+    (status, note)
 }
 
 fn queue_intent(
@@ -277,6 +320,44 @@ mod tests {
         assert!(resp.restored_path.ends_with("config.toml"));
         let contents = std::fs::read_to_string(dev.join("config.toml")).unwrap();
         assert_eq!(contents, "original");
+    }
+
+    #[test]
+    fn memory_status_errors_when_vault_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let resp = test(tmp.path(), RepairTarget::Memory);
+        assert_eq!(resp.status, "error");
+        assert!(resp.note.unwrap().contains("missing"));
+    }
+
+    #[test]
+    fn memory_status_degrading_when_index_missing() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vault")).unwrap();
+        let resp = test(tmp.path(), RepairTarget::Memory);
+        assert_eq!(resp.status, "degrading");
+    }
+
+    #[test]
+    fn memory_status_healthy_when_vault_and_index_present() {
+        let tmp = TempDir::new().unwrap();
+        let continuum_dir = tmp.path().join("vault").join(".continuum");
+        std::fs::create_dir_all(&continuum_dir).unwrap();
+        std::fs::write(continuum_dir.join("index.db"), b"").unwrap();
+        let resp = test(tmp.path(), RepairTarget::Memory);
+        assert_eq!(resp.status, "healthy");
+    }
+
+    #[test]
+    fn memory_status_notes_legacy_semantic_sqlite_without_changing_status() {
+        let tmp = TempDir::new().unwrap();
+        let continuum_dir = tmp.path().join("vault").join(".continuum");
+        std::fs::create_dir_all(&continuum_dir).unwrap();
+        std::fs::write(continuum_dir.join("index.db"), b"").unwrap();
+        std::fs::write(tmp.path().join("semantic.sqlite"), b"").unwrap();
+        let resp = test(tmp.path(), RepairTarget::Memory);
+        assert_eq!(resp.status, "healthy");
+        assert!(resp.note.unwrap().contains("semantic.sqlite"));
     }
 
     #[test]
