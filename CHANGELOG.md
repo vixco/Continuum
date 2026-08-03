@@ -55,6 +55,9 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **Release Tauri version gate**: align `@tauri-apps/api` with the resolved
+  Tauri 2.11 Rust crate so signed desktop packaging no longer stops on a
+  frontend/backend minor-version mismatch.
 - **CI format gate**: 9 dashboard files that `pnpm format` (Prettier `--check`)
   flagged in the `build-desktop` job are reformatted; `prettier --write` was
   applied so `pnpm format` now passes.
