@@ -332,15 +332,30 @@ impl Vault {
     /// `updated = now`.
     pub async fn save(&self, note: &Note) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.save_locked(note).await
+        self.save_locked(note, true).await
     }
 
-    /// Body of `save`, factored out so callers that already hold
-    /// `write_lock` for a larger multi-note sequence (`resolve_candidate`,
-    /// `sweep_expired`) can persist a note without re-locking — `write_lock`
-    /// is not reentrant, so calling the public `save` from inside one of
-    /// those would deadlock.
-    async fn save_locked(&self, note: &Note) -> Result<()> {
+    /// Like [`Vault::save`], but leaves `note.frontmatter.updated` exactly
+    /// as given instead of re-stamping it to now. `pub(crate)` — the only
+    /// legitimate caller today is [`crate::migrate`], which must carry a
+    /// legacy record's original `updated_at` into the vault; from the
+    /// public API's perspective every other write should always mean "this
+    /// changed right now," so this bypass is deliberately not exposed
+    /// outside the crate.
+    pub(crate) async fn save_preserving_updated(&self, note: &Note) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.save_locked(note, false).await
+    }
+
+    /// Body of `save`/`save_preserving_updated`, factored out so callers
+    /// that already hold `write_lock` for a larger multi-note sequence
+    /// (`resolve_candidate`, `sweep_expired`) can persist a note without
+    /// re-locking — `write_lock` is not reentrant, so calling either public
+    /// entry point from inside one of those would deadlock. `stamp_updated`
+    /// selects between the two callers' contracts: `true` re-stamps
+    /// `updated = now` (every caller except migration), `false` writes
+    /// `note.frontmatter.updated` verbatim.
+    async fn save_locked(&self, note: &Note, stamp_updated: bool) -> Result<()> {
         let id = &note.frontmatter.id;
         let rel = self
             .index
@@ -350,7 +365,9 @@ impl Vault {
         let path = self.dir.join(&rel);
 
         let mut frontmatter = note.frontmatter.clone();
-        frontmatter.updated = Some(Utc::now());
+        if stamp_updated {
+            frontmatter.updated = Some(Utc::now());
+        }
 
         let content = render_document(&frontmatter, &note.body)?;
         atomic_write(&path, &content)?;
@@ -421,11 +438,11 @@ impl Vault {
         match r {
             Resolution::Confirm => {
                 note.frontmatter.status = NodeStatus::Confirmed;
-                self.save_locked(&note).await?;
+                self.save_locked(&note, true).await?;
             }
             Resolution::Reject => {
                 note.frontmatter.status = NodeStatus::Rejected;
-                self.save_locked(&note).await?;
+                self.save_locked(&note, true).await?;
             }
             Resolution::Supersede { replaces } => {
                 if replaces == id {
@@ -456,8 +473,8 @@ impl Vault {
                 // (an idempotent no-op change other than `updated`), then
                 // completes by saving the candidate — no special-casing
                 // needed, and no error on the "already superseded" partner.
-                self.save_locked(&partner).await?;
-                self.save_locked(&note).await?;
+                self.save_locked(&partner, true).await?;
+                self.save_locked(&note, true).await?;
             }
         }
 
@@ -551,7 +568,7 @@ impl Vault {
                 match self.get(&id).await {
                     Ok(mut note) => {
                         note.frontmatter.status = NodeStatus::Archived;
-                        self.save_locked(&note).await?;
+                        self.save_locked(&note, true).await?;
                         archived += 1;
                     }
                     Err(MemoryError::NotFound(_)) => {

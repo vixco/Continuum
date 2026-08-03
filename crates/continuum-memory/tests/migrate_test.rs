@@ -47,6 +47,15 @@ async fn migrates_facts_and_edges_idempotently() {
     ));
     assert_eq!(hits[0].confidence, 1.0);
 
+    // updated is carried over from the legacy updated_at, not stamped to
+    // "now" — otherwise every migrated fact would look freshly changed in
+    // the timeline/graph filters.
+    let note = vault.get(&hits[0].id).await.unwrap();
+    let expected_updated = chrono::DateTime::parse_from_rfc3339("2026-07-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(note.frontmatter.updated, Some(expected_updated));
+
     // edge became a typed relation
     let g = vault.graph(&Default::default()).await.unwrap();
     assert_eq!(g.edges.iter().filter(|e| e.rel == "works_on").count(), 1);
@@ -55,6 +64,10 @@ async fn migrates_facts_and_edges_idempotently() {
     let again = migrate_legacy_semantic(&vault, &legacy).await.unwrap();
     assert_eq!(again.migrated, 0);
     assert_eq!(again.skipped, 2);
+
+    // edge pass 2 must not duplicate the relation on rerun
+    let g2 = vault.graph(&Default::default()).await.unwrap();
+    assert_eq!(g2.edges.iter().filter(|e| e.rel == "works_on").count(), 1);
 }
 
 #[tokio::test]
