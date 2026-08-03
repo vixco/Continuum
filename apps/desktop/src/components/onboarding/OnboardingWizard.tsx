@@ -615,8 +615,8 @@ function VoiceStep({
             ))}
           </div>
           <p className="mt-1.5 text-[11px] text-ink-dim">
-            Continuum speaks English and Dutch out loud; other languages set the UI and triage
-            preference.
+            Sets the language Continuum uses for chat replies. Desktop controls and voice replies
+            currently remain in English.
           </p>
         </div>
       </div>

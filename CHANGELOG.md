@@ -55,6 +55,9 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **English language consistency**: the desktop voice controls no longer leak
+  Dutch labels, and Chat now reads the saved onboarding language preference for
+  every response with a safe English fallback for missing or invalid settings.
 - **Windows installer release**: pin packaging to the stable GitHub-hosted
   Windows 2022 image because WiX 3.14 `candle.exe` fails to start on the new
   VS 2026 image behind `windows-latest`. The release now also uses an absolute
