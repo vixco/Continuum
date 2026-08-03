@@ -21,6 +21,7 @@ mod chat_store;
 mod commands;
 mod components;
 mod events;
+mod memory;
 mod onboarding;
 mod providers;
 mod runtime_bridge;
@@ -75,6 +76,20 @@ fn main() {
 
     let dev_dir = runtime.dev_dir();
     let backups_dir = continuum_core::config::continuum_backups_dir();
+
+    // Memory vault: opened lazily by the first command/health-probe call
+    // (see `memory::MemoryState::vault`), not here.
+    let cfg = runtime.config_snapshot();
+    let vault_dir = cfg.memory.vault.resolve_vault_dir(&dev_dir);
+    let memory_state = Arc::new(
+        memory::MemoryState::new(vault_dir, dev_dir.join("semantic.sqlite")).with_opts(
+            continuum_memory::VaultOptions {
+                watcher_debounce_ms: cfg.memory.vault.watcher_debounce_ms,
+                graph_max_nodes: cfg.memory.vault.graph_max_nodes,
+            },
+        ),
+    );
+    components::register_memory(&health, memory_state.clone());
 
     // Background pollers — the EnterGuard above means tokio::spawn works here.
     continuum_core::health::spawn_poller(
@@ -137,6 +152,7 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(app_state)
         .manage(chat_state)
+        .manage(memory_state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_config,
@@ -148,11 +164,6 @@ fn main() {
             commands::update_triage_threshold,
             commands::get_logs,
             commands::get_memory_summary,
-            commands::search_episodic,
-            commands::delete_episodic,
-            commands::list_semantic,
-            commands::set_semantic,
-            commands::delete_semantic,
             commands::wipe_memory,
             commands::list_automations,
             commands::create_automation,
@@ -198,6 +209,19 @@ fn main() {
             chat::chat_set_conversation_model,
             chat::chat_send_message,
             chat::chat_cancel,
+            memory::memory_graph,
+            memory::memory_search,
+            memory::memory_get_note,
+            memory::memory_create_note,
+            memory::memory_save_note,
+            memory::memory_delete_note,
+            memory::memory_resolve_candidate,
+            memory::memory_pending,
+            memory::memory_events,
+            memory::memory_vault_info,
+            memory::memory_migrate_legacy,
+            memory::memory_rebuild_index,
+            memory::memory_open_vault,
             onboarding::check_claude_cli,
             onboarding::check_claude_auth,
             onboarding::list_audio_input_devices,
@@ -214,6 +238,7 @@ fn main() {
             events::bridge_state(runtime_for_tauri.state.clone(), handle.clone());
             events::bridge_logs(runtime_for_tauri.logs.clone(), handle.clone());
             runtime_bridge::spawn_ipc_listener(runtime_for_tauri.clone(), handle.clone());
+            memory::spawn_watcher_bridge(handle.clone(), memory_state.clone());
             tray::init(app)?;
             Ok(())
         })

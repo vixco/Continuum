@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
 use continuum_core::automations::{Automation, AutomationInput};
@@ -278,52 +277,13 @@ pub async fn get_memory_summary(app: State<'_, Arc<AppState>>) -> Result<MemoryS
     })
 }
 
-/// Placeholder semantic-search hook. Full wiring into [`EpisodicStore`]
-/// ships with the continuum-mcp `memory_query_episodic` tool — the dashboard
-/// piggybacks on that when the main runtime is running; we return an empty
-/// list otherwise so the UI renders "no results" instead of erroring.
-#[tauri::command]
-pub async fn search_episodic(
-    _app: State<'_, Arc<AppState>>,
-    _query: String,
-    _limit: Option<u32>,
-) -> Result<Vec<Value>, String> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub async fn delete_episodic(_app: State<'_, Arc<AppState>>, _id: String) -> Result<(), String> {
-    Ok(())
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SemanticFact {
-    pub key: String,
-    pub value: String,
-    pub source: String,
-    pub confidence: f32,
-    pub namespace: String,
-}
-
-#[tauri::command]
-pub async fn list_semantic(_app: State<'_, Arc<AppState>>) -> Result<Vec<SemanticFact>, String> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub async fn set_semantic(
-    _app: State<'_, Arc<AppState>>,
-    _key: String,
-    _value: String,
-) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_semantic(_app: State<'_, Arc<AppState>>, _key: String) -> Result<(), String> {
-    Ok(())
-}
-
+/// Wipes derived memory data (raw log rows, distillation state) that the
+/// headless runtime maintains. This never touches the memory vault's
+/// markdown notes — the vault is user-owned, Obsidian-compatible source of
+/// truth and is only ever edited through the vault commands (`memory_*`,
+/// see `memory.rs`) or by the user directly on disk. `wipe_memory` exists
+/// for clearing the raw-log/episodic pipeline the orchestrator distills
+/// from, not for deleting vault notes.
 #[tauri::command]
 pub async fn wipe_memory(app: State<'_, Arc<AppState>>, confirm: String) -> Result<(), String> {
     if confirm != "DELETE" {

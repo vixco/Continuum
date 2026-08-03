@@ -22,6 +22,8 @@ use continuum_core::health::{HealthCheck, HealthRegistry, HealthResult};
 use continuum_core::runtime::ContinuumRuntime;
 use continuum_core::state::StateHandle;
 
+use crate::memory::MemoryState;
+
 /// Directory where continuum-desktop.exe was started from. Used by checks that
 /// need to find sibling files (continuum-mcp.exe, prompts/, skills/) that the
 /// installer places next to the binaries.
@@ -102,6 +104,15 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     registry.register(ChatProvidersCheck {
         dev_dir: dev_dir.clone(),
     });
+}
+
+/// Registers the Memory tab's vault health probe. Kept separate from
+/// [`register_default`] (rather than folding `Arc<MemoryState>` into that
+/// function's signature) because `MemoryState` is constructed later in
+/// `main.rs`, after `register_default` already needs to have run so the
+/// other probes are live as early as possible.
+pub fn register_memory(registry: &HealthRegistry, memory_state: Arc<MemoryState>) {
+    registry.register(MemoryVaultCheck { memory_state });
 }
 
 async fn snap(state: &Arc<RwLock<StateHandle>>) -> continuum_core::state::ContinuumState {
@@ -334,6 +345,47 @@ impl HealthCheck for MemoryCheck {
             HealthResult::degrading("memory has no rows yet", 1)
         } else {
             HealthResult::healthy(1)
+        }
+    }
+}
+
+/// Health probe for the Memory tab's vault (Task 10). Unlike the other
+/// probes here, this one talks to `MemoryState` directly rather than
+/// reading `state.json` — the vault has its own lifecycle (lazy open,
+/// per-file quarantine) independent of whether the headless `continuum`
+/// runtime is running, so it stays meaningful even when `runtime_alive`
+/// would report offline.
+struct MemoryVaultCheck {
+    memory_state: Arc<MemoryState>,
+}
+
+#[async_trait]
+impl HealthCheck for MemoryVaultCheck {
+    fn name(&self) -> &str {
+        "memory_vault"
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some(
+            "Check quarantined notes' YAML frontmatter (see the Memory tab), or delete \
+             `.continuum/index.db` under the vault directory to force a full rebuild."
+                .into(),
+        )
+    }
+    async fn probe(&self) -> HealthResult {
+        let vault = match self.memory_state.vault().await {
+            Ok(v) => v,
+            Err(e) => return HealthResult::error(e, 1),
+        };
+        match vault.info().await {
+            Ok(info) if info.quarantined.is_empty() => HealthResult::healthy(1),
+            Ok(info) => HealthResult::degrading(
+                format!(
+                    "{} note(s) quarantined due to parse errors",
+                    info.quarantined.len()
+                ),
+                1,
+            ),
+            Err(e) => HealthResult::error(e.user_message(), 1),
         }
     }
 }

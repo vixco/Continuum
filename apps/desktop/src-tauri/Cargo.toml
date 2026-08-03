@@ -29,6 +29,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 continuum-core = { path = "../../../crates/continuum-core", default-features = false }
 continuum-gateway = { path = "../../../crates/continuum-gateway" }
+continuum-memory = { path = "../../../crates/continuum-memory" }
 cpal = { version = "0.17", optional = true }
 dirs = "6"
 futures-util = "0.3"
