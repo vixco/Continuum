@@ -9,6 +9,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
+use continuum_memory::{NewEvent, Vault};
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
@@ -21,6 +22,7 @@ use crate::senses::types::PerceptionFrame;
 pub async fn run_memory_distiller(
     raw_log: RawLog,
     episodic: Arc<Mutex<EpisodicStore>>,
+    vault: Arc<Vault>,
     config: MemoryConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -48,7 +50,7 @@ pub async fn run_memory_distiller(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(err) = distill_once(&raw_log, &episodic, &config).await {
+                if let Err(err) = distill_once(&raw_log, &episodic, &vault, &config).await {
                     tracing::warn!(
                         layer = "memory",
                         component = "distiller",
@@ -75,6 +77,7 @@ pub async fn run_memory_distiller(
 pub async fn distill_once(
     raw_log: &RawLog,
     episodic: &Arc<Mutex<EpisodicStore>>,
+    vault: &Arc<Vault>,
     config: &MemoryConfig,
 ) -> Result<usize> {
     if !config.distillation_enabled {
@@ -108,6 +111,25 @@ pub async fn distill_once(
             let event = frame_to_memory_event(frame);
             store.insert_event(&event).await?;
             marked.push(frame.id);
+
+            // Best-effort mirror into the vault's event timeline so the
+            // curator / dashboard can see distillation activity. Never
+            // fails the distill pass — a vault write hiccup must not lose
+            // the episodic memory we already committed above.
+            let _ = vault
+                .append_event(NewEvent {
+                    ts: Some(event.ts),
+                    kind: "distilled".to_string(),
+                    text: event.summary.clone(),
+                    project: None,
+                    node_id: None,
+                    reference: event.source_frame_id.clone().map(|f| format!("frame:{f}")),
+                })
+                .await
+                .map_err(|e| {
+                    tracing::warn!(layer = "memory", component = "distiller",
+                        error = %e.user_message(), "vault event append failed");
+                });
         }
     }
 
@@ -265,5 +287,41 @@ mod tests {
         assert!(event.summary.contains("error"));
         assert!(event.tags.contains(&"error".to_string()));
         assert!(event.importance >= 0.7);
+    }
+
+    #[tokio::test]
+    async fn distill_once_feeds_vault_events() {
+        use continuum_memory::{EventRange, VaultOptions};
+
+        // A single undistilled, high-salience (has audio) frame in the raw log.
+        let raw_log = RawLog::open("sqlite::memory:").await.unwrap();
+        let frame = test_frame(Some("remember this bug"), false);
+        raw_log.write_frame(&frame).await.unwrap();
+
+        let episodic_dir = tempfile::tempdir().unwrap();
+        let episodic = Arc::new(Mutex::new(
+            EpisodicStore::open_for_test(episodic_dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault = Arc::new(
+            Vault::open_with(vault_dir.path(), VaultOptions::default())
+                .await
+                .unwrap(),
+        );
+
+        let config = MemoryConfig::default();
+
+        let distilled = distill_once(&raw_log, &episodic, &vault, &config)
+            .await
+            .unwrap();
+        assert_eq!(distilled, 1);
+
+        let events = vault.events(&EventRange::default()).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "distilled");
+        assert!(!events[0].text.is_empty()); // the frame summary
     }
 }
