@@ -26,7 +26,13 @@ use crate::model::{
 };
 
 /// Bump when the schema changes; mismatch triggers drop + recreate.
-const SCHEMA_VERSION: &str = "1";
+///
+/// v2: `nodes.body_hash` now covers the *whole file* (frontmatter + body,
+/// see [`index_file_inner`]) rather than just the body, so a
+/// frontmatter-only edit (e.g. a status flip) is detected as a change. Old
+/// rows would otherwise wrongly short-circuit as unchanged; bumping forces
+/// one clean rebuild rather than requiring a data migration.
+const SCHEMA_VERSION: &str = "2";
 
 /// Handle to the vault's derived SQLite index.
 pub struct Index {
@@ -70,6 +76,31 @@ pub(crate) type ResolvedEdge = (String, String, String, f64, String);
 /// An unresolved `(from_id, target)` pair, ready to upsert into
 /// `unresolved_links`.
 pub(crate) type UnresolvedLink = (String, String);
+
+/// Pooled connection type shared by [`Index::immediate_conn`] and the
+/// write-path `_tx` helper functions built on it.
+type Conn = sqlx::pool::PoolConnection<Sqlite>;
+
+/// One markdown file successfully parsed during [`Index::rebuild`]'s scan
+/// phase, carrying everything needed to insert its `nodes`/`links`/
+/// `nodes_fts` rows without re-reading the file inside the write
+/// transaction. `body_hash` is the whole-file hash (frontmatter + body),
+/// matching what `index_file_inner`'s no-op check compares against.
+struct RebuildNode {
+    rel: String,
+    slug: String,
+    mtime: i64,
+    body_hash: String,
+    parsed: ParsedDoc,
+}
+
+/// One markdown file that failed to parse (or lost a slug collision)
+/// during [`Index::rebuild`]'s scan phase.
+struct RebuildQuarantine {
+    rel: String,
+    error: String,
+    mtime: i64,
+}
 
 /// Resolve raw links against the current node set.
 ///
@@ -339,8 +370,9 @@ fn rel_path(vault_dir: &Path, path: &Path) -> Result<String> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-/// Recursively collect every `.md` file under `dir`, skipping the
-/// `.continuum` index directory.
+/// Recursively collect every `.md` file under `dir` (case-insensitive
+/// extension match, matching the watcher and `index_file_inner`), skipping
+/// the `.continuum` index directory.
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| MemoryError::io(dir, e))?;
     for entry in entries {
@@ -352,10 +384,422 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
                 continue;
             }
             collect_md_files(&path, out)?;
-        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
             out.push(path);
         }
     }
+    Ok(())
+}
+
+/// Body of [`Index::quarantine_path`], run against an already-BEGIN-IMMEDIATE
+/// connection. On `Err`, the caller rolls back; on `Ok`, it commits.
+async fn quarantine_path_tx(conn: &mut Conn, rel: &str, error: &str, mtime: i64) -> Result<()> {
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
+        .bind(rel)
+        .fetch_optional(&mut **conn)
+        .await?;
+    if let Some((id,)) = existing {
+        sqlx::query("DELETE FROM links WHERE from_id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("DELETE FROM nodes WHERE id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+    }
+    sqlx::query(
+        "INSERT INTO quarantine(path, error, mtime) VALUES (?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET error = excluded.error, mtime = excluded.mtime",
+    )
+    .bind(rel)
+    .bind(error)
+    .bind(mtime)
+    .execute(&mut **conn)
+    .await?;
+    Index::bump_reindex_ops(conn, 1).await?;
+    Ok(())
+}
+
+/// Body of [`Index::upsert_node`], run against an already-BEGIN-IMMEDIATE
+/// connection. On `Err`, the caller rolls back; on `Ok` (including the
+/// `SlugCollision` outcome, which writes nothing), it commits.
+async fn upsert_node_tx(
+    conn: &mut Conn,
+    rel: &str,
+    path: &Path,
+    parsed: &ParsedDoc,
+    mtime: i64,
+    body_hash: &str,
+) -> Result<UpsertOutcome> {
+    let fm = &parsed.frontmatter;
+    let body = &parsed.body;
+    let id = fm.id.clone();
+    let slug = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    // Deterministic first-wins on slug collisions: a UNIQUE constraint
+    // violation here would otherwise abort a rebuild mid-flight, after
+    // the top-of-rebuild DELETEs already ran. Whoever already owns the
+    // slug keeps it; the caller quarantines this file instead. Which
+    // file "already owns" the slug is made deterministic by having
+    // `rebuild` walk files in sorted relative-path order.
+    //
+    // Compare by *path*, not id: rewriting this exact file in place
+    // with a new frontmatter id must not look like a foreign
+    // collision against its own prior row (same path, old id).
+    let collision: Option<(String,)> =
+        sqlx::query_as("SELECT path FROM nodes WHERE slug = ? AND path <> ?")
+            .bind(&slug)
+            .bind(rel)
+            .fetch_optional(&mut **conn)
+            .await?;
+    if let Some((occupant_path,)) = collision {
+        return Ok(UpsertOutcome::SlugCollision {
+            slug,
+            occupant_path,
+        });
+    }
+
+    // A rewritten file can carry a new id; purge the old node row(s)
+    // at this path *and* their links/nodes_fts rows. Deleting only the
+    // `nodes` row (as a prior version of this code did) orphaned
+    // `links`/`nodes_fts` rows under the old id forever, since nothing
+    // else ever revisits an id that no longer appears in `nodes`.
+    let old_ids: Vec<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ? AND id <> ?")
+        .bind(rel)
+        .bind(&id)
+        .fetch_all(&mut **conn)
+        .await?;
+    for (old_id,) in &old_ids {
+        sqlx::query("DELETE FROM links WHERE from_id = ?")
+            .bind(old_id)
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
+            .bind(old_id)
+            .execute(&mut **conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM nodes WHERE path = ? AND id <> ?")
+        .bind(rel)
+        .bind(&id)
+        .execute(&mut **conn)
+        .await?;
+    sqlx::query("DELETE FROM quarantine WHERE path = ?")
+        .bind(rel)
+        .execute(&mut **conn)
+        .await?;
+
+    let updated = fm.updated.unwrap_or(fm.created);
+    let snippet = make_snippet(body);
+    let tags_json = serde_json::to_string(&fm.tags).unwrap_or_else(|_| "[]".to_string());
+
+    sqlx::query(
+        "INSERT INTO nodes(
+           id, slug, path, type, title, status, project, confidence, importance,
+           source, sensitivity, created, updated, last_used, expires, supersedes,
+           superseded_by, tags_json, mtime, body_hash, snippet
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           slug = excluded.slug, path = excluded.path, type = excluded.type,
+           title = excluded.title, status = excluded.status, project = excluded.project,
+           confidence = excluded.confidence, importance = excluded.importance,
+           source = excluded.source, sensitivity = excluded.sensitivity,
+           created = excluded.created, updated = excluded.updated,
+           last_used = excluded.last_used, expires = excluded.expires,
+           supersedes = excluded.supersedes, superseded_by = excluded.superseded_by,
+           tags_json = excluded.tags_json, mtime = excluded.mtime,
+           body_hash = excluded.body_hash, snippet = excluded.snippet",
+    )
+    .bind(&id)
+    .bind(&slug)
+    .bind(rel)
+    .bind(fm.node_type.as_str())
+    .bind(&fm.title)
+    .bind(fm.status.as_str())
+    .bind(&fm.project)
+    .bind(fm.confidence as f64)
+    .bind(fm.importance as f64)
+    .bind(source_str(fm.source))
+    .bind(sensitivity_str(fm.sensitivity))
+    .bind(fm.created.to_rfc3339())
+    .bind(updated.to_rfc3339())
+    .bind(fm.last_used.map(|d| d.to_rfc3339()))
+    .bind(fm.expires.map(|d| d.to_rfc3339()))
+    .bind(&fm.supersedes)
+    .bind(&fm.superseded_by)
+    .bind(&tags_json)
+    .bind(mtime)
+    .bind(body_hash)
+    .bind(&snippet)
+    .execute(&mut **conn)
+    .await?;
+
+    sqlx::query("DELETE FROM links WHERE from_id = ?")
+        .bind(&id)
+        .execute(&mut **conn)
+        .await?;
+    for relation in &fm.relations {
+        sqlx::query(
+            "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
+             VALUES (?, ?, ?, ?, 'frontmatter')",
+        )
+        .bind(&id)
+        .bind(&relation.to)
+        .bind(&relation.rel)
+        .bind(relation.confidence as f64)
+        .execute(&mut **conn)
+        .await?;
+    }
+    for target in extract_wiki_links(body) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
+             VALUES (?, ?, 'mentions', 1.0, 'body')",
+        )
+        .bind(&id)
+        .bind(&target)
+        .execute(&mut **conn)
+        .await?;
+    }
+
+    sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
+        .bind(&id)
+        .execute(&mut **conn)
+        .await?;
+    sqlx::query("INSERT INTO nodes_fts(node_id, title, body, tags) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(&fm.title)
+        .bind(body)
+        .bind(fm.tags.join(" "))
+        .execute(&mut **conn)
+        .await?;
+
+    Index::bump_reindex_ops(conn, 1).await?;
+    Ok(UpsertOutcome::Indexed(id))
+}
+
+/// Body of [`Index::remove_path_inner`], run against an already-BEGIN-IMMEDIATE
+/// connection. On `Err`, the caller rolls back; on `Ok`, it commits.
+async fn remove_path_tx(conn: &mut Conn, rel: &str) -> Result<()> {
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
+        .bind(rel)
+        .fetch_optional(&mut **conn)
+        .await?;
+    if let Some((id,)) = existing {
+        sqlx::query("DELETE FROM links WHERE from_id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+        sqlx::query("DELETE FROM nodes WHERE id = ?")
+            .bind(&id)
+            .execute(&mut **conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM quarantine WHERE path = ?")
+        .bind(rel)
+        .execute(&mut **conn)
+        .await?;
+    Index::bump_reindex_ops(conn, 1).await?;
+    Ok(())
+}
+
+/// Body of [`Index::recompute_edges`], run against an already-BEGIN-IMMEDIATE
+/// connection. On `Err`, the caller rolls back; on `Ok`, it commits. Does
+/// not touch `reindex_ops` — recomputing edges isn't itself a note-level
+/// write, and it always runs immediately after one (or after a batch) that
+/// already bumped it.
+async fn recompute_edges_tx(
+    conn: &mut Conn,
+    resolved: &[ResolvedEdge],
+    unresolved: &[UnresolvedLink],
+) -> Result<()> {
+    sqlx::query("DELETE FROM edges")
+        .execute(&mut **conn)
+        .await?;
+    sqlx::query("DELETE FROM unresolved_links")
+        .execute(&mut **conn)
+        .await?;
+    for (from_id, to_id, rel, confidence, origin) in resolved {
+        sqlx::query(
+            "INSERT OR REPLACE INTO edges(from_id, to_id, rel, confidence, origin)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(from_id)
+        .bind(to_id)
+        .bind(rel)
+        .bind(confidence)
+        .bind(origin)
+        .execute(&mut **conn)
+        .await?;
+    }
+    for (from_id, target) in unresolved {
+        sqlx::query("INSERT OR IGNORE INTO unresolved_links(from_id, target) VALUES (?, ?)")
+            .bind(from_id)
+            .bind(target)
+            .execute(&mut **conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Body of [`Index::rebuild`]'s write phase, run against an already-BEGIN-
+/// IMMEDIATE connection: clears the six derived tables and bulk-inserts
+/// the pre-parsed `nodes`/`quarantine`/edge-graph. `nodes`/`links` use
+/// `INSERT OR REPLACE` defensively (a hand-edited vault could in principle
+/// carry two files with the same frontmatter `id`, which plain `INSERT`
+/// would abort the whole rebuild over); every other insert here operates
+/// on rows that are unique by construction. On `Err`, the caller rolls
+/// back; on `Ok`, it commits.
+async fn rebuild_tx(
+    conn: &mut Conn,
+    nodes: &[RebuildNode],
+    quarantine: &[RebuildQuarantine],
+    resolved: &[ResolvedEdge],
+    unresolved: &[UnresolvedLink],
+) -> Result<()> {
+    for table in [
+        "nodes",
+        "links",
+        "nodes_fts",
+        "unresolved_links",
+        "edges",
+        "quarantine",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut **conn)
+            .await?;
+    }
+
+    for n in nodes {
+        let fm = &n.parsed.frontmatter;
+        let body = &n.parsed.body;
+        let id = &fm.id;
+        let updated = fm.updated.unwrap_or(fm.created);
+        let snippet = make_snippet(body);
+        let tags_json = serde_json::to_string(&fm.tags).unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO nodes(
+               id, slug, path, type, title, status, project, confidence, importance,
+               source, sensitivity, created, updated, last_used, expires, supersedes,
+               superseded_by, tags_json, mtime, body_hash, snippet
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(&n.slug)
+        .bind(&n.rel)
+        .bind(fm.node_type.as_str())
+        .bind(&fm.title)
+        .bind(fm.status.as_str())
+        .bind(&fm.project)
+        .bind(fm.confidence as f64)
+        .bind(fm.importance as f64)
+        .bind(source_str(fm.source))
+        .bind(sensitivity_str(fm.sensitivity))
+        .bind(fm.created.to_rfc3339())
+        .bind(updated.to_rfc3339())
+        .bind(fm.last_used.map(|d| d.to_rfc3339()))
+        .bind(fm.expires.map(|d| d.to_rfc3339()))
+        .bind(&fm.supersedes)
+        .bind(&fm.superseded_by)
+        .bind(&tags_json)
+        .bind(n.mtime)
+        .bind(&n.body_hash)
+        .bind(&snippet)
+        .execute(&mut **conn)
+        .await?;
+
+        for relation in &fm.relations {
+            sqlx::query(
+                "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
+                 VALUES (?, ?, ?, ?, 'frontmatter')",
+            )
+            .bind(id)
+            .bind(&relation.to)
+            .bind(&relation.rel)
+            .bind(relation.confidence as f64)
+            .execute(&mut **conn)
+            .await?;
+        }
+        for target in extract_wiki_links(body) {
+            sqlx::query(
+                "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
+                 VALUES (?, ?, 'mentions', 1.0, 'body')",
+            )
+            .bind(id)
+            .bind(&target)
+            .execute(&mut **conn)
+            .await?;
+        }
+
+        sqlx::query("INSERT INTO nodes_fts(node_id, title, body, tags) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(&fm.title)
+            .bind(body)
+            .bind(fm.tags.join(" "))
+            .execute(&mut **conn)
+            .await?;
+    }
+
+    for q in quarantine {
+        sqlx::query("INSERT INTO quarantine(path, error, mtime) VALUES (?, ?, ?)")
+            .bind(&q.rel)
+            .bind(&q.error)
+            .bind(q.mtime)
+            .execute(&mut **conn)
+            .await?;
+    }
+
+    for (from_id, to_id, rel, confidence, origin) in resolved {
+        sqlx::query(
+            "INSERT OR REPLACE INTO edges(from_id, to_id, rel, confidence, origin)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(from_id)
+        .bind(to_id)
+        .bind(rel)
+        .bind(confidence)
+        .bind(origin)
+        .execute(&mut **conn)
+        .await?;
+    }
+    for (from_id, target) in unresolved {
+        sqlx::query("INSERT OR IGNORE INTO unresolved_links(from_id, target) VALUES (?, ?)")
+            .bind(from_id)
+            .bind(target)
+            .execute(&mut **conn)
+            .await?;
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO meta(key, value) VALUES ('last_full_index_at', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(&now)
+    .execute(&mut **conn)
+    .await?;
+
+    let write_count = nodes.len() as i64 + quarantine.len() as i64;
+    Index::bump_reindex_ops(conn, write_count).await?;
+
     Ok(())
 }
 
@@ -384,6 +828,50 @@ impl Index {
     /// that need raw queries against the index.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Begin an IMMEDIATE transaction: takes SQLite's write lock at BEGIN
+    /// time, closing the check-then-write TOCTOU window between two
+    /// processes (a deferred `sqlx::pool::begin()` only locks at the first
+    /// write, so a reader/writer race can interleave between the check and
+    /// the write). All write paths use this instead of `self.pool.begin()`.
+    /// sqlx has no built-in `BEGIN IMMEDIATE`, so it's issued raw.
+    async fn immediate_conn(&self) -> Result<Conn> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        Ok(conn)
+    }
+
+    /// Commit an [`immediate_conn`](Self::immediate_conn) transaction.
+    async fn commit(conn: &mut Conn) -> Result<()> {
+        sqlx::query("COMMIT").execute(&mut **conn).await?;
+        Ok(())
+    }
+
+    /// Roll back an [`immediate_conn`](Self::immediate_conn) transaction,
+    /// swallowing any rollback error (called from error paths where the
+    /// original error is what the caller should see).
+    async fn rollback_quiet(conn: &mut Conn) {
+        let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
+    }
+
+    /// Bump the `reindex_ops` meta counter by `n` — a cheap, test-visible
+    /// (and dashboard-visible) signal that a write actually happened, as
+    /// opposed to a no-op skip. Runs on the given transaction connection.
+    /// `n == 0` is a no-op (skips the write entirely).
+    async fn bump_reindex_ops(conn: &mut Conn, n: i64) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO meta(key, value) VALUES ('reindex_ops', ?)
+             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?",
+        )
+        .bind(n.to_string())
+        .bind(n)
+        .execute(&mut **conn)
+        .await?;
+        Ok(())
     }
 
     async fn create_schema(&self) -> Result<()> {
@@ -525,7 +1013,11 @@ impl Index {
         recompute: bool,
     ) -> Result<IndexOutcome> {
         let rel = rel_path(vault_dir, path)?;
-        if rel.starts_with(".continuum/") || !rel.ends_with(".md") {
+        let is_md = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        if rel.starts_with(".continuum/") || !is_md {
             return Ok(IndexOutcome::Skipped);
         }
 
@@ -539,9 +1031,31 @@ impl Index {
         };
 
         let mtime = mtime_of(path)?;
+        // Whole-file hash (frontmatter + body): a frontmatter-only edit
+        // (e.g. a status flip) must still be detected as a change, so this
+        // hashes the raw file text rather than just the parsed body.
+        let file_hash = fnv1a(&content);
+
+        // No-op short-circuit: an unchanged file (same mtime AND same
+        // whole-file hash as the last indexed pass) is skipped without any
+        // write — the common case when the watcher re-fires on an
+        // untouched file, or a batch reindex revisits everything.
+        let stored: Option<(i64, String)> =
+            sqlx::query_as("SELECT mtime, body_hash FROM nodes WHERE path = ?")
+                .bind(&rel)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some((stored_mtime, stored_hash)) = stored {
+            if stored_mtime == mtime && stored_hash == file_hash {
+                return Ok(IndexOutcome::Skipped);
+            }
+        }
 
         match parse_document(&content) {
-            Ok(parsed) => match self.upsert_node(&rel, path, &parsed, mtime).await? {
+            Ok(parsed) => match self
+                .upsert_node(&rel, path, &parsed, mtime, &file_hash)
+                .await?
+            {
                 UpsertOutcome::Indexed(id) => {
                     if recompute {
                         self.recompute_edges().await?;
@@ -572,36 +1086,17 @@ impl Index {
     }
 
     async fn quarantine_path(&self, rel: &str, error: &str, mtime: i64) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
-            .bind(rel)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some((id,)) = existing {
-            sqlx::query("DELETE FROM links WHERE from_id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM nodes WHERE id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
+        let mut conn = self.immediate_conn().await?;
+        match quarantine_path_tx(&mut conn, rel, error, mtime).await {
+            Ok(()) => {
+                Self::commit(&mut conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                Err(e)
+            }
         }
-        sqlx::query(
-            "INSERT INTO quarantine(path, error, mtime) VALUES (?, ?, ?)
-             ON CONFLICT(path) DO UPDATE SET error = excluded.error, mtime = excluded.mtime",
-        )
-        .bind(rel)
-        .bind(error)
-        .bind(mtime)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     async fn upsert_node(
@@ -610,159 +1105,19 @@ impl Index {
         path: &Path,
         parsed: &ParsedDoc,
         mtime: i64,
+        body_hash: &str,
     ) -> Result<UpsertOutcome> {
-        let fm = &parsed.frontmatter;
-        let body = &parsed.body;
-        let id = fm.id.clone();
-        let slug = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-
-        let mut tx = self.pool.begin().await?;
-
-        // Deterministic first-wins on slug collisions: a UNIQUE constraint
-        // violation here would otherwise abort a rebuild mid-flight, after
-        // the top-of-rebuild DELETEs already ran. Whoever already owns the
-        // slug keeps it; the caller quarantines this file instead. Which
-        // file "already owns" the slug is made deterministic by having
-        // `rebuild` walk files in sorted relative-path order.
-        //
-        // Compare by *path*, not id: rewriting this exact file in place
-        // with a new frontmatter id must not look like a foreign
-        // collision against its own prior row (same path, old id).
-        let collision: Option<(String,)> =
-            sqlx::query_as("SELECT path FROM nodes WHERE slug = ? AND path <> ?")
-                .bind(&slug)
-                .bind(rel)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if let Some((occupant_path,)) = collision {
-            return Ok(UpsertOutcome::SlugCollision {
-                slug,
-                occupant_path,
-            });
+        let mut conn = self.immediate_conn().await?;
+        match upsert_node_tx(&mut conn, rel, path, parsed, mtime, body_hash).await {
+            Ok(outcome) => {
+                Self::commit(&mut conn).await?;
+                Ok(outcome)
+            }
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                Err(e)
+            }
         }
-
-        // A rewritten file can carry a new id; purge the old node row(s)
-        // at this path *and* their links/nodes_fts rows. Deleting only the
-        // `nodes` row (as a prior version of this code did) orphaned
-        // `links`/`nodes_fts` rows under the old id forever, since nothing
-        // else ever revisits an id that no longer appears in `nodes`.
-        let old_ids: Vec<(String,)> =
-            sqlx::query_as("SELECT id FROM nodes WHERE path = ? AND id <> ?")
-                .bind(rel)
-                .bind(&id)
-                .fetch_all(&mut *tx)
-                .await?;
-        for (old_id,) in &old_ids {
-            sqlx::query("DELETE FROM links WHERE from_id = ?")
-                .bind(old_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
-                .bind(old_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("DELETE FROM nodes WHERE path = ? AND id <> ?")
-            .bind(rel)
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM quarantine WHERE path = ?")
-            .bind(rel)
-            .execute(&mut *tx)
-            .await?;
-
-        let updated = fm.updated.unwrap_or(fm.created);
-        let snippet = make_snippet(body);
-        let body_hash = fnv1a(body);
-        let tags_json = serde_json::to_string(&fm.tags).unwrap_or_else(|_| "[]".to_string());
-
-        sqlx::query(
-            "INSERT INTO nodes(
-               id, slug, path, type, title, status, project, confidence, importance,
-               source, sensitivity, created, updated, last_used, expires, supersedes,
-               superseded_by, tags_json, mtime, body_hash, snippet
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(id) DO UPDATE SET
-               slug = excluded.slug, path = excluded.path, type = excluded.type,
-               title = excluded.title, status = excluded.status, project = excluded.project,
-               confidence = excluded.confidence, importance = excluded.importance,
-               source = excluded.source, sensitivity = excluded.sensitivity,
-               created = excluded.created, updated = excluded.updated,
-               last_used = excluded.last_used, expires = excluded.expires,
-               supersedes = excluded.supersedes, superseded_by = excluded.superseded_by,
-               tags_json = excluded.tags_json, mtime = excluded.mtime,
-               body_hash = excluded.body_hash, snippet = excluded.snippet",
-        )
-        .bind(&id)
-        .bind(&slug)
-        .bind(rel)
-        .bind(fm.node_type.as_str())
-        .bind(&fm.title)
-        .bind(fm.status.as_str())
-        .bind(&fm.project)
-        .bind(fm.confidence as f64)
-        .bind(fm.importance as f64)
-        .bind(source_str(fm.source))
-        .bind(sensitivity_str(fm.sensitivity))
-        .bind(fm.created.to_rfc3339())
-        .bind(updated.to_rfc3339())
-        .bind(fm.last_used.map(|d| d.to_rfc3339()))
-        .bind(fm.expires.map(|d| d.to_rfc3339()))
-        .bind(&fm.supersedes)
-        .bind(&fm.superseded_by)
-        .bind(&tags_json)
-        .bind(mtime)
-        .bind(&body_hash)
-        .bind(&snippet)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("DELETE FROM links WHERE from_id = ?")
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
-        for relation in &fm.relations {
-            sqlx::query(
-                "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
-                 VALUES (?, ?, ?, ?, 'frontmatter')",
-            )
-            .bind(&id)
-            .bind(&relation.to)
-            .bind(&relation.rel)
-            .bind(relation.confidence as f64)
-            .execute(&mut *tx)
-            .await?;
-        }
-        for target in extract_wiki_links(body) {
-            sqlx::query(
-                "INSERT OR REPLACE INTO links(from_id, target, rel, confidence, origin)
-                 VALUES (?, ?, 'mentions', 1.0, 'body')",
-            )
-            .bind(&id)
-            .bind(&target)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO nodes_fts(node_id, title, body, tags) VALUES (?, ?, ?, ?)")
-            .bind(&id)
-            .bind(&fm.title)
-            .bind(body)
-            .bind(fm.tags.join(" "))
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        Ok(UpsertOutcome::Indexed(id))
     }
 
     /// Remove any indexed node/quarantine entry for `path` (which need not
@@ -778,30 +1133,14 @@ impl Index {
         recompute: bool,
     ) -> Result<()> {
         let rel = rel_path(vault_dir, path)?;
-        let mut tx = self.pool.begin().await?;
-        let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
-            .bind(&rel)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some((id,)) = existing {
-            sqlx::query("DELETE FROM links WHERE from_id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM nodes WHERE id = ?")
-                .bind(&id)
-                .execute(&mut *tx)
-                .await?;
+        let mut conn = self.immediate_conn().await?;
+        match remove_path_tx(&mut conn, &rel).await {
+            Ok(()) => Self::commit(&mut conn).await?,
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                return Err(e);
+            }
         }
-        sqlx::query("DELETE FROM quarantine WHERE path = ?")
-            .bind(&rel)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
         if recompute {
             self.recompute_edges().await?;
         }
@@ -859,52 +1198,28 @@ impl Index {
 
         let (resolved, unresolved) = resolve_links(&links, &by_slug, &by_title, &by_id);
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM edges").execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM unresolved_links")
-            .execute(&mut *tx)
-            .await?;
-        for (from_id, to_id, rel, confidence, origin) in &resolved {
-            sqlx::query(
-                "INSERT OR REPLACE INTO edges(from_id, to_id, rel, confidence, origin)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(from_id)
-            .bind(to_id)
-            .bind(rel)
-            .bind(confidence)
-            .bind(origin)
-            .execute(&mut *tx)
-            .await?;
+        let mut conn = self.immediate_conn().await?;
+        match recompute_edges_tx(&mut conn, &resolved, &unresolved).await {
+            Ok(()) => Self::commit(&mut conn).await,
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                Err(e)
+            }
         }
-        for (from_id, target) in &unresolved {
-            sqlx::query("INSERT OR IGNORE INTO unresolved_links(from_id, target) VALUES (?, ?)")
-                .bind(from_id)
-                .bind(target)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Fully rebuild the index from the markdown files under `vault_dir`.
-    /// Clears `nodes`, `links`, `nodes_fts`, `unresolved_links`, `edges`,
-    /// and `quarantine` first — `events` is never touched.
+    ///
+    /// Every file is walked and parsed into memory FIRST — slug collisions
+    /// are resolved and link targets are pre-resolved against that
+    /// in-memory set — before any table is touched. The entire replacement
+    /// (clearing `nodes`, `links`, `nodes_fts`, `unresolved_links`,
+    /// `edges`, `quarantine`, then bulk-inserting everything) then runs as
+    /// ONE `BEGIN IMMEDIATE` transaction, so another connection in WAL mode
+    /// only ever sees the old snapshot or the fully-new one — never an
+    /// empty index mid-rebuild. `events` is never touched; `meta` is only
+    /// touched for `last_full_index_at`/`reindex_ops`.
     pub async fn rebuild(&self, vault_dir: &Path) -> Result<IndexStats> {
-        sqlx::query("DELETE FROM nodes").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM links").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM nodes_fts")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM unresolved_links")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM edges").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM quarantine")
-            .execute(&self.pool)
-            .await?;
-
         let mut files = Vec::new();
         collect_md_files(vault_dir, &mut files)?;
 
@@ -919,26 +1234,118 @@ impl Index {
         }
         files_rel.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut indexed = 0u64;
-        let mut quarantined = 0u64;
-        for (_, file) in &files_rel {
-            match self.index_file_inner(vault_dir, file, false).await? {
-                IndexOutcome::Indexed(_) => indexed += 1,
-                IndexOutcome::Quarantined => quarantined += 1,
-                IndexOutcome::Removed | IndexOutcome::Skipped => {}
+        // Phase 1: read + parse every file into memory. No table is
+        // touched here, so a mid-scan IO error leaves the existing index
+        // completely untouched.
+        let mut nodes: Vec<RebuildNode> = Vec::new();
+        let mut quarantine: Vec<RebuildQuarantine> = Vec::new();
+        // First-wins slug dedupe, in sorted-rel-path order: maps the
+        // lowercased slug to the rel path of the file that already claimed
+        // it, so a later collision's error message can name the occupant.
+        let mut taken_slugs: HashMap<String, String> = HashMap::new();
+
+        for (rel, file) in &files_rel {
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                // Deleted between the walk and the read (e.g. a concurrent
+                // save-then-delete): simply not part of this rebuild.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(MemoryError::io(file, e)),
+            };
+            let mtime = mtime_of(file)?;
+
+            match parse_document(&content) {
+                Ok(parsed) => {
+                    let slug = file
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if let Some(occupant_path) = taken_slugs.get(&slug) {
+                        let error = format!("slug '{slug}' already used by {occupant_path}");
+                        quarantine.push(RebuildQuarantine {
+                            rel: rel.clone(),
+                            error,
+                            mtime,
+                        });
+                        continue;
+                    }
+                    taken_slugs.insert(slug.clone(), rel.clone());
+                    let body_hash = fnv1a(&content);
+                    nodes.push(RebuildNode {
+                        rel: rel.clone(),
+                        slug,
+                        mtime,
+                        body_hash,
+                        parsed,
+                    });
+                }
+                Err(parse_err) => {
+                    quarantine.push(RebuildQuarantine {
+                        rel: rel.clone(),
+                        error: parse_err.to_string(),
+                        mtime,
+                    });
+                }
             }
         }
 
-        self.recompute_edges().await?;
+        // Resolve the edge graph in-memory (mirrors `recompute_edges`,
+        // including its determinism rule: ascending id, first occurrence
+        // wins a shared slug/title). `nodes` is sorted by rel path above,
+        // so re-sort a view of it by id for this step.
+        let mut by_id_order: Vec<&RebuildNode> = nodes.iter().collect();
+        by_id_order.sort_by(|a, b| a.parsed.frontmatter.id.cmp(&b.parsed.frontmatter.id));
 
-        let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO meta(key, value) VALUES ('last_full_index_at', ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
+        let mut by_slug: HashMap<String, String> = HashMap::new();
+        let mut by_title: HashMap<String, String> = HashMap::new();
+        let mut by_id: HashMap<String, String> = HashMap::new();
+        for n in &by_id_order {
+            let id = &n.parsed.frontmatter.id;
+            by_slug.entry(n.slug.clone()).or_insert_with(|| id.clone());
+            by_title
+                .entry(n.parsed.frontmatter.title.to_lowercase())
+                .or_insert_with(|| id.clone());
+            by_id.insert(id.clone(), id.clone());
+        }
+
+        let mut links: Vec<RawLink> = Vec::new();
+        for n in &nodes {
+            let id = &n.parsed.frontmatter.id;
+            for relation in &n.parsed.frontmatter.relations {
+                links.push(RawLink {
+                    from_id: id.clone(),
+                    target: relation.to.clone(),
+                    rel: relation.rel.clone(),
+                    confidence: relation.confidence as f64,
+                    origin: "frontmatter".to_string(),
+                });
+            }
+            for target in extract_wiki_links(&n.parsed.body) {
+                links.push(RawLink {
+                    from_id: id.clone(),
+                    target,
+                    rel: "mentions".to_string(),
+                    confidence: 1.0,
+                    origin: "body".to_string(),
+                });
+            }
+        }
+        let (resolved, unresolved) = resolve_links(&links, &by_slug, &by_title, &by_id);
+
+        let indexed = nodes.len() as u64;
+        let quarantined = quarantine.len() as u64;
+
+        // Phase 2: one IMMEDIATE transaction replaces every derived table.
+        let mut conn = self.immediate_conn().await?;
+        let result = rebuild_tx(&mut conn, &nodes, &quarantine, &resolved, &unresolved).await;
+        match result {
+            Ok(()) => Self::commit(&mut conn).await?,
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                return Err(e);
+            }
+        }
 
         tracing::info!(
             layer = "memory",

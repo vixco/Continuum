@@ -438,6 +438,111 @@ fn fts_query_sanitizes() {
 }
 
 #[tokio::test]
+async fn reindex_skips_unchanged_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "facts/a.md",
+        &note("mem_a", "fact", "A", "body"),
+    );
+    let idx = open_index(tmp.path()).await;
+    idx.rebuild(tmp.path()).await.unwrap();
+    let before: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_optional(idx.pool())
+        .await
+        .unwrap()
+        .unwrap_or(("0".into(),));
+    // Re-index the same unchanged file — must be a no-op (mtime+hash short-circuit).
+    idx.index_file(tmp.path(), &tmp.path().join("facts/a.md"))
+        .await
+        .unwrap();
+    let after: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_optional(idx.pool())
+        .await
+        .unwrap()
+        .unwrap_or(("0".into(),));
+    assert_eq!(
+        before.0, after.0,
+        "unchanged file must not bump reindex_ops"
+    );
+    // Changing the body must reindex (ops bumps).
+    write(
+        tmp.path(),
+        "facts/a.md",
+        &note("mem_a", "fact", "A", "body changed"),
+    );
+    idx.index_file(tmp.path(), &tmp.path().join("facts/a.md"))
+        .await
+        .unwrap();
+    let after2: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_one(idx.pool())
+        .await
+        .unwrap();
+    assert_ne!(after.0, after2.0);
+}
+
+#[tokio::test]
+async fn uppercase_md_extension_is_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "facts/upper.MD",
+        &note("mem_u", "fact", "Upper", ""),
+    );
+    let idx = open_index(tmp.path()).await;
+    let stats = idx.rebuild(tmp.path()).await.unwrap();
+    assert_eq!(stats.indexed, 1);
+}
+
+#[tokio::test]
+async fn rebuild_is_atomic_for_concurrent_readers() {
+    // A second connection must never observe an EMPTY nodes table while a
+    // rebuild over a non-empty vault is in flight (old-or-new, never empty).
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..300 {
+        write(
+            tmp.path(),
+            &format!("notes/n{i}.md"),
+            &note(&format!("mem_{i}"), "note", &format!("N {i}"), "x"),
+        );
+    }
+    let idx = std::sync::Arc::new(open_index(tmp.path()).await);
+    idx.rebuild(tmp.path()).await.unwrap();
+    let reader = {
+        let db = tmp.path().join(".continuum/index.db");
+        tokio::spawn(async move {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .connect(&format!("sqlite:{}", db.display()))
+                .await
+                .unwrap();
+            let mut min_seen = i64::MAX;
+            for _ in 0..200 {
+                let n: (i64,) = sqlx::query_as("SELECT count(*) FROM nodes")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                min_seen = min_seen.min(n.0);
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            min_seen
+        })
+    };
+    let idx2 = idx.clone();
+    let root = tmp.path().to_path_buf();
+    let rebuilder = tokio::spawn(async move {
+        for _ in 0..3 {
+            idx2.rebuild(&root).await.unwrap();
+        }
+    });
+    rebuilder.await.unwrap();
+    let min_seen = reader.await.unwrap();
+    assert!(
+        min_seen > 0,
+        "reader observed an empty nodes table mid-rebuild"
+    );
+}
+
+#[tokio::test]
 async fn perf_smoke_1000_notes() {
     let tmp = tempfile::tempdir().unwrap();
     for i in 0..1000 {
