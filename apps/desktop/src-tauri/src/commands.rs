@@ -20,6 +20,7 @@ use continuum_core::state::{ComponentHealth, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
 use continuum_core::workers::{WorkerIntent, WorkerSnapshot};
 
+use crate::runtime_bridge::{self, PipeHealth};
 use crate::AppState;
 
 /// Full state snapshot. The dashboard calls this once on mount and then
@@ -876,6 +877,17 @@ pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<Runtime
     })
 }
 
+/// Health of the named-pipe bridge to the running `continuum.exe` process.
+///
+/// Surfaces the two latches maintained by [`runtime_bridge::pipe`] on
+/// Windows. On non-Windows the result reports `connected = false` and
+/// `pipe_name = None` so the UI can render "not available" honestly
+/// instead of an error.
+#[tauri::command]
+pub async fn pipe_health() -> Result<PipeHealth, String> {
+    Ok(runtime_bridge::current_pipe_health())
+}
+
 #[tauri::command]
 pub async fn start_runtime() -> Result<(), String> {
     let Some(bin) = locate_runtime_binary() else {
@@ -919,7 +931,7 @@ fn locate_runtime_binary() -> Option<std::path::PathBuf> {
 /// so we mirror the registered `#[tool]` functions in
 /// `crates/continuum-mcp/src/server.rs` as a static manifest. When the
 /// tool set changes, update both sides in the same commit.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct McpTool {
     pub namespace: String,
     pub name: String,
@@ -931,12 +943,15 @@ pub struct McpTool {
 /// without any further client-side aggregation.
 #[tauri::command]
 pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
-    Ok(MCP_TOOL_MANIFEST.to_vec())
+    Ok(mcp_tool_manifest())
 }
 
 /// Single source of truth for the dashboard's MCP tool list. Keep in lockstep
 /// with the `#[tool]` functions in `crates/continuum-mcp/src/server.rs`.
-const MCP_TOOL_MANIFEST: &[McpTool] = &[
+/// Wrapped in a function because `McpTool` owns `String`s, which can't be
+/// built inside a `const` expression on stable Rust.
+fn mcp_tool_manifest() -> Vec<McpTool> {
+    vec![
     // --- memory ---
     McpTool {
         namespace: "memory".into(),
@@ -1048,4 +1063,6 @@ const MCP_TOOL_MANIFEST: &[McpTool] = &[
         name: "workers_worker_list".into(),
         description: "List recent worker snapshots".into(),
     },
-];
+]
+}
+
