@@ -10,16 +10,20 @@
 //! `events` is never touched by a rebuild — only a schema-version reset
 //! (which drops everything) removes it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use chrono::{DateTime, Utc};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::error::{MemoryError, Result};
 use crate::frontmatter::{extract_wiki_links, parse_document, ParsedDoc};
-use crate::model::{IndexStats, Sensitivity, Source};
+use crate::model::{
+    GhostNode, GraphData, GraphEdge, GraphFilter, GraphNode, IndexStats, NodeStatus, NodeSummary,
+    NodeType, QuarantineEntry, Sensitivity, Source,
+};
 
 /// Bump when the schema changes; mismatch triggers drop + recreate.
 const SCHEMA_VERSION: &str = "1";
@@ -133,6 +137,163 @@ fn sensitivity_str(sensitivity: Sensitivity) -> &'static str {
         Sensitivity::Internal => "internal",
         Sensitivity::Sensitive => "sensitive",
     }
+}
+
+/// Inverse of [`source_str`]; `None` for unrecognized strings.
+fn parse_source(s: &str) -> Option<Source> {
+    match s {
+        "user_statement" => Some(Source::UserStatement),
+        "observed" => Some(Source::Observed),
+        "inferred" => Some(Source::Inferred),
+        "agent_run" => Some(Source::AgentRun),
+        "chat" => Some(Source::Chat),
+        "manual" => Some(Source::Manual),
+        _ => None,
+    }
+}
+
+/// Inverse of [`sensitivity_str`]; `None` for unrecognized strings.
+fn parse_sensitivity(s: &str) -> Option<Sensitivity> {
+    match s {
+        "public" => Some(Sensitivity::Public),
+        "internal" => Some(Sensitivity::Internal),
+        "sensitive" => Some(Sensitivity::Sensitive),
+        _ => None,
+    }
+}
+
+/// Parse a `nodes.type` value, defaulting to [`NodeType::Note`] and logging
+/// a warning for unrecognized values (a corrupted or hand-edited row should
+/// never crash a query).
+fn parse_node_type_or_warn(s: &str) -> NodeType {
+    NodeType::parse(s).unwrap_or_else(|| {
+        tracing::warn!(
+            layer = "memory",
+            component = "index",
+            raw = %s,
+            "unknown node type in row, defaulting to note"
+        );
+        NodeType::Note
+    })
+}
+
+/// Parse a `nodes.status` value, defaulting to [`NodeStatus::Confirmed`]
+/// and logging a warning for unrecognized values.
+fn parse_node_status_or_warn(s: &str) -> NodeStatus {
+    NodeStatus::parse(s).unwrap_or_else(|| {
+        tracing::warn!(
+            layer = "memory",
+            component = "index",
+            raw = %s,
+            "unknown node status in row, defaulting to confirmed"
+        );
+        NodeStatus::Confirmed
+    })
+}
+
+/// Parse a `nodes.source` value, defaulting to [`Source::Manual`] and
+/// logging a warning for unrecognized values.
+fn parse_source_or_warn(s: &str) -> Source {
+    parse_source(s).unwrap_or_else(|| {
+        tracing::warn!(
+            layer = "memory",
+            component = "index",
+            raw = %s,
+            "unknown source in row, defaulting to manual"
+        );
+        Source::Manual
+    })
+}
+
+/// Parse a `nodes.sensitivity` value, defaulting to
+/// [`Sensitivity::Internal`] and logging a warning for unrecognized values.
+fn parse_sensitivity_or_warn(s: &str) -> Sensitivity {
+    parse_sensitivity(s).unwrap_or_else(|| {
+        tracing::warn!(
+            layer = "memory",
+            component = "index",
+            raw = %s,
+            "unknown sensitivity in row, defaulting to internal"
+        );
+        Sensitivity::Internal
+    })
+}
+
+/// Hydrate a `nodes` row (any `SELECT *`-shaped query against it) into a
+/// [`NodeSummary`]. Unrecognized enum strings fall back to safe defaults
+/// (logged once per call, see the `parse_*_or_warn` helpers) rather than
+/// failing the whole query over one corrupted row.
+fn summary_from_row(row: &SqliteRow) -> NodeSummary {
+    let type_str: String = row.try_get("type").unwrap_or_default();
+    let status_str: String = row.try_get("status").unwrap_or_default();
+    let source_str: String = row.try_get("source").unwrap_or_default();
+    let sensitivity_str: String = row.try_get("sensitivity").unwrap_or_default();
+    let tags_json: String = row
+        .try_get("tags_json")
+        .unwrap_or_else(|_| "[]".to_string());
+    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+    let snippet: String = row.try_get("snippet").unwrap_or_default();
+
+    NodeSummary {
+        id: row.try_get("id").unwrap_or_default(),
+        slug: row.try_get("slug").unwrap_or_default(),
+        title: row.try_get("title").unwrap_or_default(),
+        node_type: parse_node_type_or_warn(&type_str),
+        status: parse_node_status_or_warn(&status_str),
+        project: row.try_get::<Option<String>, _>("project").unwrap_or(None),
+        confidence: row.try_get::<f64, _>("confidence").unwrap_or(0.0) as f32,
+        importance: row.try_get::<f64, _>("importance").unwrap_or(0.0) as f32,
+        source: parse_source_or_warn(&source_str),
+        sensitivity: parse_sensitivity_or_warn(&sensitivity_str),
+        created: row.try_get("created").unwrap_or_default(),
+        updated: row.try_get("updated").unwrap_or_default(),
+        tags,
+        snippet: if snippet.is_empty() {
+            None
+        } else {
+            Some(snippet)
+        },
+    }
+}
+
+/// Hydrate a `nodes` row into the leaner [`GraphNode`] shape used by
+/// `graph`/`neighbors` (no source/sensitivity/tags/snippet).
+fn graph_node_from_row(row: &SqliteRow) -> GraphNode {
+    let type_str: String = row.try_get("type").unwrap_or_default();
+    let status_str: String = row.try_get("status").unwrap_or_default();
+
+    GraphNode {
+        id: row.try_get("id").unwrap_or_default(),
+        slug: row.try_get("slug").unwrap_or_default(),
+        title: row.try_get("title").unwrap_or_default(),
+        node_type: parse_node_type_or_warn(&type_str),
+        status: parse_node_status_or_warn(&status_str),
+        project: row.try_get::<Option<String>, _>("project").unwrap_or(None),
+        confidence: row.try_get::<f64, _>("confidence").unwrap_or(0.0) as f32,
+        importance: row.try_get::<f64, _>("importance").unwrap_or(0.0) as f32,
+        created: row.try_get("created").unwrap_or_default(),
+        updated: row.try_get("updated").unwrap_or_default(),
+    }
+}
+
+/// Normalize a user search string into an FTS5 `MATCH` query: each
+/// whitespace-separated token is stripped to alphanumeric characters,
+/// empties are dropped, and survivors become `"tok"*` prefix matches
+/// joined with spaces. Empty/whitespace-only input yields `""`.
+///
+/// `pub` (rather than `pub(crate)`) purely so tests can exercise it
+/// directly; it is a pure string transform with no trust implications.
+pub fn fts_query(user: &str) -> String {
+    user.split_whitespace()
+        .map(|tok| {
+            tok.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|tok| !tok.is_empty())
+        .map(|tok| format!("\"{tok}\"*"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 64-bit FNV-1a hash of `s`, formatted as lowercase hex. Used as a cheap
@@ -770,6 +931,373 @@ impl Index {
             quarantined,
             removed: 0,
         })
+    }
+
+    /// Full-text search over titles/bodies/tags. Empty or whitespace-only
+    /// `q` returns `Ok(vec![])` without touching the database. Results are
+    /// ordered by FTS5 `rank` (best match first).
+    pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<NodeSummary>> {
+        let query = fts_query(q);
+        if query.is_empty() {
+            return Ok(vec![]);
+        }
+        let hits: Vec<(String,)> = sqlx::query_as(
+            "SELECT node_id FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        )
+        .bind(&query)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        if hits.is_empty() {
+            return Ok(vec![]);
+        }
+        let ids: Vec<String> = hits.into_iter().map(|(id,)| id).collect();
+        let rows = self.fetch_nodes_by_ids(&ids).await?;
+        let mut by_id: HashMap<String, NodeSummary> =
+            rows.into_iter().map(|n| (n.id.clone(), n)).collect();
+        // `IN (...)` does not preserve the FTS rank order, so re-project
+        // through the id list we already have in rank order.
+        Ok(ids.into_iter().filter_map(|id| by_id.remove(&id)).collect())
+    }
+
+    /// Hydrate `nodes` rows for an explicit id set. `ids` empty short-circuits
+    /// to `Ok(vec![])` rather than emitting an invalid `IN ()`.
+    async fn fetch_nodes_by_ids(&self, ids: &[String]) -> Result<Vec<NodeSummary>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM nodes WHERE id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id);
+            }
+        }
+        qb.push(")");
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(summary_from_row).collect())
+    }
+
+    /// Resolve `f` (default statuses = confirmed + candidate when
+    /// `f.statuses` is `None`) into a bounded graph snapshot: nodes ordered
+    /// by `importance DESC, id ASC`, capped at `f.limit.unwrap_or(default_limit)`
+    /// with `truncated` set when more rows existed; edges and ghost
+    /// (unresolved-link) nodes restricted to that node set.
+    pub async fn graph(&self, f: &GraphFilter, default_limit: u32) -> Result<GraphData> {
+        let statuses: Vec<NodeStatus> = match &f.statuses {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => vec![NodeStatus::Confirmed, NodeStatus::Candidate],
+        };
+        let limit = f.limit.unwrap_or(default_limit);
+
+        let id_filter: Option<Vec<String>> = match &f.query {
+            Some(q) if !q.trim().is_empty() => Some(self.fts_ids(q).await?),
+            _ => None,
+        };
+
+        let (nodes, truncated) = self
+            .query_graph_nodes(
+                Some(&statuses),
+                f.types.as_deref(),
+                f.project.as_deref(),
+                f.updated_since,
+                f.updated_until,
+                id_filter.as_deref(),
+                limit,
+            )
+            .await?;
+
+        self.hydrate_edges_and_ghosts(nodes, truncated).await
+    }
+
+    /// BFS neighborhood of `id` over `edges`, traversed in both directions
+    /// (edge direction is ignored — this answers "what's connected to
+    /// this node", not "what does this node point to"). `depth` is capped
+    /// to 2. The start node is always included, regardless of status.
+    pub async fn neighbors(&self, id: &str, depth: u8, default_limit: u32) -> Result<GraphData> {
+        let edge_rows: Vec<(String, String)> = sqlx::query_as("SELECT from_id, to_id FROM edges")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        for (from, to) in edge_rows {
+            adj.entry(from.clone()).or_default().push(to.clone());
+            adj.entry(to).or_default().push(from);
+        }
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(id.to_string());
+        let mut frontier = vec![id.to_string()];
+        for _ in 0..depth.min(2) {
+            let mut next = Vec::new();
+            for cur in &frontier {
+                if let Some(neighbors_of) = adj.get(cur) {
+                    for n in neighbors_of {
+                        if visited.insert(n.clone()) {
+                            next.push(n.clone());
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        let ids: Vec<String> = visited.into_iter().collect();
+        let (nodes, truncated) = self
+            .query_graph_nodes(None, None, None, None, None, Some(&ids), default_limit)
+            .await?;
+        self.hydrate_edges_and_ghosts(nodes, truncated).await
+    }
+
+    /// Shared node query behind `graph`/`neighbors`: builds `WHERE` clauses
+    /// from whichever filters are `Some`, orders by `importance DESC, id
+    /// ASC`, and fetches `limit + 1` rows so the caller can detect
+    /// truncation by popping the extra row. `id_filter: Some(&[])` (an
+    /// empty explicit id set, e.g. a query with no FTS hits) short-circuits
+    /// to an empty, non-truncated result rather than emitting `IN ()`.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_graph_nodes(
+        &self,
+        statuses: Option<&[NodeStatus]>,
+        types: Option<&[NodeType]>,
+        project: Option<&str>,
+        updated_since: Option<DateTime<Utc>>,
+        updated_until: Option<DateTime<Utc>>,
+        id_filter: Option<&[String]>,
+        limit: u32,
+    ) -> Result<(Vec<GraphNode>, bool)> {
+        if matches!(id_filter, Some(ids) if ids.is_empty()) {
+            return Ok((vec![], false));
+        }
+
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM nodes WHERE 1=1");
+        if let Some(statuses) = statuses {
+            qb.push(" AND status IN (");
+            {
+                let mut sep = qb.separated(", ");
+                for s in statuses {
+                    sep.push_bind(s.as_str());
+                }
+            }
+            qb.push(")");
+        }
+        if let Some(types) = types.filter(|t| !t.is_empty()) {
+            qb.push(" AND type IN (");
+            {
+                let mut sep = qb.separated(", ");
+                for t in types {
+                    sep.push_bind(t.as_str());
+                }
+            }
+            qb.push(")");
+        }
+        if let Some(project) = project {
+            qb.push(" AND project = ").push_bind(project.to_string());
+        }
+        if let Some(since) = updated_since {
+            qb.push(" AND updated >= ").push_bind(since.to_rfc3339());
+        }
+        if let Some(until) = updated_until {
+            qb.push(" AND updated <= ").push_bind(until.to_rfc3339());
+        }
+        if let Some(ids) = id_filter {
+            qb.push(" AND id IN (");
+            {
+                let mut sep = qb.separated(", ");
+                for id in ids {
+                    sep.push_bind(id);
+                }
+            }
+            qb.push(")");
+        }
+        qb.push(" ORDER BY importance DESC, id ASC LIMIT ");
+        qb.push_bind(i64::from(limit) + 1);
+
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        let mut nodes: Vec<GraphNode> = rows.iter().map(graph_node_from_row).collect();
+        let truncated = nodes.len() > limit as usize;
+        if truncated {
+            nodes.truncate(limit as usize);
+        }
+        Ok((nodes, truncated))
+    }
+
+    /// Ids of nodes whose title/body/tags match `q` via FTS5. `q` that
+    /// sanitizes to an empty query (see [`fts_query`]) returns `Ok(vec![])`.
+    async fn fts_ids(&self, q: &str) -> Result<Vec<String>> {
+        let query = fts_query(q);
+        if query.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT node_id FROM nodes_fts WHERE nodes_fts MATCH ?1")
+                .bind(&query)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Fill in `edges`/`ghosts` for a resolved node set (`graph`/`neighbors`
+    /// share this tail end).
+    async fn hydrate_edges_and_ghosts(
+        &self,
+        nodes: Vec<GraphNode>,
+        truncated: bool,
+    ) -> Result<GraphData> {
+        let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+        let edges = self.fetch_edges_within(&ids).await?;
+        let ghosts = self.fetch_ghosts_from(&ids).await?;
+        Ok(GraphData {
+            nodes,
+            edges,
+            ghosts,
+            truncated,
+        })
+    }
+
+    /// Edges with both endpoints inside `ids`. Empty `ids` short-circuits
+    /// to `Ok(vec![])`.
+    async fn fetch_edges_within(&self, ids: &[String]) -> Result<Vec<GraphEdge>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT from_id, to_id, rel, confidence, origin FROM edges WHERE from_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id);
+            }
+        }
+        qb.push(") AND to_id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id);
+            }
+        }
+        qb.push(")");
+        let rows: Vec<(String, String, String, f64, String)> =
+            qb.build_query_as().fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(from, to, rel, confidence, origin)| GraphEdge {
+                from,
+                to,
+                rel,
+                confidence: confidence as f32,
+                origin,
+            })
+            .collect())
+    }
+
+    /// Unresolved link targets originating inside `ids`, most-referenced
+    /// first, capped at 100. Empty `ids` short-circuits to `Ok(vec![])`.
+    async fn fetch_ghosts_from(&self, ids: &[String]) -> Result<Vec<GhostNode>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT target, count(*) as cnt FROM unresolved_links WHERE from_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id);
+            }
+        }
+        qb.push(") GROUP BY target ORDER BY cnt DESC LIMIT 100");
+        let rows: Vec<(String, i64)> = qb.build_query_as().fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(target, cnt)| GhostNode {
+                target,
+                ref_count: cnt as u32,
+            })
+            .collect())
+    }
+
+    /// Candidate nodes awaiting review, oldest-created first.
+    pub async fn pending(&self) -> Result<Vec<NodeSummary>> {
+        let rows =
+            sqlx::query("SELECT * FROM nodes WHERE status = 'candidate' ORDER BY created ASC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.iter().map(summary_from_row).collect())
+    }
+
+    /// Nodes with a resolved edge pointing at `id` (i.e. "what links here"),
+    /// ordered by `importance DESC, id ASC`. Deduplicated: a node linking to
+    /// `id` via multiple edges (a typed relation and a body mention, say)
+    /// appears once.
+    pub async fn backlinks(&self, id: &str) -> Result<Vec<NodeSummary>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT n.* FROM nodes n JOIN edges e ON e.from_id = n.id
+             WHERE e.to_id = ? ORDER BY n.importance DESC, n.id ASC",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(summary_from_row).collect())
+    }
+
+    /// Vault-relative path of `id`'s markdown file, if it is indexed.
+    pub async fn get_node_path(&self, id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT path FROM nodes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(path,)| path))
+    }
+
+    /// Resolve `needle` to a node id: exact slug match (case-insensitive)
+    /// first, then case-insensitive title match (smallest id wins on
+    /// ties, for determinism when multiple notes share a title).
+    pub async fn find_by_slug_or_title(&self, needle: &str) -> Result<Option<String>> {
+        let needle_lower = needle.to_lowercase();
+
+        if let Some((id,)) = sqlx::query_as::<_, (String,)>("SELECT id FROM nodes WHERE slug = ?")
+            .bind(&needle_lower)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            return Ok(Some(id));
+        }
+
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM nodes WHERE lower(title) = ? ORDER BY id ASC LIMIT 1")
+                .bind(&needle_lower)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
+    /// Total node count plus a per-status breakdown.
+    pub async fn counts(&self) -> Result<(u64, BTreeMap<String, u64>)> {
+        let (total,): (i64,) = sqlx::query_as("SELECT count(*) FROM nodes")
+            .fetch_one(&self.pool)
+            .await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, count(*) FROM nodes GROUP BY status")
+                .fetch_all(&self.pool)
+                .await?;
+        let by_status = rows
+            .into_iter()
+            .map(|(status, count)| (status, count as u64))
+            .collect();
+        Ok((total as u64, by_status))
+    }
+
+    /// Every quarantined (failed-to-parse) note, ordered by path.
+    pub async fn quarantined(&self) -> Result<Vec<QuarantineEntry>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT path, error FROM quarantine ORDER BY path ASC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(path, error)| QuarantineEntry { path, error })
+            .collect())
     }
 }
 
