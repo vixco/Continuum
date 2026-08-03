@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/dev.ps1               # Tauri desktop app (default) - the real frameless UI
-#   ./scripts/dev.ps1 -FrontendOnly  # Next.js only on http://localhost:3000 (no Rust/Tauri)
+#   ./scripts/dev.ps1 -FrontendOnly  # Next.js only, auto free port (no Rust/Tauri)
 #   ./scripts/dev.ps1 -WithRuntime   # also start continuum.exe (release) for live data
 #   ./scripts/dev.ps1 -Check         # just verify prerequisites, don't run anything
 #
@@ -26,6 +26,22 @@ function Write-Step($msg) { Write-Host "`n== $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  !   $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "  X   $msg" -ForegroundColor Red }
+
+# Find the first free TCP port starting at $Start. Next.js and the Tauri
+# devUrl are both pointed at this port, so a stale dev server (or any other
+# app) on the default 3000 never breaks `dev.ps1` — it just rolls on to the
+# next free port. We probe via Get-NetTCPConnection (the OS listener table)
+# rather than opening a TcpListener on 127.0.0.1, because Next binds to `::`
+# (IPv6, which also covers IPv4 on Windows) and an IPv4-only probe would miss
+# it and hand back a port that is actually in use.
+function Find-FreePort {
+  param([int]$Start = 3000)
+  for ($p = $Start; $p -lt ($Start + 200); $p++) {
+    if (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue) { continue }
+    return $p
+  }
+  throw "No free dev port found in $Start..$($Start + 199). Free a port and retry."
+}
 
 function Test-Preqs {
   param([switch]$NeedRust)
@@ -55,9 +71,11 @@ if ($Check) {
   return
 }
 
-# --- Frontend-only: Next.js on :3000, no Rust/Tauri ---------------------
+# --- Frontend-only: Next.js, no Rust/Tauri ------------------------------
 if ($FrontendOnly) {
-  Write-Step "Frontend-only mode -> http://localhost:3000"
+  $port = Find-FreePort
+  $env:PORT = $port
+  Write-Step "Frontend-only mode -> http://localhost:$port"
   if (-not (Test-Preqs)) { exit 1 }
   Push-Location $desktop
   try { pnpm dev } finally { Pop-Location }
@@ -93,7 +111,13 @@ if ($WithRuntime) {
 }
 
 try {
-  Write-Step "Launching Tauri dev (compiles the Rust backend, then opens the window)"
+  # Pick a free port and point both Next.js (via $env:PORT) and Tauri's devUrl
+  # (via $env:TAURI_CONFIG) at it, so a stale dev server or any other app on
+  # 3000 can never wedge the dashboard — it just uses the next free port.
+  $port = Find-FreePort
+  $env:PORT = $port
+  $env:TAURI_CONFIG = '{"build":{"devUrl":"http://localhost:' + $port + '"}}'
+  Write-Step "Launching Tauri dev on http://localhost:$port (compiles the Rust backend, then opens the window)"
   Write-Host "  Ctrl+C to stop." -ForegroundColor DarkGray
   Push-Location $desktop
   try { pnpm tauri dev } finally { Pop-Location }
