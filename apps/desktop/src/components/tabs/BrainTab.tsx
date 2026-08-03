@@ -222,7 +222,7 @@ export function BrainTab() {
 function LayerDiagram() {
   const items = [
     { label: "Senses", colour: "from-accent-blue to-accent-blue-dim" },
-    { label: "Triage", colour: "from-accent-purple to-accent-purple-dim" },
+    { label: "Triage", colour: "from-accent-amber to-accent-amber-dim" },
     { label: "Orchestrator", colour: "from-state-healthy to-accent-blue-dim" },
     { label: "Workers", colour: "from-state-warn to-state-error" },
   ];

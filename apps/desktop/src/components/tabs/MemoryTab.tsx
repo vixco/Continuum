@@ -40,7 +40,7 @@ export function MemoryTab() {
             className={clsx(
               "border-b-2 px-3 py-2 text-sm capitalize transition-colors",
               sub === t
-                ? "border-accent-purple text-ink"
+                ? "border-accent-amber text-ink"
                 : "border-transparent text-ink-muted hover:text-ink"
             )}
           >

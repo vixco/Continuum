@@ -487,7 +487,7 @@ function CatalogTile({
       className={clsx(
         "rounded-md border px-2.5 py-2 text-left text-xs transition-colors active:scale-[0.98]",
         active
-          ? "border-accent-purple bg-accent-purple/15"
+          ? "border-accent-amber bg-accent-amber/15"
           : "border-bg-border bg-bg-elevated hover:border-bg-hover"
       )}
     >

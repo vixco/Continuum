@@ -480,7 +480,7 @@ function ModelsStep({
           value={modelsDir}
           onChange={(e) => setModelsDir(e.target.value)}
           placeholder={DEFAULT_MODELS_DIR}
-          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none"
+          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink placeholder:text-ink-dim focus:border-accent-amber focus:outline-none"
         />
         <p className="text-[11px] text-ink-dim">
           Leave empty for the default <Code>{DEFAULT_MODELS_DIR}</Code>.
@@ -497,7 +497,7 @@ function ModelsStep({
           value={qwenUrl}
           onChange={(e) => setQwenUrl(e.target.value)}
           placeholder={DEFAULT_QWEN_URL}
-          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[12px] text-ink placeholder:text-ink-dim focus:border-accent-purple focus:outline-none"
+          className="w-full rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[12px] text-ink placeholder:text-ink-dim focus:border-accent-amber focus:outline-none"
         />
         <p className="text-[11px] text-ink-dim">
           Paste any HuggingFace GGUF URL to use a custom triage model. Leave empty for the default
@@ -735,7 +735,7 @@ function DevicePicker({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink transition-colors hover:border-bg-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40"
+        className="flex w-full items-center justify-between rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 text-[13px] text-ink transition-colors hover:border-bg-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-amber/40"
       >
         <span className="truncate text-left">{selected ? selected.name : "System default"}</span>
         <ChevronRight
