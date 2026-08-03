@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  --window-bg: #090a09;
   --bg: #090a09;
   --surface: #111210;
   --elevated: #171814;
@@ -17,7 +18,10 @@ html,
 body {
   height: 100%;
   overflow: hidden;
-  background: #050605;
+  /* The Tauri window is intentionally opaque. Keep the webview canvas the
+     same color as the shell so the OS-owned corners never expose black
+     contrast pixels around the frameless window. */
+  background: var(--window-bg);
   color: #f4f4f2;
   font-family: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-feature-settings: "cv11", "ss01", "ss03";
@@ -86,10 +90,13 @@ textarea:focus-visible {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 10px;
+  /* Windows owns the physical window corners. A second CSS radius clips the
+     opaque webview and exposes its rectangular canvas as dark corner wedges. */
+  border-radius: 0;
   background:
     radial-gradient(720px 380px at 40% -12%, rgba(245, 158, 11, 0.04), transparent 60%),
-    radial-gradient(680px 560px at 110% 50%, rgba(255, 255, 255, 0.022), transparent 65%), #090a09;
+    radial-gradient(680px 560px at 110% 50%, rgba(255, 255, 255, 0.022), transparent 65%),
+    var(--window-bg);
   box-shadow:
     0 30px 100px rgba(0, 0, 0, 0.6),
     inset 0 1px rgba(255, 255, 255, 0.02);
@@ -189,6 +196,11 @@ textarea:focus-visible {
 }
 .win-btn:active {
   transform: scale(0.9);
+}
+.windows-caption-glyph {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 10px;
+  line-height: 1;
 }
 .win-btn.close:hover {
   background: rgba(239, 68, 68, 0.85);
