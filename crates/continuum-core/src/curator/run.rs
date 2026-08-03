@@ -19,6 +19,7 @@ use crate::curator::conflict::detect_conflicts;
 use crate::curator::extract::{
     candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
 };
+use crate::curator::session::{write_session_summary, SessionTracker};
 use crate::curator::{CuratorLlm, SharedCuratorStatus};
 
 /// The extraction prompt template, loaded at compile time from the
@@ -50,7 +51,11 @@ pub struct ActivitySignal {
 /// timestamp string if it doesn't parse as RFC3339 (defensive — event
 /// timestamps are always written via `Vault::append_event`, but a
 /// hand-edited or migrated row should degrade gracefully, not panic).
-fn build_events_block(events: &[Event]) -> String {
+///
+/// `pub(crate)` (not private) so [`crate::curator::session::write_session_summary`]
+/// can reuse the exact same rendering for its own `{{EVENTS}}` slot rather
+/// than duplicating it.
+pub(crate) fn build_events_block(events: &[Event]) -> String {
     events
         .iter()
         .map(|e| {
@@ -373,6 +378,34 @@ async fn curator_tick(
     }
 }
 
+/// Feeds `sig` into `tracker` (Task 6: session summaries); if a session
+/// boundary fired, writes the summary note. Failures are logged and
+/// swallowed here rather than propagated — a session-summary hiccup (a
+/// vault I/O error, an unparsable/erroring LLM reply) must never kill the
+/// curator's own extraction loop, mirroring [`write_candidate`]'s and
+/// [`curator_tick`]'s per-failure containment elsewhere in this module.
+async fn observe_session_boundary(
+    vault: &Vault,
+    llm: &dyn CuratorLlm,
+    tracker: &mut SessionTracker,
+    sig: &ActivitySignal,
+    idle_limit_min: u64,
+) {
+    let Some(ended) = tracker.observe(sig, idle_limit_min) else {
+        return;
+    };
+
+    if let Err(e) = write_session_summary(vault, llm, &ended).await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            process = %ended.process,
+            error = %e,
+            "Failed to write session summary; continuing"
+        );
+    }
+}
+
 /// Runs the curator's background extraction loop until shutdown, mirroring
 /// `crate::memory::distill::run_memory_distiller`'s shape: a disabled-config
 /// early return that parks on shutdown, then a `tokio::select!` between a
@@ -415,6 +448,7 @@ pub async fn run_curator(
     let mut ticker = tokio::time::interval(interval);
     let mut window_since = Utc::now() - Duration::minutes(cfg.interval_minutes.max(1) as i64);
     let mut window_failures: u32 = 0;
+    let mut tracker = SessionTracker::new();
 
     loop {
         tokio::select! {
@@ -430,13 +464,38 @@ pub async fn run_curator(
                 .await;
 
                 // Task 5 (conflict resolution) runs inside `curator_tick`
-                // itself, right after `extract_pass` — see its body. Task 6
-                // (session summary) adds its own per-tick call here.
+                // itself, right after `extract_pass` — see its body.
+                //
+                // Task 6 (session summary): also check the boundary state
+                // machine on every tick, not just on `activity.changed()`
+                // below — this is what actually catches the *idle* boundary
+                // in practice, since a truly idle user produces no new
+                // distinct signal to trigger a `changed()` wakeup.
+                let sig = activity.borrow().clone();
+                observe_session_boundary(
+                    &vault,
+                    llm.as_ref(),
+                    &mut tracker,
+                    &sig,
+                    cfg.session_summary_idle_minutes,
+                )
+                .await;
             }
             _ = activity.changed() => {
-                // Latest signal available via `*activity.borrow()`. Task 9
-                // wires `project_hint` through here for project-scoped
-                // extraction context; nothing to consume yet.
+                // Task 9 wires `project_hint` through here for
+                // project-scoped extraction context. Task 6 (session
+                // summary) feeds every signal change into the boundary
+                // state machine so a process handoff is caught as soon as
+                // it happens, not just at the next ticker interval.
+                let sig = activity.borrow_and_update().clone();
+                observe_session_boundary(
+                    &vault,
+                    llm.as_ref(),
+                    &mut tracker,
+                    &sig,
+                    cfg.session_summary_idle_minutes,
+                )
+                .await;
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
