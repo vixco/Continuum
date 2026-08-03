@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use continuum_memory::{Event, EventRange, Vault};
 use tokio::sync::watch;
 
-use crate::config::CuratorConfig;
+use crate::config::{CuratorConfig, MemoryVaultConfig};
 use crate::curator::conflict::detect_conflicts;
 use crate::curator::extract::{
     candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
@@ -406,6 +406,167 @@ async fn observe_session_boundary(
     }
 }
 
+/// On-disk contract for a pending derived-data wipe request (Task 7):
+/// `<dev_dir>/wipe-request.json`, written by the dashboard's `wipe_memory`
+/// command (and, per Task 8, the `memory__wipe_all` MCP tool) and drained
+/// by [`process_wipe_request`]. Neither writer can touch
+/// [`RawLog`](crate::memory::raw_log::RawLog) or
+/// [`EpisodicStore`](crate::memory::episodic::EpisodicStore) directly —
+/// those live inside this headless `continuum`
+/// runtime process — so they leave this file as a request the runtime
+/// picks up on its own schedule (boot, or the next daily hygiene tick).
+#[cfg(feature = "runtime")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WipeRequest {
+    /// When the request was made. Not currently used to gate anything
+    /// (there is no "too old to honor" cutoff) — kept for the audit trail
+    /// a `warn!` log line leaves behind.
+    #[allow(dead_code)]
+    requested_at: DateTime<Utc>,
+    /// Which stores to wipe: any of `"raw_log"`, `"episodic"`, `"events"`.
+    /// Unrecognized entries are silently ignored rather than treated as an
+    /// error — forward-compatible with a future scope this runtime
+    /// doesn't know about yet.
+    scopes: Vec<String>,
+}
+
+#[cfg(feature = "runtime")]
+fn wipe_request_path(dev_dir: &std::path::Path) -> std::path::PathBuf {
+    dev_dir.join("wipe-request.json")
+}
+
+/// Drains a pending derived-data wipe request (see [`WipeRequest`]) at
+/// `<dev_dir>/wipe-request.json`. Returns `Ok(false)` with no side effects
+/// when no request file exists — the overwhelmingly common case on every
+/// call. When a request is present, wipes each named scope via the
+/// corresponding store, deletes the request file (so a later boot/tick
+/// doesn't repeat the wipe), and returns `Ok(true)`.
+///
+/// Gated on the `runtime` feature (unlike the rest of this module) because
+/// it's the only function here that touches
+/// [`RawLog`](crate::memory::raw_log::RawLog) /
+/// [`EpisodicStore`](crate::memory::episodic::EpisodicStore),
+/// both of which only exist in a `runtime`-feature build (see
+/// `crate::memory`'s `#[cfg(feature = "runtime")]` gate in `lib.rs`). The
+/// desktop crate links this module with `default-features = false` and
+/// never calls this function — it only ever *writes* the request file for
+/// the `continuum` runtime binary to pick up.
+///
+/// A malformed request file (bad JSON) or a mid-wipe store error is
+/// propagated rather than swallowed: unlike a routine extraction-pass
+/// hiccup, a wipe request that silently fails to complete (and silently
+/// deletes itself, or silently never deletes itself) is exactly the kind
+/// of failure a user asking to delete their data needs surfaced, not
+/// contained. Callers ([`run_curator`]'s boot drain and daily hygiene
+/// tick) still log-and-continue on `Err` rather than panicking, per this
+/// module's usual containment policy — but the error reaches them instead
+/// of vanishing here.
+#[cfg(feature = "runtime")]
+pub async fn process_wipe_request(
+    dev_dir: &std::path::Path,
+    raw_log: &crate::memory::raw_log::RawLog,
+    episodic: &Arc<tokio::sync::Mutex<crate::memory::episodic::EpisodicStore>>,
+    vault: &Vault,
+) -> anyhow::Result<bool> {
+    use anyhow::Context;
+
+    let request_path = wipe_request_path(dev_dir);
+    let raw = match tokio::fs::read_to_string(&request_path).await {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to read {}", request_path.display()))
+        }
+    };
+
+    let request: WipeRequest = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse wipe request at {}", request_path.display()))?;
+
+    if request.scopes.iter().any(|s| s == "raw_log") {
+        let deleted = raw_log.wipe_all().await?;
+        tracing::info!(
+            layer = "memory",
+            component = "curator",
+            deleted,
+            "Wiped raw log per pending request"
+        );
+    }
+    if request.scopes.iter().any(|s| s == "episodic") {
+        episodic.lock().await.wipe_all().await?;
+        tracing::info!(
+            layer = "memory",
+            component = "curator",
+            "Wiped episodic memory per pending request"
+        );
+    }
+    if request.scopes.iter().any(|s| s == "events") {
+        let deleted = vault.prune_events(0).await?;
+        tracing::info!(
+            layer = "memory",
+            component = "curator",
+            deleted,
+            "Wiped vault events per pending request"
+        );
+    }
+
+    tokio::fs::remove_file(&request_path)
+        .await
+        .with_context(|| format!("Failed to remove {}", request_path.display()))?;
+
+    tracing::info!(
+        layer = "memory",
+        component = "curator",
+        scopes = ?request.scopes,
+        "Processed derived-data wipe request"
+    );
+
+    Ok(true)
+}
+
+/// Runs once per local calendar day (Task 7), driven by [`run_curator`]'s
+/// `last_hygiene` tracking: expires stale vault nodes, prunes old timeline
+/// events past `vault_cfg.events_retention_days`, and drains any pending
+/// wipe request (see [`process_wipe_request`]). Every step's failure is
+/// logged and swallowed here rather than propagated — a hygiene hiccup (a
+/// vault I/O error, a wipe mid-flight) must not stop the curator's own
+/// extraction loop, mirroring this module's other per-failure containment
+/// ([`write_candidate`], [`observe_session_boundary`]).
+async fn run_daily_hygiene(
+    vault: &Vault,
+    vault_cfg: &MemoryVaultConfig,
+    #[cfg(feature = "runtime")] dev_dir: &std::path::Path,
+    #[cfg(feature = "runtime")] raw_log: &crate::memory::raw_log::RawLog,
+    #[cfg(feature = "runtime")] episodic: &Arc<
+        tokio::sync::Mutex<crate::memory::episodic::EpisodicStore>,
+    >,
+) {
+    if let Err(e) = vault.sweep_expired().await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            error = %e.user_message(),
+            "Daily hygiene: sweep_expired failed"
+        );
+    }
+    if let Err(e) = vault.prune_events(vault_cfg.events_retention_days).await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            error = %e.user_message(),
+            "Daily hygiene: prune_events failed"
+        );
+    }
+    #[cfg(feature = "runtime")]
+    if let Err(e) = process_wipe_request(dev_dir, raw_log, episodic, vault).await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            error = %e,
+            "Daily hygiene: wipe-request drain failed"
+        );
+    }
+}
+
 /// Runs the curator's background extraction loop until shutdown, mirroring
 /// `crate::memory::distill::run_memory_distiller`'s shape: a disabled-config
 /// early return that parks on shutdown, then a `tokio::select!` between a
@@ -419,14 +580,61 @@ async fn observe_session_boundary(
 /// pass it stays put (the next tick retries the same events) *unless* the
 /// failure streak has hit the cap, in which case `curator_tick` itself
 /// advances it past the stuck window.
+///
+/// Task 7 also makes this the home of daily hygiene (vault expiry sweep,
+/// event pruning, wipe-request drain — see [`run_daily_hygiene`]) and a
+/// one-shot wipe-request drain at boot. Both need
+/// [`RawLog`](crate::memory::raw_log::RawLog) and
+/// [`EpisodicStore`](crate::memory::episodic::EpisodicStore) handles,
+/// which only exist in a `runtime`-feature
+/// build, so `dev_dir`/`raw_log`/`episodic` are declared with
+/// `#[cfg(feature = "runtime")]` directly on the parameters rather than
+/// wrapped in an `Option` or a separate struct: the one caller (the
+/// `continuum` binary, gated `required-features = ["runtime"]` in
+/// `Cargo.toml`) always has all three available, and `cfg` on a function
+/// parameter is legal, stable Rust — the featureless build simply compiles
+/// this function without them, and every use site of the three params
+/// below is itself `#[cfg(feature = "runtime")]`-gated so nothing
+/// references them when they don't exist.
+///
+/// `#[allow(clippy::too_many_arguments)]`: this is the single wiring
+/// entrypoint spawned once (from the `continuum` binary), passed ten
+/// genuinely distinct dependencies — two configs, three
+/// channel/status/shutdown handles, and (runtime build only) three store
+/// handles for the wipe-request path. Folding them into a params struct
+/// wouldn't reduce the real complexity here, just relocate it one level
+/// down (and the featureless build would still need every field but the
+/// three runtime-gated ones, reproducing the same `#[cfg]`-per-field
+/// pattern this function already uses on its parameters directly).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_curator(
     vault: Arc<Vault>,
     llm: Arc<dyn CuratorLlm>,
     cfg: CuratorConfig,
+    vault_cfg: MemoryVaultConfig,
     status: SharedCuratorStatus,
     mut activity: watch::Receiver<ActivitySignal>,
     mut shutdown: watch::Receiver<bool>,
+    #[cfg(feature = "runtime")] dev_dir: std::path::PathBuf,
+    #[cfg(feature = "runtime")] raw_log: crate::memory::raw_log::RawLog,
+    #[cfg(feature = "runtime")] episodic: Arc<
+        tokio::sync::Mutex<crate::memory::episodic::EpisodicStore>,
+    >,
 ) {
+    // Boot drain: a pending wipe request must execute on the very next
+    // runtime start even if curator extraction itself is disabled below —
+    // wiping derived data on request is a privacy/maintenance operation
+    // independent of whether the extraction pipeline is turned on.
+    #[cfg(feature = "runtime")]
+    if let Err(e) = process_wipe_request(&dev_dir, &raw_log, &episodic, &vault).await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            error = %e,
+            "Boot-time wipe-request drain failed"
+        );
+    }
+
     if !cfg.enabled {
         tracing::info!(
             layer = "memory",
@@ -449,10 +657,28 @@ pub async fn run_curator(
     let mut window_since = Utc::now() - Duration::minutes(cfg.interval_minutes.max(1) as i64);
     let mut window_failures: u32 = 0;
     let mut tracker = SessionTracker::new();
+    let mut last_hygiene: Option<chrono::NaiveDate> = None;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                // Task 7: once per local calendar day, run vault
+                // expiry/event-pruning + drain any pending wipe request —
+                // ahead of extraction so a stale/expired window never gets
+                // extracted from a day it should have already been swept.
+                let today = chrono::Local::now().date_naive();
+                if last_hygiene != Some(today) {
+                    run_daily_hygiene(
+                        &vault,
+                        &vault_cfg,
+                        #[cfg(feature = "runtime")] &dev_dir,
+                        #[cfg(feature = "runtime")] &raw_log,
+                        #[cfg(feature = "runtime")] &episodic,
+                    )
+                    .await;
+                    last_hygiene = Some(today);
+                }
+
                 window_since = curator_tick(
                     &vault,
                     llm.as_ref(),
@@ -717,5 +943,144 @@ mod tests {
             curator_tick(&vault, &llm, &cfg, &status, after_3, &mut window_failures).await;
         assert_eq!(window_failures, 0);
         assert_eq!(status.lock().unwrap().consecutive_failures, 0);
+    }
+
+    /// Regression/coverage for Task 7's real derived-data wipe path:
+    /// `process_wipe_request` must actually clear every named scope (raw
+    /// log rows, episodic events, vault timeline events) and delete the
+    /// request file so a later boot/tick doesn't repeat the wipe — then a
+    /// second call with no request file present must be a harmless no-op.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn process_wipe_request_wipes_all_scopes_and_deletes_request_file() {
+        use crate::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
+        use crate::memory::raw_log::RawLog;
+        use crate::senses::types::{ContextObservation, PerceptionFrame, ScreenObservation};
+        use tokio::sync::Mutex;
+
+        let dev_dir = tempfile::tempdir().unwrap();
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(vault_dir.path()).await.unwrap();
+        for text in ["first event", "second event"] {
+            vault
+                .append_event(NewEvent {
+                    ts: None,
+                    kind: "distilled".to_string(),
+                    text: text.to_string(),
+                    project: None,
+                    node_id: None,
+                    reference: None,
+                })
+                .await
+                .unwrap();
+        }
+        let empty_range = EventRange {
+            since: None,
+            until: None,
+            limit: None,
+        };
+        assert_eq!(vault.events(&empty_range).await.unwrap().len(), 2);
+
+        let raw_log = RawLog::open("sqlite::memory:").await.unwrap();
+        let now = Utc::now();
+        raw_log
+            .write_frame(&PerceptionFrame {
+                id: uuid::Uuid::new_v4(),
+                ts: now,
+                screen: ScreenObservation {
+                    description: "editor".to_string(),
+                    foreground_app: "Code.exe".to_string(),
+                    has_error_visible: false,
+                    confidence: 0.9,
+                    screenshot_path: None,
+                    ts: now,
+                },
+                audio: None,
+                context: ContextObservation {
+                    foreground_window_title: "main.rs".to_string(),
+                    foreground_process_name: "Code.exe".to_string(),
+                    idle_seconds: 0,
+                    in_call: false,
+                    ts: now,
+                },
+                salience_hint: 0.5,
+            })
+            .await
+            .unwrap();
+        assert_eq!(raw_log.frame_count().await.unwrap(), 1);
+
+        let episodic_dir = tempfile::tempdir().unwrap();
+        let mut episodic_store =
+            EpisodicStore::open_for_test(episodic_dir.path().to_str().unwrap())
+                .await
+                .unwrap();
+        episodic_store
+            .insert_event(&EpisodicEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: now,
+                kind: EventKind::Remember,
+                summary: "an episodic memory".to_string(),
+                importance: 0.5,
+                tags: vec![],
+                source_frame_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(episodic_store.event_count().await.unwrap(), 1);
+        let episodic = Arc::new(Mutex::new(episodic_store));
+
+        let request_path = dev_dir.path().join("wipe-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::json!({
+                "requested_at": now.to_rfc3339(),
+                "scopes": ["raw_log", "episodic", "events"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let processed = process_wipe_request(dev_dir.path(), &raw_log, &episodic, &vault)
+            .await
+            .unwrap();
+        assert!(processed);
+        assert!(!request_path.exists());
+        assert_eq!(raw_log.frame_count().await.unwrap(), 0);
+        assert_eq!(episodic.lock().await.event_count().await.unwrap(), 0);
+        assert_eq!(vault.events(&empty_range).await.unwrap().len(), 0);
+
+        // Second call: no request file present anymore — must not error
+        // and must not re-run any wipe.
+        let processed_again = process_wipe_request(dev_dir.path(), &raw_log, &episodic, &vault)
+            .await
+            .unwrap();
+        assert!(!processed_again);
+    }
+
+    /// A `dev_dir` that has never had a wipe request written to it must
+    /// behave identically to one that's already been drained — no error,
+    /// `Ok(false)`.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn process_wipe_request_returns_false_when_no_request_file() {
+        use crate::memory::episodic::EpisodicStore;
+        use crate::memory::raw_log::RawLog;
+        use tokio::sync::Mutex;
+
+        let dev_dir = tempfile::tempdir().unwrap();
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(vault_dir.path()).await.unwrap();
+        let raw_log = RawLog::open("sqlite::memory:").await.unwrap();
+        let episodic_dir = tempfile::tempdir().unwrap();
+        let episodic = Arc::new(Mutex::new(
+            EpisodicStore::open_for_test(episodic_dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+
+        let processed = process_wipe_request(dev_dir.path(), &raw_log, &episodic, &vault)
+            .await
+            .unwrap();
+        assert!(!processed);
     }
 }

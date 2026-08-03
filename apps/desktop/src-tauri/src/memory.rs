@@ -42,19 +42,27 @@ pub struct VaultInfoDto {
 pub struct MemoryState {
     vault_dir: PathBuf,
     legacy_semantic_db: PathBuf,
+    /// The shared `~/.continuum-dev/` (or prod equivalent) directory the
+    /// headless `continuum` runtime also reads/writes. Used by
+    /// `wipe_memory` (Task 7) to drop `wipe-request.json` where
+    /// `curator::run::process_wipe_request` will find it — the dashboard
+    /// process cannot touch `RawLog`/`EpisodicStore` directly, since those
+    /// live inside the separate runtime process.
+    dev_dir: PathBuf,
     vault: tokio::sync::OnceCell<Arc<Vault>>,
     pub opts: VaultOptions,
 }
 
 impl MemoryState {
     /// Builds a new, not-yet-opened vault handle over `vault_dir`, tracking
-    /// `legacy_semantic_db` for the migration-available flag. Call
-    /// [`MemoryState::with_opts`] to override the default [`VaultOptions`]
-    /// from config.
-    pub fn new(vault_dir: PathBuf, legacy_semantic_db: PathBuf) -> Self {
+    /// `legacy_semantic_db` for the migration-available flag and `dev_dir`
+    /// for the wipe-request file (Task 7). Call [`MemoryState::with_opts`]
+    /// to override the default [`VaultOptions`] from config.
+    pub fn new(vault_dir: PathBuf, legacy_semantic_db: PathBuf, dev_dir: PathBuf) -> Self {
         Self {
             vault_dir,
             legacy_semantic_db,
+            dev_dir,
             vault: tokio::sync::OnceCell::new(),
             opts: VaultOptions::default(),
         }
@@ -73,6 +81,12 @@ impl MemoryState {
     /// doesn't itself depend on the index being healthy.
     pub(crate) fn vault_dir(&self) -> &Path {
         &self.vault_dir
+    }
+
+    /// The shared runtime dev dir — see the `dev_dir` field doc for why
+    /// `wipe_memory` needs it.
+    pub(crate) fn dev_dir(&self) -> &Path {
+        &self.dev_dir
     }
 
     /// Opens the vault on first call and returns the cached handle on every
@@ -384,7 +398,11 @@ mod tests {
 
     async fn state() -> (tempfile::TempDir, MemoryState) {
         let tmp = tempfile::tempdir().unwrap();
-        let s = MemoryState::new(tmp.path().join("vault"), tmp.path().join("semantic.sqlite"));
+        let s = MemoryState::new(
+            tmp.path().join("vault"),
+            tmp.path().join("semantic.sqlite"),
+            tmp.path().to_path_buf(),
+        );
         s.vault().await.unwrap(); // force init
         (tmp, s)
     }
@@ -443,7 +461,23 @@ mod tests {
     async fn vault_dir_available_before_vault_init() {
         let tmp = tempfile::tempdir().unwrap();
         let vault_dir = tmp.path().join("vault");
-        let s = MemoryState::new(vault_dir.clone(), tmp.path().join("semantic.sqlite"));
+        let s = MemoryState::new(
+            vault_dir.clone(),
+            tmp.path().join("semantic.sqlite"),
+            tmp.path().to_path_buf(),
+        );
         assert_eq!(s.vault_dir(), vault_dir.as_path());
+    }
+
+    #[tokio::test]
+    async fn dev_dir_available_before_vault_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev_dir = tmp.path().join("dev");
+        let s = MemoryState::new(
+            tmp.path().join("vault"),
+            tmp.path().join("semantic.sqlite"),
+            dev_dir.clone(),
+        );
+        assert_eq!(s.dev_dir(), dev_dir.as_path());
     }
 }

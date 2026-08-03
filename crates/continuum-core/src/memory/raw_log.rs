@@ -441,6 +441,57 @@ impl RawLog {
         Ok(deleted)
     }
 
+    /// Deletes every frame from the raw log — the derived-data wipe path
+    /// (`curator::run::process_wipe_request`), as opposed to [`Self::rotate`]'s
+    /// age-based cutoff. Also deletes each frame's screenshot file from
+    /// disk, best-effort, mirroring `rotate`'s cleanup: a file that's
+    /// already missing or fails to delete is logged and does not abort the
+    /// wipe.
+    ///
+    /// # Returns
+    ///
+    /// The number of frame rows deleted.
+    pub async fn wipe_all(&self) -> Result<u64> {
+        let paths: Vec<String> = sqlx::query(
+            "SELECT screen_screenshot_path FROM perception_frames \
+             WHERE screen_screenshot_path IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query screenshot paths before wipe")?
+        .iter()
+        .filter_map(|row| row.get::<Option<String>, _>("screen_screenshot_path"))
+        .collect();
+
+        for path in &paths {
+            if let Err(e) = std::fs::remove_file(path) {
+                warn!(
+                    layer = "senses",
+                    component = "raw_log",
+                    path = path,
+                    error = %e,
+                    "Failed to delete screenshot file during wipe"
+                );
+            }
+        }
+
+        let result = sqlx::query("DELETE FROM perception_frames")
+            .execute(&self.pool)
+            .await
+            .context("Failed to wipe perception frames")?;
+
+        let deleted = result.rows_affected();
+        info!(
+            layer = "senses",
+            component = "raw_log",
+            deleted_frames = deleted,
+            deleted_screenshots = paths.len(),
+            "Wiped raw log"
+        );
+
+        Ok(deleted)
+    }
+
     /// Closes the database connection pool.
     pub async fn close(&self) {
         self.pool.close().await;
@@ -663,6 +714,30 @@ mod tests {
         let deleted = log.rotate(30).await.unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(log.frame_count().await.unwrap(), 1);
+
+        log.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_wipe_all_deletes_every_frame_regardless_of_age() {
+        let log = RawLog::open("sqlite::memory:").await.unwrap();
+
+        let mut old_frame = test_frame("old frame", false);
+        old_frame.ts = Utc::now() - Duration::days(400);
+        log.write_frame(&old_frame).await.unwrap();
+
+        let recent = test_frame("recent frame", true);
+        log.write_frame(&recent).await.unwrap();
+
+        assert_eq!(log.frame_count().await.unwrap(), 2);
+
+        let deleted = log.wipe_all().await.unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(log.frame_count().await.unwrap(), 0);
+
+        // Calling again on an already-empty log is a harmless no-op.
+        let deleted_again = log.wipe_all().await.unwrap();
+        assert_eq!(deleted_again, 0);
 
         log.close().await;
     }
