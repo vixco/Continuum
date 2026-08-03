@@ -22,7 +22,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   `Continuum`); adding a connection tests it before saving, with an explicit
   "Save anyway" escape hatch. New `[chat]` config section (`max_tokens`,
   `temperature`, `connect_timeout_secs`, `stream_idle_timeout_secs`,
-  `cli_timeout_secs`, `system_prompt_path`) makes every knob overridable per
+  `cli_timeout_secs`, `model_refresh_interval_secs`, `system_prompt_path`)
+  makes every knob overridable per
   non-negotiable #3. A new `chat_providers` health probe reports Degraded
   when a configured provider's last connection test failed. Per
   non-negotiable #2: the only new network calls this feature introduces go
@@ -55,6 +56,7 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- Provider model catalogs now support refresh-all and a configurable periodic refresh, propagate changes immediately to Chat, and power a unified searchable ChatGPT-style model switcher with provider branding.
 - **Blocking CI gates**: restore the explicit `continuum` → `cairo` Whisper
   wake-word alias that the Kairo rename accidentally made unreachable, update
   Whisper parameter construction for Rust 1.94's strict Clippy gate, and apply

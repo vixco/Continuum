@@ -31,7 +31,7 @@ export function Card({
   return (
     <div
       className={clsx(
-        "rounded-xl border border-bg-border bg-bg-surface shadow-sm",
+        "liquid-panel rounded-xl border border-bg-border bg-bg-surface shadow-sm",
         dense ? "p-4" : "p-5",
         className
       )}
@@ -108,7 +108,7 @@ export function Button({
     <button
       {...props}
       className={clsx(
-        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-all active:scale-[0.97]",
+        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-[transform,background-color,border-color,color,box-shadow,filter] duration-200 ease-out active:scale-[0.97]",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-amber/40",
         "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
         size === "sm" && "px-2.5 py-1 text-xs",
@@ -356,7 +356,7 @@ export function Modal({
     >
       <div
         className={clsx(
-          "w-full rounded-lg border border-bg-border bg-bg-surface shadow-xl",
+          "liquid-panel w-full rounded-lg border border-bg-border bg-bg-surface shadow-xl",
           widthClass
         )}
         onClick={(e) => e.stopPropagation()}

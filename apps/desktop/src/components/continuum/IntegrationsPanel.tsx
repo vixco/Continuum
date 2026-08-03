@@ -2,9 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
-import { Plug, Plus, RefreshCcw, Trash2, Zap } from "lucide-react";
+import { Plus, RefreshCcw, Trash2, Zap } from "lucide-react";
 
+import { ProviderLogo } from "@/components/providers/ProviderLogo";
 import { continuum } from "@/lib/tauri";
+import {
+  notifyProvidersChanged,
+  onProvidersChanged,
+  refreshAllProviderModels,
+} from "@/lib/providers";
 import type {
   CatalogEntry,
   ConnectionTestReport,
@@ -32,6 +38,7 @@ export function IntegrationsPanel() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [rowMessage, setRowMessage] = useState<Record<string, RowMessage>>({});
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
 
   // "Add provider" modal state.
   const [modalOpen, setModalOpen] = useState(false);
@@ -66,6 +73,8 @@ export function IntegrationsPanel() {
       }
     })();
   }, []);
+
+  useEffect(() => onProvidersChanged(() => void loadProviders()), [loadProviders]);
 
   const resetModal = useCallback(() => {
     setModalOpen(false);
@@ -113,6 +122,7 @@ export function IntegrationsPanel() {
       });
       resetModal();
       await loadProviders();
+      notifyProvidersChanged();
     } catch (e) {
       setModalError(e instanceof Error ? e.message : String(e));
       setTestFailed(true);
@@ -140,6 +150,7 @@ export function IntegrationsPanel() {
     } finally {
       setBusy((b) => ({ ...b, [`${id}:test`]: false }));
       await loadProviders();
+      notifyProvidersChanged();
     }
   }
 
@@ -162,6 +173,7 @@ export function IntegrationsPanel() {
     } finally {
       setBusy((b) => ({ ...b, [`${id}:refresh`]: false }));
       await loadProviders();
+      notifyProvidersChanged();
     }
   }
 
@@ -186,6 +198,7 @@ export function IntegrationsPanel() {
       setConfirmRemoveId(null);
       setBusy((b) => ({ ...b, [`${id}:remove`]: false }));
       await loadProviders();
+      notifyProvidersChanged();
     }
   }
 
@@ -201,6 +214,7 @@ export function IntegrationsPanel() {
     } finally {
       setBusy((b) => ({ ...b, [`${id}:model`]: false }));
       await loadProviders();
+      notifyProvidersChanged();
     }
   }
 
@@ -210,9 +224,29 @@ export function IntegrationsPanel() {
         title="AI providers"
         subtitle="Connect local or cloud models for Chat."
         actions={
-          <Button size="sm" variant="primary" onClick={openModal}>
-            <Plus size={12} /> Add provider
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={refreshingAll || providers.length === 0}
+              onClick={() => {
+                setRefreshingAll(true);
+                setError(null);
+                void refreshAllProviderModels()
+                  .then(({ refreshed, failed }) => {
+                    if (failed > 0) setError(`${refreshed} providers refreshed; ${failed} failed.`);
+                  })
+                  .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+                  .finally(() => setRefreshingAll(false));
+              }}
+            >
+              <RefreshCcw size={12} className={refreshingAll ? "animate-spin" : undefined} />
+              {refreshingAll ? "Refreshing…" : "Refresh all"}
+            </Button>
+            <Button size="sm" variant="primary" onClick={openModal}>
+              <Plus size={12} /> Add provider
+            </Button>
+          </>
         }
       >
         {error && (
@@ -367,6 +401,7 @@ function ProviderRow({
     <li className="flex flex-col gap-2 py-3 text-sm sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          <ProviderLogo provider={conn} size={28} />
           <span
             className={clsx(
               "h-2 w-2 shrink-0 rounded-full",
@@ -492,7 +527,7 @@ function CatalogTile({
       )}
     >
       <div className="flex items-center gap-1.5 font-medium text-ink">
-        <Plug size={11} className="text-ink-dim" />
+        <ProviderLogo provider={{ catalog_id: entry.id, display_name: entry.label }} size={22} />
         {entry.label}
       </div>
       {!entry.needs_key && <div className="mt-0.5 text-[10px] text-ink-dim">no key needed</div>}

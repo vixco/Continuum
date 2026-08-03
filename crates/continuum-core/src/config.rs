@@ -200,6 +200,9 @@ pub struct ChatConfig {
     /// streaming output is never killed by this, only a CLI that goes
     /// silent mid-send is.
     pub cli_timeout_secs: u64,
+    /// How often the desktop refreshes cached provider model catalogs.
+    /// Set to 0 to disable automatic refresh.
+    pub model_refresh_interval_secs: u64,
     /// Optional path to a custom system prompt file (overrides the built-in).
     pub system_prompt_path: Option<String>,
 }
@@ -212,6 +215,7 @@ impl Default for ChatConfig {
             connect_timeout_secs: 10,
             stream_idle_timeout_secs: 60,
             cli_timeout_secs: 120,
+            model_refresh_interval_secs: 300,
             system_prompt_path: None,
         }
     }
@@ -1045,14 +1049,18 @@ interval_secs = 5
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.stream_idle_timeout_secs, 60);
         assert_eq!(cfg.cli_timeout_secs, 120);
+        assert_eq!(cfg.model_refresh_interval_secs, 300);
         assert!(cfg.temperature.is_none());
         assert!(cfg.system_prompt_path.is_none());
 
         let parsed: ContinuumConfig =
-            toml::from_str("[chat]\nmax_tokens = 2048\nstream_idle_timeout_secs = 30\n")
+            toml::from_str(
+                "[chat]\nmax_tokens = 2048\nstream_idle_timeout_secs = 30\nmodel_refresh_interval_secs = 90\n",
+            )
                 .expect("parse");
         assert_eq!(parsed.chat.max_tokens, 2048);
         assert_eq!(parsed.chat.stream_idle_timeout_secs, 30);
+        assert_eq!(parsed.chat.model_refresh_interval_secs, 90);
         // Omitting [chat] entirely must also work:
         let empty: ContinuumConfig = toml::from_str("").expect("parse empty");
         assert_eq!(empty.chat.max_tokens, 8192);

@@ -5,12 +5,15 @@
 :root {
   --window-bg: #090a09;
   --bg: #090a09;
-  --surface: #111210;
-  --elevated: #171814;
+  --surface: rgba(19, 20, 18, 0.78);
+  --elevated: rgba(29, 30, 27, 0.76);
   --border: rgba(255, 255, 255, 0.075);
   --border-strong: rgba(255, 255, 255, 0.12);
   --accent: #f59e0b;
   --accent-dim: #b45309;
+  --glass-highlight: rgba(255, 255, 255, 0.075);
+  --glass-shadow: rgba(0, 0, 0, 0.42);
+  --motion-fluid: cubic-bezier(0.22, 1, 0.36, 1);
   color-scheme: dark;
 }
 
@@ -41,6 +44,13 @@ textarea {
 button {
   cursor: pointer;
 }
+button,
+a,
+input,
+textarea,
+select {
+  touch-action: manipulation;
+}
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
@@ -70,11 +80,11 @@ textarea:focus-visible {
    answers back. Reduced-motion users get the transition neutralised below. */
 .press {
   transition:
-    transform 0.14s cubic-bezier(0.4, 0, 0.2, 1),
-    background-color 0.18s ease,
-    border-color 0.18s ease,
-    color 0.18s ease,
-    box-shadow 0.18s ease;
+    transform 0.16s var(--motion-fluid),
+    background-color 0.2s ease-out,
+    border-color 0.2s ease-out,
+    color 0.2s ease-out,
+    box-shadow 0.2s ease-out;
 }
 .press:active {
   transform: scale(0.97);
@@ -84,6 +94,7 @@ textarea:focus-visible {
 
 .app-window {
   position: relative;
+  isolation: isolate;
   display: flex;
   height: 100dvh;
   min-width: 960px;
@@ -94,8 +105,9 @@ textarea:focus-visible {
      opaque webview and exposes its rectangular canvas as dark corner wedges. */
   border-radius: 0;
   background:
-    radial-gradient(720px 380px at 40% -12%, rgba(245, 158, 11, 0.04), transparent 60%),
-    radial-gradient(680px 560px at 110% 50%, rgba(255, 255, 255, 0.022), transparent 65%),
+    radial-gradient(720px 380px at 40% -12%, rgba(245, 158, 11, 0.055), transparent 60%),
+    radial-gradient(760px 620px at 108% 58%, rgba(71, 112, 101, 0.055), transparent 68%),
+    radial-gradient(560px 460px at 62% 20%, rgba(61, 85, 121, 0.035), transparent 65%),
     var(--window-bg);
   box-shadow:
     0 30px 100px rgba(0, 0, 0, 0.6),
@@ -111,7 +123,11 @@ textarea:focus-visible {
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(90deg, rgba(245, 158, 11, 0.025), transparent 16%), rgba(12, 13, 12, 0.7);
+  background:
+    linear-gradient(90deg, rgba(245, 158, 11, 0.035), transparent 18%), rgba(12, 13, 12, 0.66);
+  box-shadow: inset 0 1px var(--glass-highlight);
+  backdrop-filter: blur(22px) saturate(125%);
+  -webkit-backdrop-filter: blur(22px) saturate(125%);
   padding: 0 8px 0 16px;
   user-select: none;
   -webkit-app-region: drag;
@@ -159,7 +175,10 @@ textarea:focus-visible {
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.025);
   color: #a1a19a;
-  transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    transform 0.12s ease;
 }
 .tb-runtime.alive {
   border-color: rgba(34, 197, 94, 0.28);
@@ -188,7 +207,10 @@ textarea:focus-visible {
   place-items: center;
   border-radius: 7px;
   color: rgba(255, 255, 255, 0.6);
-  transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    transform 0.12s ease;
 }
 .win-btn:hover {
   background: rgba(255, 255, 255, 0.07);
@@ -223,7 +245,12 @@ textarea:focus-visible {
   flex-direction: column;
   gap: 16px;
   border-right: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(15, 16, 15, 0.92), rgba(9, 10, 9, 0.9));
+  background:
+    linear-gradient(180deg, rgba(23, 24, 21, 0.76), rgba(10, 11, 10, 0.7)),
+    radial-gradient(320px 260px at 0 0, rgba(245, 158, 11, 0.035), transparent 70%);
+  box-shadow: inset -1px 0 rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(28px) saturate(120%);
+  -webkit-backdrop-filter: blur(28px) saturate(120%);
   padding: 14px 12px;
   overflow-y: auto;
 }
@@ -253,7 +280,11 @@ textarea:focus-visible {
   color: rgba(255, 255, 255, 0.66);
   font-size: 12.5px;
   text-align: left;
-  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.12s ease;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    border-color 0.16s ease,
+    transform 0.12s ease;
 }
 .nav-item:hover {
   background: rgba(255, 255, 255, 0.035);
@@ -263,9 +294,15 @@ textarea:focus-visible {
   transform: scale(0.97);
 }
 .nav-item.is-active {
-  background: linear-gradient(90deg, rgba(245, 158, 11, 0.14), rgba(245, 158, 11, 0.04));
+  border-color: rgba(245, 158, 11, 0.1);
+  background:
+    linear-gradient(90deg, rgba(245, 158, 11, 0.16), rgba(245, 158, 11, 0.045)),
+    rgba(255, 255, 255, 0.018);
   color: #fff7ed;
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow:
+    inset 2px 0 0 var(--accent),
+    inset 0 1px rgba(255, 255, 255, 0.055),
+    0 8px 24px rgba(0, 0, 0, 0.16);
 }
 .nav-item.is-active svg {
   color: var(--accent);
@@ -288,7 +325,9 @@ textarea:focus-visible {
   gap: 10px;
   border-radius: 8px;
   padding: 6px 8px;
-  transition: background 0.16s ease, transform 0.12s ease;
+  transition:
+    background 0.16s ease,
+    transform 0.12s ease;
 }
 .foot-user:hover {
   background: rgba(255, 255, 255, 0.035);
@@ -317,6 +356,9 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background:
+    radial-gradient(620px 420px at 86% 8%, rgba(54, 82, 117, 0.035), transparent 72%),
+    radial-gradient(520px 440px at 72% 100%, rgba(53, 91, 79, 0.03), transparent 72%);
 }
 .main-scroll {
   height: 100%;
@@ -324,7 +366,7 @@ textarea:focus-visible {
   padding: 24px 28px 32px;
 }
 .main-scroll > * {
-  animation: tab-fade 0.26s ease;
+  animation: tab-fade 0.28s var(--motion-fluid);
 }
 @keyframes tab-fade {
   from {
@@ -360,7 +402,8 @@ textarea:focus-visible {
   justify-content: center;
   padding-top: 16vh;
   background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(14px) saturate(115%);
+  -webkit-backdrop-filter: blur(14px) saturate(115%);
   animation: tab-fade 0.18s ease;
 }
 .command-palette {
@@ -368,10 +411,181 @@ textarea:focus-visible {
   overflow: hidden;
   border: 1px solid rgba(245, 158, 11, 0.22);
   border-radius: 14px;
-  background: #10110f;
+  background: rgba(17, 18, 16, 0.82);
+  backdrop-filter: blur(30px) saturate(130%);
+  -webkit-backdrop-filter: blur(30px) saturate(130%);
   box-shadow:
     0 30px 90px rgba(0, 0, 0, 0.7),
-    0 0 60px rgba(245, 158, 11, 0.06);
+    0 0 60px rgba(245, 158, 11, 0.06),
+    inset 0 1px var(--glass-highlight);
+}
+
+/* Shared restrained glass material. The opaque Tailwind background remains a
+   fallback for environments where backdrop-filter is unavailable. */
+.liquid-panel {
+  position: relative;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.034), rgba(255, 255, 255, 0.008)),
+    rgba(17, 18, 16, 0.74) !important;
+  box-shadow:
+    0 14px 38px rgba(0, 0, 0, 0.2),
+    inset 0 1px var(--glass-highlight),
+    inset 0 -1px rgba(255, 255, 255, 0.018);
+  backdrop-filter: blur(22px) saturate(122%);
+  -webkit-backdrop-filter: blur(22px) saturate(122%);
+  transition:
+    border-color 0.22s ease-out,
+    background-color 0.22s ease-out,
+    box-shadow 0.22s ease-out;
+}
+
+.liquid-panel:hover {
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.24),
+    inset 0 1px rgba(255, 255, 255, 0.095),
+    inset 0 -1px rgba(255, 255, 255, 0.022);
+}
+
+/* ---------- Startup intro ---------- */
+
+.startup-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    linear-gradient(
+      105deg,
+      rgba(115, 126, 127, 0.76),
+      rgba(51, 65, 84, 0.8) 48%,
+      rgba(41, 62, 55, 0.82)
+    ),
+    #1b201f;
+  opacity: 1;
+  transition:
+    opacity 0.38s ease-in,
+    filter 0.38s ease-in;
+}
+
+.startup-intro::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    radial-gradient(
+      circle at 50% 50%,
+      transparent 0 18%,
+      rgba(3, 5, 5, 0.14) 72%,
+      rgba(3, 5, 5, 0.28)
+    );
+  pointer-events: none;
+}
+
+.startup-intro.is-leaving {
+  opacity: 0;
+  filter: blur(6px);
+  pointer-events: none;
+}
+
+.startup-aurora {
+  position: absolute;
+  inset: -18%;
+  background:
+    radial-gradient(42% 52% at 18% 60%, rgba(212, 221, 222, 0.18), transparent 72%),
+    radial-gradient(36% 46% at 55% 26%, rgba(90, 124, 178, 0.18), transparent 76%),
+    radial-gradient(38% 58% at 82% 72%, rgba(79, 123, 104, 0.18), transparent 74%);
+  filter: blur(72px);
+  transform: scale(1.08);
+  animation: startup-aurora-drift 7s ease-in-out infinite alternate;
+}
+
+.startup-emblem {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  height: 132px;
+  width: 132px;
+  place-items: center;
+  animation: startup-emblem-in 0.72s var(--motion-fluid) both;
+}
+
+.startup-mark-shell {
+  position: relative;
+  display: grid;
+  height: 86px;
+  width: 86px;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 28px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.055));
+  box-shadow:
+    0 28px 68px rgba(2, 5, 5, 0.32),
+    0 0 42px rgba(245, 158, 11, 0.11),
+    inset 0 1px rgba(255, 255, 255, 0.28),
+    inset 0 -1px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(26px) saturate(135%);
+  -webkit-backdrop-filter: blur(26px) saturate(135%);
+}
+
+.startup-mark-shell img {
+  height: 58px;
+  width: 58px;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35));
+  transform: scale(1.55);
+}
+
+.startup-ring {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+.startup-ring-outer {
+  inset: 0;
+  animation: startup-ring-breathe 2.4s ease-in-out infinite;
+}
+
+.startup-ring-inner {
+  inset: 13px;
+  border-color: rgba(245, 158, 11, 0.16);
+  animation: startup-ring-breathe 2.4s 0.18s ease-in-out infinite;
+}
+
+@keyframes startup-emblem-in {
+  from {
+    opacity: 0;
+    transform: scale(0.88) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes startup-ring-breathe {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scale(1.02);
+  }
+}
+
+@keyframes startup-aurora-drift {
+  from {
+    transform: scale(1.08) translate3d(-1.5%, -1%, 0);
+  }
+  to {
+    transform: scale(1.12) translate3d(1.5%, 1%, 0);
+  }
 }
 .command-palette kbd {
   border: 1px solid var(--border);
@@ -504,7 +718,9 @@ textarea:focus-visible {
   width: 22px;
   border-radius: 99px;
   background: rgba(255, 255, 255, 0.1);
-  transition: width 0.3s ease, background 0.3s ease;
+  transition:
+    width 0.3s ease,
+    background 0.3s ease;
 }
 .w-dot.done {
   background: rgba(245, 158, 11, 0.55);
@@ -548,5 +764,13 @@ textarea:focus-visible {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  .startup-intro,
+  .startup-emblem,
+  .startup-aurora,
+  .startup-ring {
+    filter: none !important;
+    transform: none !important;
   }
 }

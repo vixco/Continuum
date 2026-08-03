@@ -235,6 +235,15 @@ export interface WorkerSnapshot {
 }
 
 export interface ContinuumConfig {
+  chat: {
+    max_tokens: number;
+    temperature: number | null;
+    connect_timeout_secs: number;
+    stream_idle_timeout_secs: number;
+    cli_timeout_secs: number;
+    model_refresh_interval_secs: number;
+    system_prompt_path: string | null;
+  };
   vision: {
     name: string;
     model_path: string;
