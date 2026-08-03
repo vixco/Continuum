@@ -167,6 +167,15 @@ impl Vault {
         &self.dir
     }
 
+    /// Resolve `needle` to a node id by exact slug or case-insensitive
+    /// title match. `pub(crate)` accessor onto the private `index` field —
+    /// used by [`crate::migrate`] for idempotency checks (skip re-migrating
+    /// a legacy record whose title already exists) without widening the
+    /// public API beyond what the migration task needs.
+    pub(crate) async fn find_by_slug_or_title(&self, needle: &str) -> Result<Option<String>> {
+        self.index.find_by_slug_or_title(needle).await
+    }
+
     /// Fully rebuild the derived index from the markdown files on disk.
     pub async fn rebuild_index(&self) -> Result<IndexStats> {
         self.index.rebuild(&self.dir).await
