@@ -311,6 +311,133 @@ async fn duplicate_titles_resolve_deterministically_to_smallest_id() {
 }
 
 #[tokio::test]
+async fn search_graph_pending_backlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "projects/sidelife.md",
+        &note("mem_p", "project", "SideLife", "the game"),
+    );
+    write(
+        tmp.path(),
+        "decisions/lobby.md",
+        "---\nid: mem_d\ntype: decision\ntitle: Manual lobby\nstatus: confirmed\nimportance: 0.9\ncreated: 2026-08-01T10:00:00Z\nrelations:\n- to: sidelife\n  rel: belongs_to\n---\nLobbies are [[SideLife]] manual.\n",
+    );
+    write(
+        tmp.path(),
+        "facts/cand.md",
+        "---\nid: mem_c\ntype: fact\ntitle: Pnpm preferred\nstatus: candidate\ncreated: 2026-08-02T10:00:00Z\n---\nuser prefers pnpm\n",
+    );
+    let idx = open_index(tmp.path()).await;
+    idx.rebuild(tmp.path()).await.unwrap();
+
+    // FTS search hits body text
+    let hits = idx.search("pnpm", 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "mem_c");
+    assert!(hits[0]
+        .snippet
+        .as_deref()
+        .unwrap_or_default()
+        .contains("pnpm"));
+
+    // graph default statuses = confirmed + candidate
+    let g = idx
+        .graph(&continuum_memory::GraphFilter::default(), 1500)
+        .await
+        .unwrap();
+    assert_eq!(g.nodes.len(), 3);
+    // typed edge + mention edge both present between d and p
+    assert_eq!(
+        g.edges
+            .iter()
+            .filter(|e| e.from == "mem_d" && e.to == "mem_p")
+            .count(),
+        2
+    );
+
+    // type filter
+    let g2 = idx
+        .graph(
+            &continuum_memory::GraphFilter {
+                types: Some(vec![continuum_memory::NodeType::Decision]),
+                ..Default::default()
+            },
+            1500,
+        )
+        .await
+        .unwrap();
+    assert_eq!(g2.nodes.len(), 1);
+
+    // cap + truncated flag: limit 2 keeps the 2 highest-importance nodes
+    let g3 = idx
+        .graph(
+            &continuum_memory::GraphFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+            1500,
+        )
+        .await
+        .unwrap();
+    assert_eq!(g3.nodes.len(), 2);
+    assert!(g3.truncated);
+
+    let pend = idx.pending().await.unwrap();
+    assert_eq!(pend.len(), 1);
+    assert_eq!(pend[0].id, "mem_c");
+
+    let back = idx.backlinks("mem_p").await.unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].id, "mem_d");
+
+    assert_eq!(
+        idx.find_by_slug_or_title("sidelife").await.unwrap(),
+        Some("mem_p".into())
+    );
+    assert_eq!(
+        idx.find_by_slug_or_title("SIDELIFE").await.unwrap(),
+        Some("mem_p".into())
+    );
+    assert_eq!(idx.find_by_slug_or_title("nope").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn neighbors_bfs_depth() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "notes/a.md",
+        &note("mem_a", "note", "A", "[[B]]"),
+    );
+    write(
+        tmp.path(),
+        "notes/b.md",
+        &note("mem_b", "note", "B", "[[C]]"),
+    );
+    write(tmp.path(), "notes/c.md", &note("mem_c", "note", "C", ""));
+    let idx = open_index(tmp.path()).await;
+    idx.rebuild(tmp.path()).await.unwrap();
+    let g1 = idx.neighbors("mem_a", 1, 1500).await.unwrap();
+    assert_eq!(g1.nodes.len(), 2); // a + b
+    let g2 = idx.neighbors("mem_a", 2, 1500).await.unwrap();
+    assert_eq!(g2.nodes.len(), 3);
+}
+
+#[test]
+fn fts_query_sanitizes() {
+    assert_eq!(
+        continuum_memory::index::fts_query("hello world"),
+        "\"hello\"* \"world\"*"
+    );
+    assert_eq!(
+        continuum_memory::index::fts_query("a-b (c)"),
+        "\"ab\"* \"c\"*"
+    );
+    assert_eq!(continuum_memory::index::fts_query("  "), "");
+}
+
+#[tokio::test]
 async fn perf_smoke_1000_notes() {
     let tmp = tempfile::tempdir().unwrap();
     for i in 0..1000 {
