@@ -15,6 +15,7 @@ use continuum_memory::{Event, EventRange, Vault};
 use tokio::sync::watch;
 
 use crate::config::CuratorConfig;
+use crate::curator::conflict::detect_conflicts;
 use crate::curator::extract::{
     candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
 };
@@ -87,10 +88,12 @@ async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<
 }
 
 /// Attempts to write one candidate to the vault: near-duplicate check,
-/// confidence-threshold routing, then `Vault::create`. Returns `Some(())`
-/// on a successful write, `None` if the candidate was skipped for any
-/// reason — duplicate, discarded by threshold, *or* a vault operation
-/// erroring.
+/// confidence-threshold routing, then `Vault::create`. Returns `Some(id)`
+/// (the newly created note's id) on a successful write, `None` if the
+/// candidate was skipped for any reason — duplicate, discarded by
+/// threshold, *or* a vault operation erroring. The returned ids feed
+/// [`detect_conflicts`] (Task 5): only freshly-written notes need a
+/// conflict/supersede check.
 ///
 /// Every internal error is caught and logged here rather than propagated:
 /// one candidate hitting a vault I/O hiccup (a removed folder, a full
@@ -103,7 +106,7 @@ async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<
 /// same events and re-propose the (rewritten, possibly reworded) already-
 /// written candidates, risking near-duplicates slipping past `is_duplicate`
 /// on retitled output.
-async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) -> Option<()> {
+async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) -> Option<String> {
     match is_duplicate(vault, &c.title).await {
         Ok(true) => {
             tracing::debug!(
@@ -139,7 +142,7 @@ async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) 
     };
 
     match vault.create(candidate_to_draft(c, status)).await {
-        Ok(_) => Some(()),
+        Ok(note) => Some(note.frontmatter.id),
         Err(e) => {
             tracing::warn!(
                 layer = "memory",
@@ -155,26 +158,29 @@ async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) 
 
 /// One extraction pass: fetch vault events since `since`, ask the curator
 /// LLM which of them are worth remembering, and write the routed
-/// candidates into the vault. Public for tests.
+/// candidates into the vault. Public for tests. Returns the ids of the
+/// notes actually created — the caller ([`curator_tick`]) feeds these into
+/// [`detect_conflicts`] (Task 5), and uses `.len()` wherever the old
+/// `usize` count is needed.
 ///
-/// Returns `Ok(0)` without ever calling the LLM when there are no events in
-/// the window — routine idle periods shouldn't cost a model call. On a
-/// parse failure the LLM gets exactly one retry with the parse error
-/// appended to the prompt; a second failure is logged and treated as "zero
-/// candidates this pass" rather than propagated, since a stubborn
+/// Returns `Ok(vec![])` without ever calling the LLM when there are no
+/// events in the window — routine idle periods shouldn't cost a model
+/// call. On a parse failure the LLM gets exactly one retry with the parse
+/// error appended to the prompt; a second failure is logged and treated as
+/// "zero candidates this pass" rather than propagated, since a stubborn
 /// malformed-JSON model is a recoverable condition (the next scheduled pass
 /// tries again), not a hard error for the caller to handle.
 ///
 /// Only pre-loop failures — the events fetch and both LLM completion
 /// attempts — can make this function return `Err`; per-candidate failures
-/// are contained by [`write_candidate`] and simply don't count toward the
-/// returned total.
+/// are contained by [`write_candidate`] and simply don't add an id to the
+/// returned list.
 pub async fn extract_pass(
     vault: &Vault,
     llm: &dyn CuratorLlm,
     cfg: &CuratorConfig,
     since: DateTime<Utc>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Vec<String>> {
     let events = vault
         .events(&EventRange {
             since: Some(since),
@@ -189,7 +195,7 @@ pub async fn extract_pass(
             component = "curator",
             "No events since last pass; skipping extraction"
         );
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let events_block = build_events_block(&events);
@@ -217,17 +223,17 @@ pub async fn extract_pass(
                         error = %second_err,
                         "Curator LLM produced unparsable output twice; skipping this pass"
                     );
-                    return Ok(0);
+                    return Ok(Vec::new());
                 }
             }
         }
     };
     candidates.truncate(cfg.max_candidates_per_pass as usize);
 
-    let mut written = 0usize;
+    let mut created_ids = Vec::new();
     for c in &candidates {
-        if write_candidate(vault, c, cfg).await.is_some() {
-            written += 1;
+        if let Some(id) = write_candidate(vault, c, cfg).await {
+            created_ids.push(id);
         }
     }
 
@@ -236,11 +242,11 @@ pub async fn extract_pass(
         component = "curator",
         events = events.len(),
         candidates = candidates.len(),
-        written,
+        written = created_ids.len(),
         "Curator extraction pass complete"
     );
 
-    Ok(written)
+    Ok(created_ids)
 }
 
 /// Bounded-failure window-skip policy (self-healing non-negotiable #5:
@@ -251,12 +257,13 @@ pub async fn extract_pass(
 /// history on every future tick. Note this counts genuine `Err` results
 /// only — a pass that ran cleanly and simply found nothing worth
 /// remembering (including the "LLM produced invalid JSON twice" case,
-/// which [`extract_pass`] treats as `Ok(0)` by design) is a success, not a
-/// failure, and never contributes to this streak.
+/// which [`extract_pass`] treats as `Ok(vec![])` by design) is a success,
+/// not a failure, and never contributes to this streak.
 const MAX_CONSECUTIVE_WINDOW_FAILURES: u32 = 3;
 
 /// Runs one curator tick: an [`extract_pass`] attempt for `window_since`,
-/// the bounded-failure window-skip policy (see
+/// a [`detect_conflicts`] pass over any notes it created (Task 5), the
+/// bounded-failure window-skip policy (see
 /// [`MAX_CONSECUTIVE_WINDOW_FAILURES`]), and a `status` update. Returns the
 /// window start to use for the next tick.
 ///
@@ -283,6 +290,24 @@ async fn curator_tick(
     let pass_start = Utc::now();
     let outcome = extract_pass(vault, llm, cfg, window_since).await;
 
+    // Task 5: conflict/supersede detection over whatever this pass just
+    // wrote. Deliberately not folded into `outcome`/`window_failures` —
+    // a conflict-detection hiccup is a distinct failure mode from
+    // extraction itself and must not cause a healthy extraction pass to
+    // count as (or be retried like) a failed one.
+    if let Ok(ids) = &outcome {
+        if !ids.is_empty() {
+            if let Err(e) = detect_conflicts(vault, llm, ids).await {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "curator",
+                    error = %e,
+                    "Conflict detection failed for this pass's new notes"
+                );
+            }
+        }
+    }
+
     let pending_count = match vault.pending().await {
         Ok(p) => Some(p.len() as u64),
         Err(e) => {
@@ -306,9 +331,9 @@ async fn curator_tick(
             s.pending_count = count;
         }
         match &outcome {
-            Ok(written) => {
+            Ok(ids) => {
                 s.consecutive_failures = 0;
-                s.candidates_written_total += *written as u64;
+                s.candidates_written_total += ids.len() as u64;
             }
             Err(_) => {
                 s.consecutive_failures += 1;
@@ -404,8 +429,9 @@ pub async fn run_curator(
                 )
                 .await;
 
-                // Task 5 (conflict resolution) and Task 6 (session summary)
-                // add their own per-tick calls here.
+                // Task 5 (conflict resolution) runs inside `curator_tick`
+                // itself, right after `extract_pass` — see its body. Task 6
+                // (session summary) adds its own per-tick call here.
             }
             _ = activity.changed() => {
                 // Latest signal available via `*activity.borrow()`. Task 9
@@ -458,7 +484,7 @@ mod tests {
         let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
             .await
             .unwrap();
-        assert_eq!(written, 2); // 0.2 discarded
+        assert_eq!(written.len(), 2); // 0.2 discarded
 
         let pending = vault.pending().await.unwrap();
         assert_eq!(pending.len(), 1); // the 0.5 inferred one
@@ -476,7 +502,7 @@ mod tests {
         let written2 = extract_pass(&vault, &llm2, &cfg, Utc::now() - Duration::hours(1))
             .await
             .unwrap();
-        assert_eq!(written2, 0);
+        assert_eq!(written2.len(), 0);
     }
 
     #[tokio::test]
@@ -500,7 +526,7 @@ mod tests {
         let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
             .await
             .unwrap();
-        assert_eq!(written, 0);
+        assert_eq!(written.len(), 0);
         assert_eq!(llm.calls(), 2); // initial + one retry with the error appended
     }
 
@@ -550,7 +576,7 @@ mod tests {
         // (logged, not propagated) — the pass still completes and counts
         // the second candidate, rather than the whole pass aborting on the
         // first candidate's error and losing the second write's count.
-        assert_eq!(written, 1);
+        assert_eq!(written.len(), 1);
         let hits = vault.search("write fine", 5).await.unwrap();
         assert!(hits.iter().any(|h| h.title == "Will write fine"));
     }
@@ -566,10 +592,10 @@ mod tests {
     /// replies (3 passes x initial+retry) + then a valid reply"): that
     /// recipe can't actually exercise this policy, because
     /// `extract_pass`'s "LLM produced invalid JSON twice" path returns
-    /// `Ok(0)` by design (see its doc comment and
+    /// `Ok(vec![])` by design (see its doc comment and
     /// `extract_pass_retries_once_then_skips` above) — never `Err`. Feeding
-    /// it invalid JSON six times produces three `Ok(0)` passes, not three
-    /// failures, and would never trip the failure streak. This test
+    /// it invalid JSON six times produces three `Ok(vec![])` passes, not
+    /// three failures, and would never trip the failure streak. This test
     /// instead uses an empty-script `MockLlm` (every `complete()` call
     /// errors immediately, simulating an unreachable/crashed LLM) to
     /// produce genuine `Err` results from `extract_pass`, which is what the
