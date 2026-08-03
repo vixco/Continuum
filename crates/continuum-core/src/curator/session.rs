@@ -70,22 +70,32 @@ impl SessionTracker {
     ///
     /// Boundary rules, checked in this order:
     /// 1. No session in progress: start one from `sig`. Never a boundary.
-    /// 2. `sig.ts - last_activity > idle_limit_min`: the user went idle.
+    /// 2. `sig.ts` is *before* `last_activity`: a non-monotonic signal
+    ///    (clock skew, sleep/resume, an out-of-order perception frame).
+    ///    Ignored outright — no boundary, no state mutation at all — so it
+    ///    can't rewind `last_activity` and inflate the next idle-gap check.
+    /// 3. `sig.ts - last_activity > idle_limit_min`: the user went idle.
     ///    Ends the session at `last_activity` (the last moment there was
     ///    actually activity, not the idle-detecting signal's own time).
-    /// 3. The foreground process changed *and* the session so far
+    /// 4. The foreground process changed *and* the session so far
     ///    (`last_activity - started`) is at least [`MIN_SESSION_MINUTES`]:
     ///    a real handoff to different work. Ends the session at
     ///    `last_activity` (the previous signal's time, before the change).
-    /// 4. Otherwise: not a boundary. `last_activity` and `project_hint`
+    /// 5. Otherwise: not a boundary. `last_activity` and `project_hint`
     ///    track the latest signal, but `process` is left untouched — a
-    ///    brief flick to another window (case 3's condition without enough
+    ///    brief flick to another window (case 4's condition without enough
     ///    elapsed time) never renames the session out from under itself, so
     ///    a string of short flicks can never itself accumulate into a false
     ///    boundary. If the flicked-to process sticks around long enough
     ///    that the *original* session's own elapsed time alone crosses
-    ///    [`MIN_SESSION_MINUTES`], case 3 will still eventually fire and
+    ///    [`MIN_SESSION_MINUTES`], case 4 will still eventually fire and
     ///    close out the original session under its original process name.
+    ///
+    /// Cases 3 and 4 are mutually exclusive in practice (an idle gap and a
+    /// process change can't both look at the *same* prior `last_activity`
+    /// without the idle check firing first), but if a caller somehow feeds
+    /// a signal that satisfies both, the idle check (case 3) is evaluated
+    /// first and wins.
     ///
     /// Whenever a boundary fires, the tracker immediately starts a fresh
     /// session from `sig` (case 1's logic) — the signal that closed the old
@@ -102,6 +112,22 @@ impl SessionTracker {
             });
             return None;
         };
+
+        // Non-monotonic input (clock skew, sleep/resume, an out-of-order
+        // perception frame) is expected, not a bug in the caller — ignore
+        // it rather than rewinding `last_activity`, which would otherwise
+        // inflate the *next* idle-gap computation and fragment one real
+        // session into spurious short ones.
+        if ts < state.last_activity {
+            tracing::debug!(
+                layer = "memory",
+                component = "curator",
+                ts = %ts,
+                last_activity = %state.last_activity,
+                "Ignoring non-monotonic activity signal"
+            );
+            return None;
+        }
 
         let idle_limit = Duration::minutes(idle_limit_min as i64);
         if ts - state.last_activity > idle_limit {
@@ -409,6 +435,113 @@ mod tests {
             .expect("second idle boundary");
         assert_eq!(ended2.started, t1);
         assert_eq!(ended2.ended, t1);
+    }
+
+    /// Regression for the "unguarded non-monotonic `sig.ts` corrupts
+    /// `SessionTracker` state" review finding: a signal that arrives with a
+    /// timestamp *earlier* than the tracked `last_activity` (clock skew,
+    /// sleep/resume, an out-of-order perception frame) must be ignored
+    /// outright, not treated as a legitimate update that rewinds
+    /// `last_activity` backwards.
+    ///
+    /// Asserted indirectly (no internal state accessor exists, matching
+    /// this module's existing test style): a small idle limit is chosen
+    /// such that the very next *in-order* signal would spuriously trigger
+    /// an idle boundary if the out-of-order signal had been allowed to
+    /// rewind `last_activity`, but correctly does not once the guard drops
+    /// it. A genuine idle boundary afterward still fires and reports the
+    /// correct (never-rewound) `last_activity`.
+    #[test]
+    fn observe_ignores_non_monotonic_signal_without_rewinding_state() {
+        let mut tracker = SessionTracker::new();
+        let idle_limit_min = 2;
+
+        let t0 = base_ts();
+        assert_eq!(
+            tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), idle_limit_min),
+            None
+        );
+
+        // last_activity advances to t0 + 1min.
+        let t1 = t0 + Duration::minutes(1);
+        assert_eq!(
+            tracker.observe(&mk_sig(t1, "vscode", Some("continuum")), idle_limit_min),
+            None
+        );
+
+        // Out-of-order signal 30s *before* t0 (well before last_activity =
+        // t1): must be dropped with no boundary and no state mutation.
+        let out_of_order = t0 - Duration::seconds(30);
+        assert_eq!(
+            tracker.observe(
+                &mk_sig(out_of_order, "vscode", Some("continuum")),
+                idle_limit_min
+            ),
+            None
+        );
+
+        // t2 is 1min50s after the correct last_activity (t1) -- under the
+        // 2 min idle limit, so no boundary. Had the out-of-order signal
+        // above rewound last_activity to `out_of_order` (t0 - 30s), the
+        // gap here would be 2min50s > 2min and would have incorrectly
+        // fired a boundary.
+        let t2 = t1 + Duration::seconds(110);
+        assert_eq!(
+            tracker.observe(&mk_sig(t2, "vscode", Some("continuum")), idle_limit_min),
+            None
+        );
+
+        // A genuine idle gap now correctly ends the session at t2 (the
+        // last real activity), started at t0 -- neither disturbed by the
+        // dropped out-of-order signal.
+        let t3 = t2 + Duration::minutes(5);
+        let ended = tracker
+            .observe(&mk_sig(t3, "vscode", Some("continuum")), idle_limit_min)
+            .expect("genuine idle gap should still emit a boundary");
+        assert_eq!(ended.started, t0);
+        assert_eq!(ended.ended, t2);
+    }
+
+    /// Low-priority review nit: when a single `observe` call's signal
+    /// satisfies both the idle-gap condition *and* the process-change
+    /// condition at once, the idle check (evaluated first) must win --
+    /// documented in [`SessionTracker::observe`]'s doc comment as cases 3
+    /// vs. 4.
+    #[test]
+    fn observe_prefers_idle_boundary_when_both_conditions_coincide() {
+        let mut tracker = SessionTracker::new();
+        let idle_limit_min = 5;
+
+        let t0 = base_ts();
+        tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), idle_limit_min);
+
+        // Age the session past the 5 min process-change floor using two
+        // small (<5min) gaps, so neither intermediate step trips the idle
+        // check on its own -- only the cumulative `last_activity - started`
+        // crosses 5 min.
+        let t1 = t0 + Duration::minutes(3);
+        tracker.observe(&mk_sig(t1, "vscode", Some("continuum")), idle_limit_min);
+        let t2 = t1 + Duration::minutes(3);
+        tracker.observe(&mk_sig(t2, "vscode", Some("continuum")), idle_limit_min);
+
+        // t3 is both >5min idle-limit past t2 AND a different process from
+        // a session already >=5min old (t2 - t0 = 6min) -- both boundary
+        // conditions hold for this one `observe` call.
+        let t3 = t2 + Duration::minutes(10);
+        let ended = tracker
+            .observe(&mk_sig(t3, "chrome", Some("web")), idle_limit_min)
+            .expect("a boundary should fire");
+
+        assert_eq!(ended.started, t0);
+        assert_eq!(ended.ended, t2);
+        assert_eq!(ended.process, "vscode");
+
+        // Tracker restarted fresh from the triggering (chrome) signal.
+        let t4 = t3 + Duration::seconds(1);
+        assert_eq!(
+            tracker.observe(&mk_sig(t4, "chrome", Some("web")), idle_limit_min),
+            None
+        );
     }
 
     // --- write_session_summary tests -----------------------------------
