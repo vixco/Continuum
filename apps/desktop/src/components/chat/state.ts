@@ -229,7 +229,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const target = providers.find((p) => p.default_model) ?? providers[0];
     const conv = await continuum.chatCreateConversation(
       target.id,
-      target.default_model ?? target.models[0] ?? "",
+      target.default_model ?? target.models[0] ?? ""
     );
     const list = await continuum.chatListConversations();
     set({ conversations: list, activeId: conv.id, activeConv: conv });
@@ -314,7 +314,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lines.push("");
       lines.push("[attachments]");
       for (const a of composerAttachments) {
-        lines.push(`- ${a.kind === "image" ? "image" : "file"}: ${a.name}${a.path ? ` (${a.path})` : ""}`);
+        lines.push(
+          `- ${a.kind === "image" ? "image" : "file"}: ${a.name}${a.path ? ` (${a.path})` : ""}`
+        );
       }
     }
     const wire = lines.join("\n");
@@ -417,7 +419,7 @@ export const selectIsStreaming = (s: ChatState): boolean => {
 };
 
 export const selectActiveBuffer = (s: ChatState): string =>
-  s.activeId ? s.streamBuffers[s.activeId] ?? "" : "";
+  s.activeId ? (s.streamBuffers[s.activeId] ?? "") : "";
 
 export { fromStored, genId, partsToText };
 export type { ToolInvocation, ToolStatus };

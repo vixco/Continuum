@@ -84,7 +84,7 @@ function ChatWorkspace() {
   }, [bootstrap]);
 
   const isStreaming = activeId != null && activeId in streamBuffers;
-  const streamBuffer = activeId ? streamBuffers[activeId] ?? "" : "";
+  const streamBuffer = activeId ? (streamBuffers[activeId] ?? "") : "";
 
   const messages: ChatMessage[] = useMemo(() => {
     if (!activeConv) return [];
@@ -98,9 +98,7 @@ function ChatWorkspace() {
       status: m.aborted ? "aborted" : "complete",
       ts: m.ts,
       conversationId: activeConv.id,
-      usage: m.usage
-        ? { input: m.usage.input_tokens, output: m.usage.output_tokens }
-        : null,
+      usage: m.usage ? { input: m.usage.input_tokens, output: m.usage.output_tokens } : null,
     }));
   }, [activeConv]);
 
@@ -122,7 +120,7 @@ function ChatWorkspace() {
   }, [isStreaming, activeId, streamBuffer]);
 
   const activeProvider = providers.find((p) => p.id === activeConv?.provider_id) ?? null;
-  const activeError = activeId ? errors[activeId] ?? globalError : globalError;
+  const activeError = activeId ? (errors[activeId] ?? globalError) : globalError;
 
   return (
     <div className="flex h-full min-h-0">
@@ -265,9 +263,7 @@ function ConversationList({
                 </button>
                 <button
                   type="button"
-                  aria-label={
-                    confirmDelete === c.id ? "Confirm delete" : "Delete conversation"
-                  }
+                  aria-label={confirmDelete === c.id ? "Confirm delete" : "Delete conversation"}
                   onClick={() => {
                     if (confirmDelete === c.id) {
                       void onDelete(c.id);
@@ -348,13 +344,7 @@ async function updateConversationModel(providerId: string, model: string) {
   }
 }
 
-function ModelField({
-  provider,
-  value,
-}: {
-  provider: ProviderConnection | null;
-  value: string;
-}) {
+function ModelField({ provider, value }: { provider: ProviderConnection | null; value: string }) {
   if (!provider || provider.kind === "claude_cli" || provider.models.length === 0) {
     return (
       <div className="w-32">
@@ -385,11 +375,7 @@ function AmbientFooter({
 }) {
   // Footer shows the current model and a low-key state pill so the user
   // knows whether the model is thinking or idle. Kept extremely small.
-  const state = isStreaming
-    ? "streaming"
-    : sendingActive
-      ? "sending"
-      : "idle";
+  const state = isStreaming ? "streaming" : sendingActive ? "sending" : "idle";
   return (
     <div className="flex items-center justify-between border-t border-bg-border/60 bg-bg-surface/30 px-4 py-1.5 text-[10px] text-ink-dim">
       <div className="flex items-center gap-2 font-mono tabular-nums">
@@ -402,15 +388,13 @@ function AmbientFooter({
           )}
         />
         <span>
-          {state === "streaming"
-            ? "Generating…"
-            : state === "sending"
-              ? "Sending…"
-              : "Ready"}
+          {state === "streaming" ? "Generating…" : state === "sending" ? "Sending…" : "Ready"}
         </span>
       </div>
       <div className="font-mono text-ink-dim">
-        {activeProvider ? `${activeProvider.display_name} · ${activeProvider.default_model ?? "—"}` : "No provider"}
+        {activeProvider
+          ? `${activeProvider.display_name} · ${activeProvider.default_model ?? "—"}`
+          : "No provider"}
       </div>
     </div>
   );

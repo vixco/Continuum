@@ -153,8 +153,8 @@ export function ToolsTab() {
             role="status"
           >
             {dirtyPermissionCount} permission change
-            {dirtyPermissionCount === 1 ? "" : "s"} held in memory only. The runtime does
-            not yet read the dashboard&apos;s per-tool permissions — this UI exists so the
+            {dirtyPermissionCount === 1 ? "" : "s"} held in memory only. The runtime does not yet
+            read the dashboard&apos;s per-tool permissions — this UI exists so the
             orchestrator&apos;s eventual permission policy is visible and reviewable.
           </div>
         )}
@@ -169,8 +169,8 @@ export function ToolsTab() {
           <div className="py-6 text-center text-sm text-ink-dim">Loading MCP tool list…</div>
         ) : mcpTools.length === 0 ? (
           <div className="py-6 text-center text-sm text-ink-dim">
-            No MCP tools registered. This is unexpected — check that the dashboard was built
-            with the latest continuum-mcp manifest.
+            No MCP tools registered. This is unexpected — check that the dashboard was built with
+            the latest continuum-mcp manifest.
           </div>
         ) : (
           <div className="space-y-2">

@@ -170,9 +170,8 @@ function RestartNotice() {
           Voice settings will only take effect on the next Continuum start.
         </div>
         <div className="mt-0.5 text-xs text-ink-muted">
-          Changes here are saved, but the daemon only reads the config at startup.
-          Close and restart Continuum to apply them. (Live hot-reload will ship in a later
-          update.)
+          Changes here are saved, but the daemon only reads the config at startup. Close and restart
+          Continuum to apply them. (Live hot-reload will ship in a later update.)
         </div>
       </div>
     </div>

@@ -1,7 +1,9 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -31,11 +33,11 @@ env:
 jobs:
   release:
     name: Build and publish Windows release
-    # The workflow commits a version bump back to main. Do not start a second
-    # release for that generated commit.
+    # Never publish a main commit until the blocking CI workflow has passed.
+    # Manual dispatch remains available for an intentional retry.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      !startsWith(github.event.head_commit.message, 'chore(release):')
+      github.event.workflow_run.conclusion == 'success'
     # WiX 3.14's candle.exe currently fails to start on the VS 2026 image now
     # served by windows-latest. Windows 2022 remains a supported hosted image
     # and is the stable packaging environment for our MSI/NSIS release path.
@@ -55,6 +57,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # workflow_run otherwise checks out the latest default-branch SHA,
+          # which may differ from the exact commit that CI validated.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify release commit is current main
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          $releaseSha = (git rev-parse HEAD).Trim()
+          $mainSha = (git rev-parse origin/main).Trim()
+          if ($releaseSha -ne $mainSha) {
+            throw "Refusing to release stale CI commit $releaseSha; current main is $mainSha."
+          }
 
       - name: Calculate next release version
         id: version
