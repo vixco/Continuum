@@ -145,13 +145,15 @@ pub async fn migrate_legacy_semantic(vault: &Vault, semantic_db: &Path) -> Resul
         // legacy `updated_at` and save it back — a second, small write
         // under the vault's own write lock — so migrated facts keep their
         // original timestamp instead of "the moment the migration ran".
-        // (`save` always re-stamps `updated` to the current time as part
-        // of its own contract; only `created` survives the patch, which is
-        // the timestamp that actually matters for provenance here.)
+        // `Vault::save` unconditionally re-stamps `updated = now`, which
+        // would make every migrated fact look freshly changed in the
+        // timeline/graph filters; `save_preserving_updated` is the
+        // migration-only escape hatch that writes `updated` verbatim
+        // instead.
         let mut note = vault.create(draft).await?;
         note.frontmatter.created = ts;
         note.frontmatter.updated = Some(ts);
-        vault.save(&note).await?;
+        vault.save_preserving_updated(&note).await?;
 
         key_to_id.insert(key, note.frontmatter.id.clone());
         report.migrated += 1;
@@ -179,7 +181,13 @@ pub async fn migrate_legacy_semantic(vault: &Vault, semantic_db: &Path) -> Resul
                         rel: relation,
                         confidence: 0.5,
                     });
-                    vault.save(&from_note).await?;
+                    // Same reasoning as the created/updated patch above:
+                    // this write is reconstructing a legacy edge, not
+                    // performing a fresh update, so it must not bump
+                    // `updated` away from the fact's original timestamp
+                    // (the regular `save` would stamp `updated = now` and
+                    // clobber the patch already applied in pass 1).
+                    vault.save_preserving_updated(&from_note).await?;
                 }
             }
             _ => {
