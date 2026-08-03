@@ -155,16 +155,18 @@ pub async fn wake_orchestrator(
     // to "plan" would make every tool call into a no-op.
     if config.mcp_enabled {
         let mcp_bin = resolve_mcp_binary(config)?;
-        let mcp_config_file = write_mcp_config(config, &mcp_bin)?;
+        let (mcp_config_file, allowed_tools, external_server_count) =
+            write_mcp_config(config, &mcp_bin)?;
         cmd.arg("--mcp-config").arg(&mcp_config_file);
         cmd.arg("--strict-mcp-config");
-        cmd.arg("--allowedTools").arg("mcp__continuum__*");
+        cmd.arg("--allowedTools").arg(&allowed_tools);
         cmd.arg("--permission-mode").arg("default");
         info!(
             layer = "orchestrator",
             component = "spawn",
             mcp_bin = %mcp_bin.display(),
             mcp_config = %mcp_config_file.display(),
+            external_server_count,
             "MCP enabled for this wake"
         );
     } else {
@@ -374,7 +376,10 @@ fn resolve_mcp_binary(config: &OrchestratorConfig) -> Result<PathBuf> {
 /// returns its path. A unique suffix is appended per call so parallel wakes
 /// cannot clobber each other's config file (e.g. a triage-triggered wake
 /// landing at the same millisecond as a hotkey wake).
-fn write_mcp_config(config: &OrchestratorConfig, mcp_bin: &std::path::Path) -> Result<PathBuf> {
+fn write_mcp_config(
+    config: &OrchestratorConfig,
+    mcp_bin: &std::path::Path,
+) -> Result<(PathBuf, String, usize)> {
     let base_dir = config
         .mcp_config_path
         .as_ref()
@@ -425,16 +430,33 @@ fn write_mcp_config(config: &OrchestratorConfig, mcp_bin: &std::path::Path) -> R
         serde_json::json!({})
     };
 
-    let doc = serde_json::json!({
-        "mcpServers": {
-            "continuum": {
-                "type": "stdio",
-                "command": mcp_bin.to_string_lossy(),
-                "args": [],
-                "env": env_block,
-            }
-        }
-    });
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "continuum".to_string(),
+        serde_json::json!({
+            "type": "stdio",
+            "command": mcp_bin.to_string_lossy(),
+            "args": [],
+            "env": env_block,
+        }),
+    );
+
+    let registry_dir = config
+        .mcp_data_dir
+        .clone()
+        .unwrap_or_else(continuum_dev_dir);
+    let mut allowed_tools = vec!["mcp__continuum__*".to_string()];
+    let external_allowed = crate::mcp_registry::append_server_configs(&registry_dir, &mut servers)
+        .with_context(|| {
+            format!(
+                "Failed to load installed MCP servers from {}",
+                registry_dir.display()
+            )
+        })?;
+    let external_server_count = external_allowed.len();
+    allowed_tools.extend(external_allowed);
+
+    let doc = serde_json::json!({ "mcpServers": servers });
 
     let text = serde_json::to_string_pretty(&doc).context("Failed to serialize mcp-config.json")?;
     std::fs::write(&config_path, text).with_context(|| {
@@ -444,7 +466,7 @@ fn write_mcp_config(config: &OrchestratorConfig, mcp_bin: &std::path::Path) -> R
         )
     })?;
 
-    Ok(config_path)
+    Ok((config_path, allowed_tools.join(","), external_server_count))
 }
 
 /// Processes the event stream from stdout, collecting text and emitting events.

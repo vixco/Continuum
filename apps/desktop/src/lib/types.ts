@@ -501,3 +501,16 @@ export interface McpTool {
   name: string;
   description: string;
 }
+
+/** A validated local stdio MCP server registration. */
+export interface McpServerRegistration {
+  name: string;
+  command: string;
+  args: string[];
+}
+
+export interface InstallMcpServerInput {
+  name: string;
+  command: string;
+  args: string[];
+}

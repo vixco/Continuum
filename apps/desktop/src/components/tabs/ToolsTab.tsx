@@ -2,11 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { ChevronDown, Plus, Trash2 } from "lucide-react";
+import { CheckCircle2, ChevronDown, Loader2, Plus, Server, Trash2 } from "lucide-react";
 
-import { Button, Card, Select, Toggle } from "@/components/ui/primitives";
+import { Button, Card, Modal, Select, Toggle } from "@/components/ui/primitives";
 import { continuum } from "@/lib/tauri";
-import type { McpTool, SaveSkillInput, Skill } from "@/lib/types";
+import type {
+  InstallMcpServerInput,
+  McpServerRegistration,
+  McpTool,
+  SaveSkillInput,
+  Skill,
+} from "@/lib/types";
 
 /**
  * Permission presets surfaced in the per-tool dropdown. The wire-up against
@@ -33,8 +39,11 @@ export function ToolsTab() {
 
   // --- MCP tools (live, sourced from continuum-mcp static manifest) ---
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerRegistration[]>([]);
   const [mcpLoading, setMcpLoading] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
+  const [mcpNotice, setMcpNotice] = useState<string | null>(null);
+  const [showServerInstaller, setShowServerInstaller] = useState(false);
   const [toolPermissions, setToolPermissions] = useState<Record<string, Permission>>({});
 
   async function refresh() {
@@ -52,7 +61,12 @@ export function ToolsTab() {
   async function refreshMcpTools() {
     setMcpLoading(true);
     try {
-      setMcpTools(await continuum.listMcpTools());
+      const [tools, servers] = await Promise.all([
+        continuum.listMcpTools(),
+        continuum.listInstalledMcpServers(),
+      ]);
+      setMcpTools(tools);
+      setMcpServers(servers);
       setMcpError(null);
     } catch (e) {
       setMcpError(`Failed to load MCP tools: ${e}`);
@@ -84,6 +98,13 @@ export function ToolsTab() {
 
   function setToolPermission(name: string, value: Permission) {
     setToolPermissions((prev) => ({ ...prev, [name]: value }));
+  }
+
+  async function handleInstallServer(input: InstallMcpServerInput) {
+    const server = await continuum.installMcpServer(input);
+    setShowServerInstaller(false);
+    setMcpNotice(`${server.name} is registered and will be connected on the next agent run.`);
+    await refreshMcpTools();
   }
 
   async function handleToggle(skill: Skill) {
@@ -140,8 +161,11 @@ export function ToolsTab() {
           <Button
             size="sm"
             variant="default"
-            disabled
-            title="Adding new MCP servers is not yet supported from the UI. Edit config/default-permissions.toml to add namespaces."
+            onClick={() => {
+              setMcpError(null);
+              setMcpNotice(null);
+              setShowServerInstaller(true);
+            }}
           >
             <Plus size={12} /> Install server
           </Button>
@@ -160,8 +184,47 @@ export function ToolsTab() {
         )}
 
         {mcpError && (
-          <div className="mb-3 rounded-md border border-state-error/40 bg-state-error/10 px-3 py-2 text-sm text-state-error">
+          <div
+            className="mb-3 rounded-md border border-state-error/40 bg-state-error/10 px-3 py-2 text-sm text-state-error"
+            role="alert"
+          >
             {mcpError}
+          </div>
+        )}
+
+        {mcpNotice && (
+          <div
+            className="mb-3 flex items-center gap-2 rounded-md border border-state-healthy/30 bg-state-healthy/10 px-3 py-2 text-sm text-state-healthy"
+            role="status"
+          >
+            <CheckCircle2 size={14} />
+            {mcpNotice}
+          </div>
+        )}
+
+        {mcpServers.length > 0 && (
+          <div className="mb-4 rounded-md border border-bg-border bg-bg-elevated">
+            <div className="border-b border-bg-border px-3 py-2 text-[11px] uppercase tracking-wide text-ink-dim">
+              Installed servers
+            </div>
+            <ul className="divide-y divide-bg-border">
+              {mcpServers.map((server) => (
+                <li key={server.name} className="flex items-start gap-3 px-3 py-2.5">
+                  <Server className="mt-0.5 shrink-0 text-accent-amber" size={14} />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-xs text-ink">{server.name}</div>
+                    <div
+                      className="truncate font-mono text-[11px] text-ink-dim"
+                      title={server.command}
+                    >
+                      {server.command}
+                      {server.args.length > 0 ? ` ${server.args.join(" ")}` : ""}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-[11px] text-ink-dim">Next agent run</span>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -185,6 +248,12 @@ export function ToolsTab() {
           </div>
         )}
       </Card>
+
+      <McpServerInstaller
+        open={showServerInstaller}
+        onClose={() => setShowServerInstaller(false)}
+        onInstall={handleInstallServer}
+      />
 
       <Card
         title="Skills"
@@ -277,6 +346,156 @@ export function ToolsTab() {
       )}
     </div>
   );
+}
+
+function McpServerInstaller({
+  open,
+  onClose,
+  onInstall,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onInstall: (input: InstallMcpServerInput) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [argsText, setArgsText] = useState("[]");
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setName("");
+    setCommand("");
+    setArgsText("[]");
+    setInstalling(false);
+    setInstallError(null);
+  }, [open]);
+
+  async function submit() {
+    setInstallError(null);
+    let args: unknown;
+    try {
+      args = JSON.parse(argsText);
+    } catch {
+      setInstallError('Arguments must be a JSON array, for example ["--stdio"].');
+      return;
+    }
+    if (!Array.isArray(args) || !args.every((argument) => typeof argument === "string")) {
+      setInstallError("Every argument must be a string inside a JSON array.");
+      return;
+    }
+
+    setInstalling(true);
+    try {
+      await onInstall({ name: name.trim(), command: command.trim(), args });
+    } catch (error) {
+      setInstallError(formatError(error));
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        if (!installing) onClose();
+      }}
+      title="Install MCP server"
+      width="md"
+      footer={
+        <>
+          <Button size="sm" variant="ghost" onClick={onClose} disabled={installing}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={submit}
+            disabled={installing || !name.trim() || !command.trim()}
+          >
+            {installing ? <Loader2 className="animate-spin" size={13} /> : <Plus size={13} />}
+            {installing ? "Checking executable…" : "Install server"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4 text-sm">
+        <div className="rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-xs leading-relaxed text-ink-muted">
+          Register an MCP server that is already installed on this computer. Continuum checks the
+          executable and saves the registration locally; it does not download packages or run the
+          server during installation. The server connects on the next agent run. Only register
+          software you trust, because its process runs with your Windows account access.
+        </div>
+
+        <Field label="Server name">
+          <input
+            type="text"
+            value={name}
+            onChange={(event) => setName(event.target.value.toLowerCase())}
+            placeholder="example-server"
+            autoComplete="off"
+            disabled={installing}
+            className="w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 font-mono text-sm text-ink placeholder:text-ink-dim focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20 disabled:opacity-60"
+          />
+          <div className="mt-1 text-[11px] text-ink-dim">
+            Lowercase letters, numbers, hyphens, and underscores only.
+          </div>
+        </Field>
+
+        <Field label="Executable">
+          <input
+            type="text"
+            value={command}
+            onChange={(event) => setCommand(event.target.value)}
+            placeholder="C:\\Tools\\my-mcp-server.exe"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={installing}
+            className="w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 font-mono text-sm text-ink placeholder:text-ink-dim focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20 disabled:opacity-60"
+          />
+          <div className="mt-1 text-[11px] text-ink-dim">
+            Use a full path, or a command already available on PATH. Do not put tokens or passwords
+            in the command or arguments.
+          </div>
+        </Field>
+
+        <Field label="Arguments (JSON array)">
+          <input
+            type="text"
+            value={argsText}
+            onChange={(event) => setArgsText(event.target.value)}
+            placeholder='["--stdio"]'
+            autoComplete="off"
+            spellCheck={false}
+            disabled={installing}
+            className="w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 font-mono text-sm text-ink placeholder:text-ink-dim focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20 disabled:opacity-60"
+          />
+        </Field>
+
+        {installError && (
+          <div
+            className="rounded-md border border-state-error/40 bg-state-error/10 px-3 py-2 text-sm text-state-error"
+            role="alert"
+          >
+            <div className="font-medium">Server was not installed</div>
+            <div className="mt-1 text-xs leading-relaxed">{installError}</div>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "An unknown error occurred while installing the server.";
+  }
 }
 
 function McpNamespace({

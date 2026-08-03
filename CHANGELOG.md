@@ -4,6 +4,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ## [Unreleased]
 
+- Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
+
 ### Added
 
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a

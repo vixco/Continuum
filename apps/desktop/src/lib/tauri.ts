@@ -17,6 +17,8 @@ import type {
   Conversation,
   ConversationSummary,
   LogEntry,
+  InstallMcpServerInput,
+  McpServerRegistration,
   McpTool,
   ProviderAddInput,
   ProviderConnection,
@@ -273,6 +275,10 @@ export const continuum = {
     invoke<ContinuumConfig>("toggle_skill", { name, enabled }),
   installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
   listMcpTools: () => invoke<McpTool[]>("list_mcp_tools", undefined, []),
+  listInstalledMcpServers: () =>
+    invoke<McpServerRegistration[]>("list_installed_mcp_servers", undefined, []),
+  installMcpServer: (input: InstallMcpServerInput) =>
+    invoke<McpServerRegistration>("install_mcp_server", { input }),
   listWorkers: (limit?: number) => invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
   getWorker: (id: string) => invoke<WorkerSnapshot | null>("get_worker", { id }, null),
   cancelWorker: (id: string) => invoke<void>("cancel_worker", { id }),
