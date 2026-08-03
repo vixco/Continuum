@@ -811,7 +811,7 @@ async fn main() -> Result<()> {
                             // streaming from a previous trigger), don't stack — log
                             // and skip. The user's latest utterance still landed in
                             // the raw log; they can ask again.
-                            if orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
+                            if !try_claim_busy(&orchestrator_busy) {
                                 tracing::warn!(
                                     layer = "orchestrator",
                                     component = "continuum",
@@ -836,7 +836,7 @@ async fn main() -> Result<()> {
                                 // triage would queue up 5–15 stale frames while
                                 // Opus streams for 5–10 s, and every subsequent
                                 // response would be that many seconds behind reality.
-                                orchestrator_busy.store(true, std::sync::atomic::Ordering::Release);
+                                // (Busy flag already claimed above by try_claim_busy.)
                                 if let Ok(mut s) = runtime_state.lock() {
                                     s.wake_count += 1;
                                     s.voice_mode = Some("thinking".to_string());
@@ -1236,6 +1236,28 @@ async fn do_wake(
     Ok(())
 }
 
+/// Atomically claims `orchestrator_busy`, returning `true` only if this
+/// call was the one that flipped it from `false` to `true`.
+///
+/// Shared by two concurrent producers that gate new orchestrator wakes on
+/// the same flag: the `WakeOrchestrator` triage arm in `main`'s frame loop,
+/// and `spawn_maintenance_wake_ticker`'s daily ticker task. A naive
+/// load-then-store (check `load()`, then separately `store(true)`) is safe
+/// for a single producer but not for two independent tasks — both could
+/// observe "not busy" in the gap between the load and the store and each
+/// spawn a `do_wake`, yielding two concurrent Opus subprocesses (double
+/// cost, overlapping state writes). The single `compare_exchange` closes
+/// that window.
+fn try_claim_busy(busy: &std::sync::atomic::AtomicBool) -> bool {
+    busy.compare_exchange(
+        false,
+        true,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    )
+    .is_ok()
+}
+
 /// Spawns the daily memory-maintenance wake ticker (Task 10 of the memory
 /// vault curator plan).
 ///
@@ -1250,11 +1272,10 @@ async fn do_wake(
 /// to 23 with a `warn` logged once at spawn time. Never fabricates a
 /// [`PerceptionFrame`]: skips (debug log) until `last_frame` has observed
 /// at least one real frame from the main loop. Also skips when the curator
-/// is disabled, when the vault has no pending decisions, or when the
-/// orchestrator is already busy — claimed via `compare_exchange` rather
-/// than the load-then-store the frame loop uses, because unlike that
-/// single-consumer loop this ticker runs concurrently with it and a plain
-/// load-then-store would race.
+/// is disabled, when the vault has no pending decisions, or when
+/// [`try_claim_busy`] can't claim the orchestrator — shared with the
+/// `WakeOrchestrator` arm precisely to avoid a double-wake race between
+/// the two (see that function's doc comment).
 ///
 /// `history_frames` is passed as `&[]` to `do_wake` — this ticker only
 /// tracks the single most recent frame, not the frame loop's rolling
@@ -1362,16 +1383,10 @@ fn spawn_maintenance_wake_ticker(
 
             // Claim the busy flag right before firing (not earlier) so the
             // window where we could race the frame loop's own wake is as
-            // small as possible.
-            if orchestrator_busy
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_err()
-            {
+            // small as possible. Shared helper with the WakeOrchestrator
+            // arm — see try_claim_busy's doc comment for why this must be
+            // a single CAS rather than load-then-store.
+            if !try_claim_busy(&orchestrator_busy) {
                 tracing::debug!(
                     layer = "memory",
                     component = "maintenance_wake",
@@ -1404,6 +1419,10 @@ fn spawn_maintenance_wake_ticker(
                 speech.clone()
             };
 
+            // Unlike the WakeOrchestrator arm, this does not race against
+            // `shutdown` via tokio::select! — an in-flight maintenance wake
+            // is simply reaped at process exit, which is acceptable for a
+            // once-daily best-effort job (not worth the extra branching).
             let result = do_wake(
                 &frame,
                 &[],
