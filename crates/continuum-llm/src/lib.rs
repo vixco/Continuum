@@ -109,6 +109,13 @@ pub enum LlmError {
     #[error("Grammar compilation failed: {reason}")]
     GrammarFailed { reason: String },
 
+    /// GBNF grammar-constrained generation is currently unsupported because
+    /// llama.cpp's grammar sampler aborts on the Qwen 3 tokenizer. Surfacing
+    /// this as a typed error lets callers (and tests) see the real reason
+    /// instead of silently receiving a grammar-less free-form generation.
+    #[error("Grammar-constrained generation is not supported on this build")]
+    GrammarUnsupported,
+
     #[error("Generation produced no output")]
     EmptyOutput,
 
@@ -359,8 +366,11 @@ fn generate_sync(
     // GGML_ASSERT(!stacks.empty()) abort on Qwen 3 regardless of
     // grammar content, sampler ordering, or lazy triggers. Root cause
     // appears to be a tokenizer/grammar interaction specific to this
-    // model. Prompt-only mode with early-stop-on-} is used instead.
-    let _ = grammar; // suppress unused warning
+    // model. Surface a typed error instead of silently dropping the
+    // grammar and producing unconstrained output.
+    if grammar.is_some() {
+        return Err(LlmError::GrammarUnsupported.into());
+    }
     if opts.top_k > 0 {
         samplers.push(LlamaSampler::top_k(opts.top_k));
     }
@@ -591,5 +601,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(opts.max_tokens, Some(50));
+    }
+
+    #[test]
+    fn test_grammar_unsupported_error_displays() {
+        let err = LlmError::GrammarUnsupported;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not supported"),
+            "Error should explain grammar mode is unsupported: {msg}"
+        );
     }
 }
