@@ -28,19 +28,27 @@ export function MemoryTab() {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [g, i] = await Promise.all([
-        continuum.memoryGraph(filter),
-        continuum.memoryVaultInfo(),
-      ]);
-      setGraph(g);
-      setInfo(i);
+    // allSettled, not all: a failed vault-info fetch must not discard a
+    // successful graph fetch (or vice versa) and blank out an otherwise
+    // valid, already-rendered graph behind the full-bleed error card.
+    const [graphResult, infoResult] = await Promise.allSettled([
+      continuum.memoryGraph(filter),
+      continuum.memoryVaultInfo(),
+    ]);
+    if (graphResult.status === "fulfilled") {
+      setGraph(graphResult.value);
       setLoadError(null);
-    } catch (err) {
-      setLoadError(String(err));
-    } finally {
-      setLoading(false);
+    } else {
+      setLoadError(String(graphResult.reason));
     }
+    if (infoResult.status === "fulfilled") {
+      setInfo(infoResult.value);
+    } else {
+      // Non-critical: the quarantine chip/vault path just goes stale until
+      // the next successful refresh, rather than hiding a healthy graph.
+      console.warn("memoryVaultInfo failed:", infoResult.reason);
+    }
+    setLoading(false);
   }, [filter]);
 
   useEffect(() => {
@@ -96,6 +104,9 @@ export function MemoryTab() {
           <SearchInput
             value={query}
             onChange={setQuery}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitSearch();
+            }}
             placeholder="Zoek in geheugen…"
             className="pl-8"
           />

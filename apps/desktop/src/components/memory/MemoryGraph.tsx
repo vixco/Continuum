@@ -13,6 +13,8 @@ interface GraphNodeObj {
   status: string;
   x?: number;
   y?: number;
+  vx?: number;
+  vy?: number;
   fx?: number;
   fy?: number;
 }
@@ -57,6 +59,77 @@ type ForceGraphInstance = {
   _destructor?: () => void;
 };
 
+/** Builds the `{ nodes, links }` payload force-graph expects from raw
+ * `MemoryGraphData`, carrying over each node's last-known simulated
+ * position (and any user-pinned fx/fy) from `prevNodes` when a node with
+ * the same id existed in the previous feed — otherwise a refresh (which
+ * always builds fresh node literals) would reset the whole layout and
+ * un-pin anything the user had dragged. */
+function buildGraphPayload(
+  data: MemoryGraphData,
+  prevNodes: Map<string, GraphNodeObj>
+): { nodes: GraphNodeObj[]; links: { source: string; target: string }[] } {
+  const nodes: GraphNodeObj[] = [
+    ...data.nodes.map((n) => {
+      const prev = prevNodes.get(n.id);
+      return {
+        id: n.id,
+        label: n.title,
+        color: NODE_COLORS[n.type],
+        radius: 3 + n.importance * 6,
+        ghost: false,
+        status: n.status,
+        x: prev?.x,
+        y: prev?.y,
+        vx: prev?.vx,
+        vy: prev?.vy,
+        fx: prev?.fx,
+        fy: prev?.fy,
+      };
+    }),
+    ...data.ghosts.map((gh) => {
+      const id = `ghost:${gh.target}`;
+      const prev = prevNodes.get(id);
+      return {
+        id,
+        label: gh.target,
+        color: GHOST_COLOR,
+        radius: 3,
+        ghost: true,
+        status: "ghost",
+        x: prev?.x,
+        y: prev?.y,
+        vx: prev?.vx,
+        vy: prev?.vy,
+        fx: prev?.fx,
+        fy: prev?.fy,
+      };
+    }),
+  ];
+  const ids = new Set(nodes.map((n) => n.id));
+  // Ghosts float unlinked: the graph payload deliberately omits per-ghost
+  // from-ids (see plan self-review — this is per plan, not an oversight).
+  const links = data.edges
+    .filter((e) => ids.has(e.from) && ids.has(e.to))
+    .map((e) => ({ source: e.from, target: e.to }));
+  return { nodes, links };
+}
+
+/** Feeds `data` into the live graph instance and refreshes `prevNodesRef`
+ * with the just-fed node objects, so the *next* feed can carry their
+ * (possibly since-simulated or since-dragged) positions forward. Module
+ * scoped rather than a component closure so it isn't a reactive value the
+ * effects below would need to list as a dependency. */
+function feedGraph(
+  g: ForceGraphInstance,
+  data: MemoryGraphData,
+  prevNodesRef: { current: Map<string, GraphNodeObj> }
+) {
+  const { nodes, links } = buildGraphPayload(data, prevNodesRef.current);
+  prevNodesRef.current = new Map(nodes.map((n) => [n.id, n]));
+  g.graphData({ nodes, links });
+}
+
 export function MemoryGraph({
   data,
   selectedId,
@@ -70,10 +143,17 @@ export function MemoryGraph({
   const lastClick = useRef<{ id: string; at: number }>({ id: "", at: 0 });
   const propsRef = useRef({ selectedId, dimIds, onSelect, onExpand, onGhostClick });
   propsRef.current = { selectedId, dimIds, onSelect, onExpand, onGhostClick };
+  // Latest `data`, kept current by the feed effect below regardless of
+  // whether the graph instance exists yet — read once the async
+  // force-graph import resolves so data arriving before init isn't lost.
+  const dataRef = useRef(data);
+  // Simulated positions/pins from the last feed, keyed by node id.
+  const prevNodesRef = useRef<Map<string, GraphNodeObj>>(new Map());
 
   // init once
   useEffect(() => {
     let disposed = false;
+    let ro: ResizeObserver | null = null;
     void import("force-graph").then((mod) => {
       if (disposed || !containerRef.current) return;
       const ForceGraph = mod.default as unknown as () => ForceGraphInstance;
@@ -149,17 +229,27 @@ export function MemoryGraph({
         })
         .onBackgroundClick(() => propsRef.current.onSelect(null));
       graphRef.current = g;
+      // `data` may have already changed (possibly more than once) while
+      // this import was in flight — the feed effect below no-ops on every
+      // one of those updates because graphRef.current was still null, so
+      // without this the graph would stay permanently blank. `dataRef`
+      // always holds the latest value regardless of init timing.
+      feedGraph(g, dataRef.current, prevNodesRef);
 
-      const ro = new ResizeObserver(() => {
+      ro = new ResizeObserver(() => {
         if (!containerRef.current || !graphRef.current) return;
         graphRef.current.width(containerRef.current.clientWidth);
         graphRef.current.height(containerRef.current.clientHeight);
       });
       ro.observe(containerRef.current);
-      return () => ro.disconnect();
     });
     return () => {
       disposed = true;
+      // `ro` is a plain closure variable (not a ref) so this cleanup —
+      // which React *does* run, unlike the `.then()` callback's own return
+      // value, which React never sees — can always reach whichever
+      // ResizeObserver (if any) the async init actually created.
+      ro?.disconnect();
       graphRef.current?._destructor?.();
       graphRef.current = null;
     };
@@ -167,33 +257,10 @@ export function MemoryGraph({
 
   // feed data
   useEffect(() => {
+    dataRef.current = data;
     const g = graphRef.current;
     if (!g) return;
-    const nodes: GraphNodeObj[] = [
-      ...data.nodes.map((n) => ({
-        id: n.id,
-        label: n.title,
-        color: NODE_COLORS[n.type],
-        radius: 3 + n.importance * 6,
-        ghost: false,
-        status: n.status,
-      })),
-      ...data.ghosts.map((gh) => ({
-        id: `ghost:${gh.target}`,
-        label: gh.target,
-        color: GHOST_COLOR,
-        radius: 3,
-        ghost: true,
-        status: "ghost",
-      })),
-    ];
-    const ids = new Set(nodes.map((n) => n.id));
-    // Ghosts float unlinked: the graph payload deliberately omits per-ghost
-    // from-ids (see plan self-review — this is per plan, not an oversight).
-    const links = data.edges
-      .filter((e) => ids.has(e.from) && ids.has(e.to))
-      .map((e) => ({ source: e.from, target: e.to }));
-    g.graphData({ nodes, links });
+    feedGraph(g, data, prevNodesRef);
   }, [data]);
 
   return <div ref={containerRef} className="h-full w-full" />;
