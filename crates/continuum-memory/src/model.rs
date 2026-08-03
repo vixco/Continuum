@@ -278,6 +278,7 @@ pub struct GraphFilter {
     pub limit: Option<u32>,
 }
 
+/// A node in the memory graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -293,6 +294,7 @@ pub struct GraphNode {
     pub updated: String,
 }
 
+/// A directed edge between nodes in the memory graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub from: String,
@@ -310,11 +312,13 @@ pub struct GhostNode {
     pub ref_count: u32,
 }
 
+/// Complete graph snapshot for UI rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub ghosts: Vec<GhostNode>,
+    /// True if the result was truncated due to query limit.
     pub truncated: bool,
 }
 
@@ -370,6 +374,7 @@ pub struct EventRange {
     pub limit: Option<u32>,
 }
 
+/// A markdown file that failed to parse and was quarantined.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineEntry {
     pub path: String,
@@ -386,17 +391,25 @@ pub struct VaultInfo {
     pub last_full_index_at: Option<String>,
 }
 
+/// Statistics from an index operation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexStats {
+    /// Number of notes successfully indexed.
     pub indexed: u64,
+    /// Number of files quarantined due to parse errors.
     pub quarantined: u64,
+    /// Number of previously-indexed notes removed from the vault.
     pub removed: u64,
 }
 
+/// Result of a legacy data migration operation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MigrationReport {
+    /// Number of records successfully migrated.
     pub migrated: u64,
+    /// Number of records skipped (already migrated or invalid).
     pub skipped: u64,
+    /// Error messages encountered during migration.
     pub errors: Vec<String>,
 }
 
