@@ -20,6 +20,7 @@
 pub mod conflict;
 pub mod extract;
 pub mod run;
+pub mod session;
 
 use std::sync::{Arc, Mutex};
 
