@@ -109,7 +109,7 @@ export function Button({
       {...props}
       className={clsx(
         "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-all active:scale-[0.97]",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/40",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-amber/40",
         "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
         size === "sm" && "px-2.5 py-1 text-xs",
         size === "md" && "px-3 py-1.5 text-sm",
@@ -117,7 +117,7 @@ export function Button({
         variant === "default" &&
           "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-purple/60 bg-accent-purple text-black shadow-sm shadow-accent-purple/25 hover:shadow-accent-purple/40 hover:brightness-105",
+          "border-accent-amber/60 bg-accent-amber text-black shadow-sm shadow-accent-amber/25 hover:shadow-accent-amber/40 hover:brightness-105",
         variant === "danger" &&
           "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&
@@ -155,7 +155,7 @@ export function Toggle({
           "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors active:scale-95",
           "disabled:cursor-not-allowed disabled:opacity-50",
           checked
-            ? "border-accent-purple bg-accent-purple"
+            ? "border-accent-amber bg-accent-amber"
             : "border-bg-border bg-bg-elevated hover:border-bg-hover"
         )}
       >
@@ -182,6 +182,7 @@ export function Slider({
   label,
   format,
   disabled,
+  title,
 }: {
   value: number;
   onChange: (v: number) => void;
@@ -191,6 +192,9 @@ export function Slider({
   label?: ReactNode;
   format?: (v: number) => string;
   disabled?: boolean;
+  /** HTML title attribute (native tooltip) — used to surface "not yet wired"
+   *  hints on sliders whose underlying control lives elsewhere. */
+  title?: string;
 }) {
   const fillPct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   return (
@@ -210,6 +214,7 @@ export function Slider({
         max={max}
         step={step}
         disabled={disabled}
+        title={title}
         onChange={(e) => onChange(Number(e.target.value))}
         style={{ ["--continuum-range-fill" as string]: `${fillPct}%` }}
         className="continuum-range block w-full"
@@ -245,7 +250,7 @@ export function Select<T extends string>({
         className={clsx(
           "continuum-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
           "transition-colors hover:border-bg-hover",
-          "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20"
+          "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20"
         )}
       >
         {options.map((opt) => (
@@ -281,7 +286,7 @@ export function SearchInput({
         "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
         "text-ink transition-colors placeholder:text-ink-dim",
         "hover:border-bg-hover",
-        "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
+        "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20",
         className
       )}
     />
@@ -309,7 +314,7 @@ export function TextInput({
         "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
         "text-ink transition-colors placeholder:text-ink-dim",
         "hover:border-bg-hover",
-        "focus:border-accent-purple focus:outline-none focus:ring-2 focus:ring-accent-purple/20",
+        "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20",
         props.className
       )}
     />
@@ -375,7 +380,7 @@ export function Modal({
 const ORB_COLOR: Record<VoiceMode, string> = {
   idle: "bg-state-idle",
   listening: "bg-accent-blue",
-  thinking: "bg-accent-purple",
+  thinking: "bg-accent-amber",
   speaking: "bg-state-healthy",
   muted: "bg-ink-subtle",
   error: "bg-state-error",
@@ -403,9 +408,14 @@ export function StatusOrb({ mode, size = "md" }: { mode: VoiceMode; size?: "sm" 
 
 // --- Simple helper types ---
 
-export function Kbd({ children }: PropsWithChildren) {
+export function Kbd({ children, className }: PropsWithChildren<{ className?: string }>) {
   return (
-    <kbd className="rounded border border-bg-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-ink-muted">
+    <kbd
+      className={clsx(
+        "rounded border border-bg-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-ink-muted",
+        className
+      )}
+    >
       {children}
     </kbd>
   );
