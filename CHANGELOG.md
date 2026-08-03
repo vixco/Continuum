@@ -60,7 +60,9 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   Whisper parameter construction for Rust 1.94's strict Clippy gate, and apply
   the desktop Prettier format expected by the blocking build job. Releases now
   wait for a successful `CI` workflow on `main` and reject stale validated
-  SHAs, so red or superseded commits cannot be published concurrently.
+  SHAs, so red or superseded commits cannot be published concurrently. The
+  parallel full-test job restores but no longer races to upload the same
+  multi-gigabyte native cache already owned by the full Clippy job.
 - **English language consistency**: the desktop voice controls no longer leak
   Dutch labels, and Chat now reads the saved onboarding language preference for
   every response with a safe English fallback for missing or invalid settings.

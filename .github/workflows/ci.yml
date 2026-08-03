@@ -170,8 +170,11 @@ jobs:
             throw "libclang.dll was not found under LIBCLANG_PATH=$env:LIBCLANG_PATH"
           }
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
+      # The full Clippy job owns writes for this shared native cache key. This
+      # test job runs in parallel and must only restore it; otherwise both jobs
+      # can spend many minutes compressing/uploading the same multi-GB target.
+      - name: Restore cargo artifacts
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
