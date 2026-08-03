@@ -243,6 +243,18 @@ For any task with more than 3 steps, create a todo list at the start of your wor
 
 ## How to use sub-agents
 
+Before doing substantial coding reasoning or spawning cloud Codex sub-agents,
+use the global `use-local-north` skill and `north-mini-code-1.0` as the primary
+local worker. Delegate repository analysis, plans, implementation drafts,
+debugging, tests, mechanical refactors, localization audits, and focused diff
+review. For larger tasks, use focused North calls for plan, implementation, and
+review/test while keeping only relevant output in Codex context. Tell the
+maintainer immediately when LM Studio or North is unavailable; use the
+`use-local-sera` skill only as a disclosed fallback. Cloud sub-agents are a last
+resort when explicitly requested or genuinely required for independent
+high-confidence verification. Codex remains responsible for repository truth,
+reviewed edits, validation, commits, pushes, releases, and final claims.
+
 When you are implementing a feature that touches multiple crates or has a distinct research phase, use the `Task` tool to spawn sub-agents. Examples of good sub-agent delegation:
 
 - "Research the best Rust crate for Windows screen capture and return a comparison" → spawn a research sub-agent
