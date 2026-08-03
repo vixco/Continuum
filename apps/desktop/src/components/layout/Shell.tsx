@@ -31,6 +31,7 @@ import { MemoryTab } from "@/components/tabs/MemoryTab";
 import { ToolsTab } from "@/components/tabs/ToolsTab";
 import { VoiceTab } from "@/components/tabs/VoiceTab";
 import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
+import { ProviderRefreshCoordinator } from "@/components/providers/ProviderRefreshCoordinator";
 import { SettingsPage } from "@/components/layout/SettingsPage";
 import { StatusOrb } from "@/components/ui/primitives";
 import { bootstrapStore, teardownStore, useStore } from "@/lib/store";
@@ -212,6 +213,7 @@ export function Shell() {
 
   return (
     <div className="app-window">
+      <ProviderRefreshCoordinator />
       <TitleBar onCommand={() => setCommandOpen(true)} />
       <div className="app-body">
         <Sidebar active={tab} onSelect={setTab} />

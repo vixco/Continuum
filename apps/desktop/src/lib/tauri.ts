@@ -429,6 +429,15 @@ export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
 };
 
 export const DEFAULT_CONFIG: ContinuumConfig = {
+  chat: {
+    max_tokens: 8192,
+    temperature: null,
+    connect_timeout_secs: 10,
+    stream_idle_timeout_secs: 60,
+    cli_timeout_secs: 120,
+    model_refresh_interval_secs: 300,
+    system_prompt_path: null,
+  },
   vision: {
     name: "SmolVLM-256M",
     model_path: "",

@@ -11,6 +11,7 @@
 import { create } from "zustand";
 
 import { continuum, onChatEvent, isTauri } from "@/lib/tauri";
+import { onProvidersChanged } from "@/lib/providers";
 import type {
   ChatEventPayload,
   Conversation,
@@ -67,6 +68,8 @@ interface ChatState {
 
   // --- actions ---
   bootstrap: () => Promise<void>;
+  refreshProviders: () => Promise<void>;
+  setConversationModel: (providerId: string, model: string) => Promise<void>;
   selectConversation: (id: string) => Promise<void>;
   newConversation: () => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
@@ -84,6 +87,7 @@ interface ChatState {
 }
 
 let unlistenChat: (() => void) | null = null;
+let unlistenProviders: (() => void) | null = null;
 const activeIdRef: { current: string | null } = { current: null };
 const lastSentTextRef: Record<string, string> = {};
 let bootstrapped = false;
@@ -213,6 +217,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       });
     }
+    if (!unlistenProviders) {
+      unlistenProviders = onProvidersChanged(() => {
+        void get().refreshProviders();
+      });
+    }
+  },
+
+  async refreshProviders() {
+    const providers = await continuum.providersList().catch(() => [] as ProviderConnection[]);
+    set({ providers, providersLoaded: true });
+  },
+
+  async setConversationModel(providerId, model) {
+    const conversation = get().activeConv;
+    if (!conversation) return;
+    await continuum.chatSetConversationModel(conversation.id, providerId, model);
+    const [activeConv, conversations] = await Promise.all([
+      continuum.chatGetConversation(conversation.id),
+      continuum.chatListConversations(),
+    ]);
+    set({ activeConv, conversations });
   },
 
   async selectConversation(id) {

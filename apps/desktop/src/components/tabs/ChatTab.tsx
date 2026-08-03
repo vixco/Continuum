@@ -22,7 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import { Loader2, MessageSquare, Plus, Sparkles, Trash2 } from "lucide-react";
 
-import { Button, EmptyState, Kbd, Select, TextInput } from "@/components/ui/primitives";
+import { Button, EmptyState, Kbd } from "@/components/ui/primitives";
 import { isTauri } from "@/lib/tauri";
 import type { ProviderConnection } from "@/lib/types";
 
@@ -31,6 +31,7 @@ import { InputBar } from "../chat/InputBar";
 import { MessageList } from "../chat/MessageList";
 import { ChatEmptyState } from "../chat/EmptyState";
 import { VoiceInputBubble } from "../chat/VoiceInputBubble";
+import { ModelSwitcher } from "../chat/ModelSwitcher";
 import type { ChatMessage } from "../chat/types";
 
 export function ChatTab() {
@@ -78,6 +79,7 @@ function ChatWorkspace() {
   const deleteConversation = useChatStore((s) => s.deleteConversation);
   const setComposer = useChatStore((s) => s.setComposer);
   const retry = useChatStore((s) => s.retry);
+  const setConversationModel = useChatStore((s) => s.setConversationModel);
 
   useEffect(() => {
     void bootstrap();
@@ -138,8 +140,8 @@ function ChatWorkspace() {
           <>
             <ChatHeader
               providers={providers}
-              activeProvider={activeProvider}
               activeConv={activeConv}
+              onSelectModel={setConversationModel}
             />
             <div className="relative min-h-0 flex-1">
               <MessageList
@@ -170,6 +172,7 @@ function ChatWorkspace() {
             />
             <AmbientFooter
               activeProvider={activeProvider}
+              activeModel={activeConv.model}
               isStreaming={isStreaming}
               sendingActive={sendingId === activeId}
             />
@@ -294,12 +297,12 @@ function ConversationList({
 
 function ChatHeader({
   providers,
-  activeProvider,
   activeConv,
+  onSelectModel,
 }: {
   providers: ProviderConnection[];
-  activeProvider: ProviderConnection | null;
   activeConv: NonNullable<ReturnType<typeof useChatStore.getState>["activeConv"]>;
+  onSelectModel: (providerId: string, model: string) => Promise<void>;
 }) {
   // Model switcher is the only thing the legacy chat tab needed from a
   // per-conversation header. We keep it because changing the model
@@ -314,62 +317,24 @@ function ChatHeader({
         </div>
         <div className="truncate text-[13px] font-medium text-ink">{activeConv.title}</div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <div className="w-32">
-          <Select
-            aria-label="Provider"
-            value={activeConv.provider_id}
-            options={providers.map((p) => ({ value: p.id, label: p.display_name }))}
-            onChange={(providerId) => {
-              const target = providers.find((p) => p.id === providerId);
-              const model = target?.default_model ?? target?.models[0] ?? "";
-              if (model) void updateConversationModel(providerId, model);
-            }}
-          />
-        </div>
-        <ModelField provider={activeProvider} value={activeConv.model} />
-      </div>
-    </header>
-  );
-}
-
-async function updateConversationModel(providerId: string, model: string) {
-  const { continuum } = await import("@/lib/tauri");
-  const conv = useChatStore.getState().activeConv;
-  if (!conv) return;
-  try {
-    await continuum.chatSetConversationModel(conv.id, providerId, model);
-  } catch {
-    /* surfaced as a global error in the next loop tick via the store */
-  }
-}
-
-function ModelField({ provider, value }: { provider: ProviderConnection | null; value: string }) {
-  if (!provider || provider.kind === "claude_cli" || provider.models.length === 0) {
-    return (
-      <div className="w-32">
-        <TextInput aria-label="Model" value={value} onChange={() => {}} placeholder="model" />
-      </div>
-    );
-  }
-  return (
-    <div className="w-32">
-      <Select
-        aria-label="Model"
-        value={value || provider.models[0]}
-        options={provider.models.map((m) => ({ value: m, label: m }))}
-        onChange={(m) => void updateConversationModel(provider.id, m)}
+      <ModelSwitcher
+        providers={providers}
+        providerId={activeConv.provider_id}
+        model={activeConv.model}
+        onSelect={onSelectModel}
       />
-    </div>
+    </header>
   );
 }
 
 function AmbientFooter({
   activeProvider,
+  activeModel,
   isStreaming,
   sendingActive,
 }: {
   activeProvider: ProviderConnection | null;
+  activeModel: string;
   isStreaming: boolean;
   sendingActive: boolean;
 }) {
@@ -392,9 +357,7 @@ function AmbientFooter({
         </span>
       </div>
       <div className="font-mono text-ink-dim">
-        {activeProvider
-          ? `${activeProvider.display_name} · ${activeProvider.default_model ?? "—"}`
-          : "No provider"}
+        {activeProvider ? `${activeProvider.display_name} · ${activeModel || "—"}` : "No provider"}
       </div>
     </div>
   );
