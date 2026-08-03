@@ -57,7 +57,8 @@ pub fn spawn_ipc_listener(runtime: ContinuumRuntime, app: AppHandle) {
             match tick_once(&path_for_tail, &state_for_tail).await {
                 Ok(()) => {
                     if err_latch_for_tail.swap(false, Ordering::AcqRel) {
-                        let _ = app_for_tail.emit("continuum:runtime_error", serde_json::Value::Null);
+                        let _ =
+                            app_for_tail.emit("continuum:runtime_error", serde_json::Value::Null);
                     }
                 }
                 Err(e) => {
@@ -221,7 +222,10 @@ mod pipe {
         // that an idle runtime doesn't churn the thread.
         server.connect_blocking(Duration::from_secs(5))?;
         set_pipe_connected(true);
-        let _ = app.emit("continuum:runtime_pipe", serde_json::json!({"connected": true}));
+        let _ = app.emit(
+            "continuum:runtime_pipe",
+            serde_json::json!({"connected": true}),
+        );
 
         // Read loop. Each line is one JSON snapshot. The runtime is
         // expected to disconnect after each write, but we keep reading
@@ -261,7 +265,10 @@ mod pipe {
         }
 
         set_pipe_connected(false);
-        let _ = app.emit("continuum:runtime_pipe", serde_json::json!({"connected": false}));
+        let _ = app.emit(
+            "continuum:runtime_pipe",
+            serde_json::json!({"connected": false}),
+        );
         Ok(())
     }
 
@@ -286,8 +293,8 @@ mod pipe {
 
     fn create_pipe() -> std::io::Result<PipeHandle> {
         use windows::Win32::Storage::FileSystem::{
-            CreateNamedPipeW, PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
-            FILE_FLAG_FIRST_PIPE_INSTANCE,
+            CreateNamedPipeW, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+            PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
         };
 
         let wide: Vec<u16> = OsStr::new(PIPE_NAME)
@@ -346,14 +353,7 @@ mod pipe {
             use windows::Win32::Storage::FileSystem::ReadFile;
             let mut bytes_read: u32 = 0;
             // SAFETY: buf is a valid slice; handle is open for reading.
-            let r = unsafe {
-                ReadFile(
-                    self.handle,
-                    Some(buf),
-                    Some(&mut bytes_read),
-                    None,
-                )
-            };
+            let r = unsafe { ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None) };
             if r.is_err() {
                 return Err(std::io::Error::last_os_error());
             }

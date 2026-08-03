@@ -952,117 +952,116 @@ pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
 /// built inside a `const` expression on stable Rust.
 fn mcp_tool_manifest() -> Vec<McpTool> {
     vec![
-    // --- memory ---
-    McpTool {
-        namespace: "memory".into(),
-        name: "memory_query_episodic".into(),
-        description: "Vector search over past events".into(),
-    },
-    McpTool {
-        namespace: "memory".into(),
-        name: "memory_list_facts".into(),
-        description: "List semantic facts (optional prefix filter)".into(),
-    },
-    McpTool {
-        namespace: "memory".into(),
-        name: "memory_get_fact".into(),
-        description: "Fetch a single semantic fact by key".into(),
-    },
-    McpTool {
-        namespace: "memory".into(),
-        name: "memory_set_fact".into(),
-        description: "Write or update a semantic fact".into(),
-    },
-    // --- system ---
-    McpTool {
-        namespace: "system".into(),
-        name: "system_current_time".into(),
-        description: "Local wall-clock time + timezone".into(),
-    },
-    McpTool {
-        namespace: "system".into(),
-        name: "system_active_window".into(),
-        description: "Foreground window title + process name".into(),
-    },
-    McpTool {
-        namespace: "system".into(),
-        name: "system_clipboard_get".into(),
-        description: "Read current clipboard text".into(),
-    },
-    McpTool {
-        namespace: "system".into(),
-        name: "system_notification".into(),
-        description: "Show a Windows toast".into(),
-    },
-    // --- fs (read-only) ---
-    McpTool {
-        namespace: "fs".into(),
-        name: "fs_read_file".into(),
-        description: "Read up to 100 KB of a UTF-8 text file".into(),
-    },
-    McpTool {
-        namespace: "fs".into(),
-        name: "fs_list_dir".into(),
-        description: "List up to 500 entries of a directory".into(),
-    },
-    // --- web ---
-    McpTool {
-        namespace: "web".into(),
-        name: "web_fetch".into(),
-        description: "HTTP GET, 50 KB cap, public IPs only, no redirects".into(),
-    },
-    // --- repair (repair-agent only) ---
-    McpTool {
-        namespace: "repair".into(),
-        name: "repair_restart_component".into(),
-        description: "Queue a restart for a runtime subsystem".into(),
-    },
-    McpTool {
-        namespace: "repair".into(),
-        name: "repair_reinstall_model".into(),
-        description: "Re-download a model for a component".into(),
-    },
-    McpTool {
-        namespace: "repair".into(),
-        name: "repair_rollback_config".into(),
-        description: "Rollback config.toml from a dated backup".into(),
-    },
-    McpTool {
-        namespace: "repair".into(),
-        name: "repair_test_component".into(),
-        description: "Quick file-presence sanity check".into(),
-    },
-    McpTool {
-        namespace: "repair".into(),
-        name: "repair_escalate".into(),
-        description: "Surface a manual-intervention banner to the dashboard".into(),
-    },
-    // --- workers ---
-    McpTool {
-        namespace: "workers".into(),
-        name: "workers_spawn_worker".into(),
-        description: "Queue a new Claude Code worker".into(),
-    },
-    McpTool {
-        namespace: "workers".into(),
-        name: "workers_worker_status".into(),
-        description: "Poll a worker's snapshot".into(),
-    },
-    McpTool {
-        namespace: "workers".into(),
-        name: "workers_worker_cancel".into(),
-        description: "Stop a running or queued worker".into(),
-    },
-    McpTool {
-        namespace: "workers".into(),
-        name: "workers_worker_wait".into(),
-        description: "Block until a worker reaches a terminal state".into(),
-    },
-    McpTool {
-        namespace: "workers".into(),
-        name: "workers_worker_list".into(),
-        description: "List recent worker snapshots".into(),
-    },
-]
+        // --- memory ---
+        McpTool {
+            namespace: "memory".into(),
+            name: "memory_query_episodic".into(),
+            description: "Vector search over past events".into(),
+        },
+        McpTool {
+            namespace: "memory".into(),
+            name: "memory_list_facts".into(),
+            description: "List semantic facts (optional prefix filter)".into(),
+        },
+        McpTool {
+            namespace: "memory".into(),
+            name: "memory_get_fact".into(),
+            description: "Fetch a single semantic fact by key".into(),
+        },
+        McpTool {
+            namespace: "memory".into(),
+            name: "memory_set_fact".into(),
+            description: "Write or update a semantic fact".into(),
+        },
+        // --- system ---
+        McpTool {
+            namespace: "system".into(),
+            name: "system_current_time".into(),
+            description: "Local wall-clock time + timezone".into(),
+        },
+        McpTool {
+            namespace: "system".into(),
+            name: "system_active_window".into(),
+            description: "Foreground window title + process name".into(),
+        },
+        McpTool {
+            namespace: "system".into(),
+            name: "system_clipboard_get".into(),
+            description: "Read current clipboard text".into(),
+        },
+        McpTool {
+            namespace: "system".into(),
+            name: "system_notification".into(),
+            description: "Show a Windows toast".into(),
+        },
+        // --- fs (read-only) ---
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_read_file".into(),
+            description: "Read up to 100 KB of a UTF-8 text file".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_list_dir".into(),
+            description: "List up to 500 entries of a directory".into(),
+        },
+        // --- web ---
+        McpTool {
+            namespace: "web".into(),
+            name: "web_fetch".into(),
+            description: "HTTP GET, 50 KB cap, public IPs only, no redirects".into(),
+        },
+        // --- repair (repair-agent only) ---
+        McpTool {
+            namespace: "repair".into(),
+            name: "repair_restart_component".into(),
+            description: "Queue a restart for a runtime subsystem".into(),
+        },
+        McpTool {
+            namespace: "repair".into(),
+            name: "repair_reinstall_model".into(),
+            description: "Re-download a model for a component".into(),
+        },
+        McpTool {
+            namespace: "repair".into(),
+            name: "repair_rollback_config".into(),
+            description: "Rollback config.toml from a dated backup".into(),
+        },
+        McpTool {
+            namespace: "repair".into(),
+            name: "repair_test_component".into(),
+            description: "Quick file-presence sanity check".into(),
+        },
+        McpTool {
+            namespace: "repair".into(),
+            name: "repair_escalate".into(),
+            description: "Surface a manual-intervention banner to the dashboard".into(),
+        },
+        // --- workers ---
+        McpTool {
+            namespace: "workers".into(),
+            name: "workers_spawn_worker".into(),
+            description: "Queue a new Claude Code worker".into(),
+        },
+        McpTool {
+            namespace: "workers".into(),
+            name: "workers_worker_status".into(),
+            description: "Poll a worker's snapshot".into(),
+        },
+        McpTool {
+            namespace: "workers".into(),
+            name: "workers_worker_cancel".into(),
+            description: "Stop a running or queued worker".into(),
+        },
+        McpTool {
+            namespace: "workers".into(),
+            name: "workers_worker_wait".into(),
+            description: "Block until a worker reaches a terminal state".into(),
+        },
+        McpTool {
+            namespace: "workers".into(),
+            name: "workers_worker_list".into(),
+            description: "List recent worker snapshots".into(),
+        },
+    ]
 }
-
