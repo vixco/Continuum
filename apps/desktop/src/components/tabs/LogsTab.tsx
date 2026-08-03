@@ -2,9 +2,10 @@
 
 import { useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { Download } from "lucide-react";
+import { ChevronDown, Download } from "lucide-react";
 
 import { useStore } from "@/lib/store";
+import { groupAdjacentLogs, logSeverity, type LogDisplayGroup } from "@/lib/log-view";
 import { Button, Card, SearchInput, Select, Toggle } from "@/components/ui/primitives";
 import type { LogEntry } from "@/lib/types";
 
@@ -41,12 +42,13 @@ const LAYERS = [
   { value: "workers", label: "workers" },
 ];
 
-const LEVEL_STYLE: Record<string, string> = {
-  error: "text-state-error",
-  warn: "text-state-warn",
-  info: "text-ink",
-  debug: "text-ink-muted",
-  trace: "text-ink-dim",
+const SEVERITY_STYLE = {
+  error: "border-state-error/40 bg-state-error/[0.09] text-state-error",
+  warn: "border-state-warn/40 bg-state-warn/[0.08] text-state-warn",
+  info: "border-transparent text-ink",
+  debug: "border-transparent text-ink-muted",
+  trace: "border-transparent text-ink-dim",
+  other: "border-accent-blue/30 bg-accent-blue/[0.07] text-accent-blue",
 };
 
 export function LogsTab() {
@@ -58,21 +60,15 @@ export function LogsTab() {
   const [autoScroll, setAutoScroll] = useState(true);
 
   const filtered = useMemo(() => {
-    return logs.filter((e) => {
-      if (level && e.level !== level) return false;
-      if (layer && e.layer !== layer) return false;
-      if (text) {
-        const needle = text.toLowerCase();
-        if (
-          !e.message.toLowerCase().includes(needle) &&
-          !(e.component ?? "").toLowerCase().includes(needle) &&
-          !(e.target ?? "").toLowerCase().includes(needle)
-        )
-          return false;
-      }
-      return true;
-    });
+    return logs.filter((entry) => matchesLogFilter(entry, level, layer, text));
   }, [logs, level, layer, text]);
+  const displayGroups = useMemo(
+    () =>
+      groupAdjacentLogs(logs).filter((group) =>
+        matchesLogFilter(group.entries[0], level, layer, text)
+      ),
+    [logs, level, layer, text]
+  );
 
   function exportLogs() {
     const ndjson = filtered.map((e) => JSON.stringify(e)).join("\n");
@@ -89,7 +85,7 @@ export function LogsTab() {
     <div className="mx-auto max-w-6xl">
       <Card
         title="Live logs"
-        subtitle={`${filtered.length} / ${logs.length} entries (buffer cap ${logLimit.toLocaleString()})`}
+        subtitle={`${filtered.length} / ${logs.length} entries in ${displayGroups.length} visible rows (buffer cap ${logLimit.toLocaleString()})`}
         actions={
           <>
             <Toggle checked={autoScroll} onChange={setAutoScroll} label="Auto-scroll" />
@@ -109,6 +105,8 @@ export function LogsTab() {
           />
         </div>
         <div
+          role="log"
+          aria-label="Continuum live logs"
           className={clsx(
             "h-[520px] overflow-y-auto rounded-md border border-bg-border bg-black/40 p-3 font-mono text-[12px] leading-[1.5]"
           )}
@@ -118,8 +116,8 @@ export function LogsTab() {
               No matching log entries yet.
             </div>
           ) : (
-            (autoScroll ? filtered : [...filtered].reverse()).map((e) => (
-              <LogRow key={e.id} entry={e} />
+            (autoScroll ? displayGroups : [...displayGroups].reverse()).map((group) => (
+              <LogGroup key={group.key} group={group} reverseEntries={!autoScroll} />
             ))
           )}
         </div>
@@ -128,22 +126,87 @@ export function LogsTab() {
   );
 }
 
-function LogRow({ entry }: { entry: LogEntry }) {
+function LogGroup({ group, reverseEntries }: { group: LogDisplayGroup; reverseEntries: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const entries = reverseEntries ? [...group.entries].reverse() : group.entries;
+  const first = entries[0];
+
+  if (entries.length === 1) return <LogRow entry={first} />;
+
+  const last = entries.at(-1) ?? first;
+  const timeRange = `${formatTime(first.ts)} to ${formatTime(last.ts)}`;
+
   return (
-    <div className="flex gap-2 py-0.5">
-      <span className="shrink-0 text-ink-dim">
-        {new Date(entry.ts).toLocaleTimeString(undefined, { hour12: false })}
-      </span>
-      <span className={clsx("shrink-0 uppercase", LEVEL_STYLE[entry.level])}>
-        {entry.level.padEnd(5)}
+    <div className="py-0.5">
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          className="press mt-px inline-flex shrink-0 items-center gap-1 rounded border border-bg-border bg-bg-elevated px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-ink-muted hover:border-bg-hover hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent-amber"
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${entries.length} repeated log events from ${timeRange}`}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <ChevronDown
+            size={10}
+            aria-hidden="true"
+            className={clsx("transition-transform", expanded && "rotate-180")}
+          />
+          x{entries.length}
+        </button>
+        <div className="min-w-0 flex-1">
+          <LogRow entry={first} timeLabel={timeRange} />
+          {expanded && (
+            <div className="ml-2 border-l border-bg-border pl-2">
+              {entries.map((entry, index) => (
+                <LogRow key={`${entry.id}:${index}`} entry={entry} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LogRow({ entry, timeLabel }: { entry: LogEntry; timeLabel?: string }) {
+  const severity = logSeverity(entry.level);
+
+  return (
+    <div
+      className={clsx(
+        "flex min-w-0 gap-2 rounded border-l-2 px-1 py-0.5",
+        SEVERITY_STYLE[severity]
+      )}
+      data-severity={severity}
+    >
+      <span className="shrink-0 text-ink-dim">{timeLabel ?? formatTime(entry.ts)}</span>
+      <span className="shrink-0 font-semibold uppercase" aria-label={`Severity: ${severity}`}>
+        {severity.padEnd(5)}
       </span>
       <span className="shrink-0 text-ink-muted">
         {entry.layer ?? "-"}/{entry.component ?? "-"}
       </span>
-      <span className="text-ink">{entry.message}</span>
+      <span>{entry.message}</span>
       {entry.fields.length > 0 && (
         <span className="text-ink-dim">{entry.fields.map(([k, v]) => `${k}=${v}`).join(" ")}</span>
       )}
     </div>
+  );
+}
+
+function formatTime(timestamp: string) {
+  return new Date(timestamp).toLocaleTimeString(undefined, { hour12: false });
+}
+
+function matchesLogFilter(entry: LogEntry, level: string, layer: string, text: string) {
+  if (level && entry.level !== level) return false;
+  if (layer && entry.layer !== layer) return false;
+  if (!text) return true;
+
+  const needle = text.toLowerCase();
+  return (
+    entry.message.toLowerCase().includes(needle) ||
+    (entry.component ?? "").toLowerCase().includes(needle) ||
+    (entry.target ?? "").toLowerCase().includes(needle)
   );
 }
