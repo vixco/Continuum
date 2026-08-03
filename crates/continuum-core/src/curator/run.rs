@@ -297,7 +297,7 @@ async fn curator_tick(
     // count as (or be retried like) a failed one.
     if let Ok(ids) = &outcome {
         if !ids.is_empty() {
-            if let Err(e) = detect_conflicts(vault, llm, ids).await {
+            if let Err(e) = detect_conflicts(vault, llm, cfg, ids).await {
                 tracing::warn!(
                     layer = "memory",
                     component = "curator",

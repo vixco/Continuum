@@ -429,6 +429,12 @@ pub struct CuratorConfig {
     pub wake_vault_notes_max: u32,
     /// Whether to include sensitive/personal information in orchestrator context.
     pub include_sensitive_in_context: bool,
+    /// Score threshold [0.0, 1.0] at or above which a conflict-detection
+    /// verdict of `"supersedes"`/`"contradicts"` (see
+    /// `crate::curator::conflict::detect_conflicts`) is strong enough to
+    /// propose a `proposes_supersede` relation. Below this, the verdict is
+    /// treated as too weak to act on.
+    pub supersede_confidence_floor: f32,
 }
 
 impl Default for CuratorConfig {
@@ -443,6 +449,7 @@ impl Default for CuratorConfig {
             session_summary_idle_minutes: 20,
             wake_vault_notes_max: 8,
             include_sensitive_in_context: false,
+            supersede_confidence_floor: 0.5,
         }
     }
 }
@@ -1167,6 +1174,7 @@ interval_secs = 5
         assert_eq!(cfg.memory.curator.session_summary_idle_minutes, 20);
         assert_eq!(cfg.memory.curator.wake_vault_notes_max, 8);
         assert!(!cfg.memory.curator.include_sensitive_in_context);
+        assert_eq!(cfg.memory.curator.supersede_confidence_floor, 0.5);
 
         let parsed: ContinuumConfig = toml::from_str(
             "[memory.vault]\nvault_dir = \"D:/x\"\n[memory.curator]\nenabled = false\n",
