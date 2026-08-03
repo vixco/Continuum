@@ -304,7 +304,7 @@ mod pipe {
     use std::os::windows::ffi::OsStrExt;
 
     struct PipeHandle {
-        handle: *mut core::ffi::c_void,
+        handle: windows::Win32::Foundation::HANDLE,
     }
 
     // SAFETY: the underlying HANDLE is owned exclusively by this thread
@@ -314,8 +314,10 @@ mod pipe {
 
     fn create_pipe() -> std::io::Result<PipeHandle> {
         use windows::Win32::Storage::FileSystem::{
-            CreateNamedPipeW, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
-            PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+        };
+        use windows::Win32::System::Pipes::{
+            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
         };
 
         let wide: Vec<u16> = OsStr::new(PIPE_NAME)
@@ -341,17 +343,17 @@ mod pipe {
         if handle.is_invalid() {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(PipeHandle { handle: handle.0 })
+        Ok(PipeHandle { handle })
     }
 
     impl PipeHandle {
         fn connect_blocking(&self, timeout: Duration) -> std::io::Result<()> {
-            use windows::Win32::Storage::FileSystem::ConnectNamedPipe;
+            use windows::Win32::System::Pipes::ConnectNamedPipe;
             let start = std::time::Instant::now();
             loop {
                 // SAFETY: self.handle is a valid pipe handle owned by us.
                 let r = unsafe { ConnectNamedPipe(self.handle, None) };
-                if r.as_bool() {
+                if r.is_ok() {
                     return Ok(());
                 }
                 let err = std::io::Error::last_os_error();
@@ -387,7 +389,7 @@ mod pipe {
             // Disconnect first so a stuck client doesn't keep the pipe
             // alive after we've closed the handle.
             use windows::Win32::Foundation::CloseHandle;
-            use windows::Win32::Storage::FileSystem::DisconnectNamedPipe;
+            use windows::Win32::System::Pipes::DisconnectNamedPipe;
             unsafe {
                 let _ = DisconnectNamedPipe(self.handle);
                 let _ = CloseHandle(self.handle);
