@@ -482,6 +482,78 @@ async fn reindex_skips_unchanged_files() {
 }
 
 #[tokio::test]
+async fn reindex_skips_unchanged_quarantined_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "facts/broken.md", "---\nid: [oops\n---\nbody");
+    let idx = open_index(tmp.path()).await;
+    let stats = idx.rebuild(tmp.path()).await.unwrap();
+    assert_eq!(stats.quarantined, 1);
+
+    let before: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_optional(idx.pool())
+        .await
+        .unwrap()
+        .unwrap_or(("0".into(),));
+    let old_mtime: (i64,) =
+        sqlx::query_as("SELECT mtime FROM quarantine WHERE path = 'facts/broken.md'")
+            .fetch_one(idx.pool())
+            .await
+            .unwrap();
+
+    // Re-index the same unchanged broken file — must be a no-op (the
+    // quarantine table's mtime short-circuits it, same as the nodes table
+    // does for successfully-indexed files).
+    let out = idx
+        .index_file(tmp.path(), &tmp.path().join("facts/broken.md"))
+        .await
+        .unwrap();
+    assert!(matches!(out, IndexOutcome::Skipped));
+    let after: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_optional(idx.pool())
+        .await
+        .unwrap()
+        .unwrap_or(("0".into(),));
+    assert_eq!(
+        before.0, after.0,
+        "unchanged quarantined file must not bump reindex_ops"
+    );
+
+    // Touch the file with different (still broken) content — this must be
+    // detected as a change and re-quarantined, bumping reindex_ops and
+    // storing the file's new mtime in the quarantine row. Sleep past a
+    // whole second first: mtime is second-granularity, so two writes
+    // inside the same wall-clock second wouldn't be distinguishable.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(
+        tmp.path(),
+        "facts/broken.md",
+        "---\nid: [still broken\n---\nbody two",
+    );
+    let out2 = idx
+        .index_file(tmp.path(), &tmp.path().join("facts/broken.md"))
+        .await
+        .unwrap();
+    assert!(matches!(out2, IndexOutcome::Quarantined));
+    let after2: (String,) = sqlx::query_as("SELECT value FROM meta WHERE key='reindex_ops'")
+        .fetch_one(idx.pool())
+        .await
+        .unwrap();
+    assert_ne!(
+        after.0, after2.0,
+        "changed quarantined file must bump reindex_ops"
+    );
+    let new_mtime: (i64,) =
+        sqlx::query_as("SELECT mtime FROM quarantine WHERE path = 'facts/broken.md'")
+            .fetch_one(idx.pool())
+            .await
+            .unwrap();
+    assert!(
+        new_mtime.0 > old_mtime.0,
+        "quarantine row's mtime must be updated on re-quarantine"
+    );
+}
+
+#[tokio::test]
 async fn uppercase_md_extension_is_indexed() {
     let tmp = tempfile::tempdir().unwrap();
     write(
