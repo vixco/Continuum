@@ -138,11 +138,33 @@ export function MemoryTab() {
     };
   }, [refresh]);
 
+  // Escape closes whichever of the two topbar popovers is open, consistent
+  // with the command palette (Shell.tsx) and NoteEditorOverlay.
+  useEffect(() => {
+    if (!viewsOpen && !menuOpen) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setViewsOpen(false);
+        setMenuOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewsOpen, menuOpen]);
+
   // Ids of nodes whose created/updated timestamp falls inside the scrubbed
   // timeline window - passed to MemoryGraph as the set to keep highlighted
   // (everything else dims). Computed client-side per the brief: the graph
   // fetch already has its own filter pipeline, so the timeline scrub is a
   // pure view-layer overlay on whatever graph is already loaded.
+  //
+  // `null` vs. an empty `Set` are deliberately distinct states, and
+  // MemoryGraph's dim guard (`dims != null && !dims.has(node.id)`) depends
+  // on that distinction: `null` = no active window, live view, nothing
+  // dims. A `Set` - even an empty one, meaning the scrubbed window matched
+  // zero nodes - means a window IS active, so everything not in it (i.e.
+  // everything, when it's empty) dims. Only return `null` when there is no
+  // scrub window at all; once one is active, always return a Set.
   const dimIds = useMemo(() => {
     if (!scrubWindow) return null;
     const since = new Date(scrubWindow.since).getTime();

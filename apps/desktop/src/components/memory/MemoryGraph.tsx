@@ -165,7 +165,13 @@ export function MemoryGraph({
         .linkWidth(1)
         .nodeCanvasObject((node, ctx, scale) => {
           const { selectedId: sel, dimIds: dims } = propsRef.current;
-          const dimmed = dims && dims.size > 0 && !dims.has(node.id);
+          // `dims == null` (a "loose" check, catching both `null` and
+          // `undefined`) means no filter is active - nothing dims. Once a
+          // filter *is* active, `dims` is a Set - even an empty one, which
+          // means "the active window matches zero nodes" and must dim
+          // everything, not read as "no filter" (that regression made most
+          // 30-min timeline buckets silently no-op the scrub).
+          const dimmed = dims != null && !dims.has(node.id);
           const faded = node.status === "superseded" || node.status === "archived";
           ctx.globalAlpha = dimmed ? 0.15 : faded ? 0.4 : 1;
           const r = node.radius;
