@@ -53,7 +53,7 @@ export function HealthTab() {
                   onClick={() => setSelected(c)}
                   className={clsx(
                     "rounded-md border border-bg-border bg-bg-elevated p-3 text-left transition-colors",
-                    "hover:border-accent-purple hover:bg-bg-hover"
+                    "hover:border-accent-amber hover:bg-bg-hover"
                   )}
                 >
                   <div className="flex items-center justify-between">
