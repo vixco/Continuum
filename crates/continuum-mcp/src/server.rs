@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use continuum_core::health::repair::RepairSessionGrant;
 use continuum_core::memory::{
     episodic::EpisodicStore,
     semantic::{Fact, SemanticStore},
@@ -58,6 +59,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_extra_paths: Vec<PathBuf>,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
+    pub(crate) repair_grant: Option<RepairSessionGrant>,
 }
 
 /// The main MCP server. Cloneable because rmcp can fan out the handler across
@@ -87,6 +89,22 @@ impl ContinuumMcpServer {
 
         // Load [mcp] config — non-fatal, falls back to defaults on any error.
         let mcp_cfg = crate::config::load(&data_dir);
+        let repair_grant = std::env::var("CONTINUUM_REPAIR_TOKEN")
+            .ok()
+            .and_then(|token| {
+                match continuum_core::health::repair::authorize_repair_session(&data_dir, &token) {
+                    Ok(grant) => Some(grant),
+                    Err(error) => {
+                        tracing::warn!(
+                            layer = "mcp",
+                            component = "repair_auth",
+                            error = %error,
+                            "Rejected invalid repair session capability"
+                        );
+                        None
+                    }
+                }
+            });
 
         // web_fetch is the only consumer of `http`, and redirect-SSRF is a
         // real concern (a host we DNS-verified as public could redirect us to
@@ -108,9 +126,156 @@ impl ContinuumMcpServer {
                 fs_extra_paths: mcp_cfg.fs.extra_paths,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
+                repair_grant,
             }),
             tool_router: Self::tool_router(),
         })
+    }
+
+    fn require_repair_session(&self) -> Result<RepairSessionGrant, McpError> {
+        let grant = self.state.repair_grant.as_ref().ok_or_else(|| {
+            self.audit_repair_event(
+                "repair_session_denied",
+                serde_json::json!({ "reason": "missing_capability" }),
+            );
+            McpError::invalid_request(
+                "repair tools require a valid Health-tab repair session",
+                None,
+            )
+        })?;
+        continuum_core::health::repair::authorize_repair_session(&self.state.data_dir, &grant.token)
+            .map_err(|error| {
+                self.audit_repair_event(
+                    "repair_session_denied",
+                    serde_json::json!({ "reason": "invalid_or_expired_capability" }),
+                );
+                McpError::invalid_request(
+                    format!("repair session is no longer valid: {error}"),
+                    None,
+                )
+            })
+    }
+
+    fn require_repair_component(&self, component: &str) -> Result<RepairSessionGrant, McpError> {
+        let grant = self.require_repair_session()?;
+        if !grant
+            .allowed_components
+            .iter()
+            .any(|allowed| allowed == component)
+        {
+            self.audit_repair_event(
+                "repair_component_denied",
+                serde_json::json!({ "component": component, "operation": "test" }),
+            );
+            return Err(McpError::invalid_request(
+                format!("component {component:?} was not allowlisted by the live repair preview"),
+                None,
+            ));
+        }
+        Ok(grant)
+    }
+
+    fn require_repair_restart_component(
+        &self,
+        component: &str,
+    ) -> Result<RepairSessionGrant, McpError> {
+        let grant = self.require_repair_session()?;
+        if !grant
+            .allowed_restart_components
+            .iter()
+            .any(|allowed| allowed == component)
+        {
+            self.audit_repair_event(
+                "repair_component_denied",
+                serde_json::json!({ "component": component, "operation": "restart" }),
+            );
+            return Err(McpError::invalid_request(
+                format!(
+                    "restart for component {component:?} is not supported by this repair session"
+                ),
+                None,
+            ));
+        }
+        Ok(grant)
+    }
+
+    fn require_repair_escalation(&self) -> Result<RepairSessionGrant, McpError> {
+        let grant = self.require_repair_session()?;
+        if !grant.allow_escalation_intent {
+            self.audit_repair_event(
+                "repair_operation_denied",
+                serde_json::json!({ "operation": "escalation_intent" }),
+            );
+            return Err(McpError::invalid_request(
+                "escalation intents are not consumed in this repair session; report the manual action in assistant output",
+                None,
+            ));
+        }
+        Ok(grant)
+    }
+
+    fn audit_repair_event(&self, event: &str, detail: serde_json::Value) {
+        let _ = continuum_core::health::repair::append_repair_audit(
+            &self.state.data_dir,
+            event,
+            detail,
+        );
+    }
+
+    fn backup_before_repair_mutation(&self, operation: &str) -> Result<(), McpError> {
+        let backups_dir = repairtool::backups_dir_for(&self.state.data_dir);
+        let backup = continuum_core::health::backup::run_backup(&self.state.data_dir, &backups_dir)
+            .map_err(|error| {
+                McpError::internal_error(
+                    format!("pre-{operation} backup failed; mutation blocked: {error}"),
+                    None,
+                )
+            })?;
+        continuum_core::health::backup::verify_backup(&backup.path).map_err(|error| {
+            McpError::internal_error(
+                format!("pre-{operation} backup verification failed; mutation blocked: {error}"),
+                None,
+            )
+        })?;
+        let config_path = self.state.data_dir.join("config.toml");
+        let retention = continuum_core::config::load_config(&config_path)
+            .unwrap_or_default()
+            .health
+            .backup_retention
+            .max(1);
+        continuum_core::health::backup::prune_backups(&backups_dir, retention).map_err(
+            |error| {
+                McpError::internal_error(
+                    format!("pre-{operation} backup retention failed; mutation blocked: {error}"),
+                    None,
+                )
+            },
+        )?;
+        continuum_core::health::backup::verify_backup(&backup.path).map_err(|error| {
+            McpError::internal_error(
+                format!(
+                    "pre-{operation} backup was not retained after pruning; mutation blocked: {error}"
+                ),
+                None,
+            )
+        })?;
+        continuum_core::health::repair::append_repair_audit(
+            &self.state.data_dir,
+            "mutation_backup_created",
+            serde_json::json!({
+                "operation": operation,
+                "path": backup.path,
+                "bytes": backup.bytes,
+                "verified": true,
+            }),
+        )
+        .map_err(|error| {
+            McpError::internal_error(
+                format!("pre-{operation} audit failed; mutation blocked: {error}"),
+                None,
+            )
+        })?;
+        Ok(())
     }
 
     /// Builds the filesystem allowlist from all current sources:
@@ -455,12 +620,14 @@ impl ContinuumMcpServer {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Restart a Continuum subsystem. Queues a restart intent the running continuum runtime picks up on its next tick. Targets: vision | triage | audio | stt | tts | orchestrator | mcp | memory | context_watcher."
+        description = "Compatibility tool for a future component restart consumer. Denied unless a repair capability explicitly authorizes an executable restart path; the safe Health flow does not."
     )]
     async fn repair_restart_component(
         &self,
         Parameters(req): Parameters<RestartRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.require_repair_restart_component(req.component.as_str())?;
+        self.backup_before_repair_mutation("restart_component")?;
         self.run_tool("repair_restart_component", &req, || async {
             repairtool::restart(&self.state.data_dir, req.component)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -469,12 +636,27 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Queue a model reinstall for a component. The runtime re-runs scripts/download-models.ps1 for the matching model on its next tick. Destructive — confirm with the user first."
+        description = "Compatibility tool for a future model reinstall consumer. Denied unless a repair capability explicitly authorizes it; the safe Health flow does not."
     )]
     async fn repair_reinstall_model(
         &self,
         Parameters(req): Parameters<ReinstallRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let grant = self.require_repair_component(req.component.as_str())?;
+        if !grant.allow_model_reinstall {
+            self.audit_repair_event(
+                "repair_operation_denied",
+                serde_json::json!({
+                    "operation": "reinstall_model",
+                    "component": req.component.as_str(),
+                }),
+            );
+            return Err(McpError::invalid_request(
+                "model reinstall was not explicitly authorized for this repair session",
+                None,
+            ));
+        }
+        self.backup_before_repair_mutation("reinstall_model")?;
         self.run_tool("repair_reinstall_model", &req, || async {
             repairtool::reinstall(&self.state.data_dir, req.component)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -489,6 +671,17 @@ impl ContinuumMcpServer {
         &self,
         Parameters(req): Parameters<RollbackRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let grant = self.require_repair_session()?;
+        if !grant.allow_config_rollback {
+            self.audit_repair_event(
+                "repair_operation_denied",
+                serde_json::json!({ "operation": "rollback_config" }),
+            );
+            return Err(McpError::invalid_request(
+                "config rollback was not explicitly authorized for this repair session",
+                None,
+            ));
+        }
         self.run_tool("repair_rollback_config", &req, || async {
             repairtool::rollback(&self.state.data_dir, &req.date)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -503,6 +696,7 @@ impl ContinuumMcpServer {
         &self,
         Parameters(req): Parameters<TestRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.require_repair_component(req.component.as_str())?;
         self.run_tool("repair_test_component", &req, || async {
             Ok::<_, McpError>(repairtool::test(&self.state.data_dir, req.component))
         })
@@ -510,12 +704,13 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Post a user-visible escalation. Writes an intent file the dashboard turns into a red Health-tab banner. Use when the repair requires manual intervention (e.g. re-authenticate claude CLI, free disk space)."
+        description = "Compatibility tool for a future escalation-intent consumer. The safe Health flow reports manual next steps in streamed assistant output instead."
     )]
     async fn repair_escalate(
         &self,
         Parameters(req): Parameters<EscalateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.require_repair_escalation()?;
         self.run_tool("repair_escalate", &req, || async {
             repairtool::escalate(&self.state.data_dir, &req.message)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -643,5 +838,83 @@ impl ServerHandler for ContinuumMcpServer {
                  web fetch, and notification tools to the orchestrator. Every tool call \
                  is audited to episodic memory.",
             )
+    }
+}
+
+#[cfg(test)]
+mod repair_authorization_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn server_with_grant(
+        data_dir: PathBuf,
+        repair_grant: Option<RepairSessionGrant>,
+    ) -> ContinuumMcpServer {
+        if let Some(grant) = repair_grant.as_ref() {
+            let grants_dir = data_dir.join("repair-grants");
+            std::fs::create_dir_all(&grants_dir).unwrap();
+            std::fs::write(
+                grants_dir.join(format!("{}.json", grant.token)),
+                serde_json::to_vec(grant).unwrap(),
+            )
+            .unwrap();
+        }
+        ContinuumMcpServer {
+            state: Arc::new(ServerState {
+                data_dir,
+                http: reqwest::Client::new(),
+                fs_extra_paths: Vec::new(),
+                semantic: OnceCell::new(),
+                episodic: OnceCell::new(),
+                repair_grant,
+            }),
+            tool_router: ContinuumMcpServer::tool_router(),
+        }
+    }
+
+    #[test]
+    fn repair_tools_default_to_denied_without_session_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_with_grant(tmp.path().to_path_buf(), None);
+        assert!(server.require_repair_session().is_err());
+        assert!(server.require_repair_component("vision").is_err());
+    }
+
+    #[test]
+    fn repair_grant_is_scoped_to_previewed_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grant = RepairSessionGrant {
+            token: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(1),
+            allowed_components: vec!["vision".into()],
+            allowed_restart_components: Vec::new(),
+            allow_escalation_intent: false,
+            allow_model_reinstall: false,
+            allow_config_rollback: false,
+        };
+        let server = server_with_grant(tmp.path().to_path_buf(), Some(grant));
+        assert!(server.require_repair_component("vision").is_ok());
+        assert!(server.require_repair_component("memory").is_err());
+        assert!(server.require_repair_restart_component("vision").is_err());
+        assert!(server.require_repair_escalation().is_err());
+    }
+
+    #[test]
+    fn restart_requires_a_distinct_execution_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grant = RepairSessionGrant {
+            token: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(1),
+            allowed_components: vec!["vision".into()],
+            allowed_restart_components: vec!["vision".into()],
+            allow_escalation_intent: false,
+            allow_model_reinstall: false,
+            allow_config_rollback: false,
+        };
+        let server = server_with_grant(tmp.path().to_path_buf(), Some(grant));
+        assert!(server.require_repair_restart_component("vision").is_ok());
+        assert!(server.require_repair_restart_component("triage").is_err());
     }
 }

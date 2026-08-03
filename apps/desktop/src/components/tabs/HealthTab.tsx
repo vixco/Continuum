@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
-import { Archive, RefreshCcw, Wrench } from "lucide-react";
+import { Archive, RefreshCcw, ShieldCheck, Wrench } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { continuum } from "@/lib/tauri";
 import { Button, Card, Modal, StatusBadge } from "@/components/ui/primitives";
-import type { ComponentHealth, RepairEvent } from "@/lib/types";
+import type { ComponentHealth, RepairEvent, RepairPreview } from "@/lib/types";
 
 export function HealthTab() {
   const components = useStore((s) => s.components);
@@ -16,9 +16,17 @@ export function HealthTab() {
   const repairEvents = useStore((s) => s.repairEvents);
   const clearRepair = useStore((s) => s.clearRepair);
   const [selected, setSelected] = useState<ComponentHealth | null>(null);
+  const [preview, setPreview] = useState<RepairPreview | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setComponents(await continuum.getHealth());
+    try {
+      setComponents(await continuum.getHealth());
+      setActionError(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
   }, [setComponents]);
 
   useEffect(() => {
@@ -85,14 +93,21 @@ export function HealthTab() {
           <Button
             variant="primary"
             onClick={async () => {
-              clearRepair();
-              await continuum.triggerRepair(undefined);
+              setRepairBusy(true);
+              setActionError(null);
+              try {
+                setPreview(await continuum.previewRepair());
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : String(error));
+              } finally {
+                setRepairBusy(false);
+              }
             }}
-            disabled={health.repair_running}
+            disabled={health.repair_running || repairBusy}
             className="w-full"
           >
             <Wrench size={13} />
-            {health.repair_running ? "Running…" : "Fix issues"}
+            {health.repair_running ? "Running…" : repairBusy ? "Checking…" : "Fix issues"}
           </Button>
           <div className="mt-4">
             <div className="text-[11px] uppercase tracking-wider text-ink-dim">Backup</div>
@@ -106,8 +121,13 @@ export function HealthTab() {
               size="sm"
               variant="ghost"
               onClick={async () => {
-                await continuum.runBackupNow();
-                await refresh();
+                try {
+                  setActionError(null);
+                  await continuum.runBackupNow();
+                  await refresh();
+                } catch (error) {
+                  setActionError(error instanceof Error ? error.message : String(error));
+                }
               }}
               className="mt-2"
             >
@@ -117,7 +137,16 @@ export function HealthTab() {
         </Card>
       </div>
 
-      <Card title="Repair agent output" subtitle="live stream from Opus">
+      {actionError && (
+        <div
+          role="alert"
+          className="rounded-md border border-state-error/40 bg-state-error/10 p-3 text-sm text-state-error"
+        >
+          {actionError}
+        </div>
+      )}
+
+      <Card title="Repair output" subtitle="guarded actions, diagnostics, and live verification">
         <RepairStream events={repairEvents} />
       </Card>
 
@@ -173,6 +202,75 @@ export function HealthTab() {
           </div>
         )}
       </Modal>
+
+      <Modal
+        open={!!preview}
+        onClose={() => !repairBusy && setPreview(null)}
+        title="Safe repair preview"
+      >
+        {preview && (
+          <div className="space-y-4 text-sm">
+            <div className="flex gap-2 rounded-md border border-accent-amber/30 bg-accent-amber/10 p-3">
+              <ShieldCheck className="mt-0.5 shrink-0 text-accent-amber" size={16} />
+              <div>
+                A verified, versioned backup is required before this repair starts and before every
+                mutating repair action. This one-time preview expires at{" "}
+                {new Date(preview.expires_at).toLocaleTimeString()}.
+              </div>
+            </div>
+            {preview.issues.length === 0 ? (
+              <div className="text-ink-muted">Live probes found no supported repair issue.</div>
+            ) : (
+              <div className="space-y-2">
+                {preview.issues.map((issue) => (
+                  <div key={issue.component} className="rounded-md border border-bg-border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium capitalize">
+                        {issue.component.replaceAll("_", " ")}
+                      </span>
+                      <StatusBadge status={issue.status} />
+                    </div>
+                    <div className="mt-1 text-xs text-ink-muted">{issue.detail}</div>
+                    <div className="mt-2 text-xs text-ink">{issue.proposed_action}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="rounded-md border border-bg-border p-3">
+              <div className="continuum-label">Allowed in this run</div>
+              <ul className="mt-2 space-y-1 text-xs text-ink-muted">
+                {preview.allowed_actions.map((action) => (
+                  <li key={action}>• {action}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setPreview(null)} disabled={repairBusy}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                disabled={repairBusy || preview.issues.length === 0}
+                onClick={async () => {
+                  setRepairBusy(true);
+                  setActionError(null);
+                  clearRepair();
+                  try {
+                    await continuum.triggerRepair(preview.id);
+                    setPreview(null);
+                  } catch (error) {
+                    setActionError(error instanceof Error ? error.message : String(error));
+                  } finally {
+                    setRepairBusy(false);
+                  }
+                }}
+              >
+                <ShieldCheck size={13} /> Run safe repair
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -203,7 +301,9 @@ function labelFor(e: RepairEvent) {
 
 function styleFor(e: RepairEvent) {
   if (e.kind === "error") return "text-state-error";
+  if (e.kind === "action_result" && !e.success) return "text-state-error";
   if (e.kind === "stderr") return "text-state-warn";
+  if (e.kind === "verification" && e.unresolved.length > 0) return "text-state-warn";
   if (e.kind === "tool_call" || e.kind === "tool_result") return "text-accent-blue";
   return "";
 }
@@ -213,9 +313,19 @@ function bodyFor(e: RepairEvent): string {
     case "started":
       return `repair started at ${e.ts}`;
     case "finished":
-      return `done (success=${e.success})`;
+      return `repair process exited (success=${e.success}); awaiting live verification`;
     case "context_written":
       return `context at ${e.path}`;
+    case "backup_created":
+      return `verified backup (${e.bytes} bytes) at ${e.path}`;
+    case "action_result":
+      return `${e.action} (${e.success ? "verified" : "failed"}): ${e.detail}`;
+    case "verification":
+      return e.unresolved.length === 0
+        ? `live verification at ${e.checked_at}: no unresolved live issues remain`
+        : `live verification at ${e.checked_at}: unresolved ${e.unresolved
+            .map((component) => `${component.name} (${component.status})`)
+            .join(", ")}`;
     case "assistant_delta":
       return e.text;
     case "tool_call":

@@ -14,6 +14,8 @@
 //! Writing the context to `~/.continuum-dev/repair-context.md` also gives the
 //! user something to look at if the agent spawn itself fails.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -30,23 +32,42 @@ use crate::config::ContinuumConfig;
 use crate::hardware;
 use crate::logs::{LogBuffer, LogEntry, LogFilter};
 use crate::state::{ComponentHealth, StateHandle};
+use uuid::Uuid;
 
-/// Hard wall-clock ceiling for a single repair-agent run. A stuck or runaway
-/// Claude Opus session shouldn't block future repairs or leave
-/// `repair_running` pinned forever. 30 minutes is generous for a complex
-/// investigation but finite; the next tick after this fires kills the
-/// subprocess and marks the run failed.
-const REPAIR_HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const REPAIR_GRANTS_DIR: &str = "repair-grants";
+const REPAIR_AUDIT_FILE: &str = "repair-audit.ndjson";
 
 /// Input for a repair run.
 pub struct RepairInput<'a> {
     pub dev_dir: &'a Path,
+    pub backups_dir: &'a Path,
     pub repo_root: &'a Path,
     pub config: &'a ContinuumConfig,
     pub state: &'a StateHandle,
     pub logs: &'a LogBuffer,
     pub components: Vec<ComponentHealth>,
+    /// Exact component names authorized by the user's live preview.
+    pub allowed_components: Vec<String>,
     pub user_reason: Option<String>,
+}
+
+/// Short-lived capability consumed by a dedicated repair MCP process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairSessionGrant {
+    pub token: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub allowed_components: Vec<String>,
+    /// Components for which the session may queue a restart. Kept separate
+    /// from read-only tests so unsupported restart paths fail closed.
+    #[serde(default)]
+    pub allowed_restart_components: Vec<String>,
+    /// Whether the legacy escalation-intent tool is usable. The Health flow
+    /// keeps this false because no dashboard consumer exists yet.
+    #[serde(default)]
+    pub allow_escalation_intent: bool,
+    pub allow_model_reinstall: bool,
+    pub allow_config_rollback: bool,
 }
 
 /// Streamed output from the repair session — what the dashboard renders.
@@ -58,6 +79,16 @@ pub enum RepairEvent {
     },
     ContextWritten {
         path: String,
+    },
+    BackupCreated {
+        path: String,
+        bytes: u64,
+        verified: bool,
+    },
+    ActionResult {
+        action: String,
+        success: bool,
+        detail: String,
     },
     AssistantDelta {
         text: String,
@@ -77,6 +108,10 @@ pub enum RepairEvent {
         success: bool,
         cost_usd: Option<f64>,
     },
+    Verification {
+        checked_at: DateTime<Utc>,
+        unresolved: Vec<ComponentHealth>,
+    },
     Error {
         message: String,
     },
@@ -88,8 +123,55 @@ pub async fn run_repair<F>(input: RepairInput<'_>, on_event: F) -> Result<()>
 where
     F: Fn(RepairEvent) + Send + Sync + 'static,
 {
-    let on_event = Arc::new(on_event);
+    let state = input.state.clone();
+    state.set_repair_running(true).await;
+    let result = run_repair_active(input, Arc::new(on_event)).await;
+    state.set_repair_running(false).await;
+    result
+}
+
+async fn run_repair_active<F>(input: RepairInput<'_>, on_event: Arc<F>) -> Result<()>
+where
+    F: Fn(RepairEvent) + Send + Sync + 'static,
+{
     (on_event)(RepairEvent::Started { ts: Utc::now() });
+
+    append_repair_audit(
+        input.dev_dir,
+        "repair_started",
+        serde_json::json!({ "allowed_components": input.allowed_components }),
+    )?;
+
+    let backup = match super::backup::run_backup(input.dev_dir, input.backups_dir) {
+        Ok(backup) => backup,
+        Err(error) => {
+            (on_event)(RepairEvent::Error {
+                message: format!("pre-repair backup failed; no fixes were attempted: {error}"),
+            });
+            append_repair_audit(
+                input.dev_dir,
+                "repair_blocked",
+                serde_json::json!({ "reason": "backup_failed", "error": error.to_string() }),
+            )?;
+            return Err(error.context("create pre-repair backup"));
+        }
+    };
+    super::backup::prune_backups(
+        input.backups_dir,
+        input.config.health.backup_retention.max(1),
+    )?;
+    super::backup::verify_backup(&backup.path)
+        .context("pre-repair backup was not retained after pruning")?;
+    (on_event)(RepairEvent::BackupCreated {
+        path: backup.path.display().to_string(),
+        bytes: backup.bytes,
+        verified: true,
+    });
+    append_repair_audit(
+        input.dev_dir,
+        "backup_created",
+        serde_json::json!({ "path": backup.path, "bytes": backup.bytes, "verified": true }),
+    )?;
 
     let context_path = write_repair_context(&input).context("write repair context")?;
     (on_event)(RepairEvent::ContextWritten {
@@ -99,7 +181,25 @@ where
     let prompt_path =
         find_prompt(input.repo_root, input.dev_dir).context("locate repair-agent-system.md")?;
 
-    input.state.set_repair_running(true).await;
+    // Prepare the complete input before publishing a capability or spawning
+    // the subprocess. No fallible setup may orphan a child with a live grant.
+    let context_text = std::fs::read_to_string(&context_path)
+        .with_context(|| format!("read {}", context_path.display()))?;
+    let user_message = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": format!(
+                "Use only the authorized repair context below. Diagnose the root cause and \
+                 apply only the allowlisted safe tools. Follow the system prompt.\n\n<context>\n{context_text}\n</context>",
+            )
+        }
+    });
+    let user_message_line = format!(
+        "{}\n",
+        serde_json::to_string(&user_message).context("serialize repair request")?
+    );
+    let session = create_repair_session(&input)?;
 
     let claude = which_claude();
     let mut cmd = Command::new(&claude);
@@ -114,15 +214,28 @@ where
         .arg(&input.config.orchestrator.model_id)
         .arg("--append-system-prompt-file")
         .arg(&prompt_path)
+        .arg("--mcp-config")
+        .arg(&session.mcp_config_path)
+        .arg("--strict-mcp-config")
+        .arg("--setting-sources")
+        .arg("")
+        .arg("--tools")
+        .arg("")
+        .arg("--disable-slash-commands")
+        .arg("--no-session-persistence")
+        .arg("--allowedTools")
+        .arg("mcp__continuum__repair_test_component")
+        .arg("--permission-mode")
+        .arg("default")
         .current_dir(input.repo_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            input.state.set_repair_running(false).await;
             (on_event)(RepairEvent::Error {
                 message: format!("failed to spawn `{}`: {e}", claude.display()),
             });
@@ -130,41 +243,29 @@ where
         }
     };
 
-    // Send the repair context as the user message.
-    let user_message = serde_json::json!({
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": format!(
-                "Repair context has been written to {}. Read it, diagnose the root cause, \
-    and apply fixes. Follow the system prompt.{reason}",
-                context_path.display(),
-                reason = input.user_reason
-                    .as_deref()
-                    .map(|r| format!(" User said: {r}"))
-                    .unwrap_or_default(),
-            )
-        }
-    });
-
     if let Some(mut stdin) = child.stdin.take() {
-        let msg = format!("{}\n", serde_json::to_string(&user_message)?);
-        if let Err(e) = stdin.write_all(msg.as_bytes()).await {
-            tracing::warn!(
+        if let Err(e) = stdin.write_all(user_message_line.as_bytes()).await {
+            tracing::error!(
                 layer = "health",
                 component = "repair",
                 error = %e,
                 "stdin write failed"
             );
+            terminate_child(&mut child).await;
+            (on_event)(RepairEvent::Error {
+                message: format!("failed to send repair request; subprocess stopped: {e}"),
+            });
+            return Err(e.into());
         }
         drop(stdin);
+    } else {
+        terminate_child(&mut child).await;
+        anyhow::bail!("repair subprocess did not expose stdin; subprocess stopped");
     }
 
     // Stream stdout (newline-delimited JSON).
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let state_clone = input.state.clone();
-
     let stderr_cb = Arc::clone(&on_event);
     let stderr_task = tokio::spawn(async move {
         if let Some(stream) = stderr {
@@ -190,7 +291,9 @@ where
 
     // Cap the repair run: a hung claude subprocess would otherwise pin
     // `repair_running=true` forever, blocking future repairs. Kill on expiry.
-    let wait_result = tokio::time::timeout(REPAIR_HARD_TIMEOUT, child.wait()).await;
+    let repair_timeout =
+        Duration::from_secs(input.config.health.repair_timeout_secs.clamp(30, 30 * 60));
+    let wait_result = tokio::time::timeout(repair_timeout, child.wait()).await;
     let status_opt = match wait_result {
         Ok(Ok(status)) => Some(status),
         Ok(Err(e)) => {
@@ -200,41 +303,229 @@ where
                 error = %e,
                 "claude subprocess wait failed"
             );
+            terminate_child(&mut child).await;
             None
         }
         Err(_elapsed) => {
             tracing::error!(
                 layer = "health",
                 component = "repair",
-                timeout_secs = REPAIR_HARD_TIMEOUT.as_secs(),
+                timeout_secs = repair_timeout.as_secs(),
                 "Repair-agent subprocess exceeded hard timeout — killing"
             );
-            if let Err(e) = child.kill().await {
-                tracing::warn!(
-                    layer = "health",
-                    component = "repair",
-                    error = %e,
-                    "Failed to kill stuck claude subprocess"
-                );
-            }
+            terminate_child(&mut child).await;
             (on_event)(RepairEvent::Error {
                 message: format!(
                     "repair run exceeded {} minute hard timeout and was killed",
-                    REPAIR_HARD_TIMEOUT.as_secs() / 60
+                    repair_timeout.as_secs() / 60
                 ),
             });
             None
         }
     };
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    await_stream_task(stdout_task).await;
+    await_stream_task(stderr_task).await;
 
-    state_clone.set_repair_running(false).await;
+    let success = status_opt.map(|s| s.success()).unwrap_or(false);
+    append_repair_audit(
+        input.dev_dir,
+        "repair_finished",
+        serde_json::json!({ "success": success }),
+    )?;
     (on_event)(RepairEvent::Finished {
         ts: Utc::now(),
-        success: status_opt.map(|s| s.success()).unwrap_or(false),
+        success,
         cost_usd: None,
     });
+    Ok(())
+}
+
+async fn terminate_child(child: &mut tokio::process::Child) {
+    if let Err(error) = child.kill().await {
+        tracing::warn!(
+            layer = "health",
+            component = "repair",
+            error = %error,
+            "Failed to kill repair subprocess"
+        );
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+async fn await_stream_task(mut task: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_secs(5), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
+}
+
+struct RepairSessionFiles {
+    grant_path: PathBuf,
+    mcp_config_path: PathBuf,
+}
+
+impl RepairSessionFiles {
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.mcp_config_path);
+        let _ = std::fs::remove_file(&self.grant_path);
+    }
+}
+
+impl Drop for RepairSessionFiles {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn create_repair_session(input: &RepairInput<'_>) -> Result<RepairSessionFiles> {
+    // Resolve every non-secret dependency before publishing the capability.
+    // A missing MCP binary must not leave a usable orphan grant behind.
+    let mcp_bin = find_mcp_binary(input.repo_root)?;
+    let token = Uuid::new_v4().to_string();
+    let grants_dir = input.dev_dir.join(REPAIR_GRANTS_DIR);
+    std::fs::create_dir_all(&grants_dir)
+        .with_context(|| format!("create {}", grants_dir.display()))?;
+    let grant_path = grants_dir.join(format!("{token}.json"));
+    let temp_grant = grants_dir.join(format!(".{token}.tmp"));
+    let now = Utc::now();
+    let ttl = input
+        .config
+        .health
+        .repair_session_ttl_secs
+        .clamp(30, 60 * 60);
+    let grant = RepairSessionGrant {
+        token: token.clone(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(ttl as i64),
+        allowed_components: input.allowed_components.clone(),
+        // Component restart intents do not yet have a runtime consumer.
+        // The desktop performs the one genuinely supported action (starting
+        // an offline runtime) directly under its preview and backup guard.
+        allowed_restart_components: Vec::new(),
+        allow_escalation_intent: false,
+        // The Health-tab safe flow intentionally cannot authorize downloads or
+        // config rollback. Those require a separate, explicit user workflow.
+        allow_model_reinstall: false,
+        allow_config_rollback: false,
+    };
+    if let Err(error) = std::fs::write(
+        &temp_grant,
+        serde_json::to_vec_pretty(&grant).context("serialize repair grant")?,
+    ) {
+        let _ = std::fs::remove_file(&temp_grant);
+        return Err(error).with_context(|| format!("write {}", temp_grant.display()));
+    }
+    if let Err(error) = std::fs::rename(&temp_grant, &grant_path) {
+        let _ = std::fs::remove_file(&temp_grant);
+        return Err(error).with_context(|| {
+            format!(
+                "publish repair grant {} -> {}",
+                temp_grant.display(),
+                grant_path.display()
+            )
+        });
+    }
+
+    let mcp_config_path = input.dev_dir.join(format!("repair-mcp-{token}.json"));
+    let doc = serde_json::json!({
+        "mcpServers": {
+            "continuum": {
+                "type": "stdio",
+                "command": mcp_bin,
+                "args": [],
+                "env": {
+                    "CONTINUUM_DATA_DIR": input.dev_dir,
+                    "CONTINUUM_REPAIR_TOKEN": token,
+                },
+            }
+        }
+    });
+    if let Err(error) = std::fs::write(
+        &mcp_config_path,
+        serde_json::to_vec_pretty(&doc).context("serialize repair MCP config")?,
+    ) {
+        let _ = std::fs::remove_file(&grant_path);
+        let _ = std::fs::remove_file(&mcp_config_path);
+        return Err(error).context("write repair MCP config");
+    }
+    let session = RepairSessionFiles {
+        grant_path,
+        mcp_config_path,
+    };
+    if let Err(error) = append_repair_audit(
+        input.dev_dir,
+        "repair_grant_created",
+        serde_json::json!({
+            "expires_at": grant.expires_at,
+            "allowed_components": grant.allowed_components,
+        }),
+    ) {
+        session.cleanup();
+        return Err(error);
+    }
+    Ok(session)
+}
+
+fn find_mcp_binary(repo_root: &Path) -> Result<PathBuf> {
+    let executable = if cfg!(windows) {
+        "continuum-mcp.exe"
+    } else {
+        "continuum-mcp"
+    };
+    let mut candidates = Vec::new();
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            candidates.push(dir.join(executable));
+        }
+    }
+    candidates.push(repo_root.join("target/release").join(executable));
+    candidates.push(repo_root.join("target/debug").join(executable));
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .with_context(|| format!("{executable} not found; build or reinstall Continuum MCP"))
+}
+
+/// Validate the capability handed to a dedicated repair MCP process.
+pub fn authorize_repair_session(dev_dir: &Path, token: &str) -> Result<RepairSessionGrant> {
+    Uuid::parse_str(token).context("repair token is not a UUID")?;
+    let path = dev_dir
+        .join(REPAIR_GRANTS_DIR)
+        .join(format!("{token}.json"));
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("read repair grant {}", path.display()))?;
+    let grant: RepairSessionGrant =
+        serde_json::from_slice(&bytes).context("parse repair session grant")?;
+    if grant.token != token {
+        anyhow::bail!("repair grant token mismatch");
+    }
+    if grant.expires_at <= Utc::now() {
+        anyhow::bail!("repair grant expired");
+    }
+    Ok(grant)
+}
+
+/// Append a local, redaction-safe repair audit record.
+pub fn append_repair_audit(dev_dir: &Path, event: &str, detail: JsonValue) -> Result<()> {
+    std::fs::create_dir_all(dev_dir).with_context(|| format!("create {}", dev_dir.display()))?;
+    let path = dev_dir.join(REPAIR_AUDIT_FILE);
+    let record = serde_json::json!({
+        "ts": Utc::now(),
+        "event": event,
+        "detail": detail,
+    });
+    let mut bytes = serde_json::to_vec(&record).context("serialize repair audit record")?;
+    bytes.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.write_all(&bytes)
+        .context("write repair audit record")?;
+    file.sync_data().context("sync repair audit record")?;
     Ok(())
 }
 
@@ -333,7 +624,13 @@ pub fn write_repair_context(input: &RepairInput<'_>) -> Result<PathBuf> {
     }
 
     out.push_str("\n## Configuration snapshot\n\n```toml\n");
-    out.push_str(&toml::to_string_pretty(input.config).unwrap_or_default());
+    let mut safe_config = input.config.clone();
+    if !safe_config.tts.elevenlabs.api_key.is_empty() {
+        safe_config.tts.elevenlabs.api_key = "<redacted>".into();
+    }
+    out.push_str(
+        &toml::to_string_pretty(&safe_config).context("serialize redacted repair config")?,
+    );
     out.push_str("```\n\n");
 
     out.push_str(&system_resources_block(input.config));
@@ -347,14 +644,19 @@ pub fn write_repair_context(input: &RepairInput<'_>) -> Result<PathBuf> {
     let mut entries: Vec<LogEntry> = input.logs.query(&filter);
     entries.reverse();
     for e in entries {
+        let message = e.message.chars().take(2_000).collect::<String>();
         out.push_str(&format!(
             "{ts} {level} {layer}/{comp} {msg}\n",
             ts = e.ts.format("%H:%M:%S%.3f"),
             level = e.level.to_uppercase(),
             layer = e.layer.as_deref().unwrap_or("-"),
             comp = e.component.as_deref().unwrap_or("-"),
-            msg = e.message
+            msg = message
         ));
+        if out.len() >= 256 * 1024 {
+            out.push_str("[repair context truncated at 256 KiB]\n");
+            break;
+        }
     }
     out.push_str("```\n");
 
@@ -465,11 +767,7 @@ fn which_claude() -> PathBuf {
 }
 
 fn find_prompt(repo_root: &Path, dev_dir: &Path) -> Result<PathBuf> {
-    let mut candidates: Vec<PathBuf> = vec![
-        dev_dir.join("repair-agent-system.md"),
-        repo_root.join("prompts").join("repair-agent-system.md"),
-        Path::new("prompts/repair-agent-system.md").to_path_buf(),
-    ];
+    let mut candidates: Vec<PathBuf> = Vec::new();
     // Also try next to the running executable — covers packaged installs
     // where `prompts/` is bundled alongside continuum-desktop.exe and the cwd
     // is wherever the user launched from.
@@ -479,15 +777,21 @@ fn find_prompt(repo_root: &Path, dev_dir: &Path) -> Result<PathBuf> {
     {
         candidates.push(exe_dir.join("prompts").join("repair-agent-system.md"));
     }
+    candidates.push(repo_root.join("prompts").join("repair-agent-system.md"));
+    candidates.push(Path::new("prompts/repair-agent-system.md").to_path_buf());
     for p in candidates.iter() {
-        if p.exists() {
+        if p.is_file()
+            && std::fs::metadata(p)
+                .map(|metadata| metadata.len() <= 64 * 1024)
+                .unwrap_or(false)
+        {
             return Ok(p.clone());
         }
     }
     anyhow::bail!(
-        "repair-agent-system.md not found in {}, {}, cwd, or install dir",
-        dev_dir.display(),
-        repo_root.display()
+        "repair-agent-system.md not found (or exceeds 64 KiB) in {}, cwd, or install dir; refusing an untrusted data-directory prompt ({})",
+        repo_root.display(),
+        dev_dir.display()
     )
 }
 
@@ -501,20 +805,103 @@ fn find_prompt(repo_root: &Path, dev_dir: &Path) -> Result<PathBuf> {
 /// Rollback the config file from a dated backup. Returns the restored
 /// path.
 pub fn rollback_config(dev_dir: &Path, backups_dir: &Path, date: &str) -> Result<PathBuf> {
-    let zip_path = backups_dir.join(date).join(format!("continuum-{date}.zip"));
-    if !zip_path.exists() {
-        anyhow::bail!("backup {} not found", zip_path.display());
-    }
+    let zip_path = super::backup::latest_backup_for_date(backups_dir, date)?;
     let file =
         std::fs::File::open(&zip_path).with_context(|| format!("open {}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("read zip")?;
     let mut entry = archive
         .by_name("config.toml")
         .context("config.toml not in backup")?;
+    if entry.size() > super::backup::MAX_CONFIG_BYTES {
+        anyhow::bail!("backup config exceeds the 10 MiB rollback safety limit");
+    }
+    let mut restored_bytes = Vec::new();
+    std::io::copy(&mut entry, &mut restored_bytes).context("read config from backup")?;
+    drop(entry);
+    drop(archive);
+
+    let restored_text =
+        std::str::from_utf8(&restored_bytes).context("backup config is not UTF-8")?;
+    let restored_config: ContinuumConfig =
+        toml::from_str(restored_text).context("backup config is not valid Continuum TOML")?;
+    restored_config
+        .resources
+        .validate()
+        .context("backup config has invalid resource limits")?;
+
+    // Backup the current state immediately before the mutating rollback. The
+    // source archive was already selected and verified, so this new backup
+    // cannot accidentally become the rollback source.
+    let safety_backup = super::backup::run_backup(dev_dir, backups_dir)
+        .context("create pre-rollback safety backup")?;
+    super::backup::prune_backups(backups_dir, restored_config.health.backup_retention.max(1))
+        .context("apply backup retention before rollback")?;
+    super::backup::verify_backup(&safety_backup.path)
+        .context("pre-rollback safety backup was not retained")?;
+    append_repair_audit(
+        dev_dir,
+        "rollback_backup_created",
+        serde_json::json!({ "path": safety_backup.path, "bytes": safety_backup.bytes }),
+    )?;
+
     let restored = dev_dir.join("config.toml");
-    let mut out = std::fs::File::create(&restored)
-        .with_context(|| format!("write {}", restored.display()))?;
-    std::io::copy(&mut entry, &mut out).context("copy config")?;
+    std::fs::create_dir_all(dev_dir).with_context(|| format!("create {}", dev_dir.display()))?;
+    let nonce = Uuid::new_v4();
+    let staged = dev_dir.join(format!(".config-{nonce}.tmp"));
+    let previous = dev_dir.join(format!(".config-{nonce}.previous"));
+    {
+        let mut out = std::fs::File::create(&staged)
+            .with_context(|| format!("write {}", staged.display()))?;
+        out.write_all(&restored_bytes)
+            .context("write staged rollback config")?;
+        out.sync_all().context("sync staged rollback config")?;
+    }
+    let had_previous = restored.exists();
+    if had_previous {
+        std::fs::rename(&restored, &previous).with_context(|| {
+            format!(
+                "stage current config {} -> {}",
+                restored.display(),
+                previous.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(&staged, &restored) {
+        if had_previous {
+            let _ = std::fs::rename(&previous, &restored);
+        }
+        let _ = std::fs::remove_file(&staged);
+        return Err(error).context("atomically publish rollback config");
+    }
+    if let Err(audit_error) = append_repair_audit(
+        dev_dir,
+        "config_rolled_back",
+        serde_json::json!({ "source": zip_path, "restored": restored }),
+    ) {
+        let revert_result = if had_previous {
+            std::fs::remove_file(&restored).and_then(|_| std::fs::rename(&previous, &restored))
+        } else {
+            std::fs::remove_file(&restored)
+        };
+        return match revert_result {
+            Ok(()) => Err(audit_error.context("audit rollback outcome; config change reverted")),
+            Err(revert_error) => Err(anyhow::anyhow!(
+                "audit rollback outcome failed ({audit_error}); reverting config also failed ({revert_error}); safety backup: {}",
+                safety_backup.path.display()
+            )),
+        };
+    }
+    if had_previous {
+        if let Err(error) = std::fs::remove_file(&previous) {
+            tracing::warn!(
+                layer = "health",
+                component = "repair",
+                error = %error,
+                path = %previous.display(),
+                "Rollback succeeded but previous-config cleanup failed"
+            );
+        }
+    }
     tracing::info!(
         layer = "health",
         component = "repair",
@@ -563,15 +950,19 @@ mod tests {
     #[test]
     fn write_repair_context_includes_all_sections() {
         let tmp = TempDir::new().unwrap();
-        let (dev, repo, cfg, state, logs, components) = input_for(&tmp);
+        let (dev, repo, mut cfg, state, logs, components) = input_for(&tmp);
+        cfg.tts.elevenlabs.api_key = "secret-test-key".into();
+        let backups = tmp.path().join("backups");
 
         let input = RepairInput {
             dev_dir: &dev,
+            backups_dir: &backups,
             repo_root: &repo,
             config: &cfg,
             state: &state,
             logs: &logs,
             components,
+            allowed_components: vec!["vision".into()],
             user_reason: Some("voice keeps cutting out".into()),
         };
 
@@ -581,6 +972,8 @@ mod tests {
         assert!(text.contains("vision"));
         assert!(text.contains("onnx crashed"));
         assert!(text.contains("Configuration snapshot"));
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("secret-test-key"));
     }
 
     #[test]
@@ -589,13 +982,89 @@ mod tests {
         let dev = tmp.path().join("dev");
         let backups = tmp.path().join("backups");
         std::fs::create_dir_all(&dev).unwrap();
-        std::fs::write(dev.join("config.toml"), "old").unwrap();
+        std::fs::write(dev.join("config.toml"), "[screen]\ninterval_secs = 4\n").unwrap();
         crate::health::backup::run_backup(&dev, &backups).unwrap();
-        std::fs::write(dev.join("config.toml"), "newer but broken").unwrap();
+        std::fs::write(dev.join("config.toml"), "[screen]\ninterval_secs = 8\n").unwrap();
 
         let date = Utc::now().format("%Y-%m-%d").to_string();
         let restored = rollback_config(&dev, &backups, &date).unwrap();
         let contents = std::fs::read_to_string(&restored).unwrap();
-        assert_eq!(contents, "old");
+        assert_eq!(contents, "[screen]\ninterval_secs = 4\n");
+        assert_eq!(crate::health::backup::count_backups(&backups), 2);
+    }
+
+    #[test]
+    fn rollback_rejects_invalid_date_without_touching_config() {
+        let tmp = TempDir::new().unwrap();
+        let dev = tmp.path().join("dev");
+        let backups = tmp.path().join("backups");
+        std::fs::create_dir_all(&dev).unwrap();
+        let current = "[screen]\ninterval_secs = 8\n";
+        std::fs::write(dev.join("config.toml"), current).unwrap();
+        assert!(rollback_config(&dev, &backups, "../../escape").is_err());
+        assert_eq!(
+            std::fs::read_to_string(dev.join("config.toml")).unwrap(),
+            current
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_invalid_toml_before_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let dev = tmp.path().join("dev");
+        let backups = tmp.path().join("backups");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("config.toml"), "not valid toml").unwrap();
+        let source = crate::health::backup::run_backup(&dev, &backups).unwrap();
+        let date = source.date.format("%Y-%m-%d").to_string();
+        let current = "[screen]\ninterval_secs = 8\n";
+        std::fs::write(dev.join("config.toml"), current).unwrap();
+        assert!(rollback_config(&dev, &backups, &date).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dev.join("config.toml")).unwrap(),
+            current
+        );
+        assert_eq!(crate::health::backup::count_backups(&backups), 1);
+    }
+
+    #[test]
+    fn repair_grant_requires_matching_unexpired_uuid() {
+        let tmp = TempDir::new().unwrap();
+        let grants = tmp.path().join(REPAIR_GRANTS_DIR);
+        std::fs::create_dir_all(&grants).unwrap();
+        let token = Uuid::new_v4().to_string();
+        let grant = RepairSessionGrant {
+            token: token.clone(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+            allowed_components: vec!["vision".into()],
+            allowed_restart_components: Vec::new(),
+            allow_escalation_intent: false,
+            allow_model_reinstall: false,
+            allow_config_rollback: false,
+        };
+        std::fs::write(
+            grants.join(format!("{token}.json")),
+            serde_json::to_vec(&grant).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            authorize_repair_session(tmp.path(), &token)
+                .unwrap()
+                .allowed_components,
+            vec!["vision"]
+        );
+        assert!(authorize_repair_session(tmp.path(), "../../escape").is_err());
+
+        let expired = RepairSessionGrant {
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+            ..grant
+        };
+        std::fs::write(
+            grants.join(format!("{token}.json")),
+            serde_json::to_vec(&expired).unwrap(),
+        )
+        .unwrap();
+        assert!(authorize_repair_session(tmp.path(), &token).is_err());
     }
 }

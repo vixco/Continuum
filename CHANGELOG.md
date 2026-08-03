@@ -26,6 +26,7 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   image-incompatible agents one compact shared current world-state. Screenshot
   persistence remains off by default and raw keys, pointer data, clipboard data,
   and terminal text are excluded.
+- **Guarded Health self-heal**: Advanced → Health now refreshes the authoritative live probes and offers a one-time repair preview before execution. The supported automatic fix starts an offline runtime only after an atomic, versioned, manifest-verified backup, then waits for a fresh heartbeat before reporting success. Other issues are tested and escalated by a main-window-authorized, short-lived, single-use, component-scoped repair session with built-in tools disabled; unsupported component restart intents remain denied. Rollback validates its source, creates a safety backup, and publishes config reversibly. Local NDJSON audit records capture previews, grants, backups, actions, and outcomes.
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
   `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
   Claude Code CLI — plus a static provider catalog covering ~18 presets such

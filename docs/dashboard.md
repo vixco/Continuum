@@ -48,7 +48,7 @@ Two processes cooperate:
 | Voice         | Live voice state, wake word config, TTS engine + voice selector, volume / speed sliders, ambient mute settings. |
 | Automations   | List of scheduled tasks with last/next run. Create / edit / delete / toggle. |
 | Logs          | Real-time ring buffer (10k entries) with level / layer / component / text filters. NDJSON export. |
-| Health        | Component status grid, per-component detail modal, Fix Issues button, backup status, repair agent output stream. |
+| Health        | Live component probes, per-component detail, one-time repair preview, verified backup status, and guarded repair output. |
 
 ## Event topics
 
@@ -90,9 +90,9 @@ pnpm tauri dev
 | `~/.continuum-dev/config.toml`               | shared              | Runtime configuration |
 | `~/.continuum-dev/automations.json`          | dashboard           | Scheduled tasks |
 | `~/.continuum-dev/state.json`                | continuum runtime       | Live flags + voice mode (published every 2 s) |
-| `~/.continuum-dev/repair-intents/*.json`     | dashboard → runtime | Repair actions queued by the repair agent |
+| `~/.continuum-dev/repair-intents/*.json`     | legacy MCP output   | Not consumed in this release; the guarded Health flow does not authorize these restart intents |
 | `~/.continuum-dev/repair-context.md`         | dashboard           | Written at the start of each repair session |
-| `~/.continuum-backups/<date>/continuum-<date>.zip` | dashboard          | Nightly config backup, 7-day rotation |
+| `~/.continuum-backups/<date>/continuum-<timestamp>-<id>.zip` | dashboard          | Versioned, manifest-verified config backup with configurable retention |
 
 ## Limitations
 

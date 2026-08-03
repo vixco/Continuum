@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContinuumConfig {
+    /// Health polling, backup and guarded repair settings.
+    pub health: HealthConfig,
     /// Vision model configuration.
     pub vision: VisionConfig,
     /// Screen capture configuration.
@@ -49,6 +51,31 @@ pub struct ContinuumConfig {
     /// Chat tab settings.
     #[serde(default)]
     pub chat: ChatConfig,
+}
+
+/// Guardrails for Health-tab repair sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthConfig {
+    /// Hard wall-clock timeout for one repair-agent attempt.
+    pub repair_timeout_secs: u64,
+    /// Maximum time to wait for a newly-started runtime heartbeat.
+    pub runtime_start_timeout_secs: u64,
+    /// Lifetime of the one-time MCP repair grant.
+    pub repair_session_ttl_secs: u64,
+    /// Number of verified versioned backups retained.
+    pub backup_retention: u32,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            repair_timeout_secs: 10 * 60,
+            runtime_start_timeout_secs: 90,
+            repair_session_ttl_secs: 15 * 60,
+            backup_retention: 7,
+        }
+    }
 }
 
 /// Resource-aware profile. Selects a baseline policy; `Custom` uses the
@@ -616,6 +643,7 @@ impl Default for ContinuumConfig {
     fn default() -> Self {
         let base = continuum_dev_dir();
         Self {
+            health: HealthConfig::default(),
             vision: VisionConfig::default(),
             screen: ScreenConfig::default(),
             audio: AudioConfig::default(),
@@ -1002,6 +1030,8 @@ mod tests {
     fn test_default_config_is_valid() {
         let config = ContinuumConfig::default();
         assert_eq!(config.screen.interval_secs, 3);
+        assert_eq!(config.health.backup_retention, 7);
+        assert_eq!(config.health.runtime_start_timeout_secs, 90);
         assert_eq!(config.frame.salience_threshold, 0.10);
         assert_eq!(config.storage.retention_days, 30);
         assert!(config.memory.distillation_enabled);

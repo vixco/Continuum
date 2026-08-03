@@ -23,6 +23,7 @@ import type {
   ProviderAddInput,
   ProviderConnection,
   RepairEvent,
+  RepairPreview,
   ResourceConfig,
   ResourceProfile,
   ResourceProfileUpdate,
@@ -257,7 +258,9 @@ export const continuum = {
   toggleAutomation: (id: string, enabled: boolean) =>
     invoke<void>("toggle_automation", { id, enabled }),
   getHealth: () => invoke<ComponentHealth[]>("get_health", undefined, []),
-  triggerRepair: (reason?: string) => invoke<void>("trigger_repair", { reason }),
+  previewRepair: () => invoke<RepairPreview>("preview_repair"),
+  triggerRepair: (previewId: string, reason?: string) =>
+    invoke<void>("trigger_repair", { previewId, reason }),
   restartComponent: (name: string) =>
     invoke<ComponentHealth | null>("restart_component", { name }, null),
   runBackupNow: () => invoke<string>("run_backup_now"),
@@ -445,6 +448,12 @@ export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
 };
 
 export const DEFAULT_CONFIG: ContinuumConfig = {
+  health: {
+    repair_timeout_secs: 600,
+    runtime_start_timeout_secs: 90,
+    repair_session_ttl_secs: 900,
+    backup_retention: 7,
+  },
   chat: {
     max_tokens: 8192,
     temperature: null,

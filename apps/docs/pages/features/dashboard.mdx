@@ -32,7 +32,7 @@ A live-updating log stream from the 10 000-entry ring buffer. Filters by level, 
 
 ## Health
 
-All registered components with their current status (OK / degrading / error / unknown). A prominent "Fix Issues" button spawns the repair agent — its streaming output renders live in a side panel.
+All registered components with their current status (OK / degrading / error / unknown). "Fix Issues" first creates a one-time live preview. It can start an offline runtime after a verified backup and heartbeat-check the result; other issues are diagnosed and escalated without claiming an unsupported restart.
 
 Also exposes: backup status, last successful repair, rolling 24 h error rate per component, "Run backup now" and "Rollback config" actions.
 
@@ -41,7 +41,7 @@ Also exposes: backup status, last successful repair, rolling 24 h error rate per
 The dashboard process and the runtime process are separate. They communicate via:
 
 - `~/.continuum/state.json` — the runtime writes a snapshot every 2 s; the dashboard reads it
-- `~/.continuum/repair-intents/` — the repair agent writes intents; the runtime acts on them
+- `~/.continuum/repair-intents/` — legacy MCP intent output; not consumed or authorized by the safe Health flow in this release
 - Tauri `emit`/`listen` events for state / logs / repair bridging
 
 State can lag by up to 2 s after a config change. See [dashboard.md](https://github.com/vixco/Continuum/blob/main/docs/dashboard.md) for the full architecture.

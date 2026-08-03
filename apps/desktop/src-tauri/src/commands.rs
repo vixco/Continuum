@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Window};
 
 use continuum_core::automations::{Automation, AutomationInput};
 use continuum_core::config::{ContinuumConfig, ProfileMode, ResourceConfig};
@@ -16,7 +16,7 @@ use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
 use continuum_core::health::{self, repair::RepairInput};
 use continuum_core::logs::{LogEntry, LogFilter};
 use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
-use continuum_core::state::{ComponentHealth, ContinuumState};
+use continuum_core::state::{ComponentHealth, ComponentStatus, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
 use continuum_core::workers::{WorkerIntent, WorkerSnapshot};
 
@@ -427,50 +427,467 @@ pub async fn toggle_automation(
 
 // --- Health + repair ---
 
+const SAFE_TEST_TARGETS: &[&str] = &[
+    "vision",
+    "triage",
+    "orchestrator",
+    "tts",
+    "stt",
+    "memory",
+    "mcp",
+    "context_watcher",
+];
+const SAFE_DIRECT_TARGETS: &[&str] = &["runtime"];
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairPreviewIssue {
+    pub component: String,
+    pub status: ComponentStatus,
+    pub detail: String,
+    pub proposed_action: String,
+    pub actionable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairPreview {
+    pub id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub issues: Vec<RepairPreviewIssue>,
+    pub backup_required: bool,
+    pub allowed_actions: Vec<String>,
+}
+
+fn ensure_main_window(window: &Window) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Health repair commands are authorized only for the main window".into());
+    }
+    Ok(())
+}
+
+fn is_preview_repair_issue(component: &ComponentHealth) -> bool {
+    matches!(
+        component.status,
+        ComponentStatus::Error | ComponentStatus::Degrading
+    ) || (component.name == "runtime" && component.status == ComponentStatus::Unknown)
+}
+
+#[tauri::command]
+pub async fn preview_repair(
+    app: State<'_, Arc<AppState>>,
+    window: Window,
+) -> Result<RepairPreview, String> {
+    ensure_main_window(&window)?;
+    if app.runtime.state.snapshot().await.health.repair_running {
+        return Err("a repair is already running".into());
+    }
+    let _preview_gate = app
+        .repair_gate
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "a repair is already running or being previewed".to_string())?;
+    let mut pending = app.pending_repair.lock().await;
+    *pending = None;
+    let components = app.health.run_all().await;
+    app.runtime.state.set_components(components.clone()).await;
+    let issues = components
+        .into_iter()
+        .filter(is_preview_repair_issue)
+        .map(|component| {
+            let actionable = SAFE_DIRECT_TARGETS.contains(&component.name.as_str());
+            RepairPreviewIssue {
+                detail: component
+                    .last_error
+                    .clone()
+                    .or(component.recovery_note.clone())
+                    .unwrap_or_else(|| "live health probe reported a non-healthy state".into()),
+                proposed_action: if actionable {
+                    "create a verified backup, start the offline runtime once, then wait for a live heartbeat".into()
+                } else {
+                    "diagnose and escalate; no automatic mutation is allowlisted".into()
+                },
+                component: component.name,
+                status: component.status,
+                actionable,
+            }
+        })
+        .collect::<Vec<_>>();
+    let created_at = chrono::Utc::now();
+    let ttl = app
+        .runtime
+        .config_snapshot()
+        .health
+        .repair_session_ttl_secs
+        .clamp(30, 15 * 60);
+    let preview = RepairPreview {
+        id: uuid::Uuid::new_v4().to_string(),
+        created_at,
+        expires_at: created_at + chrono::Duration::seconds(ttl as i64),
+        issues,
+        backup_required: true,
+        allowed_actions: vec![
+            "start an offline runtime after a verified backup".into(),
+            "test previewed components".into(),
+            "report explicit manual next steps".into(),
+        ],
+    };
+    if let Err(error) = continuum_core::health::repair::append_repair_audit(
+        &app.runtime.dev_dir(),
+        "repair_preview_created",
+        serde_json::json!({
+            "preview_id": preview.id,
+            "expires_at": preview.expires_at,
+            "issues": preview.issues.iter().map(|issue| &issue.component).collect::<Vec<_>>(),
+        }),
+    ) {
+        return Err(error.to_string());
+    }
+    *pending = Some(preview.clone());
+    Ok(preview)
+}
+
 #[tauri::command]
 pub async fn get_health(app: State<'_, Arc<AppState>>) -> Result<Vec<ComponentHealth>, String> {
-    Ok(app.health.run_all().await)
+    let components = app.health.run_all().await;
+    app.runtime.state.set_components(components.clone()).await;
+    Ok(components)
 }
 
 #[tauri::command]
 pub async fn trigger_repair(
     app: State<'_, Arc<AppState>>,
     app_handle: AppHandle,
+    window: Window,
+    preview_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    uuid::Uuid::parse_str(&preview_id).map_err(|_| "invalid repair preview id".to_string())?;
+    if reason.as_ref().map(|value| value.len()).unwrap_or(0) > 1_000 {
+        return Err("repair reason is limited to 1000 characters".into());
+    }
+    let gate = app
+        .repair_gate
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "a repair is already running".to_string())?;
+    let preview = app
+        .pending_repair
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| "repair preview missing or already used; preview again".to_string())?;
+    if preview.id != preview_id {
+        return Err("repair preview does not match the authorized plan".into());
+    }
+    if preview.expires_at <= chrono::Utc::now() {
+        return Err("repair preview expired; preview the live issues again".into());
+    }
+    let live_components = app.health.run_all().await;
+    let previewed = preview
+        .issues
+        .iter()
+        .map(|issue| issue.component.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let live_issues = live_components
+        .iter()
+        .filter(|component| previewed.contains(&component.name))
+        .filter(|component| is_preview_repair_issue(component))
+        .cloned()
+        .collect::<Vec<_>>();
+    let allowed_components = live_issues
+        .iter()
+        .filter(|component| SAFE_TEST_TARGETS.contains(&component.name.as_str()))
+        .map(|component| component.name.clone())
+        .collect::<Vec<_>>();
+    if live_issues.is_empty() {
+        return Err("none of the previewed live issues still requires repair".into());
+    }
+    let start_runtime = live_issues
+        .iter()
+        .any(|component| component.name == "runtime");
+    let needs_agent = live_issues
+        .iter()
+        .any(|component| component.name != "runtime");
     let runtime = app.runtime.clone();
     let health = app.health.clone();
+    runtime.state.set_repair_running(true).await;
     tokio::spawn(async move {
-        let components = health.run_all().await;
+        let _gate = gate;
+        let components = live_components;
         let dev_dir = runtime.dev_dir();
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| dev_dir.clone());
+        let backups_dir = continuum_core::config::continuum_backups_dir();
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| dev_dir.clone());
         let cfg = runtime.config_snapshot();
 
-        let input = RepairInput {
-            dev_dir: &dev_dir,
-            repo_root: &repo_root,
-            config: &cfg,
-            state: &runtime.state,
-            logs: &runtime.logs,
-            components,
-            user_reason: reason,
-        };
-
-        let emit_handle = app_handle.clone();
-        let cb = move |ev: continuum_core::health::repair::RepairEvent| {
-            let _ = emit_handle.emit("continuum:repair", ev);
-        };
-
-        if let Err(e) = health::repair::run_repair(input, cb).await {
+        if start_runtime {
+            if !needs_agent {
+                let _ = app_handle.emit(
+                    "continuum:repair",
+                    continuum_core::health::repair::RepairEvent::Started {
+                        ts: chrono::Utc::now(),
+                    },
+                );
+            }
+            let action = "start_runtime".to_string();
+            let outcome = guarded_start_runtime(
+                &dev_dir,
+                &backups_dir,
+                cfg.health.backup_retention.max(1),
+                cfg.health.runtime_start_timeout_secs.clamp(10, 5 * 60),
+                &app_handle,
+            )
+            .await;
+            let direct_action_success = outcome.is_ok();
+            let mut detail = outcome.unwrap_or_else(|error| error);
+            if let Err(error) = continuum_core::health::repair::append_repair_audit(
+                &dev_dir,
+                "runtime_start_result",
+                serde_json::json!({
+                    "success": direct_action_success,
+                    "detail": &detail,
+                }),
+            ) {
+                detail.push_str(&format!("; warning: result audit failed: {error}"));
+            }
             let _ = app_handle.emit(
                 "continuum:repair",
-                continuum_core::health::repair::RepairEvent::Error {
-                    message: e.to_string(),
+                continuum_core::health::repair::RepairEvent::ActionResult {
+                    action,
+                    success: direct_action_success,
+                    detail,
                 },
             );
+            if !needs_agent {
+                let _ = app_handle.emit(
+                    "continuum:repair",
+                    continuum_core::health::repair::RepairEvent::Finished {
+                        ts: chrono::Utc::now(),
+                        success: direct_action_success,
+                        cost_usd: None,
+                    },
+                );
+            }
+        }
+
+        if needs_agent {
+            let input = RepairInput {
+                dev_dir: &dev_dir,
+                backups_dir: &backups_dir,
+                repo_root: &repo_root,
+                config: &cfg,
+                state: &runtime.state,
+                logs: &runtime.logs,
+                components,
+                allowed_components,
+                user_reason: reason,
+            };
+
+            let emit_handle = app_handle.clone();
+            let cb = move |ev: continuum_core::health::repair::RepairEvent| {
+                let _ = emit_handle.emit("continuum:repair", ev);
+            };
+
+            if let Err(e) = health::repair::run_repair(input, cb).await {
+                let _ = app_handle.emit(
+                    "continuum:repair",
+                    continuum_core::health::repair::RepairEvent::Error {
+                        message: e.to_string(),
+                    },
+                );
+            }
+            // `run_repair` owns its standalone state lifecycle. Keep the
+            // enclosing UI action marked busy through the authoritative
+            // follow-up probes below.
+            runtime.state.set_repair_running(true).await;
+        }
+        let verified_components = health.run_all().await;
+        runtime
+            .state
+            .set_components(verified_components.clone())
+            .await;
+        let unresolved = verified_components
+            .into_iter()
+            .filter(|component| {
+                matches!(
+                    component.status,
+                    ComponentStatus::Error | ComponentStatus::Degrading
+                ) || (previewed.contains(&component.name)
+                    && component.status != ComponentStatus::Healthy)
+            })
+            .collect::<Vec<_>>();
+        let _ = app_handle.emit(
+            "continuum:repair",
+            continuum_core::health::repair::RepairEvent::Verification {
+                checked_at: chrono::Utc::now(),
+                unresolved: unresolved.clone(),
+            },
+        );
+        let _ = continuum_core::health::repair::append_repair_audit(
+            &dev_dir,
+            "repair_verified",
+            serde_json::json!({
+                "unresolved": unresolved.iter().map(|item| &item.name).collect::<Vec<_>>(),
+            }),
+        );
+        runtime.state.set_repair_running(false).await;
+        match continuum_core::health::backup::backup_status(&backups_dir) {
+            Ok((latest, count)) => runtime.state.set_backup_status(latest, count).await,
+            Err(error) => {
+                let _ = app_handle.emit(
+                    "continuum:repair",
+                    continuum_core::health::repair::RepairEvent::Error {
+                        message: format!(
+                            "repair finished but backup status refresh failed: {error}"
+                        ),
+                    },
+                );
+            }
         }
     });
     Ok(())
+}
+
+async fn guarded_start_runtime(
+    dev_dir: &std::path::Path,
+    backups_dir: &std::path::Path,
+    retention: u32,
+    timeout_secs: u64,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    if crate::components::runtime_alive(dev_dir) {
+        return Ok("runtime is already publishing a live heartbeat; no action taken".into());
+    }
+    let bin = locate_runtime_binary().ok_or_else(|| {
+        "continuum runtime binary was not found next to the desktop executable".to_string()
+    })?;
+    if runtime_process_exists(&bin) {
+        return Err(
+            "a Continuum runtime process already exists but is not publishing a fresh heartbeat; refusing to start a duplicate"
+                .into(),
+        );
+    }
+
+    let backup = continuum_core::health::backup::run_backup(dev_dir, backups_dir)
+        .map_err(|error| format!("pre-start backup failed; runtime was not started: {error}"))?;
+    continuum_core::health::backup::prune_backups(backups_dir, retention)
+        .map_err(|error| format!("backup retention failed; runtime was not started: {error}"))?;
+    continuum_core::health::backup::verify_backup(&backup.path).map_err(|error| {
+        format!("verified backup was not retained; runtime was not started: {error}")
+    })?;
+    let _ = app_handle.emit(
+        "continuum:repair",
+        continuum_core::health::repair::RepairEvent::BackupCreated {
+            path: backup.path.display().to_string(),
+            bytes: backup.bytes,
+            verified: true,
+        },
+    );
+    continuum_core::health::repair::append_repair_audit(
+        dev_dir,
+        "runtime_start_requested",
+        serde_json::json!({
+            "backup": backup.path,
+            "backup_bytes": backup.bytes,
+            "backup_verified": true,
+        }),
+    )
+    .map_err(|error| format!("repair audit failed; runtime was not started: {error}"))?;
+
+    if crate::components::runtime_alive(dev_dir) {
+        return Ok(
+            "runtime began publishing a live heartbeat during backup; no process was started"
+                .into(),
+        );
+    }
+    if runtime_process_exists(&bin) {
+        return Err(
+            "a Continuum runtime process appeared during backup but has no fresh heartbeat; refusing to start a duplicate"
+                .into(),
+        );
+    }
+    let working_dir = bin
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut child = runtime_command(&bin, &working_dir)
+        .spawn()
+        .map_err(|error| format!("failed to start {}: {error}", bin.display()))?;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if crate::components::runtime_alive(dev_dir) {
+            let detail = format!(
+                "runtime started (pid {}) and published a fresh heartbeat",
+                child.id()
+            );
+            if let Err(error) = continuum_core::health::repair::append_repair_audit(
+                dev_dir,
+                "runtime_started",
+                serde_json::json!({ "pid": child.id(), "verified": "fresh_state_heartbeat" }),
+            ) {
+                return Ok(format!("{detail}; warning: success audit failed: {error}"));
+            }
+            return Ok(detail);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "runtime exited before publishing a heartbeat (status {status})"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "failed to inspect runtime process; it was stopped: {error}"
+                ));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let detail = format!(
+                "runtime did not publish a heartbeat within {timeout_secs} seconds and was stopped"
+            );
+            let _ = continuum_core::health::repair::append_repair_audit(
+                dev_dir,
+                "runtime_start_failed",
+                serde_json::json!({ "reason": "heartbeat_timeout", "timeout_secs": timeout_secs }),
+            );
+            return Err(detail);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+fn runtime_process_exists(bin: &std::path::Path) -> bool {
+    let expected = bin.canonicalize().unwrap_or_else(|_| bin.to_path_buf());
+    let mut system = sysinfo::System::new_all();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    system.processes().values().any(|process| {
+        process.exe().is_some_and(|path| {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) == expected
+        })
+    })
+}
+
+fn runtime_command(bin: &std::path::Path, working_dir: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(bin);
+    command.current_dir(working_dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: the runtime is a background companion process.
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 
 #[tauri::command]
@@ -482,11 +899,10 @@ pub async fn restart_component(
         layer = "health",
         component = "dashboard",
         target = %name,
-        "User requested component restart"
+        "User requested component re-probe"
     );
-    // Restart is component-specific and needs the running runtime. The
-    // runtime bridge listens on a local socket; for now we re-run the
-    // health probe so the dashboard shows up-to-date status.
+    // Kept under the published Tauri command name for compatibility. This is
+    // deliberately a re-probe and must not be presented as a restart.
     Ok(app.health.run_single(&name).await)
 }
 
@@ -496,23 +912,33 @@ pub async fn run_backup_now(app: State<'_, Arc<AppState>>) -> Result<String, Str
     let backups_dir = continuum_core::config::continuum_backups_dir();
     let result = continuum_core::health::backup::run_backup(&dev_dir, &backups_dir)
         .map_err(|e| e.to_string())?;
-    let _ = continuum_core::health::backup::prune_backups(
+    continuum_core::health::backup::prune_backups(
         &backups_dir,
-        continuum_core::health::backup::DEFAULT_RETENTION,
-    );
-    let latest = continuum_core::health::backup::latest_backup_ts(&backups_dir);
-    let count = continuum_core::health::backup::count_backups(&backups_dir);
+        app.runtime.config_snapshot().health.backup_retention.max(1),
+    )
+    .map_err(|e| e.to_string())?;
+    continuum_core::health::backup::verify_backup(&result.path).map_err(|e| e.to_string())?;
+    let (latest, count) =
+        continuum_core::health::backup::backup_status(&backups_dir).map_err(|e| e.to_string())?;
     app.runtime.state.set_backup_status(latest, count).await;
     Ok(result.path.display().to_string())
 }
 
 #[tauri::command]
-pub async fn rollback_config(app: State<'_, Arc<AppState>>, date: String) -> Result<(), String> {
+pub async fn rollback_config(
+    app: State<'_, Arc<AppState>>,
+    window: Window,
+    date: String,
+) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let dev_dir = app.runtime.dev_dir();
     let backups_dir = continuum_core::config::continuum_backups_dir();
     continuum_core::health::repair::rollback_config(&dev_dir, &backups_dir, &date)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let (latest, count) =
+        continuum_core::health::backup::backup_status(&backups_dir).map_err(|e| e.to_string())?;
+    app.runtime.state.set_backup_status(latest, count).await;
+    Ok(())
 }
 
 // --- Voice: push-to-talk ---
@@ -935,8 +1361,7 @@ pub async fn start_runtime() -> Result<(), String> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    std::process::Command::new(&bin)
-        .current_dir(&working_dir)
+    runtime_command(&bin, &working_dir)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to spawn {}: {}", bin.display(), e))
@@ -1116,7 +1541,7 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
         McpTool {
             namespace: "repair".into(),
             name: "repair_restart_component".into(),
-            description: "Queue a restart for a runtime subsystem".into(),
+            description: "Compatibility tool; denied unless an execution path is authorized".into(),
         },
         McpTool {
             namespace: "repair".into(),
@@ -1165,4 +1590,52 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             description: "List recent worker snapshots".into(),
         },
     ]
+}
+
+#[cfg(test)]
+mod health_repair_tests {
+    use super::*;
+
+    fn component(name: &str, status: ComponentStatus) -> ComponentHealth {
+        ComponentHealth {
+            name: name.into(),
+            status,
+            last_check_ts: None,
+            last_error: None,
+            error_count_24h: 0,
+            avg_response_ms: None,
+            log_path: None,
+            recovery_note: None,
+        }
+    }
+
+    #[test]
+    fn preview_includes_only_actionable_runtime_unknown_and_real_failures() {
+        assert!(is_preview_repair_issue(&component(
+            "runtime",
+            ComponentStatus::Unknown
+        )));
+        assert!(!is_preview_repair_issue(&component(
+            "vision",
+            ComponentStatus::Unknown
+        )));
+        assert!(is_preview_repair_issue(&component(
+            "vision",
+            ComponentStatus::Error
+        )));
+        assert!(is_preview_repair_issue(&component(
+            "memory",
+            ComponentStatus::Degrading
+        )));
+        assert!(!is_preview_repair_issue(&component(
+            "mcp",
+            ComponentStatus::Healthy
+        )));
+    }
+
+    #[test]
+    fn only_offline_runtime_has_a_direct_mutating_action() {
+        assert_eq!(SAFE_DIRECT_TARGETS, &["runtime"]);
+        assert!(!SAFE_DIRECT_TARGETS.contains(&"vision"));
+    }
 }
