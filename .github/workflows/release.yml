@@ -13,10 +13,17 @@ env:
   RUST_VERSION: "1.94.0"
   CARGO_TARGET_DIR: target
   # sccache wraps rustc/cc; mozilla-actions/sccache-action (run later) manages
-  # SCCACHE_DIR + the GitHub Actions cache backing. These two are plain values,
+  # SCCACHE_DIR + the GitHub Actions cache backing. These are plain values,
   # so workflow-level env is valid (no `runner` context needed here).
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 4G
+  # Route the cmake-built native libs (whisper.cpp + llama.cpp) through sccache.
+  # RUSTC_WRAPPER alone only caches rustc — the slow 15-20 min is the C/C++
+  # compile of those two libs. cmake reads CMAKE_<LANG>_COMPILER_LAUNCHER from
+  # the env and runs `sccache cl` for each translation unit, so after the first
+  # release they become cache hits.
+  CMAKE_C_COMPILER_LAUNCHER: sccache
+  CMAKE_CXX_COMPILER_LAUNCHER: sccache
 
 jobs:
   release:
