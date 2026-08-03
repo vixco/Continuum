@@ -11,13 +11,13 @@
 //! and it is rebuilt from the markdown on next open.
 
 pub mod error;
+pub mod frontmatter; // Task 2
 pub mod model;
-// pub mod frontmatter;   // Task 2
-// pub mod slug;          // Task 2
-// pub mod index;         // Task 3
-// pub mod vault;         // Task 5
-// pub mod watcher;       // Task 7
-// pub mod migrate;       // Task 8
+pub mod slug; // Task 2
+              // pub mod index;         // Task 3
+              // pub mod vault;         // Task 5
+              // pub mod watcher;       // Task 7
+              // pub mod migrate;       // Task 8
 
 pub use error::{MemoryError, Result};
 pub use model::*;
