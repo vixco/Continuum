@@ -213,9 +213,8 @@ fn queue_intent(
         "body": body,
     });
     std::fs::write(&temp, serde_json::to_string_pretty(&payload)?)?;
-    std::fs::rename(&temp, &path).map_err(|error| {
+    std::fs::rename(&temp, &path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
-        error
     })?;
     Ok(IntentResponse {
         intent_file: path.display().to_string(),
