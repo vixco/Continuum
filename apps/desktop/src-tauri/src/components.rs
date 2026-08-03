@@ -155,7 +155,7 @@ struct VisionCheck {
 }
 
 struct LiveContextCheck {
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -174,7 +174,8 @@ impl HealthCheck for LiveContextCheck {
         )
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.screen.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.screen.enabled {
             return HealthResult::healthy(1);
         }
         if !runtime_alive(&self.dev_dir) {
@@ -190,8 +191,7 @@ impl HealthCheck for LiveContextCheck {
                 Ok(state) => state,
                 Err(error) => return HealthResult::error(error.to_string(), 1),
             };
-        let interval =
-            std::time::Duration::from_millis(self.cfg.screen.capture_interval_ms.max(50));
+        let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(50));
         if state
             .health
             .should_restart(chrono::Utc::now(), true, interval)
