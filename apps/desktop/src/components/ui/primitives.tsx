@@ -5,6 +5,7 @@ import { useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
+  KeyboardEvent,
   PropsWithChildren,
   ReactNode,
   SelectHTMLAttributes,
@@ -263,11 +264,13 @@ export function Select<T extends string>({
 export function SearchInput({
   value,
   onChange,
+  onKeyDown,
   placeholder,
   className,
 }: {
   value: string;
   onChange: (v: string) => void;
+  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
   placeholder?: string;
   className?: string;
 }) {
@@ -276,6 +279,7 @@ export function SearchInput({
       type="search"
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown}
       placeholder={placeholder}
       className={clsx(
         "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
