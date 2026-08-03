@@ -855,6 +855,31 @@ impl Index {
         let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
     }
 
+    /// Finish an [`immediate_conn`](Self::immediate_conn) transaction
+    /// whose body already produced `result`. This is the ONLY place any
+    /// write path is allowed to call `commit`: a failed COMMIT (disk
+    /// full, IO error, ...) must never be propagated as-is, because that
+    /// would leave the transaction open on the pooled connection — the
+    /// next caller to acquire that slot would hit "cannot start a
+    /// transaction within a transaction" and the slot would be dead for
+    /// the rest of the process's life. So both the `result == Err` path
+    /// AND a failed `commit` roll back before propagating.
+    async fn finish<T>(mut conn: Conn, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => match Self::commit(&mut conn).await {
+                Ok(()) => Ok(value),
+                Err(e) => {
+                    Self::rollback_quiet(&mut conn).await;
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                Self::rollback_quiet(&mut conn).await;
+                Err(e)
+            }
+        }
+    }
+
     /// Bump the `reindex_ops` meta counter by `n` — a cheap, test-visible
     /// (and dashboard-visible) signal that a write actually happened, as
     /// opposed to a no-op skip. Runs on the given transaction connection.
@@ -1045,9 +1070,33 @@ impl Index {
                 .bind(&rel)
                 .fetch_optional(&self.pool)
                 .await?;
-        if let Some((stored_mtime, stored_hash)) = stored {
-            if stored_mtime == mtime && stored_hash == file_hash {
+        match stored {
+            Some((stored_mtime, stored_hash))
+                if stored_mtime == mtime && stored_hash == file_hash =>
+            {
                 return Ok(IndexOutcome::Skipped);
+            }
+            Some(_) => {}
+            None => {
+                // Not a currently-indexed node — it may instead be an
+                // unchanged *quarantined* file (broken frontmatter that
+                // hasn't been touched since it was last quarantined).
+                // Without this check, a quarantined file gets re-parsed
+                // and re-quarantined on every single pass, inflating
+                // `reindex_ops` forever. `quarantine` has no body_hash
+                // column (only `path`, `error`, `mtime`), so this is a
+                // mtime-only comparison — coarser than the nodes check,
+                // but sufficient: any real edit updates mtime.
+                let quarantined_mtime: Option<(i64,)> =
+                    sqlx::query_as("SELECT mtime FROM quarantine WHERE path = ?")
+                        .bind(&rel)
+                        .fetch_optional(&self.pool)
+                        .await?;
+                if let Some((quarantined_mtime,)) = quarantined_mtime {
+                    if quarantined_mtime == mtime {
+                        return Ok(IndexOutcome::Skipped);
+                    }
+                }
             }
         }
 
@@ -1087,16 +1136,8 @@ impl Index {
 
     async fn quarantine_path(&self, rel: &str, error: &str, mtime: i64) -> Result<()> {
         let mut conn = self.immediate_conn().await?;
-        match quarantine_path_tx(&mut conn, rel, error, mtime).await {
-            Ok(()) => {
-                Self::commit(&mut conn).await?;
-                Ok(())
-            }
-            Err(e) => {
-                Self::rollback_quiet(&mut conn).await;
-                Err(e)
-            }
-        }
+        let result = quarantine_path_tx(&mut conn, rel, error, mtime).await;
+        Self::finish(conn, result).await
     }
 
     async fn upsert_node(
@@ -1108,16 +1149,8 @@ impl Index {
         body_hash: &str,
     ) -> Result<UpsertOutcome> {
         let mut conn = self.immediate_conn().await?;
-        match upsert_node_tx(&mut conn, rel, path, parsed, mtime, body_hash).await {
-            Ok(outcome) => {
-                Self::commit(&mut conn).await?;
-                Ok(outcome)
-            }
-            Err(e) => {
-                Self::rollback_quiet(&mut conn).await;
-                Err(e)
-            }
-        }
+        let result = upsert_node_tx(&mut conn, rel, path, parsed, mtime, body_hash).await;
+        Self::finish(conn, result).await
     }
 
     /// Remove any indexed node/quarantine entry for `path` (which need not
@@ -1134,13 +1167,8 @@ impl Index {
     ) -> Result<()> {
         let rel = rel_path(vault_dir, path)?;
         let mut conn = self.immediate_conn().await?;
-        match remove_path_tx(&mut conn, &rel).await {
-            Ok(()) => Self::commit(&mut conn).await?,
-            Err(e) => {
-                Self::rollback_quiet(&mut conn).await;
-                return Err(e);
-            }
-        }
+        let result = remove_path_tx(&mut conn, &rel).await;
+        Self::finish(conn, result).await?;
         if recompute {
             self.recompute_edges().await?;
         }
@@ -1199,13 +1227,8 @@ impl Index {
         let (resolved, unresolved) = resolve_links(&links, &by_slug, &by_title, &by_id);
 
         let mut conn = self.immediate_conn().await?;
-        match recompute_edges_tx(&mut conn, &resolved, &unresolved).await {
-            Ok(()) => Self::commit(&mut conn).await,
-            Err(e) => {
-                Self::rollback_quiet(&mut conn).await;
-                Err(e)
-            }
-        }
+        let result = recompute_edges_tx(&mut conn, &resolved, &unresolved).await;
+        Self::finish(conn, result).await
     }
 
     /// Fully rebuild the index from the markdown files under `vault_dir`.
@@ -1339,13 +1362,7 @@ impl Index {
         // Phase 2: one IMMEDIATE transaction replaces every derived table.
         let mut conn = self.immediate_conn().await?;
         let result = rebuild_tx(&mut conn, &nodes, &quarantine, &resolved, &unresolved).await;
-        match result {
-            Ok(()) => Self::commit(&mut conn).await?,
-            Err(e) => {
-                Self::rollback_quiet(&mut conn).await;
-                return Err(e);
-            }
-        }
+        Self::finish(conn, result).await?;
 
         tracing::info!(
             layer = "memory",
