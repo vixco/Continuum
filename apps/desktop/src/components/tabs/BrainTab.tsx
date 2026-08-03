@@ -272,11 +272,13 @@ function ModelStatus({
       <span
         className={clsx(
           "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider",
-          loaded
-            ? "bg-state-healthy/20 text-state-healthy"
-            : "bg-state-idle/20 text-state-idle"
+          loaded ? "bg-state-healthy/20 text-state-healthy" : "bg-state-idle/20 text-state-idle"
         )}
-        title={loaded ? "Runtime reports this model/backend is reachable" : "Not yet reported by the runtime"}
+        title={
+          loaded
+            ? "Runtime reports this model/backend is reachable"
+            : "Not yet reported by the runtime"
+        }
       >
         {loaded ? "ready" : "not reported"}
       </span>

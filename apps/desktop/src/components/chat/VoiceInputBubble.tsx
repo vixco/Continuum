@@ -59,9 +59,7 @@ export function VoiceInputBubble({ partial, open, onCancel, onCommit }: VoiceInp
       </div>
       <Waveform />
       <div className="min-h-[36px] rounded-md border border-bg-border bg-bg-elevated px-2 py-1.5 text-[12.5px] text-ink">
-        {partial || (
-          <span className="text-ink-dim">Speak now…</span>
-        )}
+        {partial || <span className="text-ink-dim">Speak now…</span>}
       </div>
       <div className="mt-2 flex items-center justify-between text-[10px] text-ink-dim">
         <span>

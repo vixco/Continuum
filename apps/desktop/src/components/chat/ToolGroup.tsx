@@ -30,9 +30,7 @@ export function ToolGroup({ group }: ToolGroupProps) {
         aria-expanded={open}
       >
         <Layers size={11} strokeWidth={1.8} className="shrink-0 text-amber-400/80" />
-        <span className="font-medium tracking-wide">
-          {group.invocations.length} tools
-        </span>
+        <span className="font-medium tracking-wide">{group.invocations.length} tools</span>
         {running > 0 && (
           <span className="font-mono tabular-nums text-amber-300">· {running} running</span>
         )}

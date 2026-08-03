@@ -77,7 +77,8 @@ export function InputBar({ disabled, placeholder, onToggleVoice, voiceListening 
   }, [skills]);
 
   const isStreaming = sendingId != null && sendingId === activeId;
-  const canSend = !disabled && !isStreaming && (composerText.trim().length > 0 || attachments.length > 0);
+  const canSend =
+    !disabled && !isStreaming && (composerText.trim().length > 0 || attachments.length > 0);
 
   // Auto-grow the textarea up to MAX_HEIGHT_PX. We deliberately don't use
   // `rows` because the browser resets it on every input event.
@@ -214,13 +215,7 @@ export function InputBar({ disabled, placeholder, onToggleVoice, voiceListening 
           >
             <Paperclip size={13} />
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={onFiles}
-          />
+          <input ref={fileInputRef} type="file" multiple hidden onChange={onFiles} />
           <textarea
             ref={ref}
             value={composerText}
@@ -230,12 +225,12 @@ export function InputBar({ disabled, placeholder, onToggleVoice, voiceListening 
             placeholder={
               disabled
                 ? "Select or create a conversation to start…"
-                : placeholder ?? "Ask Continuum…"
+                : (placeholder ?? "Ask Continuum…")
             }
             disabled={disabled}
             spellCheck
             className={clsx(
-              "min-h-[28px] max-h-[220px] flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[13.5px] leading-snug text-ink outline-none placeholder:text-ink-dim",
+              "max-h-[220px] min-h-[28px] flex-1 resize-none bg-transparent px-1.5 py-1.5 text-[13.5px] leading-snug text-ink outline-none placeholder:text-ink-dim",
               "disabled:opacity-50"
             )}
           />
@@ -277,7 +272,7 @@ export function InputBar({ disabled, placeholder, onToggleVoice, voiceListening 
             >
               <ArrowUp size={11} className="mr-0.5 inline" />
               Send
-              <Kbd className="ml-1.5 !bg-black/20 !text-black/70 !border-black/20">⏎</Kbd>
+              <Kbd className="ml-1.5 !border-black/20 !bg-black/20 !text-black/70">⏎</Kbd>
             </button>
           )}
         </div>

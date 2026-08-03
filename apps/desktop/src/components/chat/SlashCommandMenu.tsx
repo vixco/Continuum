@@ -20,14 +20,18 @@ interface SlashCommandMenuProps {
   onClose: () => void;
 }
 
-export function SlashCommandMenu({ open, query, commands, onPick, onClose }: SlashCommandMenuProps) {
+export function SlashCommandMenu({
+  open,
+  query,
+  commands,
+  onPick,
+  onClose,
+}: SlashCommandMenuProps) {
   const [active, setActive] = useState(0);
   const list = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return commands.slice(0, 8);
-    return commands
-      .filter((c) => c.searchHaystack.toLowerCase().includes(q))
-      .slice(0, 8);
+    return commands.filter((c) => c.searchHaystack.toLowerCase().includes(q)).slice(0, 8);
   }, [commands, query]);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -63,7 +67,11 @@ export function SlashCommandMenu({ open, query, commands, onPick, onClose }: Sla
         ref={ref}
         className="absolute bottom-full left-0 right-0 mb-1 rounded-md border border-bg-border bg-bg-surface px-3 py-2.5 text-[11px] text-ink-dim shadow-md"
       >
-        No matches. Press <kbd className="rounded border border-bg-border bg-bg-elevated px-1 font-mono text-[9px]">esc</kbd> to close.
+        No matches. Press{" "}
+        <kbd className="rounded border border-bg-border bg-bg-elevated px-1 font-mono text-[9px]">
+          esc
+        </kbd>{" "}
+        to close.
       </div>
     );
   }

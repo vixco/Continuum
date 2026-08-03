@@ -14,14 +14,7 @@
 
 import { useState } from "react";
 import { clsx } from "clsx";
-import {
-  ChevronDown,
-  Check,
-  AlertTriangle,
-  Loader2,
-  Terminal,
-  XCircle,
-} from "lucide-react";
+import { ChevronDown, Check, AlertTriangle, Loader2, Terminal, XCircle } from "lucide-react";
 
 import type { ToolInvocation } from "./types";
 
@@ -38,9 +31,7 @@ export function ToolInvocationCard({ invocation, defaultOpen = false }: ToolInvo
     <div
       className={clsx(
         "overflow-hidden rounded-md border bg-bg-elevated/50 transition-colors",
-        invocation.status === "error"
-          ? "border-state-error/30"
-          : "border-bg-border/70"
+        invocation.status === "error" ? "border-state-error/30" : "border-bg-border/70"
       )}
     >
       <button
@@ -52,18 +43,14 @@ export function ToolInvocationCard({ invocation, defaultOpen = false }: ToolInvo
         <StatusDot status={invocation.status} />
         <Terminal size={11} strokeWidth={1.8} className="shrink-0 text-ink-dim" />
         <span className="font-mono text-ink">{invocation.name}</span>
-        {summary && (
-          <span className="min-w-0 flex-1 truncate text-ink-muted">{summary}</span>
-        )}
+        {summary && <span className="min-w-0 flex-1 truncate text-ink-muted">{summary}</span>}
         {!summary && <span className="flex-1" />}
         {invocation.durationMs != null && (
           <span className="font-mono tabular-nums text-ink-dim/70">
             {formatDuration(invocation.durationMs)}
           </span>
         )}
-        {isRunning && (
-          <Loader2 size={10} strokeWidth={2} className="animate-spin text-amber-400" />
-        )}
+        {isRunning && <Loader2 size={10} strokeWidth={2} className="animate-spin text-amber-400" />}
         <ChevronDown
           size={11}
           strokeWidth={2}

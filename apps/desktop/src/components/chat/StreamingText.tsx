@@ -82,7 +82,7 @@ function StreamingTextImpl({ text, isStreaming, className }: StreamingTextProps)
       {rendered}
       {isStreaming && (
         <span
-          className="ml-0.5 inline-block h-3 w-[2px] -mb-0.5 animate-pulse rounded-sm bg-amber-400/80 align-middle"
+          className="-mb-0.5 ml-0.5 inline-block h-3 w-[2px] animate-pulse rounded-sm bg-amber-400/80 align-middle"
           aria-hidden
         />
       )}

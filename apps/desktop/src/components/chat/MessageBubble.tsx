@@ -112,9 +112,7 @@ function AssistantBubble({
             <Parts parts={message.parts} isStreaming={isStreaming} />
           </div>
         )}
-        {message.status === "aborted" && (
-          <div className="text-[10px] text-ink-dim">stopped</div>
-        )}
+        {message.status === "aborted" && <div className="text-[10px] text-ink-dim">stopped</div>}
       </div>
     </div>
   );
@@ -132,13 +130,7 @@ function ToolBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-function Parts({
-  parts,
-  isStreaming,
-}: {
-  parts: ContentPart[];
-  isStreaming?: boolean;
-}) {
+function Parts({ parts, isStreaming }: { parts: ContentPart[]; isStreaming?: boolean }) {
   return (
     <div className="space-y-2.5">
       {parts.map((part, i) => {
