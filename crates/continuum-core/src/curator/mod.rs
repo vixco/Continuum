@@ -11,11 +11,13 @@
 //!
 //! Only the [`CuratorLlm`] impl for `TriageLayer` needs the heavy llama.cpp
 //! runtime, so it is gated behind the `runtime` feature. The trait itself,
-//! [`CuratorStatus`], and the extraction logic in [`extract`] are plain
-//! serde/std and compile unconditionally — the desktop crate (which builds
-//! with `default-features = false`) links this module to share types with
-//! the runtime binary.
+//! [`CuratorStatus`], the extraction logic in [`extract`], and the
+//! conflict/supersede detection in [`conflict`] are plain serde/std and
+//! compile unconditionally — the desktop crate (which builds with
+//! `default-features = false`) links this module to share types with the
+//! runtime binary.
 
+pub mod conflict;
 pub mod extract;
 pub mod run;
 
