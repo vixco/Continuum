@@ -363,6 +363,90 @@ pub struct StorageConfig {
     pub retention_days: u32,
 }
 
+/// Configuration for vault storage (Obsidian-like markdown memory).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryVaultConfig {
+    /// Directory path for vault storage. Empty string means "use default location"
+    /// (resolved via [`resolve_vault_dir`]).
+    pub vault_dir: String,
+    /// Debounce delay for file watcher events in milliseconds.
+    pub watcher_debounce_ms: u64,
+    /// Number of days to retain vault events before cleanup.
+    pub events_retention_days: u32,
+    /// Maximum number of nodes in the memory graph before truncation.
+    pub graph_max_nodes: u32,
+}
+
+impl Default for MemoryVaultConfig {
+    fn default() -> Self {
+        Self {
+            vault_dir: String::new(),
+            watcher_debounce_ms: 500,
+            events_retention_days: 30,
+            graph_max_nodes: 1500,
+        }
+    }
+}
+
+impl MemoryVaultConfig {
+    /// Resolve the effective vault directory, filling in the default under
+    /// `base/vault` when the config value is empty.
+    pub fn resolve_vault_dir(&self, base: &Path) -> PathBuf {
+        if !self.vault_dir.is_empty() {
+            return PathBuf::from(&self.vault_dir);
+        }
+        base.join("vault")
+    }
+}
+
+/// Configuration for the memory curator pipeline (Plan B).
+///
+/// The curator periodically reviews stored memories, scores them for
+/// semantic importance, and discards low-confidence duplicates while
+/// promoting high-signal episodic entries. Every field is overridable
+/// via config per non-negotiable #3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CuratorConfig {
+    /// Whether the curator pipeline is active.
+    pub enabled: bool,
+    /// Interval between curator passes in minutes.
+    pub interval_minutes: u64,
+    /// Maximum number of candidate memories to evaluate per pass.
+    pub max_candidates_per_pass: u32,
+    /// Score threshold [0.0, 1.0] above which memories are auto-promoted
+    /// without Claude review.
+    pub auto_confirm_threshold: f32,
+    /// Score threshold [0.0, 1.0] below which memories are auto-discarded.
+    pub discard_floor: f32,
+    /// Batch size for Claude evaluation when scoring borderline memories.
+    pub claude_batch: u32,
+    /// Idle timeout in minutes after which to summarise the current session
+    /// into vault notes.
+    pub session_summary_idle_minutes: u64,
+    /// Maximum number of vault notes to include in wake context.
+    pub wake_vault_notes_max: u32,
+    /// Whether to include sensitive/personal information in orchestrator context.
+    pub include_sensitive_in_context: bool,
+}
+
+impl Default for CuratorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_minutes: 10,
+            max_candidates_per_pass: 3,
+            auto_confirm_threshold: 0.85,
+            discard_floor: 0.4,
+            claude_batch: 10,
+            session_summary_idle_minutes: 20,
+            wake_vault_notes_max: 8,
+            include_sensitive_in_context: false,
+        }
+    }
+}
+
 /// Configuration for background memory distillation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -377,6 +461,13 @@ pub struct MemoryConfig {
     pub distillation_min_salience: f32,
     /// Maximum frames to distill in one pass.
     pub distillation_batch_size: usize,
+    /// Vault storage settings (Obsidian-like markdown memory).
+    #[serde(default)]
+    pub vault: MemoryVaultConfig,
+    /// Curator pipeline settings (Plan B consumes these; configurable now
+    /// per non-negotiable #3).
+    #[serde(default)]
+    pub curator: CuratorConfig,
 }
 
 /// Configuration for the voice input loop.
@@ -764,6 +855,8 @@ impl Default for MemoryConfig {
             distillation_lookback_minutes: 20,
             distillation_min_salience: 0.35,
             distillation_batch_size: 100,
+            vault: MemoryVaultConfig::default(),
+            curator: CuratorConfig::default(),
         }
     }
 }
@@ -1056,5 +1149,40 @@ interval_secs = 5
         // Omitting [chat] entirely must also work:
         let empty: ContinuumConfig = toml::from_str("").expect("parse empty");
         assert_eq!(empty.chat.max_tokens, 8192);
+    }
+
+    #[test]
+    fn memory_vault_defaults_and_toml_nesting() {
+        let cfg = ContinuumConfig::default();
+        assert_eq!(cfg.memory.vault.watcher_debounce_ms, 500);
+        assert_eq!(cfg.memory.vault.events_retention_days, 30);
+        assert_eq!(cfg.memory.vault.graph_max_nodes, 1500);
+        assert!(cfg.memory.vault.vault_dir.is_empty());
+        assert!(cfg.memory.curator.enabled);
+        assert_eq!(cfg.memory.curator.interval_minutes, 10);
+        assert_eq!(cfg.memory.curator.max_candidates_per_pass, 3);
+        assert_eq!(cfg.memory.curator.auto_confirm_threshold, 0.85);
+        assert_eq!(cfg.memory.curator.discard_floor, 0.4);
+        assert_eq!(cfg.memory.curator.claude_batch, 10);
+        assert_eq!(cfg.memory.curator.session_summary_idle_minutes, 20);
+        assert_eq!(cfg.memory.curator.wake_vault_notes_max, 8);
+        assert!(!cfg.memory.curator.include_sensitive_in_context);
+
+        let parsed: ContinuumConfig = toml::from_str(
+            "[memory.vault]\nvault_dir = \"D:/x\"\n[memory.curator]\nenabled = false\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.memory.vault.vault_dir, "D:/x");
+        assert!(!parsed.memory.curator.enabled);
+        assert_eq!(parsed.memory.vault.watcher_debounce_ms, 500); // default backfill
+
+        let base = std::path::Path::new("/tmp/base");
+        assert_eq!(
+            ContinuumConfig::default()
+                .memory
+                .vault
+                .resolve_vault_dir(base),
+            base.join("vault")
+        );
     }
 }
