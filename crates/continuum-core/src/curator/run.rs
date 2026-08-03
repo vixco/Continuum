@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use crate::config::CuratorConfig;
 use crate::curator::extract::{
-    candidate_to_draft, is_duplicate, parse_candidates, route_candidate,
+    candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
 };
 use crate::curator::{CuratorLlm, SharedCuratorStatus};
 
@@ -86,6 +86,73 @@ async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<
         .join("\n"))
 }
 
+/// Attempts to write one candidate to the vault: near-duplicate check,
+/// confidence-threshold routing, then `Vault::create`. Returns `Some(())`
+/// on a successful write, `None` if the candidate was skipped for any
+/// reason — duplicate, discarded by threshold, *or* a vault operation
+/// erroring.
+///
+/// Every internal error is caught and logged here rather than propagated:
+/// one candidate hitting a vault I/O hiccup (a removed folder, a full
+/// disk, a transient lock) must not abort the rest of the pass. Before this
+/// was split out, `is_duplicate(..).await?` and `vault.create(..).await?`
+/// used `extract_pass`'s own `?`, so a single bad candidate mid-batch threw
+/// away every candidate after it *and* every candidate already written
+/// before it went uncounted in the returned total — worse, since the pass
+/// window still only advances on `Ok`, the next tick would re-fetch the
+/// same events and re-propose the (rewritten, possibly reworded) already-
+/// written candidates, risking near-duplicates slipping past `is_duplicate`
+/// on retitled output.
+async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) -> Option<()> {
+    match is_duplicate(vault, &c.title).await {
+        Ok(true) => {
+            tracing::debug!(
+                layer = "memory",
+                component = "curator",
+                title = %c.title,
+                "Skipping duplicate candidate"
+            );
+            return None;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                title = %c.title,
+                error = %e,
+                "Duplicate check failed for candidate; skipping it (pass continues)"
+            );
+            return None;
+        }
+    }
+
+    let Some(status) = route_candidate(c, cfg) else {
+        tracing::debug!(
+            layer = "memory",
+            component = "curator",
+            title = %c.title,
+            confidence = c.confidence,
+            "Discarding low-confidence candidate"
+        );
+        return None;
+    };
+
+    match vault.create(candidate_to_draft(c, status)).await {
+        Ok(_) => Some(()),
+        Err(e) => {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                title = %c.title,
+                error = %e.user_message(),
+                "Failed to write candidate to vault; skipping it (pass continues)"
+            );
+            None
+        }
+    }
+}
+
 /// One extraction pass: fetch vault events since `since`, ask the curator
 /// LLM which of them are worth remembering, and write the routed
 /// candidates into the vault. Public for tests.
@@ -97,6 +164,11 @@ async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<
 /// candidates this pass" rather than propagated, since a stubborn
 /// malformed-JSON model is a recoverable condition (the next scheduled pass
 /// tries again), not a hard error for the caller to handle.
+///
+/// Only pre-loop failures — the events fetch and both LLM completion
+/// attempts — can make this function return `Err`; per-candidate failures
+/// are contained by [`write_candidate`] and simply don't count toward the
+/// returned total.
 pub async fn extract_pass(
     vault: &Vault,
     llm: &dyn CuratorLlm,
@@ -154,27 +226,9 @@ pub async fn extract_pass(
 
     let mut written = 0usize;
     for c in &candidates {
-        if is_duplicate(vault, &c.title).await? {
-            tracing::debug!(
-                layer = "memory",
-                component = "curator",
-                title = %c.title,
-                "Skipping duplicate candidate"
-            );
-            continue;
+        if write_candidate(vault, c, cfg).await.is_some() {
+            written += 1;
         }
-        let Some(status) = route_candidate(c, cfg) else {
-            tracing::debug!(
-                layer = "memory",
-                component = "curator",
-                title = %c.title,
-                confidence = c.confidence,
-                "Discarding low-confidence candidate"
-            );
-            continue;
-        };
-        vault.create(candidate_to_draft(c, status)).await?;
-        written += 1;
     }
 
     tracing::info!(
@@ -189,20 +243,124 @@ pub async fn extract_pass(
     Ok(written)
 }
 
+/// Bounded-failure window-skip policy (self-healing non-negotiable #5:
+/// every component must bound its own failure modes rather than wedging
+/// forever). A window that fails [`extract_pass`] this many times in a row
+/// is abandoned rather than retried indefinitely: [`curator_tick`] advances
+/// past it, logging a `warn!`, instead of re-fetching the same slice of
+/// history on every future tick. Note this counts genuine `Err` results
+/// only — a pass that ran cleanly and simply found nothing worth
+/// remembering (including the "LLM produced invalid JSON twice" case,
+/// which [`extract_pass`] treats as `Ok(0)` by design) is a success, not a
+/// failure, and never contributes to this streak.
+const MAX_CONSECUTIVE_WINDOW_FAILURES: u32 = 3;
+
+/// Runs one curator tick: an [`extract_pass`] attempt for `window_since`,
+/// the bounded-failure window-skip policy (see
+/// [`MAX_CONSECUTIVE_WINDOW_FAILURES`]), and a `status` update. Returns the
+/// window start to use for the next tick.
+///
+/// `window_failures` is the caller's running count of consecutive `Err`
+/// results *for the current window* — reset to 0 whenever the window
+/// advances, whether by a successful pass or by hitting the failure cap.
+/// This is deliberately separate from `status.consecutive_failures`, an
+/// unbounded lifetime counter for the dashboard/repair agent that this
+/// policy never resets on its own (only a genuinely successful pass resets
+/// it) — the two answer different questions: "is *this* window stuck?" vs.
+/// "how healthy has the curator been overall?".
+///
+/// Split out of [`run_curator`] so tests can drive individual ticks
+/// deterministically without running the real interval/shutdown-driven
+/// loop.
+async fn curator_tick(
+    vault: &Vault,
+    llm: &dyn CuratorLlm,
+    cfg: &CuratorConfig,
+    status: &SharedCuratorStatus,
+    window_since: DateTime<Utc>,
+    window_failures: &mut u32,
+) -> DateTime<Utc> {
+    let pass_start = Utc::now();
+    let outcome = extract_pass(vault, llm, cfg, window_since).await;
+
+    let pending_count = match vault.pending().await {
+        Ok(p) => Some(p.len() as u64),
+        Err(e) => {
+            tracing::debug!(
+                layer = "memory",
+                component = "curator",
+                error = %e.user_message(),
+                "Failed to refresh pending count"
+            );
+            None
+        }
+    };
+
+    {
+        // Poison recovery (a prior panicking holder must not permanently
+        // stop status updates), matching continuum.rs's runtime_state
+        // convention.
+        let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
+        s.last_pass_at = Some(pass_start);
+        if let Some(count) = pending_count {
+            s.pending_count = count;
+        }
+        match &outcome {
+            Ok(written) => {
+                s.consecutive_failures = 0;
+                s.candidates_written_total += *written as u64;
+            }
+            Err(_) => {
+                s.consecutive_failures += 1;
+            }
+        }
+    }
+
+    match outcome {
+        Ok(_) => {
+            *window_failures = 0;
+            pass_start
+        }
+        Err(err) => {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                error = %err,
+                "Curator pass failed"
+            );
+            *window_failures += 1;
+            if *window_failures >= MAX_CONSECUTIVE_WINDOW_FAILURES {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "curator",
+                    since = %window_since,
+                    until = %pass_start,
+                    failures = *window_failures,
+                    "skipping memory-extraction window after {MAX_CONSECUTIVE_WINDOW_FAILURES} \
+                     failures: {window_since}..{pass_start}"
+                );
+                *window_failures = 0;
+                pass_start
+            } else {
+                window_since
+            }
+        }
+    }
+}
+
 /// Runs the curator's background extraction loop until shutdown, mirroring
 /// `crate::memory::distill::run_memory_distiller`'s shape: a disabled-config
 /// early return that parks on shutdown, then a `tokio::select!` between a
 /// fixed-interval ticker and the shutdown watch channel.
 ///
-/// Each tick runs one [`extract_pass`] over events since the previous
-/// tick's start (first pass looks back one interval from startup) and
-/// updates `status` — `last_pass_at` unconditionally (successful or not,
-/// per [`crate::curator::CuratorStatus`]'s doc comment), `consecutive_failures`
-/// reset to 0 on success / incremented on error, `candidates_written_total`
-/// bumped by whatever this pass wrote, and `pending_count` refreshed from
-/// the vault. The pass window only advances on success — a failed pass
-/// (vault I/O error, etc.) leaves `since` where it was so the next tick
-/// retries the same window instead of silently losing events.
+/// Each tick delegates to [`curator_tick`] (see its doc comment for the
+/// per-tick status update and bounded-failure window-skip policy). The
+/// window starts at "one interval ago" so the first pass has something to
+/// look at, and only ever advances via `curator_tick`'s return value —
+/// on an ordinary success it moves to that pass's start time; on a failed
+/// pass it stays put (the next tick retries the same events) *unless* the
+/// failure streak has hit the cap, in which case `curator_tick` itself
+/// advances it past the stuck window.
 pub async fn run_curator(
     vault: Arc<Vault>,
     llm: Arc<dyn CuratorLlm>,
@@ -231,53 +389,20 @@ pub async fn run_curator(
     let interval = StdDuration::from_secs(cfg.interval_minutes.max(1) * 60);
     let mut ticker = tokio::time::interval(interval);
     let mut window_since = Utc::now() - Duration::minutes(cfg.interval_minutes.max(1) as i64);
+    let mut window_failures: u32 = 0;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let pass_start = Utc::now();
-                let outcome = extract_pass(&vault, llm.as_ref(), &cfg, window_since).await;
-
-                let pending_count = match vault.pending().await {
-                    Ok(p) => Some(p.len() as u64),
-                    Err(e) => {
-                        tracing::debug!(
-                            layer = "memory",
-                            component = "curator",
-                            error = %e.user_message(),
-                            "Failed to refresh pending count"
-                        );
-                        None
-                    }
-                };
-
-                if let Ok(mut s) = status.lock() {
-                    s.last_pass_at = Some(pass_start);
-                    if let Some(count) = pending_count {
-                        s.pending_count = count;
-                    }
-                    match &outcome {
-                        Ok(written) => {
-                            s.consecutive_failures = 0;
-                            s.candidates_written_total += *written as u64;
-                        }
-                        Err(_) => {
-                            s.consecutive_failures += 1;
-                        }
-                    }
-                }
-
-                match outcome {
-                    Ok(_) => window_since = pass_start,
-                    Err(err) => {
-                        tracing::warn!(
-                            layer = "memory",
-                            component = "curator",
-                            error = %err,
-                            "Curator pass failed"
-                        );
-                    }
-                }
+                window_since = curator_tick(
+                    &vault,
+                    llm.as_ref(),
+                    &cfg,
+                    &status,
+                    window_since,
+                    &mut window_failures,
+                )
+                .await;
 
                 // Task 5 (conflict resolution) and Task 6 (session summary)
                 // add their own per-tick calls here.
@@ -377,5 +502,135 @@ mod tests {
             .unwrap();
         assert_eq!(written, 0);
         assert_eq!(llm.calls(), 2); // initial + one retry with the error appended
+    }
+
+    /// Regression for the "non-atomic per-candidate loop" review finding:
+    /// one candidate's `Vault::create` failing must not abort the pass or
+    /// lose the other candidate's write.
+    ///
+    /// `Vault::create` has exactly one built-in validation error (a blank
+    /// title), which `parse_candidates` already rejects for the whole batch
+    /// before any candidate reaches this loop — so there's no JSON payload
+    /// that reaches `write_candidate` pre-broken. Instead this deterministically
+    /// breaks the *write path* itself: removing the "facts" folder out from
+    /// under an already-open vault makes `Vault::create`'s `atomic_write`
+    /// fail with a genuine I/O error for any `fact`-typed candidate — a
+    /// realistic failure mode (externally deleted directory, disk hiccup)
+    /// that needs no vault mocking.
+    #[tokio::test]
+    async fn extract_pass_contains_per_candidate_write_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+        vault
+            .append_event(NewEvent {
+                ts: None,
+                kind: "distilled".to_string(),
+                text: "Two candidates, one whose vault write will fail".to_string(),
+                project: None,
+                node_id: None,
+                reference: None,
+            })
+            .await
+            .unwrap();
+
+        std::fs::remove_dir_all(tmp.path().join("facts")).unwrap();
+
+        let llm = MockLlm::scripted(vec![
+            r#"[{"type":"fact","title":"Will fail to write","body":"b","confidence":0.9,"source":"user_statement"},
+                {"type":"preference","title":"Will write fine","body":"b","confidence":0.9,"source":"user_statement"}]"#
+                .into(),
+        ]);
+        let cfg = CuratorConfig::default();
+
+        let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
+            .await
+            .unwrap();
+
+        // The first candidate's write errors internally and is contained
+        // (logged, not propagated) — the pass still completes and counts
+        // the second candidate, rather than the whole pass aborting on the
+        // first candidate's error and losing the second write's count.
+        assert_eq!(written, 1);
+        let hits = vault.search("write fine", 5).await.unwrap();
+        assert!(hits.iter().any(|h| h.title == "Will write fine"));
+    }
+
+    /// Regression for the "permanently-failing window wedges the curator
+    /// forever" review finding: three consecutive `extract_pass` failures
+    /// on the same window must cause `curator_tick` to abandon that window
+    /// (advance past it) rather than retry it forever, while
+    /// `status.consecutive_failures` (the dashboard's unbounded lifetime
+    /// counter) keeps counting independently of the bounded local streak.
+    ///
+    /// Deviation from the fix request's literal test sketch ("6 invalid
+    /// replies (3 passes x initial+retry) + then a valid reply"): that
+    /// recipe can't actually exercise this policy, because
+    /// `extract_pass`'s "LLM produced invalid JSON twice" path returns
+    /// `Ok(0)` by design (see its doc comment and
+    /// `extract_pass_retries_once_then_skips` above) — never `Err`. Feeding
+    /// it invalid JSON six times produces three `Ok(0)` passes, not three
+    /// failures, and would never trip the failure streak. This test
+    /// instead uses an empty-script `MockLlm` (every `complete()` call
+    /// errors immediately, simulating an unreachable/crashed LLM) to
+    /// produce genuine `Err` results from `extract_pass`, which is what the
+    /// policy is actually keyed on.
+    #[tokio::test]
+    async fn curator_tick_skips_window_after_three_consecutive_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+        vault
+            .append_event(NewEvent {
+                ts: None,
+                kind: "distilled".to_string(),
+                text: "Something happened".to_string(),
+                project: None,
+                node_id: None,
+                reference: None,
+            })
+            .await
+            .unwrap();
+
+        let llm = MockLlm::scripted(vec![]);
+        let cfg = CuratorConfig::default();
+        let status: SharedCuratorStatus = Default::default();
+        let window_since = Utc::now() - Duration::hours(1);
+        let mut window_failures = 0u32;
+
+        // Two failing ticks: below the cap, the window doesn't move yet.
+        let after_1 = curator_tick(
+            &vault,
+            &llm,
+            &cfg,
+            &status,
+            window_since,
+            &mut window_failures,
+        )
+        .await;
+        assert_eq!(after_1, window_since);
+        assert_eq!(window_failures, 1);
+
+        let after_2 =
+            curator_tick(&vault, &llm, &cfg, &status, after_1, &mut window_failures).await;
+        assert_eq!(after_2, window_since);
+        assert_eq!(window_failures, 2);
+        assert_eq!(status.lock().unwrap().consecutive_failures, 2);
+
+        // Third consecutive failure hits the cap: the window is abandoned
+        // (advances to "now"), and the local streak resets — but the
+        // dashboard's lifetime counter does not.
+        let after_3 =
+            curator_tick(&vault, &llm, &cfg, &status, after_2, &mut window_failures).await;
+        assert!(after_3 > window_since);
+        assert_eq!(window_failures, 0);
+        assert_eq!(status.lock().unwrap().consecutive_failures, 3);
+
+        // A fourth tick on the new window: the vault's only event now
+        // predates the new window start, so `extract_pass` short-circuits
+        // to `Ok(0)` without even calling the LLM — a real success outcome
+        // that resets the dashboard's consecutive_failures back to 0.
+        let _after_4 =
+            curator_tick(&vault, &llm, &cfg, &status, after_3, &mut window_failures).await;
+        assert_eq!(window_failures, 0);
+        assert_eq!(status.lock().unwrap().consecutive_failures, 0);
     }
 }
