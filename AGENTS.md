@@ -107,7 +107,7 @@ cargo run --bin continuum-triage-bench       # runs 20-frame benchmark, reports 
 
 ## Current project status
 
-Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `continuum-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
+Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 20 tools exposed via a standalone `continuum-mcp` binary, organized in six namespaces: memory (query_episodic, list_facts, get_fact, set_fact), system info (current_time, active_window, clipboard_get, notification), filesystem (read_file, list_dir - read-only with allowlist + hardcoded deny list), web (fetch - GET only, public-IP only, redirects disabled), repair (restart_component, reinstall_model, rollback_config, test_component, escalate), and workers (spawn_worker, worker_status, worker_cancel, worker_wait, worker_list). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
 
 ## Coding standards
 
