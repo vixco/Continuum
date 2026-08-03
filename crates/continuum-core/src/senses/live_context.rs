@@ -491,6 +491,9 @@ impl LiveContextHub {
         }
     }
 
+    // Keeping the serialized event fields explicit here makes every producer
+    // pass source, ordering, and degradation metadata through one choke point.
+    #[allow(clippy::too_many_arguments)]
     fn push_event_locked(
         &self,
         inner: &mut Projection,
