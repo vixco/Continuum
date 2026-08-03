@@ -74,41 +74,112 @@ pub fn build_extract_prompt(
     )
 }
 
+/// From a `[` at byte offset `start` in `raw`, scans forward tracking
+/// bracket depth (starting at 1 for the opening `[`) while respecting JSON
+/// string literals — `[`/`]` bytes inside a quoted string don't perturb the
+/// count, and a backslash escapes the following byte so `\"` doesn't
+/// prematurely end the string. Returns the byte offset of the `]` where
+/// depth first returns to 0 (the bracket matching `start`), or `None` if
+/// the text ends before the brackets balance.
+///
+/// Byte-level comparison against the ASCII bytes for `"`, `\`, `[`, `]` is
+/// safe on non-ASCII UTF-8 input: every continuation/lead byte of a
+/// multi-byte codepoint is >= 0x80, so it can never be mistaken for one of
+/// these single-byte ASCII structural characters.
+fn matching_bracket_end(raw: &str, start: usize) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse the curator LLM's raw reply into candidates.
 ///
-/// LLMs like to wrap JSON in prose ("Sure! Here are the memories: [...] Done.")
-/// so this finds the first `[` and the last `]` in the text and strictly
-/// deserializes that slice. Every candidate's `type` must parse via
-/// [`NodeType::parse`] and its `title` must be non-blank, or the whole call
-/// errors (naming the offending candidate) rather than silently dropping it.
+/// LLMs like to wrap JSON in prose ("Sure! Here are the memories: [...]
+/// Done.") — and that prose can itself contain stray `[`/`]` characters
+/// (footnote markers, `[[Wiki-Links]]`, trailing asides), so naive
+/// first-`[`/last-`]` slicing breaks the moment prose brackets appear on
+/// either side of the real array. Instead this walks every `[` in the text
+/// left to right, uses [`matching_bracket_end`] to find each one's balanced
+/// closing `]` (respecting string literals, so nested `"relations": [...]`
+/// arrays inside a candidate object don't confuse the scan), and returns
+/// the first slice that both balances *and* deserializes as
+/// `Vec<CandidateJson>`. A syntactically-valid-but-wrong-shaped bracket
+/// pair (e.g. a footnote `[1]`) is skipped in favor of the next `[` rather
+/// than treated as a hard failure.
+///
+/// Once a slice deserializes structurally, every candidate's `type` must
+/// parse via [`NodeType::parse`] and its `title` must be non-blank, or the
+/// whole call errors immediately (naming the offending candidate) rather
+/// than silently dropping it or trying yet another bracket — a
+/// successfully-parsed-but-semantically-invalid candidate is a real
+/// problem the caller should see, not something to paper over.
 pub fn parse_candidates(raw: &str) -> anyhow::Result<Vec<CandidateJson>> {
-    let start = raw
-        .find('[')
-        .ok_or_else(|| anyhow::anyhow!("no JSON array found in curator LLM output: {raw:?}"))?;
-    let end = raw
-        .rfind(']')
-        .ok_or_else(|| anyhow::anyhow!("no closing ']' found in curator LLM output: {raw:?}"))?;
-    if end < start {
-        anyhow::bail!("malformed JSON array bounds in curator LLM output: {raw:?}");
-    }
-    let slice = &raw[start..=end];
-    let candidates: Vec<CandidateJson> = serde_json::from_str(slice)
-        .map_err(|e| anyhow::anyhow!("failed to parse curator candidates JSON: {e}"))?;
+    let mut last_err: Option<String> = None;
+    let mut search_from = 0usize;
 
-    for c in &candidates {
-        if NodeType::parse(&c.r#type).is_none() {
-            anyhow::bail!(
-                "candidate {:?} has unknown node type {:?}",
-                c.title,
-                c.r#type
-            );
-        }
-        if c.title.trim().is_empty() {
-            anyhow::bail!("candidate of type {:?} has a blank title", c.r#type);
+    while let Some(rel_start) = raw[search_from..].find('[') {
+        let start = search_from + rel_start;
+        search_from = start + 1; // always advance past this '[' before the next attempt
+
+        let Some(end) = matching_bracket_end(raw, start) else {
+            last_err = Some(format!("no matching ']' for '[' at byte offset {start}"));
+            continue;
+        };
+
+        match serde_json::from_str::<Vec<CandidateJson>>(&raw[start..=end]) {
+            Ok(candidates) => {
+                for c in &candidates {
+                    if NodeType::parse(&c.r#type).is_none() {
+                        anyhow::bail!(
+                            "candidate {:?} has unknown node type {:?}",
+                            c.title,
+                            c.r#type
+                        );
+                    }
+                    if c.title.trim().is_empty() {
+                        anyhow::bail!("candidate of type {:?} has a blank title", c.r#type);
+                    }
+                }
+                return Ok(candidates);
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+            }
         }
     }
 
-    Ok(candidates)
+    Err(match last_err {
+        Some(e) => anyhow::anyhow!("failed to parse curator candidates JSON: {e} (raw: {raw:?})"),
+        None => anyhow::anyhow!("no JSON array found in curator LLM output: {raw:?}"),
+    })
 }
 
 /// Normalize a title for duplicate comparison: lowercase, strip punctuation,
@@ -214,6 +285,43 @@ mod tests {
     fn parse_candidates_rejects_garbage() {
         assert!(parse_candidates("no json here").is_err());
         assert!(parse_candidates("[{\"title\":\"missing type\"}]").is_err());
+    }
+
+    #[test]
+    fn parse_candidates_skips_prose_bracket_before_array() {
+        // "[1]" is a syntactically-valid JSON array too (of one integer) —
+        // the balanced-bracket scan must reject it as the wrong shape and
+        // keep looking rather than erroring out on the first match.
+        let raw = "Here's a note [1]:\n[{\"type\":\"fact\",\"title\":\"T\",\"body\":\"b\",\"confidence\":0.5}]";
+        let c = parse_candidates(raw).unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].title, "T");
+    }
+
+    #[test]
+    fn parse_candidates_skips_prose_bracket_after_array() {
+        // Naive first-'['/last-']' slicing would span all the way to the
+        // ']' in "[Note Two]", swallowing trailing prose into the JSON
+        // slice and breaking the parse. The balanced scan must stop at the
+        // real array's own closing bracket.
+        let raw = "[{\"type\":\"fact\",\"title\":\"T\",\"body\":\"b\",\"confidence\":0.5}]\nSee [Note Two].";
+        let c = parse_candidates(raw).unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].title, "T");
+    }
+
+    #[test]
+    fn parse_candidates_rejects_unknown_type() {
+        let raw = r#"[{"type":"bogus","title":"T","body":"b","confidence":0.5}]"#;
+        let err = parse_candidates(raw).unwrap_err();
+        assert!(err.to_string().contains("unknown node type"));
+    }
+
+    #[test]
+    fn parse_candidates_rejects_blank_title() {
+        let raw = r#"[{"type":"fact","title":"   ","body":"b","confidence":0.5}]"#;
+        let err = parse_candidates(raw).unwrap_err();
+        assert!(err.to_string().contains("blank title"));
     }
 
     #[test]
