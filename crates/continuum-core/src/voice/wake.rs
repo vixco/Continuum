@@ -7,13 +7,14 @@
 //!
 //! ## Homophone handling
 //!
-//! Whisper-small almost always transcribes "Continuum" as "Cairo" (the
-//! Egyptian capital — a real English word) because "Continuum" isn't in its
-//! vocabulary. To keep the wake gate from false-rejecting every real
-//! utterance, the detector expands the configured keyword into a small
-//! set of phonetic variants before matching. Currently just K→C, which
-//! covers the observed problem; a future fuzzy-matcher can replace this
-//! if needed.
+//! Whisper-small almost always transcribed "Kairo" — Continuum's name
+//! before its rename — as "Cairo" (the Egyptian capital, a real English
+//! word) because "Kairo" wasn't in its vocabulary. To keep the wake gate
+//! from false-rejecting real utterances on a keyword like that, the
+//! detector expands the configured keyword into a small set of phonetic
+//! variants before matching. Currently just K→C, which covers that case
+//! (and any future keyword with the same K/C ambiguity); a future
+//! fuzzy-matcher can replace this if needed.
 
 /// Result of a wake phrase detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +94,7 @@ impl TranscriptWakeDetector {
 /// Expand a normalized keyword into phonetic variants whisper may produce.
 ///
 /// Rule set (kept deliberately small):
-///  - Every `k` → `c` (handles "continuum"→"cairo", "kyle"→"cyle")
+///  - Every `k` → `c` (handles "kairo"→"cairo", "kyle"→"cyle")
 ///  - A leading `hey ` → `ei ` (observed Whisper transcription)
 ///  - Adds the unchanged keyword first so primary spelling wins ties.
 ///
@@ -164,16 +165,16 @@ mod tests {
 
     #[test]
     fn matches_whisper_k_to_c_homophone() {
-        // Whisper-small transcribes "Hey Continuum" as "Ei, Cairo!" (PT) or
+        // Whisper-small transcribes "Hey Kairo" as "Ei, Cairo!" (PT) or
         // "Hey Cairo!" (EN). Both should still fire the wake detector.
-        let detector = TranscriptWakeDetector::new("hey continuum");
+        let detector = TranscriptWakeDetector::new("hey kairo");
         assert!(detector.detect("Hey Cairo, what's the time?").is_some());
         assert!(detector.detect("Ei, Cairo!").is_some());
     }
 
     #[test]
     fn utterance_after_wake_captures_remaining_command() {
-        let detector = TranscriptWakeDetector::new("hey continuum");
+        let detector = TranscriptWakeDetector::new("hey kairo");
         let got = detector.detect("hey cairo open the build log").unwrap();
         assert_eq!(got.utterance_after_wake, "open the build log");
     }
@@ -192,13 +193,13 @@ mod tests {
 
     #[test]
     fn expand_variants_produces_k_and_c_versions() {
-        let v = expand_variants("hey continuum");
+        let v = expand_variants("hey kairo");
         assert_eq!(
             v,
             vec![
-                "hey continuum".to_string(),
+                "hey kairo".to_string(),
                 "hey cairo".to_string(),
-                "ei continuum".to_string(),
+                "ei kairo".to_string(),
                 "ei cairo".to_string(),
             ]
         );
@@ -224,9 +225,9 @@ mod tests {
 
     #[test]
     fn variants_accessor_exposes_normalized_set() {
-        let detector = TranscriptWakeDetector::new("Hey Continuum!");
+        let detector = TranscriptWakeDetector::new("Hey Kairo!");
         let vs = detector.variants();
-        assert!(vs.contains(&"hey continuum".to_string()));
+        assert!(vs.contains(&"hey kairo".to_string()));
         assert!(vs.contains(&"hey cairo".to_string()));
     }
 }
