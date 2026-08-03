@@ -1,0 +1,25 @@
+[package]
+name = "continuum-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Continuum memory vault: markdown source of truth + derived SQLite index"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+ulid = "1"
+regex = "1"
+notify = "6.1"
+notify-debouncer-mini = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
