@@ -12,9 +12,9 @@
 
 pub mod error;
 pub mod frontmatter; // Task 2
+pub mod index; // Task 3
 pub mod model;
 pub mod slug; // Task 2
-              // pub mod index;         // Task 3
               // pub mod vault;         // Task 5
               // pub mod watcher;       // Task 7
               // pub mod migrate;       // Task 8
