@@ -1291,7 +1291,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "continuum-core"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-desktop"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-gateway"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-llm"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-mcp"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-vision"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "async-trait",
