@@ -45,6 +45,11 @@ toml = "0.8"
 parking_lot = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Memory vault (Plan B): markdown + derived SQLite index. Deliberately NOT
+# gated behind `runtime` — it is lightweight by design, and the `continuum`
+# runtime binary (runtime-only) needs it unconditionally, so it must keep
+# compiling under `--no-default-features` (the desktop app's build) too.
+continuum-memory = { path = "../continuum-memory" }
 
 # Optional (feature = "runtime"): heavy native deps
 continuum-vision = { path = "../continuum-vision", optional = true }

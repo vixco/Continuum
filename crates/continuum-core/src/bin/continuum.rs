@@ -156,6 +156,22 @@ async fn main() -> Result<()> {
             .context("Failed to open episodic memory")?,
     ));
 
+    // Memory vault (Plan B): markdown source of truth + derived SQLite
+    // index. Opened once here; the distiller and the watcher-drain task
+    // below both hold a clone of this `Arc`.
+    let vault_dir = config.memory.vault.resolve_vault_dir(&dev_dir);
+    let vault = Arc::new(
+        continuum_memory::Vault::open_with(
+            &vault_dir,
+            continuum_memory::VaultOptions {
+                watcher_debounce_ms: config.memory.vault.watcher_debounce_ms,
+                graph_max_nodes: config.memory.vault.graph_max_nodes,
+            },
+        )
+        .await
+        .context("open memory vault")?,
+    );
+
     // --- TTS + feedback ---
     let (speech, feedback): (Option<Arc<SpeechController>>, FeedbackPlayer) = if no_tts {
         tracing::info!(
@@ -203,6 +219,38 @@ async fn main() -> Result<()> {
         );
         let _ = ctrl_c_shutdown.send(true);
     });
+
+    // --- Memory vault watcher ---
+    // Drains the vault's debounced file-watcher so external edits (the
+    // user editing a note by hand, or the desktop dashboard writing to the
+    // same vault directory) keep the runtime's derived index fresh.
+    // Mirrors `apps/desktop/src-tauri/src/memory.rs`'s watcher bridge, minus
+    // the Tauri event emit — there is no frontend in this process to notify.
+    {
+        let vault = vault.clone();
+        let mut shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut watcher = match vault.watch() {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(layer = "memory", component = "runtime",
+                        error = %e.user_message(), "vault watcher unavailable");
+                    return;
+                }
+            };
+            loop {
+                tokio::select! {
+                    Some(paths) = watcher.rx.recv() => {
+                        if let Err(e) = vault.reindex_paths(&paths).await {
+                            tracing::warn!(layer = "memory", component = "runtime",
+                                error = %e.user_message(), "vault reindex failed");
+                        }
+                    }
+                    _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
+                }
+            }
+        });
+    }
 
     // --- Phase 8: Skills + Worker pool ---
     let skill_loader = SkillLoader::new(resolve_skills_root(&config));
@@ -339,11 +387,13 @@ async fn main() -> Result<()> {
     let distiller_shutdown = shutdown_rx.clone();
     let distiller_raw_log = raw_log.clone();
     let distiller_episodic = episodic.clone();
+    let distiller_vault = vault.clone();
     let distiller_config = config.memory.clone();
     tokio::spawn(async move {
         run_memory_distiller(
             distiller_raw_log,
             distiller_episodic,
+            distiller_vault,
             distiller_config,
             distiller_shutdown,
         )

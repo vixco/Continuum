@@ -379,8 +379,13 @@ impl EpisodicStore {
         Ok(store)
     }
 
+    /// Test-only constructor using a deterministic hash-based embedder (no
+    /// model download, no network). `pub(crate)` rather than private so
+    /// sibling test modules (e.g. `memory::distill`'s tests, which need a
+    /// real `EpisodicStore` to exercise `distill_once`) can reuse it instead
+    /// of duplicating this setup.
     #[cfg(test)]
-    async fn open_for_test(db_dir: &str) -> Result<Self> {
+    pub(crate) async fn open_for_test(db_dir: &str) -> Result<Self> {
         Self::open_with_embedder(db_dir, Embedder::deterministic()).await
     }
 
