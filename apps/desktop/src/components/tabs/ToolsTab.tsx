@@ -1,83 +1,28 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 
 import { Button, Card, Select, Toggle } from "@/components/ui/primitives";
 import { continuum } from "@/lib/tauri";
-import type { SaveSkillInput, Skill } from "@/lib/types";
+import type { McpTool, SaveSkillInput, Skill } from "@/lib/types";
 
-const MCP_NAMESPACES: Array<{
-  namespace: string;
-  tools: Array<{
-    name: string;
-    description: string;
-    permission: "auto" | "session" | "confirm" | "blocked";
-  }>;
-}> = [
-  {
-    namespace: "memory",
-    tools: [
-      {
-        name: "memory_query_episodic",
-        description: "Vector search past events",
-        permission: "auto",
-      },
-      { name: "memory_list_facts", description: "List semantic facts", permission: "auto" },
-      { name: "memory_get_fact", description: "Fetch a single fact", permission: "auto" },
-      { name: "memory_set_fact", description: "Write/update a fact", permission: "auto" },
-    ],
-  },
-  {
-    namespace: "system",
-    tools: [
-      { name: "system_current_time", description: "Local time", permission: "auto" },
-      { name: "system_active_window", description: "Foreground window info", permission: "auto" },
-      { name: "system_clipboard_get", description: "Read clipboard", permission: "confirm" },
-      { name: "system_notification", description: "Show toast", permission: "session" },
-    ],
-  },
-  {
-    namespace: "fs",
-    tools: [
-      { name: "fs_read_file", description: "Read file (100 KB cap)", permission: "session" },
-      { name: "fs_list_dir", description: "Directory listing", permission: "session" },
-    ],
-  },
-  {
-    namespace: "web",
-    tools: [
-      {
-        name: "web_fetch",
-        description: "HTTP GET, 50 KB cap, public IPs only",
-        permission: "session",
-      },
-    ],
-  },
-  {
-    namespace: "workers",
-    tools: [
-      {
-        name: "workers_spawn_worker",
-        description: "Queue a new Claude Code worker",
-        permission: "session",
-      },
-      {
-        name: "workers_worker_status",
-        description: "Poll a worker's snapshot",
-        permission: "auto",
-      },
-      {
-        name: "workers_worker_wait",
-        description: "Block until terminal state",
-        permission: "auto",
-      },
-      { name: "workers_worker_cancel", description: "Stop a worker", permission: "session" },
-      { name: "workers_worker_list", description: "List recent workers", permission: "auto" },
-    ],
-  },
+/**
+ * Permission presets surfaced in the per-tool dropdown. The wire-up against
+ * `default-permissions.toml` is intentionally NOT live yet — toggling
+ * here updates component state only, with a small banner telling the user
+ * that the runtime is unaware of the change. That avoids a silent "save
+ * but nothing happens" footgun while the in-memory state exists.
+ */
+const PERMISSION_PRESETS: Array<{ value: Permission; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "session", label: "Session" },
+  { value: "confirm", label: "Confirm" },
+  { value: "blocked", label: "Blocked" },
 ];
+
+type Permission = "auto" | "session" | "confirm" | "blocked";
 
 export function ToolsTab() {
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -85,6 +30,12 @@ export function ToolsTab() {
   const [installUrl, setInstallUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // --- MCP tools (live, sourced from continuum-mcp static manifest) ---
+  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+  const [toolPermissions, setToolPermissions] = useState<Record<string, Permission>>({});
 
   async function refresh() {
     setLoading(true);
@@ -98,9 +49,42 @@ export function ToolsTab() {
     }
   }
 
+  async function refreshMcpTools() {
+    setMcpLoading(true);
+    try {
+      setMcpTools(await continuum.listMcpTools());
+      setMcpError(null);
+    } catch (e) {
+      setMcpError(`Failed to load MCP tools: ${e}`);
+    } finally {
+      setMcpLoading(false);
+    }
+  }
+
   useEffect(() => {
     refresh();
+    refreshMcpTools();
   }, []);
+
+  // Group MCP tools by namespace, preserve the order returned by the backend.
+  const mcpByNamespace = useMemo(() => {
+    const out: Array<{ namespace: string; tools: McpTool[] }> = [];
+    const index = new Map<string, number>();
+    for (const t of mcpTools) {
+      let i = index.get(t.namespace);
+      if (i === undefined) {
+        i = out.length;
+        index.set(t.namespace, i);
+        out.push({ namespace: t.namespace, tools: [] });
+      }
+      out[i].tools.push(t);
+    }
+    return out;
+  }, [mcpTools]);
+
+  function setToolPermission(name: string, value: Permission) {
+    setToolPermissions((prev) => ({ ...prev, [name]: value }));
+  }
 
   async function handleToggle(skill: Skill) {
     try {
@@ -142,22 +126,64 @@ export function ToolsTab() {
     }
   }
 
+  const dirtyPermissionCount = useMemo(
+    () => Object.keys(toolPermissions).length,
+    [toolPermissions]
+  );
+
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <Card
         title="MCP tools"
-        subtitle="Exposed to the orchestrator via continuum-mcp"
+        subtitle={`${mcpTools.length} tools across ${mcpByNamespace.length} namespaces — exposed to the orchestrator via continuum-mcp`}
         actions={
-          <Button size="sm" variant="default" disabled>
+          <Button
+            size="sm"
+            variant="default"
+            disabled
+            title="Adding new MCP servers is not yet supported from the UI. Edit config/default-permissions.toml to add namespaces."
+          >
             <Plus size={12} /> Install server
           </Button>
         }
       >
-        <div className="space-y-2">
-          {MCP_NAMESPACES.map((ns) => (
-            <Namespace key={ns.namespace} ns={ns} />
-          ))}
-        </div>
+        {dirtyPermissionCount > 0 && (
+          <div
+            className="mb-3 rounded-md border border-state-warn/40 bg-state-warn/10 px-3 py-2 text-xs text-state-warn"
+            role="status"
+          >
+            {dirtyPermissionCount} permission change
+            {dirtyPermissionCount === 1 ? "" : "s"} held in memory only. The runtime does
+            not yet read the dashboard&apos;s per-tool permissions — this UI exists so the
+            orchestrator&apos;s eventual permission policy is visible and reviewable.
+          </div>
+        )}
+
+        {mcpError && (
+          <div className="mb-3 rounded-md border border-state-error/40 bg-state-error/10 px-3 py-2 text-sm text-state-error">
+            {mcpError}
+          </div>
+        )}
+
+        {mcpLoading && mcpTools.length === 0 ? (
+          <div className="py-6 text-center text-sm text-ink-dim">Loading MCP tool list…</div>
+        ) : mcpTools.length === 0 ? (
+          <div className="py-6 text-center text-sm text-ink-dim">
+            No MCP tools registered. This is unexpected — check that the dashboard was built
+            with the latest continuum-mcp manifest.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {mcpByNamespace.map((ns) => (
+              <McpNamespace
+                key={ns.namespace}
+                ns={ns}
+                permissions={toolPermissions}
+                onPermissionChange={setToolPermission}
+              />
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card
@@ -248,6 +274,55 @@ export function ToolsTab() {
 
       {editing && (
         <SkillEditor initial={editing} onCancel={() => setEditing(null)} onSave={handleSave} />
+      )}
+    </div>
+  );
+}
+
+function McpNamespace({
+  ns,
+  permissions,
+  onPermissionChange,
+}: {
+  ns: { namespace: string; tools: McpTool[] };
+  permissions: Record<string, Permission>;
+  onPermissionChange: (name: string, value: Permission) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded-md border border-bg-border bg-bg-elevated">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between px-3 py-2 text-left"
+      >
+        <span className="font-mono text-sm text-ink">{ns.namespace}</span>
+        <span className="flex items-center gap-2 text-xs text-ink-muted">
+          {ns.tools.length} tools
+          <ChevronDown size={14} className={clsx("transition-transform", open && "rotate-180")} />
+        </span>
+      </button>
+      {open && (
+        <ul className="divide-y divide-bg-border border-t border-bg-border">
+          {ns.tools.map((tool) => (
+            <li
+              key={tool.name}
+              className="flex items-center justify-between gap-4 px-3 py-2 text-sm"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-mono text-xs text-ink">{tool.name}</div>
+                <div className="truncate text-xs text-ink-muted">{tool.description}</div>
+              </div>
+              <Select
+                value={permissions[tool.name] ?? "auto"}
+                options={PERMISSION_PRESETS}
+                onChange={(v) => onPermissionChange(tool.name, v as Permission)}
+                className="w-28"
+                title="Per-tool permission is in-memory only — the runtime reads default-permissions.toml on startup."
+              />
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
@@ -352,56 +427,5 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="mb-1 text-xs uppercase tracking-wider text-ink-dim">{label}</div>
       {children}
     </label>
-  );
-}
-
-function Namespace({
-  ns,
-}: {
-  ns: {
-    namespace: string;
-    tools: Array<{ name: string; description: string; permission: string }>;
-  };
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="rounded-md border border-bg-border bg-bg-elevated">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left"
-      >
-        <span className="font-mono text-sm text-ink">{ns.namespace}</span>
-        <span className="flex items-center gap-2 text-xs text-ink-muted">
-          {ns.tools.length} tools
-          <ChevronDown size={14} className={clsx("transition-transform", open && "rotate-180")} />
-        </span>
-      </button>
-      {open && (
-        <ul className="divide-y divide-bg-border border-t border-bg-border">
-          {ns.tools.map((tool) => (
-            <li
-              key={tool.name}
-              className="flex items-center justify-between gap-4 px-3 py-2 text-sm"
-            >
-              <div className="min-w-0">
-                <div className="truncate font-mono text-xs text-ink">{tool.name}</div>
-                <div className="truncate text-xs text-ink-muted">{tool.description}</div>
-              </div>
-              <Select
-                value={tool.permission}
-                options={[
-                  { value: "auto", label: "Auto" },
-                  { value: "session", label: "Session" },
-                  { value: "confirm", label: "Confirm" },
-                  { value: "blocked", label: "Blocked" },
-                ]}
-                onChange={() => {}}
-                className="w-28"
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }

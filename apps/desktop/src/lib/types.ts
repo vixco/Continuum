@@ -485,3 +485,10 @@ export interface ProviderAddInput {
   api_key: string | null;
   save_anyway: boolean;
 }
+
+/** One entry in the static MCP-tool manifest (see commands.rs::list_mcp_tools). */
+export interface McpTool {
+  namespace: string;
+  name: string;
+  description: string;
+}
