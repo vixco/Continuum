@@ -17,6 +17,18 @@ import type {
   Conversation,
   ConversationSummary,
   LogEntry,
+  MemoryEvent,
+  MemoryEventPayload,
+  MemoryEventRange,
+  MemoryGraphData,
+  MemoryGraphFilter,
+  MemoryIndexStats,
+  MemoryMigrationReport,
+  MemoryNodeSummary,
+  MemoryNote,
+  MemoryNoteDraft,
+  MemoryResolution,
+  MemoryVaultInfo,
   ProviderAddInput,
   ProviderConnection,
   RepairEvent,
@@ -25,7 +37,6 @@ import type {
   ResourceProfileUpdate,
   ResourceProfileUpdateResult,
   SaveSkillInput,
-  SemanticFact,
   Skill,
   WorkerSnapshot,
 } from "./types";
@@ -233,13 +244,40 @@ export const continuum = {
     text?: string;
     limit?: number;
   }) => invoke<LogEntry[]>("get_logs", { query }, []),
-  searchEpisodic: (query: string, limit?: number) =>
-    invoke<unknown[]>("search_episodic", { query, limit }, []),
-  deleteEpisodic: (id: string) => invoke<void>("delete_episodic", { id }),
-  listSemantic: () => invoke<SemanticFact[]>("list_semantic", undefined, []),
-  setSemantic: (key: string, value: string) => invoke<void>("set_semantic", { key, value }),
-  deleteSemantic: (key: string) => invoke<void>("delete_semantic", { key }),
   wipeMemory: (confirm: string) => invoke<void>("wipe_memory", { confirm }),
+  memoryGraph: (filter: MemoryGraphFilter) =>
+    invoke<MemoryGraphData>(
+      "memory_graph",
+      { filter },
+      {
+        nodes: [],
+        edges: [],
+        ghosts: [],
+        truncated: false,
+      }
+    ),
+  memorySearch: (query: string, limit?: number) =>
+    invoke<MemoryNodeSummary[]>("memory_search", { query, limit }, []),
+  memoryGetNote: (id: string) => invoke<MemoryNote>("memory_get_note", { id }),
+  memoryCreateNote: (draft: MemoryNoteDraft) => invoke<MemoryNote>("memory_create_note", { draft }),
+  memorySaveNote: (note: MemoryNote) => invoke<void>("memory_save_note", { note }),
+  memoryDeleteNote: (id: string) => invoke<void>("memory_delete_note", { id }),
+  memoryResolveCandidate: (id: string, resolution: MemoryResolution) =>
+    invoke<void>("memory_resolve_candidate", { id, resolution }),
+  memoryPending: () => invoke<MemoryNodeSummary[]>("memory_pending", undefined, []),
+  memoryEvents: (range: MemoryEventRange) => invoke<MemoryEvent[]>("memory_events", { range }, []),
+  memoryVaultInfo: () =>
+    invoke<MemoryVaultInfo>("memory_vault_info", undefined, {
+      path: "",
+      note_count: 0,
+      counts_by_status: {},
+      quarantined: [],
+      last_full_index_at: null,
+      legacy_semantic_present: false,
+    }),
+  memoryMigrateLegacy: () => invoke<MemoryMigrationReport>("memory_migrate_legacy"),
+  memoryRebuildIndex: () => invoke<MemoryIndexStats>("memory_rebuild_index"),
+  memoryOpenVault: () => invoke<void>("memory_open_vault"),
   listAutomations: () => invoke<Automation[]>("list_automations", undefined, []),
   createAutomation: (input: AutomationInput) => invoke<Automation>("create_automation", { input }),
   updateAutomation: (id: string, input: AutomationInput) =>
@@ -308,6 +346,7 @@ export const continuum = {
     invoke<void>("chat_send_message", { conversationId, text }),
   chatCancel: (conversationId: string) => invoke<void>("chat_cancel", { conversationId }),
   onChatEvent,
+  onMemoryEvent,
 };
 
 export interface RuntimeStatus {
@@ -333,6 +372,13 @@ export async function onChatEvent(
   handler: (payload: ChatEventPayload) => void
 ): Promise<() => void> {
   return listen<ChatEventPayload>("continuum:chat", handler);
+}
+
+/** Subscribes to live vault-change pushes (watcher-driven reindex/rebuild). */
+export async function onMemoryEvent(
+  handler: (payload: MemoryEventPayload) => void
+): Promise<() => void> {
+  return listen<MemoryEventPayload>("continuum:memory", handler);
 }
 
 // --- Defaults (used when the dashboard renders outside Tauri, e.g. `pnpm dev`) ---

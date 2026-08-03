@@ -160,12 +160,183 @@ export interface AutomationInput {
   enabled: boolean;
 }
 
-export interface SemanticFact {
-  key: string;
-  value: string;
-  source: string;
+// --- Memory vault ---
+
+export type MemoryNodeType =
+  | "project"
+  | "goal"
+  | "task"
+  | "decision"
+  | "person"
+  | "preference"
+  | "fact"
+  | "error"
+  | "session"
+  | "note";
+
+export type MemoryNodeStatus = "candidate" | "confirmed" | "rejected" | "superseded" | "archived";
+export type MemorySource =
+  "user_statement" | "observed" | "inferred" | "agent_run" | "chat" | "manual";
+export type MemorySensitivity = "public" | "internal" | "sensitive";
+
+export interface MemoryRelation {
+  to: string;
+  rel: string;
   confidence: number;
-  namespace: string;
+}
+
+export interface MemoryFrontmatter {
+  id: string;
+  type: MemoryNodeType;
+  title: string;
+  status: MemoryNodeStatus;
+  project?: string | null;
+  confidence: number;
+  importance: number;
+  source: MemorySource;
+  source_ref?: string | null;
+  sensitivity: MemorySensitivity;
+  created: string;
+  updated?: string | null;
+  last_used?: string | null;
+  expires?: string | null;
+  supersedes?: string | null;
+  superseded_by?: string | null;
+  relations?: MemoryRelation[];
+  tags?: string[];
+}
+
+export interface MemoryNodeSummary {
+  id: string;
+  slug: string;
+  title: string;
+  type: MemoryNodeType;
+  status: MemoryNodeStatus;
+  project: string | null;
+  confidence: number;
+  importance: number;
+  source: MemorySource;
+  sensitivity: MemorySensitivity;
+  created: string;
+  updated: string;
+  tags: string[];
+  snippet: string | null;
+}
+
+export interface MemoryNote {
+  frontmatter: MemoryFrontmatter;
+  body: string;
+  path: string;
+  slug: string;
+  backlinks: MemoryNodeSummary[];
+}
+
+export interface MemoryNoteDraft {
+  type: MemoryNodeType;
+  title: string;
+  body?: string;
+  project?: string | null;
+  status?: MemoryNodeStatus;
+  confidence?: number;
+  importance?: number;
+  source?: MemorySource;
+  source_ref?: string | null;
+  sensitivity?: MemorySensitivity;
+  relations?: MemoryRelation[];
+  tags?: string[];
+}
+
+export interface MemoryGraphFilter {
+  types?: MemoryNodeType[] | null;
+  statuses?: MemoryNodeStatus[] | null;
+  project?: string | null;
+  query?: string | null;
+  updated_since?: string | null;
+  updated_until?: string | null;
+  limit?: number | null;
+}
+
+export interface MemoryGraphNode {
+  id: string;
+  slug: string;
+  title: string;
+  type: MemoryNodeType;
+  status: MemoryNodeStatus;
+  project: string | null;
+  confidence: number;
+  importance: number;
+  created: string;
+  updated: string;
+}
+
+export interface MemoryGraphEdge {
+  from: string;
+  to: string;
+  rel: string;
+  confidence: number;
+  origin: "frontmatter" | "body";
+}
+
+export interface MemoryGhostNode {
+  target: string;
+  ref_count: number;
+}
+
+export interface MemoryGraphData {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  ghosts: MemoryGhostNode[];
+  truncated: boolean;
+}
+
+export type MemoryResolution =
+  { action: "confirm" } | { action: "reject" } | { action: "supersede"; replaces: string };
+
+export interface MemoryEvent {
+  id: number;
+  ts: string;
+  kind: string;
+  text: string;
+  project: string | null;
+  node_id: string | null;
+  ref: string | null;
+}
+
+export interface MemoryEventRange {
+  since?: string | null;
+  until?: string | null;
+  limit?: number | null;
+}
+
+export interface MemoryQuarantineEntry {
+  path: string;
+  error: string;
+}
+
+export interface MemoryVaultInfo {
+  path: string;
+  note_count: number;
+  counts_by_status: Record<string, number>;
+  quarantined: MemoryQuarantineEntry[];
+  last_full_index_at: string | null;
+  legacy_semantic_present: boolean;
+}
+
+export interface MemoryIndexStats {
+  indexed: number;
+  quarantined: number;
+  removed: number;
+}
+
+export interface MemoryMigrationReport {
+  migrated: number;
+  skipped: number;
+  errors: string[];
+}
+
+export interface MemoryEventPayload {
+  kind: "changed" | "rebuilt";
+  ids: string[];
 }
 
 export type RepairEvent =
