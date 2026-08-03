@@ -931,6 +931,7 @@ interface DiagnosticCheck {
 function DiagnosticsStep() {
   const [checks, setChecks] = useState<DiagnosticCheck[]>(INITIAL_CHECKS);
   const [running, setRunning] = useState(false);
+  const [repairHint, setRepairHint] = useState<string | null>(null);
   const allPass = useMemo(
     () => checks.every((c) => c.status === "ok" || c.status === "skip"),
     [checks]
@@ -989,13 +990,29 @@ function DiagnosticsStep() {
         </button>
         {!allPass && !running && (
           <button
-            onClick={() => invoke("trigger_repair", { reason: "onboarding-diagnostics" })}
+            onClick={async () => {
+              try {
+                const preview = await invoke<{ issues: unknown[] }>("preview_repair");
+                setRepairHint(
+                  preview.issues.length > 0
+                    ? `${preview.issues.length} live issue(s) found. Finish onboarding, then review and confirm the plan in Advanced → Health.`
+                    : "The live Health probes found no supported repair issue."
+                );
+              } catch (error) {
+                setRepairHint(`Could not load the Health preview: ${String(error)}`);
+              }
+            }}
             className="press rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink"
           >
-            Fix with repair agent
+            Check repair options
           </button>
         )}
       </div>
+      {repairHint && (
+        <p role="status" className="text-[12px] text-ink-muted">
+          {repairHint}
+        </p>
+      )}
     </StepContainer>
   );
 }

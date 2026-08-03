@@ -21,7 +21,7 @@ The ten tabs are grouped as:
 | Brain              | hybrid         | `update_live_context_config`, `update_triage_threshold`       | Live capture consent/cadence/all-monitor status and triage controls; layer-card model selects remain disabled. |
 | Tools & Skills     | hybrid         | `list_mcp_tools`, local MCP server registry, `list_skills`, skill CRUD | Built-in namespace list and local stdio server install are live; per-tool permission UI is in-memory only. |
 | Automations        | live           | `list_automations` + `create_/update_/delete_/toggle_`        | Fully live.                                                                     |
-| Health             | live           | `get_health`, `trigger_repair`, `restart_component`           | Fully live; runtime bridge surfaces health on a 2 s poll.                       |
+| Health             | live           | `get_health`, `preview_repair`, `trigger_repair`               | Live probes; guarded repair requires a one-time preview and verified backup.    |
 | Logs               | live           | `get_logs` + `continuum:log` stream                           | Fully live; layer filter updated to real emitters in this PR.                  |
 | Settings (system)  | live           | `get_config`, `update_*`, keyring-backed secrets              | Fully live (resource profile update marks `restart_required`).                  |
 

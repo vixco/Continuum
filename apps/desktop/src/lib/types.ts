@@ -175,12 +175,32 @@ export interface SemanticFact {
 export type RepairEvent =
   | { kind: "started"; ts: string }
   | { kind: "context_written"; path: string }
+  | { kind: "backup_created"; path: string; bytes: number; verified: boolean }
+  | { kind: "action_result"; action: string; success: boolean; detail: string }
   | { kind: "assistant_delta"; text: string }
   | { kind: "tool_call"; name: string }
   | { kind: "tool_result"; name: string; summary: string }
   | { kind: "stderr"; line: string }
   | { kind: "finished"; ts: string; success: boolean; cost_usd: number | null }
+  | { kind: "verification"; checked_at: string; unresolved: ComponentHealth[] }
   | { kind: "error"; message: string };
+
+export interface RepairPreviewIssue {
+  component: string;
+  status: ComponentStatus;
+  detail: string;
+  proposed_action: string;
+  actionable: boolean;
+}
+
+export interface RepairPreview {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  issues: RepairPreviewIssue[];
+  backup_required: boolean;
+  allowed_actions: string[];
+}
 
 // Phase 8: skills + workers
 
@@ -239,6 +259,12 @@ export interface WorkerSnapshot {
 }
 
 export interface ContinuumConfig {
+  health: {
+    repair_timeout_secs: number;
+    runtime_start_timeout_secs: number;
+    repair_session_ttl_secs: number;
+    backup_retention: number;
+  };
   chat: {
     max_tokens: number;
     temperature: number | null;

@@ -22,6 +22,8 @@ use continuum_core::health::{HealthCheck, HealthRegistry, HealthResult};
 use continuum_core::runtime::ContinuumRuntime;
 use continuum_core::state::StateHandle;
 
+type ConfigProvider = Arc<dyn Fn() -> ContinuumConfig + Send + Sync>;
+
 /// Directory where continuum-desktop.exe was started from. Used by checks that
 /// need to find sibling files (continuum-mcp.exe, prompts/, skills/) that the
 /// installer places next to the binaries.
@@ -53,7 +55,11 @@ pub(crate) fn runtime_alive(dev_dir: &Path) -> bool {
 
 pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     let state = Arc::new(RwLock::new(runtime.state.clone()));
-    let cfg = Arc::new(runtime.config_snapshot());
+    let cfg: ConfigProvider = {
+        let runtime = runtime.clone();
+        Arc::new(move || runtime.config_snapshot())
+    };
+    let startup_cfg = runtime.config_snapshot();
     let dev_dir = runtime.dev_dir();
 
     registry.register(RuntimeCheck {
@@ -102,7 +108,7 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
         cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
-    registry.register(SystemResourceCheck::new(&cfg));
+    registry.register(SystemResourceCheck::new(&startup_cfg));
     registry.register(ChatProvidersCheck {
         dev_dir: dev_dir.clone(),
     });
@@ -144,7 +150,7 @@ impl HealthCheck for RuntimeCheck {
 
 struct VisionCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -230,7 +236,8 @@ impl HealthCheck for VisionCheck {
         Some("Re-run scripts/download-models.ps1 to reinstall SmolVLM.".into())
     }
     async fn probe(&self) -> HealthResult {
-        let model_path = PathBuf::from(&self.cfg.vision.model_path);
+        let cfg = (self.cfg)();
+        let model_path = PathBuf::from(&cfg.vision.model_path);
         if !model_path.exists() {
             return HealthResult::error("vision model missing on disk", 1);
         }
@@ -318,7 +325,7 @@ impl HealthCheck for OrchestratorCheck {
 
 struct VoiceTtsCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -331,10 +338,11 @@ impl HealthCheck for VoiceTtsCheck {
         Some("Verify Piper voice files exist, rerun scripts/download-models.ps1.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.tts.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.tts.enabled {
             return HealthResult::healthy(1);
         }
-        let Some(primary) = self.cfg.tts.voices.get(&self.cfg.tts.primary) else {
+        let Some(primary) = cfg.tts.voices.get(&cfg.tts.primary) else {
             return HealthResult::error("TTS primary voice key missing from config", 1);
         };
         if !PathBuf::from(&primary.model_path).exists() {
@@ -354,7 +362,7 @@ impl HealthCheck for VoiceTtsCheck {
 
 struct VoiceSttCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -367,10 +375,11 @@ impl HealthCheck for VoiceSttCheck {
         Some("Verify whisper model at audio.whisper_model_path.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.audio.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.audio.enabled {
             return HealthResult::healthy(1);
         }
-        if !PathBuf::from(&self.cfg.audio.whisper_model_path).exists() {
+        if !PathBuf::from(&cfg.audio.whisper_model_path).exists() {
             return HealthResult::error("whisper model file missing", 1);
         }
         if !runtime_alive(&self.dev_dir) {
@@ -504,7 +513,7 @@ impl HealthCheck for WorkersCheck {
 }
 
 struct SkillsCheck {
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -517,16 +526,17 @@ impl HealthCheck for SkillsCheck {
         Some("Fix or remove any SKILL.md that failed to parse. See logs.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.skills.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.skills.enabled {
             return HealthResult::healthy(1);
         }
-        let configured = std::path::PathBuf::from(&self.cfg.skills.dir);
+        let configured = std::path::PathBuf::from(&cfg.skills.dir);
         let root = if configured.is_absolute() && configured.exists() {
             configured
         } else {
             // Try in order: cwd-relative, install-dir-relative (next to the
             // exe — covers packaged installs), dev-dir-relative.
-            let rel = &self.cfg.skills.dir;
+            let rel = &cfg.skills.dir;
             std::env::current_dir()
                 .ok()
                 .map(|cwd| cwd.join(rel))
