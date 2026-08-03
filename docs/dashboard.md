@@ -64,9 +64,13 @@ a broken/locked vault degrades only this tab, never app startup.
   the status filter shows them), a hollow ring marks a ghost node (an
   unresolved `[[wiki-link]]` target — clicking one offers "create note").
   Drag to pan, scroll to zoom, drag a node to pin it for the session. The
-  topbar has full-text search (Enter centers the result), type/status/
-  project filter chips, a legend toggle, and a quarantine warning chip when
-  the vault has unparsable files (`docs/self-healing.md` covers recovery).
+  topbar has full-text search (Enter or the **Search** button sets a graph
+  query filter), type filter chips, and a **Show hidden** toggle that
+  reveals rejected/superseded/archived notes (hidden by default); a
+  quarantine warning chip appears when the vault has unparsable files
+  (`docs/self-healing.md` covers recovery). An always-on legend (dot color
+  per type) sits bottom-left over the graph. Saved views and the vault
+  actions ("…" menu) round out the topbar — see the bullets below.
 - **Note panel + editor** — clicking a node opens a resizable (320px–70%
   of viewport, width persisted) docked right panel: rendered markdown,
   metadata chips, editable confidence/importance sliders, tags, project,
@@ -95,7 +99,8 @@ a broken/locked vault degrades only this tab, never app startup.
   markdown — safe any time, see `docs/memory.md`'s troubleshooting section),
   **Import legacy memory** (shown only when a pre-vault `semantic.sqlite`
   still exists; runs the idempotent migration and shows a result banner),
-  and **Wipe derived memory data** (danger row, requires typing `DELETE`).
+  and **Wipe derived data (records request)** (danger row, requires typing
+  `DELETE`).
   It never touches vault markdown — but as of this writing `wipe_memory`
   (`apps/desktop/src-tauri/src/commands.rs`) is a stub: it validates the
   `DELETE` confirmation, logs the request, and marks the distiller for a

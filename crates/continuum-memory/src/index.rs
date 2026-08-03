@@ -496,6 +496,28 @@ impl Index {
         self.index_file_inner(vault_dir, path, true).await
     }
 
+    /// Index (or re-index) each of `paths` — e.g. a debounced batch from
+    /// the file-watcher — without recomputing the resolved edge graph
+    /// after every individual file, then recomputes `edges`/
+    /// `unresolved_links` exactly ONCE at the end. Behaviorally equivalent
+    /// to calling [`Index::index_file`] on each path in sequence (same
+    /// per-file [`IndexOutcome`]s, same final `edges` table), but O(1)
+    /// edge recomputations instead of O(paths.len()) for a multi-file
+    /// batch — `index_file`'s own per-call recompute is unaffected, this
+    /// is purely a batch-shaped path used by `Vault::reindex_paths`.
+    pub(crate) async fn index_files(
+        &self,
+        vault_dir: &Path,
+        paths: &[PathBuf],
+    ) -> Result<Vec<IndexOutcome>> {
+        let mut outcomes = Vec::with_capacity(paths.len());
+        for path in paths {
+            outcomes.push(self.index_file_inner(vault_dir, path, false).await?);
+        }
+        self.recompute_edges().await?;
+        Ok(outcomes)
+    }
+
     async fn index_file_inner(
         &self,
         vault_dir: &Path,

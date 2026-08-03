@@ -13,7 +13,12 @@ import ReactMarkdown from "react-markdown";
 import { continuum } from "@/lib/tauri";
 import { NODE_TYPE_LABELS } from "@/lib/memoryTheme";
 import { Button, Select, Slider, TextInput, Toggle } from "@/components/ui/primitives";
-import { MetaChip, STATUS_DOT_CLASSES, STATUS_LABELS } from "@/components/memory/NotePanel";
+import {
+  MetaChip,
+  STATUS_DOT_CLASSES,
+  STATUS_LABELS,
+  STATUS_OPTIONS,
+} from "@/components/memory/NotePanel";
 import type {
   MemoryNodeType,
   MemoryNodeStatus,
@@ -41,9 +46,10 @@ interface NoteEditorOverlayProps {
   onSaved: (id: string) => void;
 }
 
-/** Local, fully-editable working copy. Status/source/sensitivity are kept
- * here for display but - matching NotePanel, which only ever shows them as
- * read-only chips - are not user-editable in this UI. */
+/** Local, fully-editable working copy. Status is user-editable (mirrors
+ * NotePanel's status Select, same `STATUS_OPTIONS`); source/sensitivity
+ * are kept here for display only - matching NotePanel, which shows them as
+ * read-only chips - and are not user-editable in this UI. */
 interface EditorDraft {
   type: MemoryNodeType;
   title: string;
@@ -309,6 +315,13 @@ export function NoteEditorOverlay({ mode, onClose, onSaved }: NoteEditorOverlayP
               <MetaChip>{draft.source}</MetaChip>
               <MetaChip>{draft.sensitivity}</MetaChip>
             </div>
+
+            <Select
+              label="Status"
+              value={draft.status}
+              options={STATUS_OPTIONS}
+              onChange={(v) => setDraft((d) => (d ? { ...d, status: v } : d))}
+            />
 
             <Slider
               label="Confidence"
