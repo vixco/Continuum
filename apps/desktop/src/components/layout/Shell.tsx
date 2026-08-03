@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
 import {
   BrainCircuit,
@@ -95,10 +95,45 @@ interface UpdateState {
 }
 
 const AUTO_UPDATE_STORAGE_KEY = "continuum.auto-updates";
+const UPDATE_ATTEMPT_STORAGE_KEY = "continuum.update-attempted-version";
+
+function attemptedUpdateVersion(): string | null {
+  try {
+    return window.localStorage.getItem(UPDATE_ATTEMPT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberUpdateAttempt(version: string): void {
+  try {
+    window.localStorage.setItem(UPDATE_ATTEMPT_STORAGE_KEY, version);
+  } catch (error) {
+    console.warn("Could not persist the updater attempt guard", error);
+  }
+}
+
+function clearUpdateAttempt(): void {
+  try {
+    window.localStorage.removeItem(UPDATE_ATTEMPT_STORAGE_KEY);
+  } catch (error) {
+    console.warn("Could not clear the updater attempt guard", error);
+  }
+}
+
+function updateErrorMessage(error: unknown, action: "check" | "install"): string {
+  const detail = error instanceof Error ? error.message : String(error || "Unknown error");
+  const nextStep =
+    action === "install"
+      ? "Retry from Settings. If it still fails, install the latest GitHub release manually."
+      : "Check your connection, then try again from Settings.";
+  return `${action === "install" ? "Update installation" : "Update check"} failed: ${detail}. ${nextStep}`;
+}
 
 function useUpdates() {
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(true);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const pendingVersionRef = useRef<string | null>(null);
   const [state, setState] = useState<UpdateState>({
     phase: "idle",
     update: null,
@@ -113,6 +148,10 @@ function useUpdates() {
   }, []);
 
   const installUpdate = useCallback(async () => {
+    const pendingVersion = pendingVersionRef.current;
+    if (pendingVersion) {
+      rememberUpdateAttempt(pendingVersion);
+    }
     setState((current) => ({ ...current, phase: "downloading", message: null, progress: 0 }));
     try {
       await continuum.installPendingUpdate((downloaded, total) => {
@@ -125,7 +164,7 @@ function useUpdates() {
       setState((current) => ({
         ...current,
         phase: "error",
-        message: error instanceof Error ? error.message : "Update installation failed",
+        message: updateErrorMessage(error, "install"),
       }));
     }
   }, []);
@@ -136,16 +175,28 @@ function useUpdates() {
       try {
         const update = await continuum.checkForUpdate();
         if (!update) {
+          pendingVersionRef.current = null;
+          clearUpdateAttempt();
           setState({ phase: "current", update: null, message: null, progress: null });
           return;
         }
-        setState({ phase: "available", update, message: null, progress: null });
-        if (automatic && autoUpdateEnabled) await installUpdate();
+        pendingVersionRef.current = update.version;
+        const attemptedVersion = attemptedUpdateVersion();
+        const previousAttemptDidNotFinish = attemptedVersion === update.version;
+        setState({
+          phase: "available",
+          update,
+          message: previousAttemptDidNotFinish
+            ? `Update v${update.version} is still available because the previous automatic install did not finish. Retry it manually when ready.`
+            : null,
+          progress: null,
+        });
+        if (automatic && autoUpdateEnabled && !previousAttemptDidNotFinish) await installUpdate();
       } catch (error) {
         setState({
           phase: "error",
           update: null,
-          message: error instanceof Error ? error.message : "Update check failed",
+          message: updateErrorMessage(error, "check"),
           progress: null,
         });
       }
@@ -418,7 +469,17 @@ function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () 
   return (
     <div className="update-banner">
       {state.phase === "error" ? (
-        <span className="text-red-300">Update check failed: {state.message}</span>
+        <>
+          <span className="flex-1 text-red-300">{state.message}</span>
+          {state.update && (
+            <button
+              onClick={onInstall}
+              className="press rounded-md border border-red-300/50 px-3 py-1 text-[10px] font-medium text-red-200 hover:bg-red-300/10"
+            >
+              Retry install
+            </button>
+          )}
+        </>
       ) : state.phase === "downloading" ? (
         <>
           <RefreshCw size={14} className="animate-spin text-amber-400" />
@@ -430,7 +491,7 @@ function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () 
       ) : (
         <>
           <Check size={14} className="text-amber-400" />
-          <span className="flex-1">Update available: {updateLabel}</span>
+          <span className="flex-1">{state.message ?? `Update available: ${updateLabel}`}</span>
           <button
             onClick={onInstall}
             className="press rounded-md border border-amber-400/50 px-3 py-1 text-[10px] font-medium text-amber-300 hover:bg-amber-400/10"

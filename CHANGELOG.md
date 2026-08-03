@@ -4,7 +4,15 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
 - Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
+- **Windows updater retry loop**: release publishing now clears cached Tauri
+  bundles, selects exactly one installer matching the calculated version, and
+  rejects mismatched signature metadata. The desktop app remembers an
+  interrupted install attempt per release, stops automatic retries on later
+  launches, and keeps an actionable manual retry path without altering user
+  data or configuration.
 
 ### Added
 
