@@ -548,6 +548,26 @@ async fn main() -> Result<()> {
         None
     };
 
+    // `followup_until` is shared between the main loop (reads + clears) and
+    // the spawned do_wake tasks (writes after a wake completes), so it lives
+    // behind a std::sync::Mutex — locks are held for microseconds.
+    let followup_until: Arc<std::sync::Mutex<Option<Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // `orchestrator_busy` gates new wakes. When true, triage keeps running
+    // but the wake_orchestrator / whisper decisions are suppressed so we
+    // don't stack multiple Opus calls on top of each other. Cleared by the
+    // spawned wake task when do_wake completes. Declared here (rather than
+    // down in the main loop) so the daily memory-maintenance ticker below
+    // can share it.
+    let orchestrator_busy: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Task 10: most recent perception frame, updated once per frame in the
+    // main loop below. The maintenance-wake ticker uses this as the trigger
+    // frame for its `do_wake` call instead of fabricating one — per
+    // non-negotiable design, a wake always carries a real observation.
+    let last_frame: Arc<std::sync::Mutex<Option<PerceptionFrame>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // --- Runtime state publisher ---
     //
     // Writes `~/.continuum-dev/state.json` every 2 s so the dashboard (a
@@ -587,6 +607,31 @@ async fn main() -> Result<()> {
         );
     }
 
+    // --- Task 10: daily memory-maintenance wake ---
+    // Quiet-day drain: if nothing else ever wakes the orchestrator on a
+    // given day, this ticker fires once at the configured local hour and
+    // reviews any vault decisions that piled up unattended. It reuses the
+    // exact same `do_wake` path the triage `WakeOrchestrator` arm uses.
+    spawn_maintenance_wake_ticker(
+        config.memory.curator.clone(),
+        orch_config.clone(),
+        vault.clone(),
+        semantic.clone(),
+        episodic.clone(),
+        skill_loader.clone(),
+        config.skills.token_budget,
+        dev_dir.clone(),
+        speech.clone(),
+        feedback.clone(),
+        last_frame.clone(),
+        followup_until.clone(),
+        config.voice.conversation_followup_seconds,
+        config.voice.ambient_mute_enabled,
+        orchestrator_busy.clone(),
+        runtime_state.clone(),
+        shutdown_rx.clone(),
+    );
+
     // --- Hotkey (Windows only) ---
     // Drop guard: _hotkey_handle must stay in scope for the listener thread
     // to keep running. Dropping it at end of main unregisters the hotkey.
@@ -619,17 +664,6 @@ async fn main() -> Result<()> {
     let mut main_shutdown = shutdown_rx.clone();
     let wake_detector = TranscriptWakeDetector::new(config.voice.wake_keyword.clone());
     let mut voice_session: Option<VoiceSession> = None;
-    // `followup_until` is shared between the main loop (reads + clears) and
-    // the spawned do_wake tasks (writes after a wake completes), so it lives
-    // behind a std::sync::Mutex — locks are held for microseconds.
-    let followup_until: Arc<std::sync::Mutex<Option<Instant>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    // `orchestrator_busy` gates new wakes. When true, triage keeps running
-    // but the wake_orchestrator / whisper decisions are suppressed so we
-    // don't stack multiple Opus calls on top of each other. Cleared by the
-    // spawned wake task when do_wake completes.
-    let orchestrator_busy: Arc<std::sync::atomic::AtomicBool> =
-        Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut hotkey_pending: bool = false;
 
     loop {
@@ -638,6 +672,17 @@ async fn main() -> Result<()> {
                 frame_count += 1;
                 if let Ok(mut s) = runtime_state.lock() {
                     s.frame_count = frame_count;
+                }
+
+                // Task 10: publish the latest frame for the daily
+                // memory-maintenance ticker. It never fabricates a frame —
+                // it waits for this to be `Some` before it can fire at all.
+                {
+                    let mut lf = match last_frame.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    *lf = Some(frame.clone());
                 }
 
                 // Curator (Plan B): publish the latest activity signal so the
@@ -1189,6 +1234,218 @@ async fn do_wake(
     );
 
     Ok(())
+}
+
+/// Spawns the daily memory-maintenance wake ticker (Task 10 of the memory
+/// vault curator plan).
+///
+/// Once per local day, at `curator_cfg.maintenance_wake_hour`, this checks
+/// whether the vault has pending memory decisions that would otherwise sit
+/// unreviewed on a day when nothing else triggers a wake — the "queue
+/// drains on quiet days" guarantee — and, if so, fires the same [`do_wake`]
+/// path the triage `WakeOrchestrator` arm in `main` uses (see the argument
+/// construction there, which this mirrors).
+///
+/// Disabled entirely when `maintenance_wake_hour < 0`. Values >= 24 clamp
+/// to 23 with a `warn` logged once at spawn time. Never fabricates a
+/// [`PerceptionFrame`]: skips (debug log) until `last_frame` has observed
+/// at least one real frame from the main loop. Also skips when the curator
+/// is disabled, when the vault has no pending decisions, or when the
+/// orchestrator is already busy — claimed via `compare_exchange` rather
+/// than the load-then-store the frame loop uses, because unlike that
+/// single-consumer loop this ticker runs concurrently with it and a plain
+/// load-then-store would race.
+///
+/// `history_frames` is passed as `&[]` to `do_wake` — this ticker only
+/// tracks the single most recent frame, not the frame loop's rolling
+/// history, so there is no synthetic history to hand the orchestrator.
+#[allow(clippy::too_many_arguments)]
+fn spawn_maintenance_wake_ticker(
+    curator_cfg: CuratorConfig,
+    orch_config: OrchestratorConfig,
+    vault: Arc<continuum_memory::Vault>,
+    semantic: Arc<SemanticStore>,
+    episodic: Arc<Mutex<EpisodicStore>>,
+    skill_loader: SkillLoader,
+    skill_token_budget: usize,
+    dev_dir: PathBuf,
+    speech: Option<Arc<SpeechController>>,
+    feedback: FeedbackPlayer,
+    last_frame: Arc<std::sync::Mutex<Option<PerceptionFrame>>>,
+    followup_until: Arc<std::sync::Mutex<Option<Instant>>>,
+    followup_secs: u64,
+    ambient_mute_enabled: bool,
+    orchestrator_busy: Arc<std::sync::atomic::AtomicBool>,
+    runtime_state: Arc<std::sync::Mutex<continuum_core::runtime_publish::RuntimeSnapshot>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let configured_hour = curator_cfg.maintenance_wake_hour;
+    if configured_hour < 0 {
+        tracing::info!(
+            layer = "memory",
+            component = "maintenance_wake",
+            "daily memory-maintenance wake disabled (maintenance_wake_hour < 0)"
+        );
+        return;
+    }
+    let hour = if configured_hour >= 24 {
+        tracing::warn!(
+            layer = "memory",
+            component = "maintenance_wake",
+            configured = configured_hour,
+            "maintenance_wake_hour >= 24, clamping to 23"
+        );
+        23u32
+    } else {
+        configured_hour as u32
+    };
+
+    tokio::spawn(async move {
+        loop {
+            let delay = continuum_core::health::backup::seconds_until_next_local(hour);
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
+                    } else {
+                        continue;
+                    }
+                }
+            }
+
+            if !curator_cfg.enabled {
+                tracing::debug!(
+                    layer = "memory",
+                    component = "maintenance_wake",
+                    "skip — curator disabled"
+                );
+                continue;
+            }
+
+            let pending = match vault.pending().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        layer = "memory",
+                        component = "maintenance_wake",
+                        error = %e.user_message(),
+                        "skip — vault.pending() failed"
+                    );
+                    continue;
+                }
+            };
+            if pending.is_empty() {
+                tracing::debug!(
+                    layer = "memory",
+                    component = "maintenance_wake",
+                    "skip — no pending memory decisions"
+                );
+                continue;
+            }
+
+            let frame = {
+                let guard = match last_frame.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.clone()
+            };
+            let Some(frame) = frame else {
+                tracing::debug!(
+                    layer = "memory",
+                    component = "maintenance_wake",
+                    "skip — no frame observed yet"
+                );
+                continue;
+            };
+
+            // Claim the busy flag right before firing (not earlier) so the
+            // window where we could race the frame loop's own wake is as
+            // small as possible.
+            if orchestrator_busy
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+            {
+                tracing::debug!(
+                    layer = "memory",
+                    component = "maintenance_wake",
+                    "skip — orchestrator busy"
+                );
+                continue;
+            }
+
+            let reason = format!(
+                "daily memory maintenance: {} pending memory decisions",
+                pending.len()
+            );
+            tracing::info!(
+                layer = "memory",
+                component = "maintenance_wake",
+                pending = pending.len(),
+                "Firing daily memory-maintenance wake"
+            );
+
+            if let Ok(mut s) = runtime_state.lock() {
+                s.wake_count += 1;
+                s.voice_mode = Some("thinking".to_string());
+            }
+
+            // Mirrors the WakeOrchestrator arm's ambient-mute check: a live
+            // call suppresses spoken output, but the wake itself still runs.
+            let wake_speech_opt = if ambient_mute_enabled && frame.context.in_call {
+                None
+            } else {
+                speech.clone()
+            };
+
+            let result = do_wake(
+                &frame,
+                &[],
+                &reason,
+                &orch_config,
+                &semantic,
+                &episodic,
+                &vault,
+                &curator_cfg,
+                wake_speech_opt.as_ref(),
+                &skill_loader,
+                None,
+                skill_token_budget,
+                &dev_dir,
+            )
+            .await;
+
+            match result {
+                Ok(()) => {
+                    if followup_secs > 0 {
+                        if let Ok(mut slot) = followup_until.lock() {
+                            *slot = Some(Instant::now() + Duration::from_secs(followup_secs));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        layer = "memory",
+                        component = "maintenance_wake",
+                        error = %e,
+                        "daily memory-maintenance wake failed"
+                    );
+                    feedback.play(FeedbackCue::Error);
+                }
+            }
+
+            orchestrator_busy.store(false, std::sync::atomic::Ordering::Release);
+            if let Ok(mut s) = runtime_state.lock() {
+                s.voice_mode = Some("idle".to_string());
+            }
+        }
+    });
 }
 
 /// Updates the post-wake voice session and returns an explicit wake decision

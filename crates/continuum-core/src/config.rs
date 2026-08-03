@@ -435,6 +435,13 @@ pub struct CuratorConfig {
     /// propose a `proposes_supersede` relation. Below this, the verdict is
     /// treated as too weak to act on.
     pub supersede_confidence_floor: f32,
+    /// Local hour (0-23) for the daily memory-maintenance wake — a
+    /// quiet-day guarantee that drains any pending vault decisions even if
+    /// nothing else would have woken the orchestrator. Negative disables
+    /// the wake entirely. Values >= 24 are clamped to 23 (with a `warn`
+    /// logged at the use site) rather than rejected, since a bad config
+    /// value should degrade, not crash the runtime.
+    pub maintenance_wake_hour: i32,
 }
 
 impl Default for CuratorConfig {
@@ -450,6 +457,7 @@ impl Default for CuratorConfig {
             wake_vault_notes_max: 8,
             include_sensitive_in_context: false,
             supersede_confidence_floor: 0.5,
+            maintenance_wake_hour: 4,
         }
     }
 }
@@ -1175,6 +1183,7 @@ interval_secs = 5
         assert_eq!(cfg.memory.curator.wake_vault_notes_max, 8);
         assert!(!cfg.memory.curator.include_sensitive_in_context);
         assert_eq!(cfg.memory.curator.supersede_confidence_floor, 0.5);
+        assert_eq!(cfg.memory.curator.maintenance_wake_hour, 4);
 
         let parsed: ContinuumConfig = toml::from_str(
             "[memory.vault]\nvault_dir = \"D:/x\"\n[memory.curator]\nenabled = false\n",
@@ -1183,6 +1192,11 @@ interval_secs = 5
         assert_eq!(parsed.memory.vault.vault_dir, "D:/x");
         assert!(!parsed.memory.curator.enabled);
         assert_eq!(parsed.memory.vault.watcher_debounce_ms, 500); // default backfill
+
+        // Negative disables the maintenance wake; must parse cleanly via TOML.
+        let disabled: ContinuumConfig =
+            toml::from_str("[memory.curator]\nmaintenance_wake_hour = -1\n").unwrap();
+        assert_eq!(disabled.memory.curator.maintenance_wake_hour, -1);
 
         let base = std::path::Path::new("/tmp/base");
         assert_eq!(

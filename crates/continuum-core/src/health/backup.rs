@@ -187,7 +187,14 @@ pub fn spawn_nightly(
     });
 }
 
-fn seconds_until_next_local(hour: u32) -> u64 {
+/// Seconds until the next local-time occurrence of `hour:00:00` (24h,
+/// 0-23). If `hour` has already passed today, rolls over to tomorrow.
+/// Floors at 60 seconds so a caller that fires right at the boundary
+/// doesn't busy-loop on a near-zero sleep. Shared by the nightly backup
+/// ticker and the daily memory-maintenance wake ticker
+/// (`bin/continuum.rs`) — one local-hour-scheduling implementation for
+/// both.
+pub fn seconds_until_next_local(hour: u32) -> u64 {
     let now = Local::now();
     let today_target = now
         .date_naive()
