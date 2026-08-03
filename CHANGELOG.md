@@ -66,11 +66,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 - **English language consistency**: the desktop voice controls no longer leak
   Dutch labels, and Chat now reads the saved onboarding language preference for
   every response with a safe English fallback for missing or invalid settings.
-- **Windows installer release**: pin packaging to the stable GitHub-hosted
-  Windows 2022 image because WiX 3.14 `candle.exe` fails to start on the new
-  VS 2026 image behind `windows-latest`. The release now also uses an absolute
-  workspace `CARGO_TARGET_DIR`, preventing a duplicate Tauri compile and
-  ensuring MSI/NSIS assets land where the publishing step expects them.
+- **Windows installer release**: packaging is permanently NSIS-only because
+  WiX 3.14 `candle.exe` fails to start on multiple GitHub-hosted Windows
+  images. Both Tauri config and the release command exclude MSI/WiX, with a
+  preflight guard that rejects target drift before compilation. The release
+  also uses an absolute workspace `CARGO_TARGET_DIR`, preventing a duplicate
+  Tauri compile and ensuring NSIS assets land where publishing expects them.
 - **Desktop release blockers**: declare the `react-virtuoso` and `remark-gfm`
   packages already imported by the new chat UI, and correct the Windows named
   pipe bindings/features so the Tauri desktop binary compiles on Windows.

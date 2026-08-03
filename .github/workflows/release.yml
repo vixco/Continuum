@@ -38,9 +38,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    # WiX 3.14's candle.exe currently fails to start on the VS 2026 image now
-    # served by windows-latest. Windows 2022 remains a supported hosted image
-    # and is the stable packaging environment for our MSI/NSIS release path.
+    # Keep the native toolchain stable. Packaging itself is NSIS-only because
+    # WiX 3 candle.exe fails to start on multiple hosted Windows images.
     runs-on: windows-2022
     # sccache wraps rustc/cc so whisper.cpp + llama.cpp + ort + lancedb native
     # compiles are cache hits across releases. First release is full speed;
@@ -69,6 +68,15 @@ jobs:
           $mainSha = (git rev-parse origin/main).Trim()
           if ($releaseSha -ne $mainSha) {
             throw "Refusing to release stale CI commit $releaseSha; current main is $mainSha."
+          }
+
+      - name: Verify NSIS-only packaging contract
+        shell: pwsh
+        run: |
+          $config = Get-Content "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $targets = @($config.bundle.targets)
+          if ($targets.Count -ne 1 -or $targets[0] -ne "nsis") {
+            throw "Release packaging must remain NSIS-only; configured targets: $($targets -join ', ')"
           }
 
       - name: Calculate next release version
@@ -185,7 +193,8 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        # Defense in depth: never invoke WiX even if the config later drifts.
+        run: pnpm tauri build --bundles nsis
 
       - name: Assemble release assets and updater metadata
         id: assets
@@ -212,23 +221,14 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
 
           $bundleRoot = "target\release\bundle"
-          $msi = Get-ChildItem "$bundleRoot\msi" -Filter "*.msi" | Select-Object -First 1
-          if (-not $msi) { throw "Tauri did not produce an MSI" }
-          # Tauri 2's modern updater mode signs the installer executable
-          # directly; v1Compatible mode emits a .nsis.zip instead. Accept
-          # either artifact so the release job remains migration-safe.
-          $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*.nsis.zip" | Select-Object -First 1
-          if (-not $nsis) {
-            $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*-setup.exe" | Select-Object -First 1
-          }
-          if (-not $nsis) { throw "Tauri did not produce an NSIS updater artifact" }
+          $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $nsis) { throw "Tauri did not produce an NSIS setup executable" }
           $nsisSig = Get-Item "$($nsis.FullName).sig" -ErrorAction SilentlyContinue
-          if (-not $nsisSig) { throw "Tauri did not produce a signature for $($nsis.Name)" }
+          if (-not $nsisSig) { throw "Tauri did not produce an updater signature for $($nsis.Name)" }
 
-          $updaterExtension = if ($nsis.Extension -eq ".zip") { ".nsis.zip" } else { ".exe" }
-          $updaterName = "continuum-$version-windows-x64-updater$updaterExtension"
-          $signatureName = "$updaterName.sig"
-          Copy-Item $nsis.FullName $updaterName
+          $installerName = "continuum-$version-windows-x64-setup.exe"
+          $signatureName = "$installerName.sig"
+          Copy-Item $nsis.FullName $installerName
           Copy-Item $nsisSig.FullName $signatureName
           $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
           $latest = [ordered]@{
@@ -238,21 +238,20 @@ jobs:
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{
                 signature = $signature
-                url = "https://github.com/$repo/releases/download/$tag/$updaterName"
+                url = "https://github.com/$repo/releases/download/$tag/$installerName"
               }
             }
           }
           $latest | ConvertTo-Json -Depth 5 | Set-Content -Path "latest.json" -Encoding utf8NoBOM
 
-          $shaFiles = @($portable, $msi.FullName, $updaterName, $signatureName, "latest.json")
+          $shaFiles = @($portable, $installerName, $signatureName, "latest.json")
           $shaLines = foreach ($file in $shaFiles) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
             "$hash  $(Split-Path -Leaf $file)"
           }
           $shaLines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
 
-          "msi_path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
-          "updater_name=$updaterName" >> $env:GITHUB_OUTPUT
+          "installer_name=$installerName" >> $env:GITHUB_OUTPUT
           "signature_name=$signatureName" >> $env:GITHUB_OUTPUT
           Get-Content "latest.json"
           Get-Content "SHA256SUMS.txt"
@@ -280,8 +279,7 @@ jobs:
           generate_release_notes: true
           files: |
             continuum-${{ steps.version.outputs.version }}-windows-x64.zip
-            ${{ steps.assets.outputs.msi_path }}
-            ${{ steps.assets.outputs.updater_name }}
+            ${{ steps.assets.outputs.installer_name }}
             ${{ steps.assets.outputs.signature_name }}
             latest.json
             SHA256SUMS.txt
