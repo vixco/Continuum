@@ -42,6 +42,14 @@ pub enum IndexOutcome {
     Skipped,
 }
 
+/// Internal result of `Index::upsert_node`: either the node was written, or
+/// its slug is already owned by another node's path (deterministic
+/// first-wins; the caller quarantines the loser).
+enum UpsertOutcome {
+    Indexed(String),
+    SlugCollision { slug: String, occupant_path: String },
+}
+
 /// A single frontmatter relation or body wiki-link, prior to resolution.
 pub(crate) struct RawLink {
     pub from_id: String,
@@ -318,14 +326,6 @@ impl Index {
         Ok(())
     }
 
-    async fn node_id_for_path(&self, rel: &str) -> Result<Option<String>> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
-            .bind(rel)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|(id,)| id))
-    }
-
     /// Index (or re-index) a single markdown file. `path` must live under
     /// `vault_dir`. Non-`.md` files and anything under `.continuum/` are
     /// ignored ([`IndexOutcome::Skipped`]); a missing file is treated as a
@@ -358,13 +358,25 @@ impl Index {
         let mtime = mtime_of(path)?;
 
         match parse_document(&content) {
-            Ok(parsed) => {
-                let id = self.upsert_node(&rel, path, &parsed, mtime).await?;
-                if recompute {
-                    self.recompute_edges().await?;
+            Ok(parsed) => match self.upsert_node(&rel, path, &parsed, mtime).await? {
+                UpsertOutcome::Indexed(id) => {
+                    if recompute {
+                        self.recompute_edges().await?;
+                    }
+                    Ok(IndexOutcome::Indexed(id))
                 }
-                Ok(IndexOutcome::Indexed(id))
-            }
+                UpsertOutcome::SlugCollision {
+                    slug,
+                    occupant_path,
+                } => {
+                    let error = format!("slug '{slug}' already used by {occupant_path}");
+                    self.quarantine_path(&rel, &error, mtime).await?;
+                    if recompute {
+                        self.recompute_edges().await?;
+                    }
+                    Ok(IndexOutcome::Quarantined)
+                }
+            },
             Err(parse_err) => {
                 self.quarantine_path(&rel, &parse_err.to_string(), mtime)
                     .await?;
@@ -377,18 +389,23 @@ impl Index {
     }
 
     async fn quarantine_path(&self, rel: &str, error: &str, mtime: i64) -> Result<()> {
-        if let Some(id) = self.node_id_for_path(rel).await? {
+        let mut tx = self.pool.begin().await?;
+        let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
+            .bind(rel)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some((id,)) = existing {
             sqlx::query("DELETE FROM links WHERE from_id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM nodes WHERE id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         sqlx::query(
@@ -398,8 +415,9 @@ impl Index {
         .bind(rel)
         .bind(error)
         .bind(mtime)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -409,29 +427,72 @@ impl Index {
         path: &Path,
         parsed: &ParsedDoc,
         mtime: i64,
-    ) -> Result<String> {
+    ) -> Result<UpsertOutcome> {
         let fm = &parsed.frontmatter;
         let body = &parsed.body;
         let id = fm.id.clone();
-
-        // A rewritten file can carry a new id; the old row at this path
-        // (if any, under the old id) must not collide on the UNIQUE path
-        // column when we upsert by id below.
-        sqlx::query("DELETE FROM nodes WHERE path = ? AND id <> ?")
-            .bind(rel)
-            .bind(&id)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM quarantine WHERE path = ?")
-            .bind(rel)
-            .execute(&self.pool)
-            .await?;
-
         let slug = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_lowercase();
+
+        let mut tx = self.pool.begin().await?;
+
+        // Deterministic first-wins on slug collisions: a UNIQUE constraint
+        // violation here would otherwise abort a rebuild mid-flight, after
+        // the top-of-rebuild DELETEs already ran. Whoever already owns the
+        // slug keeps it; the caller quarantines this file instead. Which
+        // file "already owns" the slug is made deterministic by having
+        // `rebuild` walk files in sorted relative-path order.
+        //
+        // Compare by *path*, not id: rewriting this exact file in place
+        // with a new frontmatter id must not look like a foreign
+        // collision against its own prior row (same path, old id).
+        let collision: Option<(String,)> =
+            sqlx::query_as("SELECT path FROM nodes WHERE slug = ? AND path <> ?")
+                .bind(&slug)
+                .bind(rel)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((occupant_path,)) = collision {
+            return Ok(UpsertOutcome::SlugCollision {
+                slug,
+                occupant_path,
+            });
+        }
+
+        // A rewritten file can carry a new id; purge the old node row(s)
+        // at this path *and* their links/nodes_fts rows. Deleting only the
+        // `nodes` row (as a prior version of this code did) orphaned
+        // `links`/`nodes_fts` rows under the old id forever, since nothing
+        // else ever revisits an id that no longer appears in `nodes`.
+        let old_ids: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM nodes WHERE path = ? AND id <> ?")
+                .bind(rel)
+                .bind(&id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for (old_id,) in &old_ids {
+            sqlx::query("DELETE FROM links WHERE from_id = ?")
+                .bind(old_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
+                .bind(old_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM nodes WHERE path = ? AND id <> ?")
+            .bind(rel)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM quarantine WHERE path = ?")
+            .bind(rel)
+            .execute(&mut *tx)
+            .await?;
+
         let updated = fm.updated.unwrap_or(fm.created);
         let snippet = make_snippet(body);
         let body_hash = fnv1a(body);
@@ -475,12 +536,12 @@ impl Index {
         .bind(mtime)
         .bind(&body_hash)
         .bind(&snippet)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         sqlx::query("DELETE FROM links WHERE from_id = ?")
             .bind(&id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         for relation in &fm.relations {
             sqlx::query(
@@ -491,7 +552,7 @@ impl Index {
             .bind(&relation.to)
             .bind(&relation.rel)
             .bind(relation.confidence as f64)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
         for target in extract_wiki_links(body) {
@@ -501,23 +562,24 @@ impl Index {
             )
             .bind(&id)
             .bind(&target)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
 
         sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
             .bind(&id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT INTO nodes_fts(node_id, title, body, tags) VALUES (?, ?, ?, ?)")
             .bind(&id)
             .bind(&fm.title)
             .bind(body)
             .bind(fm.tags.join(" "))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
-        Ok(id)
+        tx.commit().await?;
+        Ok(UpsertOutcome::Indexed(id))
     }
 
     /// Remove any indexed node/quarantine entry for `path` (which need not
@@ -533,24 +595,30 @@ impl Index {
         recompute: bool,
     ) -> Result<()> {
         let rel = rel_path(vault_dir, path)?;
-        if let Some(id) = self.node_id_for_path(&rel).await? {
+        let mut tx = self.pool.begin().await?;
+        let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE path = ?")
+            .bind(&rel)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some((id,)) = existing {
             sqlx::query("DELETE FROM links WHERE from_id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM nodes_fts WHERE node_id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("DELETE FROM nodes WHERE id = ?")
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         sqlx::query("DELETE FROM quarantine WHERE path = ?")
             .bind(&rel)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         if recompute {
             self.recompute_edges().await?;
         }
@@ -561,8 +629,14 @@ impl Index {
     /// `nodes`/`links` tables. Idempotent and safe to call repeatedly;
     /// `rebuild()` and `index_file`/`remove_path` all funnel through this.
     pub async fn recompute_edges(&self) -> Result<()> {
+        // ORDER BY id: SQLite gives no ordering guarantee for a TEXT
+        // primary key without an explicit ORDER BY, and this table's rows
+        // are mutated over time (upserts, deletes) rather than only ever
+        // appended — relying on physical/rowid order would silently drift.
+        // We need a *stable* order so that the tie-break below always
+        // picks the same winner across repeated rebuilds.
         let nodes: Vec<(String, String, String)> =
-            sqlx::query_as("SELECT id, slug, title FROM nodes")
+            sqlx::query_as("SELECT id, slug, title FROM nodes ORDER BY id")
                 .fetch_all(&self.pool)
                 .await?;
 
@@ -570,8 +644,18 @@ impl Index {
         let mut by_title: HashMap<String, String> = HashMap::new();
         let mut by_id: HashMap<String, String> = HashMap::new();
         for (id, slug, title) in &nodes {
-            by_slug.insert(slug.to_lowercase(), id.clone());
-            by_title.insert(title.to_lowercase(), id.clone());
+            // Deterministic tie-break for a title shared by multiple nodes
+            // (slugs can't collide in practice — collisions are quarantined
+            // at index time — but titles legitimately can): nodes are
+            // visited in ascending `id` order and the FIRST occurrence of a
+            // given slug/title wins, so link resolution always lands on the
+            // note with the smallest id, consistently across rebuilds.
+            by_slug
+                .entry(slug.to_lowercase())
+                .or_insert_with(|| id.clone());
+            by_title
+                .entry(title.to_lowercase())
+                .or_insert_with(|| id.clone());
             by_id.insert(id.clone(), id.clone());
         }
 
@@ -641,9 +725,20 @@ impl Index {
         let mut files = Vec::new();
         collect_md_files(vault_dir, &mut files)?;
 
+        // Deterministic processing order: filesystem enumeration order is
+        // not guaranteed, but "who wins a slug collision" must be stable
+        // across rebuilds. Sort by vault-relative path (forward-slash
+        // normalized) so the same file always wins.
+        let mut files_rel: Vec<(String, PathBuf)> = Vec::with_capacity(files.len());
+        for file in files {
+            let rel = rel_path(vault_dir, &file)?;
+            files_rel.push((rel, file));
+        }
+        files_rel.sort_by(|a, b| a.0.cmp(&b.0));
+
         let mut indexed = 0u64;
         let mut quarantined = 0u64;
-        for file in &files {
+        for (_, file) in &files_rel {
             match self.index_file_inner(vault_dir, file, false).await? {
                 IndexOutcome::Indexed(_) => indexed += 1,
                 IndexOutcome::Quarantined => quarantined += 1,
