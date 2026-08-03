@@ -11,6 +11,7 @@
 
 use continuum_memory::{NodeStatus, NodeSummary, Note, Relation, Vault};
 
+use crate::config::CuratorConfig;
 use crate::curator::CuratorLlm;
 
 /// The conflict-detection prompt template, loaded at compile time from the
@@ -22,15 +23,6 @@ pub const CONFLICT_PROMPT: &str = include_str!("../../../../prompts/curator-conf
 /// supersedes or contradicts an existing CONFIRMED note. A proposal, not an
 /// automatic resolution — see the module doc comment.
 const PROPOSES_SUPERSEDE: &str = "proposes_supersede";
-
-/// Confidence floor below which a "supersedes"/"contradicts" verdict is
-/// treated as too weak to propose. Matches the fixed value in
-/// `prompts/curator-conflict.md`'s design (Plan B Task 5); unlike
-/// `CuratorConfig`'s thresholds this isn't yet plumbed through config
-/// because [`detect_conflicts`]'s public signature (Plan B Task 5's
-/// contract, consumed by [`crate::curator::run`]) doesn't thread a config
-/// handle through — see the doc comment on [`detect_conflicts`].
-const SUPERSEDE_CONFIDENCE_FLOOR: f32 = 0.5;
 
 /// The curator LLM's verdict on one OLD/NEW note pair, as parsed from its
 /// JSON reply (see `prompts/curator-conflict.md`).
@@ -191,14 +183,14 @@ async fn evaluate_pair(llm: &dyn CuratorLlm, prompt: &str) -> anyhow::Result<Ver
 /// pass), searches the vault for up to 2 existing CONFIRMED notes on the
 /// same topic (see [`find_partners`]) and asks the curator LLM whether the
 /// new note supersedes or contradicts each one. A `"supersedes"` or
-/// `"contradicts"` verdict with confidence >=
-/// [`SUPERSEDE_CONFIDENCE_FLOOR`] appends a [`Relation`] (`rel:
-/// "proposes_supersede"`) onto the **new** note pointing at the partner,
-/// then saves it — skipped if that relation is already present (idempotent
-/// against a re-run over the same ids). The OLD note is never read for
-/// writing and never touched: this is a proposal for a human (or the
-/// orchestrator) to confirm via `Vault::resolve_candidate`'s
-/// `Resolution::Supersede`, not an automatic supersede.
+/// `"contradicts"` verdict with confidence >= `cfg.supersede_confidence_floor`
+/// appends a [`Relation`] (`rel: "proposes_supersede"`) onto the **new**
+/// note pointing at the partner, then saves it — skipped if that relation
+/// is already present (idempotent against a re-run over the same ids). The
+/// OLD note is never read for writing and never touched: this is a
+/// proposal for a human (or the orchestrator) to confirm via
+/// `Vault::resolve_candidate`'s `Resolution::Supersede`, not an automatic
+/// supersede.
 ///
 /// Every failure — loading the new note, the partner search, an LLM
 /// completion/parse failure that survives [`evaluate_pair`]'s one retry, or
@@ -208,16 +200,10 @@ async fn evaluate_pair(llm: &dyn CuratorLlm, prompt: &str) -> anyhow::Result<Ver
 ///
 /// Returns the number of `proposes_supersede` relations actually created
 /// (saved) across every id in `new_note_ids`.
-///
-/// The confidence floor is intentionally not threaded through
-/// `CuratorConfig` yet: this function's signature is Plan B Task 5's fixed
-/// contract (`vault`, `llm`, `new_note_ids` only) so it composes directly
-/// with [`crate::curator::run::extract_pass`]'s output. A follow-up task
-/// can widen the signature to take `&CuratorConfig` if the floor needs to
-/// be dashboard-tunable.
 pub async fn detect_conflicts(
     vault: &Vault,
     llm: &dyn CuratorLlm,
+    cfg: &CuratorConfig,
     new_note_ids: &[String],
 ) -> anyhow::Result<usize> {
     let mut created = 0usize;
@@ -293,7 +279,7 @@ pub async fn detect_conflicts(
             };
 
             let is_conflict = matches!(verdict.verdict.as_str(), "supersedes" | "contradicts");
-            if !is_conflict || verdict.confidence < SUPERSEDE_CONFIDENCE_FLOOR {
+            if !is_conflict || verdict.confidence < cfg.supersede_confidence_floor {
                 continue;
             }
 
@@ -379,9 +365,14 @@ mod tests {
             r#"{"verdict":"supersedes","confidence":0.9,"reason":"newer db decision"}"#.into(),
         ]);
 
-        let n = detect_conflicts(&vault, &llm, std::slice::from_ref(&new.frontmatter.id))
-            .await
-            .unwrap();
+        let n = detect_conflicts(
+            &vault,
+            &llm,
+            &CuratorConfig::default(),
+            std::slice::from_ref(&new.frontmatter.id),
+        )
+        .await
+        .unwrap();
         assert_eq!(n, 1);
 
         let refreshed = vault.get(&new.frontmatter.id).await.unwrap();
@@ -429,9 +420,14 @@ mod tests {
                 .into(),
         ]);
 
-        let n = detect_conflicts(&vault, &llm, std::slice::from_ref(&new.frontmatter.id))
-            .await
-            .unwrap();
+        let n = detect_conflicts(
+            &vault,
+            &llm,
+            &CuratorConfig::default(),
+            std::slice::from_ref(&new.frontmatter.id),
+        )
+        .await
+        .unwrap();
         assert_eq!(n, 0);
 
         let refreshed = vault.get(&new.frontmatter.id).await.unwrap();
@@ -477,9 +473,14 @@ mod tests {
             r#"{"verdict":"supersedes","confidence":0.8,"reason":"newer db decision"}"#.into(),
         ]);
 
-        let n = detect_conflicts(&vault, &llm, std::slice::from_ref(&new.frontmatter.id))
-            .await
-            .unwrap();
+        let n = detect_conflicts(
+            &vault,
+            &llm,
+            &CuratorConfig::default(),
+            std::slice::from_ref(&new.frontmatter.id),
+        )
+        .await
+        .unwrap();
         assert_eq!(n, 1);
         assert_eq!(llm.calls(), 2); // initial + one retry, for this single pair
 
@@ -489,6 +490,62 @@ mod tests {
             .relations
             .iter()
             .any(|r| r.rel == "proposes_supersede" && r.to == old.frontmatter.id));
+    }
+
+    #[tokio::test]
+    async fn confidence_below_configured_floor_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let old = vault
+            .create(decision_draft(
+                "Use MongoDB",
+                "We use MongoDB for the primary datastore; PostgreSQL was considered too.",
+                NodeStatus::Confirmed,
+            ))
+            .await
+            .unwrap();
+
+        let cand = decision_draft(
+            "Use PostgreSQL",
+            "switching db to PostgreSQL for better relational guarantees",
+            NodeStatus::Candidate,
+        );
+        let new = vault.create(cand).await.unwrap();
+
+        // 0.9 confidence would clear the default 0.5 floor, but a
+        // dashboard-configured 0.95 floor should reject it.
+        let llm = MockLlm::scripted(vec![
+            r#"{"verdict":"supersedes","confidence":0.9,"reason":"newer db decision"}"#.into(),
+        ]);
+        let cfg = CuratorConfig {
+            supersede_confidence_floor: 0.95,
+            ..CuratorConfig::default()
+        };
+
+        let n = detect_conflicts(
+            &vault,
+            &llm,
+            &cfg,
+            std::slice::from_ref(&new.frontmatter.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+
+        let refreshed = vault.get(&new.frontmatter.id).await.unwrap();
+        assert!(refreshed.frontmatter.relations.is_empty());
+
+        // OLD note untouched either way.
+        assert_eq!(
+            vault
+                .get(&old.frontmatter.id)
+                .await
+                .unwrap()
+                .frontmatter
+                .status,
+            NodeStatus::Confirmed
+        );
     }
 
     #[test]
