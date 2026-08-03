@@ -281,12 +281,12 @@ export function MemoryTab() {
             onKeyDown={(e) => {
               if (e.key === "Enter") submitSearch();
             }}
-            placeholder="Zoek in geheugen…"
+            placeholder="Search memory…"
             className="pl-8"
           />
         </div>
         <Button size="sm" variant="primary" onClick={submitSearch}>
-          Zoek
+          Search
         </Button>
         {ALL_TYPES.map((t) => {
           const active = filter.types?.includes(t) ?? false;
@@ -315,16 +315,16 @@ export function MemoryTab() {
               : "border-bg-border text-ink-muted hover:text-ink")
           }
         >
-          Toon verborgen
+          Show hidden
         </button>
         <div className="flex-1" />
         {(info?.quarantined.length ?? 0) > 0 && (
           <span className="rounded-md border border-state-warn/40 bg-state-warn/10 px-2 py-1 text-xs text-state-warn">
-            {info?.quarantined.length} bestand(en) in quarantaine
+            {info?.quarantined.length} file(s) quarantined
           </span>
         )}
         {graph.truncated && (
-          <span className="text-xs text-ink-dim">graph afgekapt — verfijn je filters</span>
+          <span className="text-xs text-ink-dim">graph truncated — refine your filters</span>
         )}
 
         {/* Saved views */}
@@ -451,7 +451,7 @@ export function MemoryTab() {
                     }}
                     className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-xs text-state-error hover:bg-state-error/10"
                   >
-                    <AlertTriangle size={13} /> Wipe derived memory data
+                    <AlertTriangle size={13} /> Wipe derived data (records request)
                   </button>
                 </div>
                 <p className="mt-2 border-t border-bg-border pt-2 text-[10px] text-ink-dim">
@@ -522,11 +522,11 @@ export function MemoryTab() {
         />
         {loadError && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Card title="Memory niet beschikbaar" className="max-w-md">
+            <Card title="Memory unavailable" className="max-w-md">
               <p className="text-sm text-ink-muted">{loadError}</p>
               <div className="mt-3">
                 <Button variant="primary" onClick={() => void refresh()}>
-                  Opnieuw proberen
+                  Try again
                 </Button>
               </div>
             </Card>
@@ -534,14 +534,14 @@ export function MemoryTab() {
         )}
         {!loading && !loadError && graph.nodes.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Card title="Nog geen memories" className="max-w-md">
+            <Card title="No memories yet" className="max-w-md">
               <EmptyState
-                title="Je vault is leeg"
-                description="Continuum bewaart hier alles wat het over je werk leert — als gewone markdown-bestanden die je zelf mag bewerken."
+                title="Your vault is empty"
+                description="Continuum stores everything it learns about your work here — as plain markdown files you own and can edit."
               />
               <div className="mt-2 flex justify-center gap-2">
                 <Button onClick={() => void continuum.memoryOpenVault()}>
-                  <FolderOpen size={13} /> Open vault-map
+                  <FolderOpen size={13} /> Open vault folder
                 </Button>
                 {info?.legacy_semantic_present && (
                   <Button
@@ -640,8 +640,9 @@ export function MemoryTab() {
         }
       >
         <p className="text-sm text-ink-muted">
-          This clears derived memory data (the raw perception log and distillation state). Vault
-          markdown is never deleted.
+          This records a wipe request for derived data (raw log, episodic, events). The actual wipe
+          ships with the runtime&apos;s <code className="text-xs">memory__wipe_all</code> tool.
+          Vault markdown is never deleted.
         </p>
         <p className="mt-2 text-sm">
           Type <span className="font-mono text-state-error">DELETE</span> to confirm. This action is

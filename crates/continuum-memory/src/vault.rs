@@ -116,6 +116,25 @@ fn slug_of(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Delete `index_path` and its `-wal`/`-shm` journal siblings, if present.
+/// Used only by the corrupt-index fail-safe in [`Vault::open_index_with_failsafe`];
+/// every path touched is a sibling of `index_path` (which always lives
+/// inside `.continuum/`), so this never reaches outside that directory.
+fn remove_index_files(index_path: &Path) -> Result<()> {
+    let mut candidates = vec![index_path.to_path_buf()];
+    for suffix in ["-wal", "-shm"] {
+        let mut name = index_path.as_os_str().to_os_string();
+        name.push(suffix);
+        candidates.push(PathBuf::from(name));
+    }
+    for path in candidates {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| MemoryError::io(&path, e))?;
+        }
+    }
+    Ok(())
+}
+
 impl Vault {
     /// Open (creating if missing) the vault at `dir` with default
     /// [`VaultOptions`].
@@ -142,7 +161,8 @@ impl Vault {
 
         clean_stray_tmp_files(dir)?;
 
-        let index = Index::open(&continuum_dir.join("index.db")).await?;
+        let index_path = continuum_dir.join("index.db");
+        let index = Self::open_index_with_failsafe(&index_path).await?;
         let vault = Vault {
             dir: dir.to_path_buf(),
             index,
@@ -160,6 +180,40 @@ impl Vault {
             "vault opened"
         );
         Ok(vault)
+    }
+
+    /// Open the derived SQLite index at `index_path`, with a corrupt-index
+    /// fail-safe. The index is disposable by design — the vault's markdown
+    /// files are the sole source of truth, and the spec's "index is
+    /// disposable" guarantee only holds if a broken index.db (truncated by
+    /// a crash, corrupted by a full disk, etc.) can never strand a user out
+    /// of their own vault.
+    ///
+    /// If `index_path` already exists on disk and [`Index::open`] fails
+    /// against it, this logs a warning, deletes `index.db` and its
+    /// `-wal`/`-shm` siblings (never anything outside `.continuum/`), and
+    /// retries [`Index::open`] exactly once. The error is only propagated
+    /// if that retry also fails. A missing `index_path` (first-ever open)
+    /// skips the fail-safe entirely — [`Index::open`] failing there is a
+    /// genuine error (e.g. an unwritable `.continuum/` directory), not
+    /// corruption to recover from.
+    async fn open_index_with_failsafe(index_path: &Path) -> Result<Index> {
+        let existed = index_path.exists();
+        match Index::open(index_path).await {
+            Ok(index) => Ok(index),
+            Err(e) if existed => {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "vault",
+                    path = %index_path.display(),
+                    error = %e,
+                    "index open failed against an existing index.db; deleting and rebuilding"
+                );
+                remove_index_files(index_path)?;
+                Index::open(index_path).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The vault's root directory, as given to `open`/`open_with`.
@@ -185,14 +239,22 @@ impl Vault {
     /// file-watcher) rather than the whole vault. Returns the ids of notes
     /// that were successfully (re)indexed; removed/quarantined/skipped
     /// paths are not included.
+    ///
+    /// Uses [`Index::index_files`] to recompute the resolved edge graph
+    /// once for the whole batch rather than once per file — a full
+    /// `recompute_edges` per file in a multi-file batch was wasted work
+    /// (`N-1` of the `N` recomputes get immediately superseded by the
+    /// next file's), and edge resolution scans every `nodes`/`links` row,
+    /// so it scales with vault size, not batch size.
     pub async fn reindex_paths(&self, paths: &[PathBuf]) -> Result<Vec<String>> {
-        let mut changed = Vec::new();
-        for path in paths {
-            if let IndexOutcome::Indexed(id) = self.index.index_file(&self.dir, path).await? {
-                changed.push(id);
-            }
-        }
-        Ok(changed)
+        let outcomes = self.index.index_files(&self.dir, paths).await?;
+        Ok(outcomes
+            .into_iter()
+            .filter_map(|o| match o {
+                IndexOutcome::Indexed(id) => Some(id),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Start a debounced watch of this vault's directory for external

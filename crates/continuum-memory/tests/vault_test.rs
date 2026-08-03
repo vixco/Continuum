@@ -380,3 +380,98 @@ async fn events_append_query_prune() {
     assert_eq!(vault.prune_events(30).await.unwrap(), 1);
     assert_eq!(vault.events(&Default::default()).await.unwrap().len(), 1);
 }
+
+/// Regression test for the corrupt-index fail-safe in `Vault::open_with`:
+/// a note is created via a first vault instance, `.continuum/index.db` is
+/// then overwritten with garbage bytes (simulating a crash mid-write, a
+/// full-disk truncation, or any other on-disk corruption), and reopening
+/// the vault must recover by deleting and rebuilding the index rather than
+/// propagating the open error and stranding the user out of their own
+/// vault — the markdown files are the real source of truth, so the index
+/// must always be disposable.
+#[tokio::test]
+async fn open_recovers_from_corrupt_index_db() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = {
+        let vault = Vault::open(tmp.path()).await.unwrap();
+        let note = vault
+            .create(draft(NodeType::Fact, "Survives Corruption", "body text"))
+            .await
+            .unwrap();
+        note.frontmatter.id
+    };
+
+    let index_path = tmp.path().join(".continuum/index.db");
+    assert!(index_path.exists());
+    std::fs::write(&index_path, b"not a sqlite database, just garbage bytes").unwrap();
+
+    // Reopening must not propagate the corruption.
+    let vault = Vault::open(tmp.path()).await.unwrap();
+    let note = vault.get(&id).await.unwrap();
+    assert_eq!(note.frontmatter.title, "Survives Corruption");
+    // And the note must be reachable through the rebuilt index's search
+    // path too, not just direct id lookup by path.
+    let found = vault.search("Survives Corruption", 10).await.unwrap();
+    assert_eq!(found.len(), 1);
+}
+
+/// Regression test for the `reindex_paths` batch-recompute fix: indexing a
+/// multi-file batch through `reindex_paths` (one `recompute_edges` call
+/// for the whole batch) must yield the exact same resolved edge set as a
+/// full `rebuild_index` over the same files (one `recompute_edges` call
+/// per file during rebuild's own indexing, then a final one) — the batch
+/// path only changes *how many times* edges are recomputed, never the
+/// resulting graph.
+#[tokio::test]
+async fn reindex_paths_batch_matches_full_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+
+    let a_path = tmp.path().join("facts/a.md");
+    let b_path = tmp.path().join("facts/b.md");
+    let c_path = tmp.path().join("facts/c.md");
+    std::fs::write(
+        &a_path,
+        "---\nid: mem_a\ntype: fact\ntitle: A\ncreated: 2026-08-01T10:00:00Z\n---\nlinks to [[B]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &b_path,
+        "---\nid: mem_b\ntype: fact\ntitle: B\ncreated: 2026-08-01T10:00:00Z\n---\nlinks to [[C]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &c_path,
+        "---\nid: mem_c\ntype: fact\ntitle: C\ncreated: 2026-08-01T10:00:00Z\n---\nlinks to [[A]]\n",
+    )
+    .unwrap();
+
+    let mut ids = vault
+        .reindex_paths(&[a_path, b_path, c_path])
+        .await
+        .unwrap();
+    ids.sort();
+    assert_eq!(ids, vec!["mem_a", "mem_b", "mem_c"]);
+
+    let batch_graph = vault
+        .graph(&continuum_memory::GraphFilter::default())
+        .await
+        .unwrap();
+
+    // A full rebuild from the same files on disk must resolve to the same
+    // edges.
+    vault.rebuild_index().await.unwrap();
+    let rebuilt_graph = vault
+        .graph(&continuum_memory::GraphFilter::default())
+        .await
+        .unwrap();
+
+    let edge_key = |e: &continuum_memory::GraphEdge| (e.from.clone(), e.to.clone(), e.rel.clone());
+    let mut batch_edges: Vec<_> = batch_graph.edges.iter().map(edge_key).collect();
+    let mut rebuilt_edges: Vec<_> = rebuilt_graph.edges.iter().map(edge_key).collect();
+    batch_edges.sort();
+    rebuilt_edges.sort();
+
+    assert_eq!(batch_edges.len(), 3);
+    assert_eq!(batch_edges, rebuilt_edges);
+}

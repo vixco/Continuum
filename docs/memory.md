@@ -248,7 +248,7 @@ close Continuum first.
 - **A note I know exists doesn't show up in search or the graph** — check
   the quarantine chip first (a parse failure hides the note everywhere);
   otherwise check the status filter (`rejected`/`superseded`/`archived`
-  notes are hidden by default — toggle "Toon verborgen" in the Memory tab
+  notes are hidden by default — toggle "Show hidden" in the Memory tab
   topbar to see them).
 - **I want to inspect or back up the vault outside Continuum** — it's just a
   folder of `.md` files; copy it, `git init` it, sync it, whatever you'd do

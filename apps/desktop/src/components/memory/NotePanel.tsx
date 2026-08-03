@@ -12,7 +12,7 @@ import ReactMarkdown from "react-markdown";
 
 import { continuum } from "@/lib/tauri";
 import { NODE_COLORS, NODE_TYPE_LABELS } from "@/lib/memoryTheme";
-import { Button, Modal, Slider, TextInput } from "@/components/ui/primitives";
+import { Button, Modal, Select, Slider, TextInput } from "@/components/ui/primitives";
 import type { MemoryFrontmatter, MemoryNodeStatus, MemoryNote, MemoryRelation } from "@/lib/types";
 
 // Same handful-of-elements markdown styling as ChatTab - no
@@ -44,6 +44,13 @@ export const STATUS_DOT_CLASSES: Record<MemoryNodeStatus, string> = {
   superseded: "bg-ink-dim",
   archived: "bg-ink-subtle",
 };
+
+/** Shared `<Select>` options for the status field, in `STATUS_LABELS`
+ * order. Exported so NoteEditorOverlay's status editor always offers the
+ * exact same choices as NotePanel's. */
+export const STATUS_OPTIONS: Array<{ value: MemoryNodeStatus; label: string }> = (
+  Object.entries(STATUS_LABELS) as [MemoryNodeStatus, string][]
+).map(([value, label]) => ({ value, label }));
 
 function clampWidth(w: number, viewportWidth: number): number {
   const max = Math.max(MIN_WIDTH, viewportWidth * MAX_WIDTH_FRACTION);
@@ -198,6 +205,9 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
     e.preventDefault();
   }
 
+  function commitStatus(status: MemoryNodeStatus) {
+    void persist({ status });
+  }
   function commitConfidence() {
     void persist({ confidence });
   }
@@ -299,6 +309,15 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
               <span className="text-ink-muted">{formatDate(note.frontmatter.created)}</span>
               <span>Updated</span>
               <span className="text-ink-muted">{formatDate(note.frontmatter.updated)}</span>
+            </div>
+
+            <div className="mb-4">
+              <Select
+                label="Status"
+                value={note.frontmatter.status}
+                options={STATUS_OPTIONS}
+                onChange={commitStatus}
+              />
             </div>
 
             <div className="mb-4 space-y-3">
