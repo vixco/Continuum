@@ -60,6 +60,10 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   explicit expandable groups without changing the raw buffer or NDJSON export,
   while severity now has accessible text labels plus clear error, warning,
   informational, debug, trace, and fallback styling.
+- **Windows system tray identity**: register one intentional Continuum tray
+  icon instead of overlapping declarative and Rust-owned icons, retain the
+  dashboard and quick-action menu behavior, and use the quiet
+  `Continuum · Idle` tooltip.
 - Provider model catalogs now support refresh-all and a configurable periodic refresh, propagate changes immediately to Chat, and power a unified searchable ChatGPT-style model switcher with provider branding.
 - **Blocking CI gates**: restore the explicit `continuum` → `cairo` Whisper
   wake-word alias that the Kairo rename accidentally made unreachable, update

@@ -8,6 +8,10 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, Emitter, Manager};
 
+const TRAY_ID: &str = "continuum-tray";
+const IDLE_TOOLTIP: &str = "Continuum · Idle";
+
+/// Registers Continuum's single application tray icon and its controls.
 pub fn init(app: &mut App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause", true, None::<&str>)?;
@@ -24,9 +28,16 @@ pub fn init(app: &mut App) -> tauri::Result<()> {
         ],
     )?;
 
-    let _tray = TrayIconBuilder::with_id("continuum-tray")
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .tooltip("Continuum — idle")
+        .show_menu_on_left_click(false)
+        .tooltip(IDLE_TOOLTIP);
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    let _tray = tray
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "pause" => {
@@ -72,5 +83,35 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_identity_is_quiet_and_readable() {
+        assert_eq!(TRAY_ID, "continuum-tray");
+        assert_eq!(IDLE_TOOLTIP, "Continuum · Idle");
+        assert!(!IDLE_TOOLTIP.contains('-'));
+        assert!(!IDLE_TOOLTIP.contains('—'));
+    }
+
+    #[test]
+    fn tauri_config_does_not_register_a_second_tray_icon() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json should contain valid JSON");
+
+        assert_eq!(
+            config
+                .get("productName")
+                .and_then(serde_json::Value::as_str),
+            Some("Continuum")
+        );
+        assert!(
+            config.pointer("/app/trayIcon").is_none(),
+            "the tray must be registered only by tray::init so its actions are attached"
+        );
     }
 }
