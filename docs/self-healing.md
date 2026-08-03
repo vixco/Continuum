@@ -78,6 +78,31 @@ Recovery:
 - If LanceDB writes fail, inspect `~/.continuum-dev/episodic_db`.
 - Raw frames are marked with `memory_distilled_at` only after successful episodic inserts, so restarting does not lose undistilled frames.
 
+## Memory Vault
+
+Component: `memory_vault`
+
+Logs:
+
+- `layer = "memory"`, `component = "vault"` for note read/write/delete and index rebuild events.
+- `layer = "memory"`, `component = "watcher"` for file-watcher batches and watcher startup failures.
+- Structured events at `~/.continuum/logs/memory.log` per house rules.
+
+Health check (`MemoryVaultCheck` in `apps/desktop/src-tauri/src/components.rs`, registered via `register_memory`):
+
+- Talks to `MemoryState` directly (not `state.json`), so it stays meaningful even when the headless `continuum` runtime is offline — the vault has its own lifecycle independent of the runtime.
+- **Healthy**: the vault opens and `Vault::info()` reports zero quarantined files.
+- **Degrading**: the vault opens but one or more files are quarantined (unparsable frontmatter) — reported as `"N note(s) quarantined due to parse errors"`.
+- **Error**: the vault fails to open at all (e.g. the index directory is locked or the disk is unwritable).
+
+Recovery:
+
+- **Quarantined file(s)** (degrading): open the vault folder (Memory tab → **Open vault**, or the probe's own recovery note) and fix the offending note's YAML frontmatter — indentation, a missing required field (`id`/`type`/`title`/`status`/`created`), or an invalid date. The file rejoins the index automatically on the next reindex (the file-watcher picks up the save); no restart needed.
+- **Corrupt or schema-mismatched index** (surfaces as an error on open, or just "things look stale/wrong"): delete `vault/.continuum/index.db` and restart — `Vault::open` always performs a full rebuild from the markdown, so this is non-destructive by design. Equivalently, use the Memory tab's **"…" menu → Rebuild index**, which does the same thing without a restart.
+- **Watcher dead** (live updates stop arriving, but every command still works against the vault directly): restart the dashboard (or the `continuum` runtime, whichever's watcher died) — the watcher bridge is stateless and simply re-opens on the next start; nothing is lost since the vault itself was never touched.
+- The Memory tab's **Open vault folder** and **Rebuild index** actions (in the "…" vault-actions menu, "Open vault" also has its own topbar button) are the user-facing versions of the two recovery steps above and are always available, even when the vault has failed to open — `memory_open_vault` deliberately does not depend on a healthy index (see the comment on `MemoryState::vault_dir` in `memory.rs`).
+- Full data model, config, and quarantine details: `docs/memory.md`.
+
 ## Voice Wake And STT Session
 
 Component: `voice/wake`, `voice/stt`
