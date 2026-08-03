@@ -185,6 +185,18 @@ impl TriageLayer {
         TriageDecision::Ignore
     }
 
+    /// One-shot text completion against the shared local model. Used by the
+    /// curator; calls serialize on `LocalLlm`'s internal context mutex, so
+    /// concurrent callers queue rather than race the same llama.cpp context.
+    pub async fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        let opts = GenerateOpts {
+            temperature: 0.2,
+            max_tokens: Some(max_tokens),
+            ..Default::default()
+        };
+        self.llm.generate(prompt, &opts).await
+    }
+
     /// Log the evaluation result with latency tracking.
     fn log_evaluation(&self, frame: &PerceptionFrame, decision: &TriageDecision, latency_ms: u64) {
         if latency_ms > self.config.latency_warn_ms {
