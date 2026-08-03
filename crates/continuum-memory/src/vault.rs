@@ -552,12 +552,11 @@ impl Vault {
     /// Append a single event to the timeline. If `ts` is `None`, uses the
     /// current UTC time. Timestamps are stored as RFC3339 strings. Events
     /// are append-only and do not require `write_lock`.
-    pub async fn append_event(&self, event: NewEvent) -> Result<Event> {
+    pub async fn append_event(&self, event: NewEvent) -> Result<()> {
         let ts = event.ts.unwrap_or_else(Utc::now).to_rfc3339();
-        let result = sqlx::query_as::<_, (i64,)>(
+        sqlx::query(
             "INSERT INTO events(ts, kind, text, project, node_id, \"ref\")
-             VALUES (?, ?, ?, ?, ?, ?)
-             RETURNING id",
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&ts)
         .bind(&event.kind)
@@ -565,18 +564,10 @@ impl Vault {
         .bind(&event.project)
         .bind(&event.node_id)
         .bind(&event.reference)
-        .fetch_one(self.index.pool())
+        .execute(self.index.pool())
         .await?;
 
-        Ok(Event {
-            id: result.0,
-            ts,
-            kind: event.kind,
-            text: event.text,
-            project: event.project,
-            node_id: event.node_id,
-            reference: event.reference,
-        })
+        Ok(())
     }
 
     /// Query events within an optional time range, ordered ascending by
@@ -634,8 +625,8 @@ impl Vault {
 
     /// Delete events with timestamp older than `now - keep_days` days.
     /// Returns the number of deleted rows. Timestamps are parsed as RFC3339.
-    pub async fn prune_events(&self, keep_days: i64) -> Result<u64> {
-        let cutoff = (Utc::now() - chrono::Duration::days(keep_days)).to_rfc3339();
+    pub async fn prune_events(&self, keep_days: u32) -> Result<u64> {
+        let cutoff = (Utc::now() - chrono::Duration::days(i64::from(keep_days))).to_rfc3339();
         let result = sqlx::query("DELETE FROM events WHERE ts < ?")
             .bind(&cutoff)
             .execute(self.index.pool())
