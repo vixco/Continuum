@@ -168,6 +168,16 @@ fn memory_tools_section(kind: ProviderKind) -> String {
     )
 }
 
+/// Whether an assistant turn that terminated WITHOUT a clean `Done` (error
+/// event, cancel/Stop, tool-round limit, or a stream that just ended) still
+/// deserves a persisted `StoredMessage`: yes when any text streamed OR any
+/// tool call ran. Tool calls can mutate the vault (e.g. `memory_delete`)
+/// before the first text delta, so dropping a text-less turn with tool
+/// activity would erase the only transcript record of a permanent mutation.
+fn should_persist_assistant_turn(acc: &str, tool_calls: &[StoredToolCall]) -> bool {
+    !acc.is_empty() || !tool_calls.is_empty()
+}
+
 /// Lists every conversation, newest-updated first.
 #[tauri::command]
 pub fn chat_list_conversations(
@@ -579,7 +589,11 @@ pub async fn chat_send_message(
                 }
                 ChatEvent::Error { .. } => {
                     finished = true;
-                    if !acc.is_empty() {
+                    // Skip persistence only when NOTHING streamed AND no
+                    // tools ran — an executed tool call may have already
+                    // mutated the vault, so its record must survive the
+                    // error even with empty content.
+                    if should_persist_assistant_turn(&acc, &tool_calls) {
                         let _guard = conv_lock.lock().await;
                         if let Some(mut conv) = store.get(&conversation_id) {
                             conv.messages.push(StoredMessage {
@@ -606,9 +620,11 @@ pub async fn chat_send_message(
                 }
             }
         }
-        if !finished && !acc.is_empty() {
+        if !finished && should_persist_assistant_turn(&acc, &tool_calls) {
             // Stream ended without a Done/Error event (shouldn't happen,
-            // but keep the partial reply rather than silently drop it).
+            // but keep the partial reply — streamed text and/or executed
+            // tool calls — rather than silently drop it. Only a turn with
+            // nothing streamed AND no tools run is skipped.
             let _guard = conv_lock.lock().await;
             if let Some(mut conv) = store.get(&conversation_id) {
                 conv.messages.push(StoredMessage {
@@ -727,6 +743,33 @@ mod tests {
         ] {
             assert!(s.contains(tool), "missing {tool}");
         }
+    }
+
+    /// Regression test for the whole-branch review's Finding I1: a turn
+    /// that executed tools (the vault may already be mutated — e.g. a
+    /// completed `memory_delete`) but streamed NO text before hitting an
+    /// error/cancel must still be persisted, or the tool cards vanish on
+    /// reload while the mutation is permanent.
+    #[test]
+    fn turn_with_tools_but_no_text_is_persisted() {
+        let ran_tool = StoredToolCall {
+            id: "call_1".into(),
+            name: "memory_delete".into(),
+            input: serde_json::json!({"id": "mem_1"}),
+            output: Some(r#"{"deleted":true}"#.into()),
+            is_error: false,
+            duration_ms: 3,
+        };
+        assert!(should_persist_assistant_turn("", &[ran_tool]));
+    }
+
+    #[test]
+    fn turn_with_text_is_persisted_and_empty_turn_is_not() {
+        assert!(should_persist_assistant_turn("partial reply", &[]));
+        assert!(
+            !should_persist_assistant_turn("", &[]),
+            "a turn with nothing streamed and no tools run stays unpersisted"
+        );
     }
 
     /// `chat_send_message` itself takes `tauri::State`/`tauri::AppHandle`
