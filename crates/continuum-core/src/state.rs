@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
+use crate::runtime_publish::CuratorSnapshot;
 use crate::senses::types::PerceptionFrame;
 use crate::triage::TriageDecision;
 
@@ -127,6 +128,13 @@ pub struct MemoryState {
     pub episodic_count: u64,
     pub semantic_count: u64,
     pub last_distill_ts: Option<DateTime<Utc>>,
+    /// Memory-vault curator (Plan B) health, mirrored from the `continuum`
+    /// runtime's `state.json` by `runtime_bridge::tick_once` (Task 11).
+    /// `None` until the dashboard's IPC bridge has read at least one
+    /// snapshot from a running runtime — distinct from a `Some` value with
+    /// `enabled: false`, which means the runtime is reachable but the
+    /// curator itself isn't running (see [`CuratorSnapshot::enabled`]).
+    pub curator: Option<CuratorSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -452,6 +460,20 @@ impl StateHandle {
         self.notify(StateEvent::Memory);
     }
 
+    /// Mirrors the `continuum` runtime's curator status (Task 11), as read
+    /// from `state.json` by `runtime_bridge::tick_once`. Pass `None` only
+    /// when the runtime bridge itself has nothing to report (e.g. an
+    /// `state.json` predating this field); once a snapshot has been read,
+    /// callers should pass `Some` even when the curator is disabled — see
+    /// [`MemoryState::curator`].
+    pub async fn set_curator_snapshot(&self, curator: Option<CuratorSnapshot>) {
+        {
+            let mut s = self.inner.write().await;
+            s.memory.curator = curator;
+        }
+        self.notify(StateEvent::Memory);
+    }
+
     // --- Health ---
 
     pub async fn set_components(&self, components: Vec<ComponentHealth>) {
@@ -633,6 +655,40 @@ mod tests {
             .expect("event arrived in time")
             .expect("event not lost");
         assert!(matches!(got, StateEvent::Voice));
+    }
+
+    #[tokio::test]
+    async fn set_curator_snapshot_updates_memory_and_notifies() {
+        let handle = StateHandle::new();
+        let mut rx = handle.subscribe();
+
+        // Starts unknown.
+        assert!(handle.snapshot().await.memory.curator.is_none());
+
+        handle
+            .set_curator_snapshot(Some(CuratorSnapshot {
+                last_pass_at: Some("2026-04-14T10:05:00Z".to_string()),
+                consecutive_failures: 3,
+                candidates_written_total: 9,
+                pending_count: 2,
+                enabled: true,
+            }))
+            .await;
+
+        let snap = handle.snapshot().await;
+        let curator = snap
+            .memory
+            .curator
+            .expect("curator should be Some after set");
+        assert_eq!(curator.consecutive_failures, 3);
+        assert_eq!(curator.pending_count, 2);
+        assert!(curator.enabled);
+
+        let got = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("event arrived in time")
+            .expect("event not lost");
+        assert!(matches!(got, StateEvent::Memory));
     }
 
     #[tokio::test]

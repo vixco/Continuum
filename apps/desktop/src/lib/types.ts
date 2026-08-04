@@ -66,12 +66,27 @@ export interface VoiceState {
   last_heard_at: string | null;
 }
 
+// Mirrors crates/continuum-core/src/runtime_publish.rs's CuratorSnapshot,
+// forwarded into MemoryState.curator by the dashboard's runtime bridge
+// (apps/desktop/src-tauri/src/runtime_bridge.rs, Task 11).
+export interface CuratorSnapshot {
+  last_pass_at: string | null;
+  consecutive_failures: number;
+  candidates_written_total: number;
+  pending_count: number;
+  enabled: boolean;
+}
+
 export interface MemoryState {
   raw_log_rows: number;
   raw_log_bytes: number;
   episodic_count: number;
   semantic_count: number;
   last_distill_ts: string | null;
+  // `null` until the dashboard's runtime bridge has read a state.json from
+  // a running `continuum` process at least once — distinct from a present
+  // snapshot with `enabled: false` (curator reachable but not running).
+  curator?: CuratorSnapshot | null;
 }
 
 export interface ComponentHealth {
