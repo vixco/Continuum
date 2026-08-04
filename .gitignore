@@ -49,3 +49,6 @@ Desktop.ini
 # Claude Code local session settings
 .claude/
 .superpowers/
+
+# Local working notes (Claude workflow doc)
+workflow.md
