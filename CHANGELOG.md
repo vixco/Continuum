@@ -21,6 +21,42 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Chat memory tools**: the Chat tab's AI can now read and write the memory
+  vault through an explicit, config-gated tool set, instead of chat being
+  fully sandboxed from the runtime. A new `continuum-gateway` tool-calling
+  layer (`ToolDef`, `ToolExecutor`, `McpSpec`, and `ChatEvent::ToolCall`/
+  `ToolResult`) backs internal tool loops in the OpenAI-compatible and
+  Anthropic adapters (a first request that gets a 4xx with tool definitions
+  attached is retried once without tools, so plain chat still works against
+  endpoints that reject `tools`), and lets the Claude CLI adapter attach a
+  `continuum-mcp` server via `--mcp-config` and pass its `tool_use`/
+  `tool_result` traffic straight through as gateway events. On top of that,
+  `apps/desktop/src-tauri/src/chat_tools.rs` exposes four provider-neutral
+  tools — `memory_search`, `memory_get`, `memory_save` (same-title
+  case-insensitive upsert), `memory_delete` — run in-process against the
+  same vault the Memory tab uses for OpenAI-compatible/Anthropic providers;
+  the Claude CLI provider instead gets the `mcp__continuum__memory_vault_*`
+  family (including the new `memory_vault_delete`, see below) plus the
+  existing fact/episodic tools attached over MCP, since the CLI subprocess
+  can't call back into the desktop process directly. A per-turn
+  "## Memory context" section injects up to `memory_context_notes_max`
+  vault notes matching the new user message (confirmed status, sensitivity
+  gated) ahead of any tool call, and every tool invocation is persisted on
+  `StoredMessage.tool_calls` and rendered as a card in the chat UI, live
+  and from history. New `[chat]` keys: `memory_tools_enabled` (default
+  `true`), `memory_tool_max_rounds` (`8`), `memory_context_notes_max` (`6`,
+  `0` disables injection), `include_sensitive_memory` (`false`). Known
+  limitation: the sensitivity gate filters `memory_search` results and
+  injected context, but does not reach the Claude CLI provider's
+  `memory_vault_search`/`memory_vault_get` MCP tools — a follow-up is
+  planned. See `docs/chat.md`'s new "Memory access" section.
+- **`memory_vault_delete` MCP tool**: permanently removes a vault note's
+  markdown file and index entry (unlike `memory_vault_resolve`'s `reject`
+  or the curator's `archive`, which only change `status`). Additive, no
+  existing tool schema changed. Returns `{ deleted, id }`; errors if `id`
+  doesn't exist. Requires session confirmation (`session-approved` in
+  `config/default-permissions.toml`), same tier as the other vault-writing
+  tools. See `docs/mcp-tools.md`.
 - **Memory vault + graph-centric Memory tab (Plan A)**: a new
   `crates/continuum-memory` crate (dependency-light: `sqlx`/SQLite,
   `serde_yaml`, `ulid`, `notify` — no llama/whisper/lancedb) implements an
@@ -210,6 +246,11 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Changed
 
+- **Anthropic chat adapter refusal handling**: a `refusal` stop reason now
+  surfaces as a chat error even when the connection closes before a
+  `message_stop` event arrives, not only when `message_stop` is the event
+  that reports it. Introduced by the Anthropic adapter's tool_use loop
+  refactor; a minor behavior change at the margin, not a new failure mode.
 - **Faster CI/releases**: full native Clippy/tests run on pull requests, while
   `main` reuses the tested code path and performs one production build. Release
   compiler artifacts are cached across version bumps, dependency resolution is
