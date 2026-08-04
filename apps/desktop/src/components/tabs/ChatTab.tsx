@@ -20,7 +20,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Sparkles, Trash2 } from "lucide-react";
+import {
+  Loader2,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 
 import { Button, EmptyState, Kbd } from "@/components/ui/primitives";
 import { isTauri } from "@/lib/tauri";
