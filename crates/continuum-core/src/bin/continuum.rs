@@ -606,6 +606,11 @@ async fn main() -> Result<()> {
                 orchestrator_ready: !orch_config.system_prompt_path.is_empty(),
                 voice_mode: Some("idle".to_string()),
                 partial_transcript: None,
+                voice_volume: Some(config.voice.volume),
+                tts_queue_len: Some(0),
+                ambient_mute_active: Some(false),
+                detected_call_app: None,
+                wake_word_enabled: Some(config.voice.wake_word_enabled),
                 frame_count: 0,
                 monitor_count: 0,
                 capture_event_count: 0,
@@ -630,6 +635,7 @@ async fn main() -> Result<()> {
         // for the rest of `main` below this block.
         let curator_status_for_publisher = curator_status.clone();
         let curator_enabled = config.memory.curator.enabled;
+        let speech_clone = speech.clone();
         continuum_core::runtime_publish::spawn_publisher(
             dev_dir.join("state.json"),
             2,
@@ -645,6 +651,12 @@ async fn main() -> Result<()> {
                 // the opposite order, but there's no reason to hold it a
                 // moment longer than the `.clone()` above needs.
                 drop(guard);
+                if let Some(controller) = speech_clone.as_ref() {
+                    snap.tts_queue_len = Some(controller.pending_count());
+                    if controller.is_speaking() {
+                        snap.voice_mode = Some("speaking".to_string());
+                    }
+                }
                 snap.last_update = chrono::Utc::now().to_rfc3339();
                 snap.curator = Some(build_curator_snapshot(
                     curator_status_for_publisher.as_ref(),
@@ -725,6 +737,10 @@ async fn main() -> Result<()> {
                     s.capture_event_count = world.health.capture_events;
                     s.dropped_capture_event_count = world.health.dropped_capture_events;
                     s.last_capture_at = world.health.last_capture_at;
+                    let ambient_active = config.voice.ambient_mute_enabled && frame.context.in_call;
+                    s.ambient_mute_active = Some(ambient_active);
+                    s.detected_call_app = ambient_active
+                        .then(|| frame.context.foreground_process_name.clone());
                 }
 
                 // Task 10: publish the latest frame for the daily
@@ -844,6 +860,17 @@ async fn main() -> Result<()> {
                     speech.as_ref(),
                     &feedback,
                 );
+                if !orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
+                    if let Ok(mut s) = runtime_state.lock() {
+                        if let Some(session) = voice_session.as_ref() {
+                            s.voice_mode = Some("listening".to_string());
+                            s.partial_transcript = Some(session.text().to_string());
+                        } else {
+                            s.voice_mode = Some("idle".to_string());
+                            s.partial_transcript = Some(String::new());
+                        }
+                    }
+                }
 
                 // --force-wake: override triage on the first frame to test the pipeline.
                 let effective_decision = if force_wake && frame_count == 1 {

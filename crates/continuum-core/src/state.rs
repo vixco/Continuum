@@ -241,11 +241,20 @@ pub struct StateHandle {
 
 impl StateHandle {
     pub fn new() -> Self {
+        Self::new_with_voice_config(0.0, false)
+    }
+
+    /// Create state with the persisted voice settings already represented.
+    /// Live runtime telemetry can overwrite these values once the separate
+    /// runtime process publishes its first snapshot.
+    pub fn new_with_voice_config(volume: f32, wake_word_enabled: bool) -> Self {
         let (tx, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let started_at = Utc::now();
         let mut initial = ContinuumState::default();
         initial.system.started_at = Some(started_at);
         initial.system.version = env!("CARGO_PKG_VERSION").to_string();
+        initial.voice.volume = volume.clamp(0.0, 1.0);
+        initial.voice.wake_word_enabled = wake_word_enabled;
         Self {
             inner: Arc::new(RwLock::new(initial)),
             events: tx,
@@ -449,6 +458,35 @@ impl StateHandle {
             s.voice.wake_word_enabled = wake_word_enabled;
             s.voice.ambient_mute_active = ambient_mute_active;
             s.voice.detected_call_app = detected_call_app;
+        }
+        self.notify(StateEvent::Voice);
+    }
+
+    /// Apply the optional voice telemetry fields published by the separate
+    /// runtime process without resetting fields omitted by older snapshots.
+    pub async fn apply_voice_runtime_snapshot(
+        &self,
+        volume: Option<f32>,
+        wake_word_enabled: Option<bool>,
+        tts_queue_len: Option<usize>,
+        ambient_mute_active: Option<bool>,
+        detected_call_app: Option<String>,
+    ) {
+        {
+            let mut s = self.inner.write().await;
+            if let Some(volume) = volume {
+                s.voice.volume = volume.clamp(0.0, 1.0);
+            }
+            if let Some(enabled) = wake_word_enabled {
+                s.voice.wake_word_enabled = enabled;
+            }
+            if let Some(len) = tts_queue_len {
+                s.voice.tts_queue_len = len;
+            }
+            if let Some(active) = ambient_mute_active {
+                s.voice.ambient_mute_active = active;
+                s.voice.detected_call_app = if active { detected_call_app } else { None };
+            }
         }
         self.notify(StateEvent::Voice);
     }
@@ -710,6 +748,44 @@ mod tests {
             .expect("event arrived in time")
             .expect("event not lost");
         assert!(matches!(got, StateEvent::Memory));
+    }
+
+    #[tokio::test]
+    async fn voice_runtime_snapshot_updates_live_fields_without_resetting_mode() {
+        let handle = StateHandle::new_with_voice_config(0.8, true);
+        handle.set_voice_mode(VoiceMode::Listening).await;
+        handle
+            .apply_voice_runtime_snapshot(
+                Some(0.65),
+                Some(false),
+                Some(3),
+                Some(true),
+                Some("Discord.exe".into()),
+            )
+            .await;
+
+        let snap = handle.snapshot().await;
+        assert_eq!(snap.voice.mode, VoiceMode::Listening);
+        assert_eq!(snap.voice.volume, 0.65);
+        assert_eq!(snap.voice.tts_queue_len, 3);
+        assert!(snap.voice.ambient_mute_active);
+        assert_eq!(snap.voice.detected_call_app.as_deref(), Some("Discord.exe"));
+        assert!(!snap.voice.wake_word_enabled);
+    }
+
+    #[tokio::test]
+    async fn inactive_ambient_mute_clears_stale_call_app() {
+        let handle = StateHandle::new();
+        handle
+            .apply_voice_runtime_snapshot(None, None, None, Some(true), Some("Zoom.exe".into()))
+            .await;
+        handle
+            .apply_voice_runtime_snapshot(None, None, None, Some(false), None)
+            .await;
+
+        let snap = handle.snapshot().await;
+        assert!(!snap.voice.ambient_mute_active);
+        assert_eq!(snap.voice.detected_call_app, None);
     }
 
     #[tokio::test]

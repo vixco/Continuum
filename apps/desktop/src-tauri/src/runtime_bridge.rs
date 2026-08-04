@@ -159,6 +159,49 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
             snap.last_capture_at,
         )
         .await;
+    state
+        .apply_voice_runtime_snapshot(
+            snap.voice_volume,
+            snap.wake_word_enabled,
+            snap.tts_queue_len,
+            snap.ambient_mute_active,
+            snap.detected_call_app.clone(),
+        )
+        .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn applies_live_voice_telemetry_from_runtime_snapshot() {
+        let state = StateHandle::new();
+        let snapshot = RuntimeSnapshot {
+            voice_mode: Some("speaking".into()),
+            partial_transcript: Some("hello".into()),
+            voice_volume: Some(0.72),
+            tts_queue_len: Some(2),
+            ambient_mute_active: Some(true),
+            detected_call_app: Some("Teams.exe".into()),
+            wake_word_enabled: Some(true),
+            ..RuntimeSnapshot::default()
+        };
+
+        apply_snapshot(&snapshot, &state).await;
+
+        let applied = state.snapshot().await;
+        assert_eq!(applied.voice.mode, VoiceMode::Speaking);
+        assert_eq!(applied.voice.partial_transcript, "hello");
+        assert_eq!(applied.voice.volume, 0.72);
+        assert_eq!(applied.voice.tts_queue_len, 2);
+        assert!(applied.voice.ambient_mute_active);
+        assert_eq!(
+            applied.voice.detected_call_app.as_deref(),
+            Some("Teams.exe")
+        );
+        assert!(applied.voice.wake_word_enabled);
+    }
 }
 
 /// Snapshot of the named-pipe health. Surfaced by the `pipe_health`
