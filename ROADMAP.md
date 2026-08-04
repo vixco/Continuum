@@ -75,6 +75,23 @@ Deze verdeling is het startpunt. Wissel taken als ervaring of beschikbaarheid da
 
 **Resultaat:** Continuum onthoudt projecten en beslissingen betrouwbaar over meerdere dagen.
 
+> **Vroeg geleverde plak (2026-08-03/04):** de memory-vault (markdown
+> notes + afgeleide SQLite-index, `crates/continuum-memory`) en de
+> curator-pipeline (achtergrondextractie, conflict/supersede-detectie,
+> sessiesamenvattingen, dagelijkse hygiëne + wipe-afhandeling,
+> `crates/continuum-core/src/curator/`) zijn al gebouwd en liggen live
+> achter de Memory-tab en vijf nieuwe `memory_vault_*` MCP-tools — zie
+> `docs/memory.md` ("The curator") en de bijgewerkte "Memory system"-sectie
+> van `ARCHITECTURE.md`. Dit dekt het grootste deel van typed-entity-opslag,
+> session summarization/memory candidates, confidence/conflict detection en
+> de review-UX hieronder, maar **niet** met een eigen dedicated
+> precision/retentie-testsuite (alleen unit/integratietests per curator-fase)
+> en niet met echte vector/semantische zoekopdrachten over de vault (de
+> vault-zoekfunctie is FTS5-tekstzoeken, geen embeddings — dat blijft open).
+> De onderstaande checkboxen zijn bewust niet aangevinkt: dit dekt de
+> functionaliteit, niet per se het "op de testserver bewezen"-niveau dat de
+> statuslegenda hierboven voor `[x]` eist.
+
 - [ ] **Arda:** typed entities voor projects, sessions, tasks, decisions en blockers opslaan
 - [ ] **Arda:** SQLite event store + migraties + back-up/restore bouwen
 - [ ] **Toshan:** session summarization en memory candidates bouwen

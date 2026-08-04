@@ -61,6 +61,86 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   wrappers are removed outright — pre-alpha, no external consumers, no
   compat shim. See `docs/memory.md` (new) and the updated "Memory system"
   section of `ARCHITECTURE.md`.
+- **Memory curator pipeline (Plan B)**: the background process that turns
+  what Continuum observes into vault candidates, catches contradictions, and
+  keeps the vault tidy — the part of the memory vault (above) that was
+  configurable but dormant now actually runs. New
+  `crates/continuum-core/src/curator/` module, spawned at boot whenever a
+  triage LLM is loaded (skipped with a log line otherwise): an **extraction
+  pass** (`prompts/curator-extract.md`) every `interval_minutes` reads new
+  vault events and asks the triage LLM for candidate notes, deduplicates
+  them (normalized title + FTS check against existing/rejected notes), and
+  routes each by confidence — auto-confirmed above `auto_confirm_threshold`
+  from a `user_statement` source, written as a review candidate in between,
+  discarded below `discard_floor`; a **conflict/supersede pass**
+  (`prompts/curator-conflict.md`) checks each newly-written note against up
+  to 2 same-type/same-project confirmed notes and, above
+  `supersede_confidence_floor` (new config key, default 0.5), attaches a
+  `proposes_supersede` relation without ever auto-flipping the old note's
+  status; a **session tracker** (`crates/continuum-core/src/curator/session.rs`,
+  its own idle/process-change boundary detector, not fed by triage)
+  compresses a finished work session into a `Session` note via
+  `prompts/curator-session.md` (or writes nothing on a literal `SKIP` reply);
+  a **daily hygiene tick** prunes expired nodes/old events and drains any
+  pending derived-data wipe request, once at boot (even with the curator
+  disabled) and once per local calendar day thereafter; and a **daily
+  maintenance-wake ticker** (new `[memory.curator] maintenance_wake_hour`
+  config key, `i32`, default local hour 4, negative disables it) — a
+  purpose-built ticker, since no scheduler existed to hook into — wakes the
+  orchestrator specifically to drain pending decisions on a day nothing else
+  would have, sharing an atomic busy-claim with the regular triage wake path
+  so the two can never double-fire. Every LLM-parse failure retries once
+  before the pass/pair is skipped; a window that fails outright 3 times
+  running is abandoned (boundary advances, logged, dashboard's lifetime
+  failure counter keeps climbing) rather than wedging the curator forever.
+- **MCP vault tools + fact-tool redirect + real wipe (Plan B)**: five new
+  `continuum-mcp` tools — `memory_vault_search`, `memory_vault_get`,
+  `memory_vault_save` (create-or-update-by-title), `memory_vault_resolve`
+  (confirm/reject/supersede a candidate), and `memory_wipe_all` (queues a
+  derived-data wipe; requires the literal confirmation string `"WIPE"`).
+  `memory_set_fact` now writes exclusively into the vault (a `type: fact`
+  note, matched/updated by title) instead of the legacy `semantic.sqlite`
+  store; `memory_get_fact`/`memory_list_facts` read the vault first and fall
+  back to the legacy store on any vault miss — no match, or the vault itself
+  unavailable. New `CONTINUUM_VAULT_DIR` env var lets a non-default
+  `vault_dir` reach the MCP server, which doesn't load the full runtime
+  config (documented as a known limitation in `docs/mcp-tools.md`). See
+  `docs/mcp-tools.md`'s new "Vault memory" section.
+- **Wake-context vault retrieval + pending-decisions block (Plan B)**: every
+  orchestrator wake now injects a `## Long-term memory (vault)` section
+  (confirmed notes FTS-matched to the trigger frame, up to
+  `wake_vault_notes_max`) and a `## Pending memory decisions` section
+  (candidate notes older than 30 minutes, oldest-first, up to
+  `claude_batch`) into the wake message, both sensitivity-gated (excludes
+  `sensitivity: sensitive` notes unless `include_sensitive_in_context =
+  true`) and both degrading to empty on any internal failure rather than
+  failing the wake. Confirmed/pending notes' `id`s are marked
+  `touch_last_used` on injection.
+- **Curator status on the dashboard (Plan B)**: the runtime's `state.json`
+  snapshot gains a `curator` field (last pass time, consecutive failures,
+  lifetime candidates written, pending count, enabled); the Home tab renders
+  it as a status row — healthy, degrading at 3+ consecutive failures, or
+  "Curator: off" when disabled or not yet heard from. No dedicated
+  health-probe/repair-restart target exists yet for the curator — documented
+  as a known gap in `docs/self-healing.md`; recovery today is a full
+  `continuum` runtime restart.
+- **Vault index hardening (Plan B foundation)**: `crates/continuum-memory`'s
+  index writes switched from deferred to `BEGIN IMMEDIATE` transactions
+  (avoids a class of SQLite write-lock races), gained a commit-failure
+  rollback path (a failed `COMMIT` no longer leaks an open transaction into
+  the connection pool), a no-op skip for unchanged files (mtime + a hash of
+  the raw frontmatter+body, so a status-only edit still counts as a change)
+  that also covers previously-quarantined files, an atomic two-phase
+  `rebuild()` (full in-memory scan, then one transaction — a
+  concurrent reader never observes a half-rebuilt index), and
+  case-insensitive `.md` extension matching to match the file watcher.
+- **Runtime vault boot + distiller feed (Plan B foundation)**: the headless
+  `continuum` runtime now opens the memory vault at boot (same directory the
+  dashboard uses) and runs a watcher-drain task so externally-changed files
+  reindex live; the existing raw-log→episodic memory distiller additionally
+  appends a `kind: "distilled"` event into the vault's event timeline for
+  every frame it distills, giving the curator's extraction pass something to
+  read from process start.
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
   `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
   Claude Code CLI — plus a static provider catalog covering ~18 presets such
@@ -110,6 +190,18 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **Wake-word test fixtures + a stray clippy lint (found during Plan B)**:
+  four `voice::wake` tests were asserting against the pre-rename "Kairo"
+  wake word's K→C whisper-homophone behavior (`"hey cairo"`) while being fed
+  the post-rename `"hey continuum"` keyword — `"continuum"` has no `k` for
+  the substitution to act on, so the asserted variants could never be
+  produced by the real code. Fixtures restored to use a keyword that
+  actually contains a `k`, with recomputed expected outputs; the module's
+  doc comments' stale "Continuum mistranscribes to Cairo" claim corrected
+  back to "Kairo mistranscribes to Cairo". Production wake-detection code
+  was already correct and needed no changes. Also fixed one pre-existing
+  `clippy::field_reassign_with_default` in `senses/audio/full.rs`'s whisper
+  init (struct-literal instead of default-then-mutate).
 - **CI format gate**: 9 dashboard files that `pnpm format` (Prettier `--check`)
   flagged in the `build-desktop` job are reformatted; `prettier --write` was
   applied so `pnpm format` now passes.

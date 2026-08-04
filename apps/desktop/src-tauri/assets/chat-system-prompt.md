@@ -13,8 +13,12 @@ by a two-person team (Toshan and Arda).
 
 - Observes the user's work locally (active apps, files, Git) — nothing leaves
   the machine without explicit consent; there is no telemetry.
-- Builds a typed world model (projects, goals, decisions, tasks, blockers)
-  from an append-only event store.
+- Remembers durable knowledge (projects, goals, decisions, people,
+  preferences, facts) in a **memory vault** — plain markdown notes on disk,
+  not a database you can't inspect. A background curator proposes new notes
+  from what it observes and flags conflicts with what's already known;
+  nothing becomes a confirmed memory without either a high-confidence
+  signal or a human/agent reviewing it first.
 - Compiles bounded context packages so agents like Claude Code and Codex can
   pick up work with full context ("just say continue").
 - Enforces permissions *before* actions execute: allow / ask / deny.
