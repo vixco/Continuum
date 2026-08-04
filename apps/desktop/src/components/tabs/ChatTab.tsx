@@ -20,7 +20,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { Loader2, MessageSquare, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Sparkles, Trash2 } from "lucide-react";
 
 import { Button, EmptyState, Kbd } from "@/components/ui/primitives";
 import { isTauri } from "@/lib/tauri";
@@ -83,6 +83,10 @@ function ChatWorkspace() {
   const retry = useChatStore((s) => s.retry);
   const setConversationModel = useChatStore((s) => s.setConversationModel);
 
+  // Conversation list is collapsed by default so the chat pane gets the
+  // full width. The user pops it open to switch/start conversations.
+  const [conversationsOpen, setConversationsOpen] = useState(false);
+
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
@@ -143,6 +147,8 @@ function ChatWorkspace() {
         onSelect={selectConversation}
         onDelete={deleteConversation}
         onNew={newConversation}
+        collapsed={!conversationsOpen}
+        onToggle={() => setConversationsOpen((v) => !v)}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-bg">
         {activeConv ? (
@@ -214,6 +220,8 @@ function ConversationList({
   onSelect,
   onDelete,
   onNew,
+  collapsed,
+  onToggle,
 }: {
   conversations: ReturnType<typeof useChatStore.getState>["conversations"];
   conversationsLoaded: boolean;
@@ -222,8 +230,39 @@ function ConversationList({
   onSelect: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onNew: () => Promise<void>;
+  collapsed: boolean;
+  onToggle: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  // Collapsed: a thin rail with just a toggle to expand and a new-chat
+  // button. The chat pane gets the full remaining width.
+  if (collapsed) {
+    return (
+      <aside className="flex w-12 shrink-0 flex-col items-center gap-1.5 border-r border-bg-border bg-bg-surface/30 py-3">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label="Show conversations"
+          title="Show conversations"
+          className="press flex h-9 w-9 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-bg-elevated hover:text-ink"
+        >
+          <PanelLeftOpen size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={() => void onNew()}
+          disabled={providers.length === 0}
+          aria-label="New chat"
+          title="New chat"
+          className="press flex h-9 w-9 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-bg-elevated hover:text-ink disabled:pointer-events-none disabled:opacity-40"
+        >
+          <Plus size={16} />
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-bg-border bg-bg-surface/30">
       <div className="flex items-center gap-2 p-3">
@@ -236,6 +275,15 @@ function ConversationList({
         >
           <Plus size={12} /> New chat
         </Button>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label="Hide conversations"
+          title="Hide conversations"
+          className="press flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-bg-elevated hover:text-ink"
+        >
+          <PanelLeftClose size={15} />
+        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {providers.length === 0 ? (
@@ -318,7 +366,7 @@ function ChatHeader({
   // mid-conversation is a common pattern; the new tab just doesn't put
   // a title in the header anymore (the active title is in the sidebar).
   return (
-    <header className="flex items-center justify-between gap-3 border-b border-bg-border px-4 py-2.5">
+    <header className="flex items-center justify-between gap-3 px-4 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-dim">
           <Sparkles size={10} className="text-amber-400/80" />
@@ -351,7 +399,7 @@ function AmbientFooter({
   // knows whether the model is thinking or idle. Kept extremely small.
   const state = isStreaming ? "streaming" : sendingActive ? "sending" : "idle";
   return (
-    <div className="flex items-center justify-between border-t border-bg-border/60 bg-bg-surface/30 px-4 py-1.5 text-[10px] text-ink-dim">
+    <div className="flex items-center justify-between px-4 py-1.5 text-[10px] text-ink-dim">
       <div className="flex items-center gap-2 font-mono tabular-nums">
         <span
           className={clsx(

@@ -959,6 +959,16 @@ kbd,
   margin-inline: auto;
   animation: hallmark-tab-crossfade var(--dur-short) var(--ease-out);
 }
+/* Chat tab fills the whole main area edge-to-edge: no page padding,
+   no centered max-width column. The chat has its own internal layout
+   (conversation sidebar + message list + composer). */
+.main-scroll.is-flush {
+  padding: 0;
+}
+.main-scroll.is-flush > * {
+  max-width: none;
+  margin-inline: 0;
+}
 
 @keyframes hallmark-tab-crossfade {
   from {
