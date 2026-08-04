@@ -31,7 +31,7 @@ use continuum_core::memory::distill::run_memory_distiller;
 use continuum_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use continuum_core::memory::raw_log::RawLog;
 use continuum_core::memory::retrieval::{
-    infer_project_hint, retrieve_context, retrieve_vault_context,
+    filter_pending, infer_project_hint, retrieve_context, retrieve_vault_context,
 };
 use continuum_core::memory::semantic::SemanticStore;
 use continuum_core::orchestrator::spawn::{
@@ -1437,11 +1437,17 @@ fn spawn_maintenance_wake_ticker(
                     continue;
                 }
             };
+            // I4 fix: gate on the same filtered view `retrieve_vault_context`
+            // uses for the wake message itself (age + sensitivity), not the
+            // raw unfiltered list — otherwise a vault whose only pending
+            // items are too-fresh or sensitivity-excluded could fire a
+            // no-op wake (nothing to show) every single day, forever.
+            let pending = filter_pending(pending, &curator_cfg, chrono::Utc::now());
             if pending.is_empty() {
                 tracing::debug!(
                     layer = "memory",
                     component = "maintenance_wake",
-                    "skip — no pending memory decisions"
+                    "skip — no pending memory decisions after age/sensitivity filtering"
                 );
                 continue;
             }
