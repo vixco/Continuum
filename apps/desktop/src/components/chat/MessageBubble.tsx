@@ -71,7 +71,7 @@ function AssistantBubble({
   const isError = message.status === "error";
   return (
     <div className="flex animate-[msg-in_180ms_ease-out] justify-start">
-      <div className="max-w-[88%] space-y-2">
+      <div className="w-full max-w-full space-y-2">
         <div className="flex items-center gap-2 text-[10px] text-ink-dim">
           <Bot size={11} strokeWidth={1.8} className="text-amber-400/80" />
           <span className="font-medium text-ink-muted">Continuum</span>

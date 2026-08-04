@@ -53,7 +53,7 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
       followOutput={isStreaming ? "smooth" : false}
       initialTopMostItemIndex={Math.max(0, data.length - 1)}
       itemContent={(index, message) => (
-        <div className="px-1 pb-5">
+        <div className="mx-auto w-full max-w-3xl px-4 pb-5">
           <MessageBubble
             message={message}
             isStreaming={Boolean(streamingMessage) && index === data.length - 1}
