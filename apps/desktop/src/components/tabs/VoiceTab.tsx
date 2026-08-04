@@ -39,28 +39,6 @@ export function VoiceTab() {
         )}
       </Card>
 
-      <Card title="Wake word">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <Toggle
-            checked={config.voice.wake_word_enabled}
-            onChange={async (v) => {
-              const cfg = await continuum.updateVoiceFlag("wake_word_enabled", v);
-              setConfig(cfg);
-            }}
-            label="Wake word enabled"
-          />
-          {/* `wake_sensitivity` is currently not consumed by the wake-word
-              detector (transcript-based phonetic match has no threshold).
-              Hidden until that field is actually wired into the matcher. */}
-        </div>
-        <div className="mt-4 text-sm text-ink-muted">
-          Hotkey: <Kbd>{config.voice.hotkey || "unset"}</Kbd>
-          <span className="ml-2 text-xs text-ink-dim">
-            (rebind via config.toml - UI rebind coming later)
-          </span>
-        </div>
-      </Card>
-
       <Card title="Text to speech">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Select
@@ -110,6 +88,14 @@ export function VoiceTab() {
       <Card title="Behaviour">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <Toggle
+            checked={config.voice.wake_word_enabled}
+            onChange={async (v) => {
+              const cfg = await continuum.updateVoiceFlag("wake_word_enabled", v);
+              setConfig(cfg);
+            }}
+            label="Wake word enabled"
+          />
+          <Toggle
             checked={config.voice.barge_in_enabled}
             onChange={async (v) => {
               const cfg = await continuum.updateVoiceFlag("barge_in_enabled", v);
@@ -141,6 +127,10 @@ export function VoiceTab() {
             }}
             label="Auto-switch voice by detected language"
           />
+        </div>
+        <div className="mt-3 text-xs text-ink-dim">
+          Hotkey: <Kbd>{config.voice.hotkey || "unset"}</Kbd> · rebind via config.toml (UI rebind
+          coming later)
         </div>
       </Card>
     </div>
