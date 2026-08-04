@@ -677,6 +677,20 @@ export interface TokenUsage {
 
 export type ChatRole = "user" | "assistant";
 
+/** One tool invocation persisted on an assistant chat message. Serde may
+ *  omit defaults: missing `is_error` means false, missing `duration_ms`
+ *  means 0 (unknown). */
+export interface StoredToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+  /** Raw result payload; null/undefined when the turn ended without a result. */
+  output?: string | null;
+  is_error?: boolean;
+  /** Milliseconds; 0 means unknown (hidden in the UI). */
+  duration_ms?: number;
+}
+
 export interface StoredMessage {
   role: ChatRole;
   content: string;
@@ -685,6 +699,8 @@ export interface StoredMessage {
   duration_ms: number | null;
   usage: TokenUsage | null;
   aborted: boolean;
+  /** Tool calls made during this assistant turn, in call order. */
+  tool_calls?: StoredToolCall[];
 }
 
 export interface Conversation {
@@ -708,6 +724,8 @@ export interface ConversationSummary {
 
 export type ChatStreamEvent =
   | { type: "delta"; text: string }
+  | { type: "tool_call"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; id: string; output: string; is_error: boolean; duration_ms: number }
   | { type: "done"; usage: TokenUsage; stop_reason: string | null }
   | { type: "error"; message: string; retryable: boolean };
 

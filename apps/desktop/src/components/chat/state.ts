@@ -1,10 +1,10 @@
 // Chat state slice + bridge to the persisted store + the streaming
 // `continuum:chat` event. The state slice is *not* persisted — it's a
 // local mirror of: (a) the on-disk conversation list (`conversations`),
-// (b) per-conversation in-flight streaming buffers, and (c) the chat
-// composer's transient UI state (active skills, slash-menu open, voice
-// listening). The store is the only thing that talks to Tauri; the
-// components subscribe via thin selectors.
+// (b) per-conversation in-flight streaming buffers + tool invocations,
+// and (c) the chat composer's transient UI state (active skills,
+// slash-menu open, voice listening). The store is the only thing that
+// talks to Tauri; the components subscribe via thin selectors.
 
 "use client";
 
@@ -30,6 +30,7 @@ import type {
   ToolInvocation,
   ToolStatus,
 } from "./types";
+import { applyToolCall, applyToolResult, storedMessageParts } from "./toolInvocations";
 
 interface ChatState {
   // --- catalog ---
@@ -45,6 +46,11 @@ interface ChatState {
   activeConv: Conversation | null;
   /** Map of conversationId -> assistant message currently streaming. */
   streamBuffers: Record<string, string>;
+  /** Map of conversationId -> tool invocations of the in-flight assistant
+   *  turn, in arrival order. Same lifecycle as `streamBuffers`: cleared on
+   *  done/error, at which point the persisted conversation (which carries
+   *  `tool_calls`) takes over. */
+  streamToolCalls: Record<string, ToolInvocation[]>;
   /** Map of conversationId -> per-conversation UI error. */
   errors: Record<string, string>;
   globalError: string | null;
@@ -107,13 +113,14 @@ function partsToText(parts: ContentPart[]): string {
 }
 
 /** Convert a persisted StoredMessage (lib/types) into a ChatMessage (chat
- *  types) by wrapping its content in a single text part. */
+ *  types): persisted tool calls become leading tool parts, followed by the
+ *  text part. */
 function fromStored(stored: StoredMessage, conversationId: string): ChatMessage {
   const role: Role = stored.role;
   return {
     id: `stored_${stored.ts}_${Math.random().toString(36).slice(2, 6)}`,
     role,
-    parts: [{ kind: "text", text: stored.content }],
+    parts: storedMessageParts(stored),
     text: stored.content,
     model: stored.model,
     durationMs: stored.duration_ms,
@@ -136,6 +143,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeId: null,
   activeConv: null,
   streamBuffers: {},
+  streamToolCalls: {},
   errors: {},
   globalError: null,
   retryInfo: null,
@@ -192,12 +200,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }));
           return;
         }
-        // done / error: clear the buffer, reload persisted state, mark finished.
+        if (ev.type === "tool_call") {
+          // Seed the stream buffer too so the streaming tail (and its tool
+          // cards) renders even before the first text delta arrives.
+          set((s) => ({
+            streamBuffers: { ...s.streamBuffers, [id]: s.streamBuffers[id] ?? "" },
+            streamToolCalls: {
+              ...s.streamToolCalls,
+              [id]: applyToolCall(s.streamToolCalls[id] ?? [], ev),
+            },
+          }));
+          return;
+        }
+        if (ev.type === "tool_result") {
+          set((s) => ({
+            streamBuffers: { ...s.streamBuffers, [id]: s.streamBuffers[id] ?? "" },
+            streamToolCalls: {
+              ...s.streamToolCalls,
+              [id]: applyToolResult(s.streamToolCalls[id] ?? [], ev),
+            },
+          }));
+          return;
+        }
+        // done / error: clear the buffer and in-flight tool list, reload
+        // persisted state (which carries the finished tool_calls), mark
+        // finished. Unfinished invocations surface as "aborted" via the
+        // persisted mapping.
         STREAM_FINISHED.add(id);
         set((s) => {
           const next = { ...s.streamBuffers };
           delete next[id];
-          return { streamBuffers: next };
+          const nextTools = { ...s.streamToolCalls };
+          delete nextTools[id];
+          return { streamBuffers: next, streamToolCalls: nextTools };
         });
         if (activeIdRef.current === id) {
           void continuum.chatGetConversation(id).then((conv) => {
@@ -266,11 +301,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const next = { ...s.streamBuffers };
       delete next[id];
+      const nextTools = { ...s.streamToolCalls };
+      delete nextTools[id];
       const nextErr = { ...s.errors };
       delete nextErr[id];
       return {
         conversations: s.conversations.filter((c) => c.id !== id),
         streamBuffers: next,
+        streamToolCalls: nextTools,
         errors: nextErr,
         activeId: s.activeId === id ? null : s.activeId,
         activeConv: s.activeId === id ? null : s.activeConv,
@@ -445,6 +483,13 @@ export const selectIsStreaming = (s: ChatState): boolean => {
 
 export const selectActiveBuffer = (s: ChatState): string =>
   s.activeId ? (s.streamBuffers[s.activeId] ?? "") : "";
+
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+
+/** Stable-reference selector: in-flight tool invocations of the active
+ *  conversation (empty while nothing is streaming). */
+export const selectActiveToolCalls = (s: ChatState): ToolInvocation[] =>
+  s.activeId ? (s.streamToolCalls[s.activeId] ?? EMPTY_TOOL_CALLS) : EMPTY_TOOL_CALLS;
 
 export { fromStored, genId, partsToText };
 export type { ToolInvocation, ToolStatus };
