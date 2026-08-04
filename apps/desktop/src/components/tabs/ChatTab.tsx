@@ -20,15 +20,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import {
-  Loader2,
-  MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Plus,
-  Sparkles,
-  Trash2,
-} from "lucide-react";
+import { Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from "lucide-react";
 
 import { Button, EmptyState, Kbd } from "@/components/ui/primitives";
 import { isTauri } from "@/lib/tauri";
@@ -375,12 +367,8 @@ function ChatHeader({
   // a title in the header anymore (the active title is in the sidebar).
   return (
     <header className="flex items-center justify-between gap-3 px-4 py-2.5">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-dim">
-          <Sparkles size={10} className="text-amber-400/80" />
-          <span>Conversation</span>
-        </div>
-        <div className="truncate text-[13px] font-medium text-ink">{activeConv.title}</div>
+      <div className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">
+        {activeConv.title}
       </div>
       <ModelSwitcher
         providers={providers}
