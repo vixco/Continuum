@@ -282,7 +282,7 @@ export function Shell() {
         <Sidebar active={tab} onSelect={setTab} />
         <main className="main">
           <UpdateBanner state={updates.state} onInstall={updates.installUpdate} />
-          <div className={clsx("main-scroll", tab === "chat" && "is-flush")}>
+          <div className={clsx("main-scroll", (tab === "chat" || tab === "memory") && "is-flush")}>
             {tab === "home" && <HomeTab />}
             {tab === "chat" && <ChatTab />}
             {tab === "voice" && <VoiceTab />}
