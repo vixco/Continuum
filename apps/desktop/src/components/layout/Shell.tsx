@@ -246,6 +246,18 @@ export function Shell() {
     }
   }, []);
 
+  // Cross-component navigation without prop-drilling the tab setter: any
+  // component can dispatch `continuum:navigate` with a tab id as detail
+  // (e.g. the Home tab's Memories stat card jumping to the Memory tab).
+  useEffect(() => {
+    const onNavigate = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (typeof detail === "string") navigate(detail);
+    };
+    window.addEventListener("continuum:navigate", onNavigate);
+    return () => window.removeEventListener("continuum:navigate", onNavigate);
+  }, [navigate]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {

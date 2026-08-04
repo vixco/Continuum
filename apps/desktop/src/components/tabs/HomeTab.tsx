@@ -24,6 +24,28 @@ export function HomeTab() {
   const [selected, setSelected] = useState<WorkerSnapshot | null>(null);
   const selectedId = selected?.id;
 
+  // Real vault note count, read straight from the in-process vault index —
+  // the runtime snapshot's episodic_count only updates while the background
+  // runtime is running, so it reads 0 in dashboard-only sessions.
+  const [vaultCount, setVaultCount] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const info = await continuum.memoryVaultInfo();
+        if (!cancelled) setVaultCount(info.note_count);
+      } catch {
+        /* vault unavailable (dev server outside Tauri): keep fallback */
+      }
+    }
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     async function poll() {
@@ -80,8 +102,11 @@ export function HomeTab() {
       <Stats
         wakesToday={state.orchestrator.wakes_today}
         costToday={state.orchestrator.cost_usd_today + totalCost}
-        episodic={state.memory.episodic_count}
+        memories={vaultCount ?? state.memory.episodic_count}
         uptime={state.system.uptime_secs}
+        onMemoriesClick={() =>
+          window.dispatchEvent(new CustomEvent("continuum:navigate", { detail: "memory" }))
+        }
       />
 
       <CuratorRow curator={state.memory.curator} />
@@ -324,31 +349,54 @@ function statusHeadline(mode: VoiceMode, lastReason: string | null): string {
 function Stats({
   wakesToday,
   costToday,
-  episodic,
+  memories,
   uptime,
+  onMemoriesClick,
 }: {
   wakesToday: number;
   costToday: number;
-  episodic: number;
+  memories: number;
   uptime: number;
+  onMemoriesClick: () => void;
 }) {
   const items = [
     { label: "Opus wakes", value: wakesToday.toLocaleString(), icon: Sparkles },
     { label: "Cost today", value: `$${costToday.toFixed(3)}`, icon: Wallet },
-    { label: "Memories", value: episodic.toLocaleString(), icon: MessagesSquare },
+    {
+      label: "Memories",
+      value: memories.toLocaleString(),
+      icon: MessagesSquare,
+      onClick: onMemoriesClick,
+    },
     { label: "Uptime", value: humanDuration(uptime), icon: Users },
   ];
   return (
     <section className="col-span-12 grid grid-cols-2 gap-4 md:grid-cols-4">
-      {items.map(({ label, value, icon: Icon }) => (
-        <div key={label} className="rounded-lg border border-bg-border bg-bg-surface p-4">
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-dim">
-            <Icon size={12} />
-            {label}
+      {items.map(({ label, value, icon: Icon, onClick }) =>
+        onClick ? (
+          <button
+            key={label}
+            type="button"
+            onClick={onClick}
+            title="Open the Memory tab"
+            className="rounded-lg border border-bg-border bg-bg-surface p-4 text-left transition-colors hover:border-accent-amber/40 hover:bg-bg-elevated active:scale-[0.995]"
+          >
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-dim">
+              <Icon size={12} />
+              {label}
+            </div>
+            <div className="mt-2 font-mono text-2xl text-ink">{value}</div>
+          </button>
+        ) : (
+          <div key={label} className="rounded-lg border border-bg-border bg-bg-surface p-4">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-dim">
+              <Icon size={12} />
+              {label}
+            </div>
+            <div className="mt-2 font-mono text-2xl text-ink">{value}</div>
           </div>
-          <div className="mt-2 font-mono text-2xl text-ink">{value}</div>
-        </div>
-      ))}
+        )
+      )}
     </section>
   );
 }
