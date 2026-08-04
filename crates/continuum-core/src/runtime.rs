@@ -55,8 +55,11 @@ impl ContinuumRuntime {
 
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
+        let state =
+            StateHandle::new_with_voice_config(config.voice.volume, config.voice.wake_word_enabled);
+
         Ok(Self {
-            state: StateHandle::new(),
+            state,
             logs: LogBuffer::new(DEFAULT_BUFFER_CAP),
             automations,
             inner: Arc::new(RwLock::new(ContinuumRuntimeInner {

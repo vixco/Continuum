@@ -7,6 +7,11 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 ### Fixed
 
 - Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
+- Publish live voice volume, wake-word, queue, listening, and ambient-mute state
+  from the runtime to the desktop without overwriting curator or live-context
+  telemetry.
+- Keep release version bumps compatible with `--locked` after adding the
+  `continuum-memory` workspace crate.
 - **Windows updater retry loop**: release publishing now clears cached Tauri
   bundles, selects exactly one installer matching the calculated version, and
   rejects mismatched signature metadata. The desktop app remembers an

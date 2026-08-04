@@ -38,6 +38,23 @@ pub struct RuntimeSnapshot {
     pub voice_mode: Option<String>,
     #[serde(default)]
     pub partial_transcript: Option<String>,
+    /// Master playback gain currently applied by the running voice process.
+    /// `None` keeps older runtime snapshots backwards-compatible.
+    #[serde(default)]
+    pub voice_volume: Option<f32>,
+    /// Number of TTS utterances waiting for synthesis/playback, including the
+    /// utterance currently being processed.
+    #[serde(default)]
+    pub tts_queue_len: Option<usize>,
+    /// Whether call detection is actively suppressing voice output.
+    #[serde(default)]
+    pub ambient_mute_active: Option<bool>,
+    /// Foreground process that caused ambient mute to activate.
+    #[serde(default)]
+    pub detected_call_app: Option<String>,
+    /// Wake-word setting applied by this runtime process at boot.
+    #[serde(default)]
+    pub wake_word_enabled: Option<bool>,
     #[serde(default)]
     pub frame_count: u64,
     #[serde(default)]
@@ -159,6 +176,8 @@ mod tests {
         let snap = RuntimeSnapshot {
             triage_model_loaded: true,
             voice_mode: Some("listening".into()),
+            voice_volume: Some(0.65),
+            tts_queue_len: Some(2),
             last_update: "2026-04-14T10:00:00Z".into(),
             ..RuntimeSnapshot::default()
         };
@@ -166,6 +185,20 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"triage_model_loaded\": true"));
         assert!(contents.contains("\"voice_mode\": \"listening\""));
+        assert!(contents.contains("\"voice_volume\": 0.65"));
+        assert!(contents.contains("\"tts_queue_len\": 2"));
+    }
+
+    #[test]
+    fn older_snapshot_without_voice_telemetry_still_deserializes() {
+        let snapshot: RuntimeSnapshot =
+            serde_json::from_str(r#"{"voice_mode":"idle","last_update":"2026-08-03T00:00:00Z"}"#)
+                .unwrap();
+
+        assert_eq!(snapshot.voice_mode.as_deref(), Some("idle"));
+        assert_eq!(snapshot.voice_volume, None);
+        assert_eq!(snapshot.tts_queue_len, None);
+        assert_eq!(snapshot.ambient_mute_active, None);
     }
 
     #[test]

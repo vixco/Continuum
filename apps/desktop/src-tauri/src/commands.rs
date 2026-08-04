@@ -178,11 +178,6 @@ pub async fn update_voice_volume(
         .runtime
         .update_config(|c| c.voice.volume = volume.clamp(0.0, 1.0))
         .map_err(|e| e.to_string())?;
-    let mute = app.runtime.is_voice_muted();
-    app.runtime
-        .state
-        .set_voice_config_snapshot(cfg.voice.volume, cfg.voice.wake_word_enabled, mute, None)
-        .await;
     Ok(cfg)
 }
 
