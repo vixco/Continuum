@@ -345,6 +345,12 @@ pub async fn chat_send_message(
             .collect(),
         max_tokens: chat_cfg.max_tokens,
         temperature: chat_cfg.temperature,
+        // Chat memory tools land in the follow-up wiring task; until then the
+        // chat runs tool-less exactly as before.
+        tools: vec![],
+        executor: None,
+        mcp: None,
+        tool_max_rounds: continuum_gateway::DEFAULT_MAX_TOOL_ROUNDS,
     };
 
     let mut stream = match adapter.stream_chat(req, cancel).await {
@@ -382,6 +388,9 @@ pub async fn chat_send_message(
             );
             match ev {
                 ChatEvent::Delta { text } => acc.push_str(&text),
+                // Tool events are forwarded to the frontend above; persistence
+                // of tool calls lands with the chat-memory-tools wiring task.
+                ChatEvent::ToolCall { .. } | ChatEvent::ToolResult { .. } => {}
                 ChatEvent::Done { usage, .. } => {
                     finished = true;
                     let _guard = conv_lock.lock().await;
