@@ -19,6 +19,11 @@ use continuum_core::config::env_or_legacy;
 
 use crate::AppState;
 
+const DEFAULT_LANGUAGE: &str = "en";
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "en", "zh", "hi", "es", "fr", "ar", "pt", "ru", "de", "ja", "nl",
+];
+
 // ---- Types -----------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -730,6 +735,28 @@ fn marker_path(app: &AppState) -> PathBuf {
         .join("onboarding-complete")
 }
 
+/// Returns the user's saved response-language preference.
+///
+/// Missing, malformed, blank, or unsupported values safely fall back to
+/// English. Restricting the value to the onboarding allowlist also prevents a
+/// manually edited marker from injecting arbitrary text into the chat prompt.
+pub fn preferred_language(dev_dir: &Path) -> String {
+    preferred_language_from_path(&dev_dir.join("config").join("onboarding-complete"))
+}
+
+fn preferred_language_from_path(path: &Path) -> String {
+    let language = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<OnboardingPayload>(&json).ok())
+        .and_then(|payload| payload.language)
+        .map(|language| language.trim().to_ascii_lowercase());
+
+    match language.as_deref() {
+        Some(language) if SUPPORTED_LANGUAGES.contains(&language) => language.to_string(),
+        _ => DEFAULT_LANGUAGE.to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn is_onboarding_complete(app: State<'_, Arc<AppState>>) -> Result<bool, String> {
     Ok(marker_path(&app).exists())
@@ -857,4 +884,34 @@ async fn seed_semantic_memory(_app: &AppState, payload: &OnboardingPayload) -> R
         payload.language
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferred_language_reads_supported_saved_value() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("onboarding-complete");
+        std::fs::write(&path, r#"{"language":" NL "}"#).expect("write marker");
+
+        assert_eq!(preferred_language_from_path(&path), "nl");
+    }
+
+    #[test]
+    fn preferred_language_defaults_to_english_for_missing_or_invalid_marker() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing");
+        assert_eq!(preferred_language_from_path(&missing), "en");
+
+        let malformed = dir.path().join("malformed");
+        std::fs::write(&malformed, "not json").expect("write malformed marker");
+        assert_eq!(preferred_language_from_path(&malformed), "en");
+
+        let unsupported = dir.path().join("unsupported");
+        std::fs::write(&unsupported, r#"{"language":"prompt injection"}"#)
+            .expect("write unsupported marker");
+        assert_eq!(preferred_language_from_path(&unsupported), "en");
+    }
 }

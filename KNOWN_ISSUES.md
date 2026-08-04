@@ -32,6 +32,7 @@ Last updated: 2026-04-15.
 - **Qwen 3 8B occasionally over-wakes on visible errors** when the user is mid-edit of a file with a transient compile error. We're still calibrating the "error visible ≥ N seconds + idle" heuristic.
 - **Qwen 3 4B fallback loses ~5% accuracy** on boundary cases (ignore vs remember, whisper vs wake). If you're on a 6 GB GPU or CPU-only, budget for more false wakes.
 - **Non-English reasoning is untested.** The triage prompt and benchmark are English + Dutch only.
+- **GBNF grammar-constrained generation is disabled.** llama.cpp's grammar sampler aborts on the Qwen 3 tokenizer with `GGML_ASSERT(!stacks.empty())` regardless of grammar content or sampler ordering. `continuum-llm::generate_sync` now returns `LlmError::GrammarUnsupported` instead of silently dropping the constraint, but until that's resolved we rely on prompt-only JSON generation with brace-depth early stopping.
 
 ## Orchestrator / Claude Code
 

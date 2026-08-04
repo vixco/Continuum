@@ -8,8 +8,8 @@ The dashboard's **Fix Issues** button spawns a dedicated Claude Opus 4.6 session
 
 - Working directory: the Continuum install folder.
 - System prompt: [`prompts/repair-agent-system.md`](../prompts/repair-agent-system.md).
-- Input context: written to `~/.continuum-dev/repair-context.md` before the spawn, containing the user-reported problem (if any), component statuses, the live config snapshot, and the last 500 log lines.
-- Access to the Continuum MCP server plus the repair-specific tools listed below.
+- Input context: written to `~/.continuum-dev/repair-context.md` before the spawn and sent inline after secret fields are redacted. It contains the user-reported problem (if any), component statuses, the live config snapshot, and the last 500 log lines.
+- A dedicated Continuum MCP server restricted to component tests. Built-in Claude tools, project/user settings, slash commands, and session persistence are disabled. Manual next steps are reported directly in the streamed assistant output.
 
 Output streams live to the Health tab via `continuum:repair` events (text deltas, tool calls, tool results, stderr, final status).
 
@@ -19,17 +19,17 @@ All under the `repair_*` namespace (routed via `continuum-mcp`):
 
 | Tool                       | Effect                                                                 |
 |----------------------------|------------------------------------------------------------------------|
-| `repair_restart_component` | Queues a restart intent for the running runtime in `~/.continuum-dev/repair-intents/`. Targets: vision, triage, audio, stt, tts, orchestrator, mcp, memory, context_watcher. |
-| `repair_reinstall_model`   | Queues a model-reinstall intent (non-destructive — the runtime re-downloads the file and restarts the subsystem). |
-| `repair_rollback_config`   | Restores `config.toml` from a dated backup under `~/.continuum-backups/`. Destructive: requires confirmation. |
-| `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`. Complement to `repair_restart_component` — test first, restart if needed. |
-| `repair_escalate`          | Posts a dashboard banner asking the user to take manual action.        |
+| `repair_restart_component` | Published MCP compatibility boundary, but denied in the safe Health session because restart intents have no runtime consumer. |
+| `repair_reinstall_model`   | Published MCP compatibility boundary; denied in the safe Health session. |
+| `repair_rollback_config`   | Published MCP compatibility boundary; denied in the safe Health session. The separate desktop rollback command is guarded and reversible. |
+| `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`; it is not live recovery proof. |
+| `repair_escalate`          | Published MCP compatibility boundary; denied because escalation intents have no dashboard consumer. |
 
-Intent files have the shape `{kind, queued_at, body}` — the runtime polls `repair-intents/` every 2 s and moves consumed intents to `.done` siblings.
+The one automatic Health fix that is implemented end-to-end is starting an offline runtime. The desktop verifies the one-time preview, creates and re-verifies a backup, starts the packaged runtime once, and waits for a fresh `state.json` heartbeat up to `health.runtime_start_timeout_secs` (90 seconds by default, clamped to 10–300 seconds). A timeout stops the process and reports failure. Component restart intent files are not consumed in this release and must never be presented as successful repair.
 
 ## Backup rotation
 
-Every night at 04:00 local time (configurable via `health::backup::spawn_nightly`), the dashboard zips these files into `~/.continuum-backups/<YYYY-MM-DD>/continuum-<date>.zip`:
+Every night at 04:00 local time, the dashboard zips these files into versioned archives under `~/.continuum-backups/<YYYY-MM-DD>/`:
 
 - `config.toml`
 - `automations.json`
@@ -39,7 +39,7 @@ Every night at 04:00 local time (configurable via `health::backup::spawn_nightly
 
 Deliberately excluded: raw log (`raw_log.sqlite`), episodic LanceDB folder, screenshots, model weights, logs.
 
-Rotation retains the most recent 7 backups; older dated folders are removed. The Health tab's **Backup now** button triggers an immediate rotation.
+Retention defaults to the most recent 7 archives and is configurable. The Health tab's **Backup now** button triggers an immediate archive.
 
 ## Predictive maintenance
 
@@ -52,7 +52,49 @@ Components marked `degrading` show amber in the Health tab. Predictive auto-repa
 
 ## Voice-activated repair
 
-The triage layer recognises spoken phrases like "Continuum, something is broken" and "Continuum, check your health" as `execute_simple` decisions that forward to the repair subsystem. Implementation detail: the voice command maps to a `trigger_repair` Tauri command with the spoken text as the user reason, so the repair context surfaces what the user said.
+Voice activation is not wired to the one-time desktop preview in this release. Start repair from Advanced → Health so the authorization and preview cannot be bypassed.
+
+---
+
+## Continuous Live Context
+
+Component: `live_context`
+
+Logs:
+
+- `layer = "senses"`, `component = "vision"` for monitor discovery, capture,
+  change selection, and local vision failures.
+- `layer = "senses"`, `component = "live_context"` for projection publication.
+- `~/.continuum-dev/live-context.json` contains bounded health counters and the
+  last capture timestamp; it never contains raw screenshot bytes or raw input.
+
+Health check:
+
+- Healthy when capture is enabled, connected monitors are represented, the last
+  capture is recent, and there is no sustained buffer loss.
+- Degrading when no monitor is represented, more than 10% of capture events
+  were dropped, or more than 10% exceeded the configured capture deadline.
+  Drops and cadence misses are explicit overload evidence, not hidden pauses.
+- Error/restart-required when `LiveContextHealth::should_restart()` detects a
+  sustained capture stall or repeated capture failures.
+
+Recovery:
+
+1. Confirm **Brain → Continuous local context** is enabled and the intended
+   monitor IDs are not in `screen.excluded_monitor_ids`.
+2. Inspect `live-context.json` health counters and recent source-attributed
+   events. If drops rise, increase `screen.buffer_capacity`, increase
+   `screen.vision_min_interval_ms`, or relax capture cadence.
+3. Restart the Continuum runtime to re-enumerate displays and restart all
+   monitor workers. Hot-plug discovery normally repairs topology within 2 s.
+4. Persistent xcap failures require checking the interactive Windows desktop
+   session and display drivers; do not delete local user data.
+
+Runtime proof boundary: unit tests cover event ordering, bounded oldest-drop
+behavior, compact projection limits, privacy classification, and restart logic.
+CI compilation/integration tests validate wiring. Actual simultaneous cadence
+across multiple physical Windows monitors requires a live machine with multiple
+displays and is not established by unit tests alone.
 
 ---
 

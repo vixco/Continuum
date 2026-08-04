@@ -1,7 +1,9 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -11,7 +13,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.94.0"
-  CARGO_TARGET_DIR: target
+  # Keep every Cargo invocation in one workspace-level directory. Tauri runs
+  # Cargo from src-tauri, so a relative value creates a second target tree and
+  # leaves the asset assembly step looking in the wrong place.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # sccache wraps rustc/cc; mozilla-actions/sccache-action (run later) manages
   # SCCACHE_DIR + the GitHub Actions cache backing. These are plain values,
   # so workflow-level env is valid (no `runner` context needed here).
@@ -28,12 +33,14 @@ env:
 jobs:
   release:
     name: Build and publish Windows release
-    # The workflow commits a version bump back to main. Do not start a second
-    # release for that generated commit.
+    # Never publish a main commit until the blocking CI workflow has passed.
+    # Manual dispatch remains available for an intentional retry.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: windows-latest
+      github.event.workflow_run.conclusion == 'success'
+    # Keep the native toolchain stable. Packaging itself is NSIS-only because
+    # WiX 3 candle.exe fails to start on multiple hosted Windows images.
+    runs-on: windows-2022
     # sccache wraps rustc/cc so whisper.cpp + llama.cpp + ort + lancedb native
     # compiles are cache hits across releases. First release is full speed;
     # every subsequent release reuses the C/C++ objects in seconds. The
@@ -49,6 +56,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # workflow_run otherwise checks out the latest default-branch SHA,
+          # which may differ from the exact commit that CI validated.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify release commit is current main
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          $releaseSha = (git rev-parse HEAD).Trim()
+          $mainSha = (git rev-parse origin/main).Trim()
+          if ($releaseSha -ne $mainSha) {
+            throw "Refusing to release stale CI commit $releaseSha; current main is $mainSha."
+          }
+
+      - name: Verify NSIS-only packaging contract
+        shell: pwsh
+        run: |
+          $config = Get-Content "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $targets = @($config.bundle.targets)
+          if ($targets.Count -ne 1 -or $targets[0] -ne "nsis") {
+            throw "Release packaging must remain NSIS-only; configured targets: $($targets -join ', ')"
+          }
 
       - name: Calculate next release version
         id: version
@@ -89,7 +118,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # whisper-rs-sys bindgen needs libclang. windows-latest ships LLVM, but
+      # whisper-rs-sys bindgen needs libclang. windows-2022 ships LLVM, but
       # pin the path explicitly (mirrors ci.yml clippy-full) so an image change
       # never silently breaks the release build at the bindgen step.
       - name: Configure LLVM + ninja for bindgen / cmake
@@ -159,12 +188,24 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --bin continuum --bin continuum-mcp
 
+      # `target` is restored from cache, including old Tauri bundles. Remove
+      # only packaged outputs so asset assembly can never select an installer
+      # from an earlier version while retaining the expensive compiler cache.
+      - name: Clear stale Tauri bundles
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $env:CARGO_TARGET_DIR "release\bundle"
+          if (Test-Path -LiteralPath $bundleRoot) {
+            Remove-Item -LiteralPath $bundleRoot -Recurse -Force
+          }
+
       - name: Build Tauri desktop app with signed updater artifacts
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        # Defense in depth: never invoke WiX even if the config later drifts.
+        run: pnpm tauri build --bundles nsis
 
       - name: Assemble release assets and updater metadata
         id: assets
@@ -191,25 +232,28 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
 
           $bundleRoot = "target\release\bundle"
-          $msi = Get-ChildItem "$bundleRoot\msi" -Filter "*.msi" | Select-Object -First 1
-          if (-not $msi) { throw "Tauri did not produce an MSI" }
-          # Tauri 2's modern updater mode signs the installer executable
-          # directly; v1Compatible mode emits a .nsis.zip instead. Accept
-          # either artifact so the release job remains migration-safe.
-          $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*.nsis.zip" | Select-Object -First 1
-          if (-not $nsis) {
-            $nsis = Get-ChildItem "$bundleRoot\nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          $versionPattern = [Regex]::Escape($version)
+          $nsisCandidates = @(
+            Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" |
+              Where-Object { $_.Name -match "_$versionPattern(?:_|-)" }
+          )
+          if ($nsisCandidates.Count -ne 1) {
+            $found = @(Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" -ErrorAction SilentlyContinue).Name -join ", "
+            throw "Expected exactly one NSIS installer for $version; found: $found"
           }
-          if (-not $nsis) { throw "Tauri did not produce an NSIS updater artifact" }
+          $nsis = $nsisCandidates[0]
           $nsisSig = Get-Item "$($nsis.FullName).sig" -ErrorAction SilentlyContinue
-          if (-not $nsisSig) { throw "Tauri did not produce a signature for $($nsis.Name)" }
+          if (-not $nsisSig) { throw "Tauri did not produce an updater signature for $($nsis.Name)" }
 
-          $updaterExtension = if ($nsis.Extension -eq ".zip") { ".nsis.zip" } else { ".exe" }
-          $updaterName = "continuum-$version-windows-x64-updater$updaterExtension"
-          $signatureName = "$updaterName.sig"
-          Copy-Item $nsis.FullName $updaterName
+          $installerName = "continuum-$version-windows-x64-setup.exe"
+          $signatureName = "$installerName.sig"
+          Copy-Item $nsis.FullName $installerName
           Copy-Item $nsisSig.FullName $signatureName
           $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
+          $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
+          if ($signatureText -notmatch $versionPattern) {
+            throw "Updater signature does not identify the expected version $version. Refusing to publish mismatched metadata."
+          }
           $latest = [ordered]@{
             version = $version
             notes = "Automatic Continuum release $tag. See the GitHub release notes for details."
@@ -217,21 +261,20 @@ jobs:
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{
                 signature = $signature
-                url = "https://github.com/$repo/releases/download/$tag/$updaterName"
+                url = "https://github.com/$repo/releases/download/$tag/$installerName"
               }
             }
           }
           $latest | ConvertTo-Json -Depth 5 | Set-Content -Path "latest.json" -Encoding utf8NoBOM
 
-          $shaFiles = @($portable, $msi.FullName, $updaterName, $signatureName, "latest.json")
+          $shaFiles = @($portable, $installerName, $signatureName, "latest.json")
           $shaLines = foreach ($file in $shaFiles) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
             "$hash  $(Split-Path -Leaf $file)"
           }
           $shaLines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
 
-          "msi_path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
-          "updater_name=$updaterName" >> $env:GITHUB_OUTPUT
+          "installer_name=$installerName" >> $env:GITHUB_OUTPUT
           "signature_name=$signatureName" >> $env:GITHUB_OUTPUT
           Get-Content "latest.json"
           Get-Content "SHA256SUMS.txt"
@@ -259,8 +302,7 @@ jobs:
           generate_release_notes: true
           files: |
             continuum-${{ steps.version.outputs.version }}-windows-x64.zip
-            ${{ steps.assets.outputs.msi_path }}
-            ${{ steps.assets.outputs.updater_name }}
+            ${{ steps.assets.outputs.installer_name }}
             ${{ steps.assets.outputs.signature_name }}
             latest.json
             SHA256SUMS.txt

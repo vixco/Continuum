@@ -24,6 +24,8 @@ use continuum_core::state::StateHandle;
 
 use crate::memory::MemoryState;
 
+type ConfigProvider = Arc<dyn Fn() -> ContinuumConfig + Send + Sync>;
+
 /// Directory where continuum-desktop.exe was started from. Used by checks that
 /// need to find sibling files (continuum-mcp.exe, prompts/, skills/) that the
 /// installer places next to the binaries.
@@ -55,7 +57,11 @@ pub(crate) fn runtime_alive(dev_dir: &Path) -> bool {
 
 pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     let state = Arc::new(RwLock::new(runtime.state.clone()));
-    let cfg = Arc::new(runtime.config_snapshot());
+    let cfg: ConfigProvider = {
+        let runtime = runtime.clone();
+        Arc::new(move || runtime.config_snapshot())
+    };
+    let startup_cfg = runtime.config_snapshot();
     let dev_dir = runtime.dev_dir();
 
     registry.register(RuntimeCheck {
@@ -63,6 +69,10 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     });
     registry.register(VisionCheck {
         state: state.clone(),
+        cfg: cfg.clone(),
+        dev_dir: dev_dir.clone(),
+    });
+    registry.register(LiveContextCheck {
         cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
@@ -100,7 +110,7 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
         cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
-    registry.register(SystemResourceCheck::new(&cfg));
+    registry.register(SystemResourceCheck::new(&startup_cfg));
     registry.register(ChatProvidersCheck {
         dev_dir: dev_dir.clone(),
     });
@@ -151,8 +161,78 @@ impl HealthCheck for RuntimeCheck {
 
 struct VisionCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
+}
+
+struct LiveContextCheck {
+    cfg: ConfigProvider,
+    dev_dir: PathBuf,
+}
+
+#[async_trait]
+impl HealthCheck for LiveContextCheck {
+    fn name(&self) -> &str {
+        "live_context"
+    }
+    fn log_path(&self) -> Option<String> {
+        Some("~/.continuum-dev/logs/continuum.log".into())
+    }
+    fn recovery_note(&self) -> Option<String> {
+        Some(
+            "Restart the vision/context components; reduce capture cadence or increase screen.buffer_capacity if drops persist."
+                .into(),
+        )
+    }
+    async fn probe(&self) -> HealthResult {
+        let cfg = (self.cfg)();
+        if !cfg.screen.enabled {
+            return HealthResult::healthy(1);
+        }
+        if !runtime_alive(&self.dev_dir) {
+            return HealthResult::unknown("runtime offline", 1);
+        }
+        let path = self.dev_dir.join("live-context.json");
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) => return HealthResult::degrading(error.to_string(), 1),
+        };
+        let state: continuum_core::senses::live_context::LiveWorldState =
+            match serde_json::from_str(&contents) {
+                Ok(state) => state,
+                Err(error) => return HealthResult::error(error.to_string(), 1),
+            };
+        let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(50));
+        if state
+            .health
+            .should_restart(chrono::Utc::now(), true, interval)
+        {
+            return HealthResult::error("multi-monitor capture stalled", 1);
+        }
+        if state.monitors.is_empty() {
+            return HealthResult::degrading("no monitor captures published yet", 1);
+        }
+        let total = state.health.capture_events.max(1);
+        if state.health.dropped_capture_events.saturating_mul(10) > total {
+            return HealthResult::degrading(
+                format!(
+                    "capture buffer dropped {} of {} event(s)",
+                    state.health.dropped_capture_events, total
+                ),
+                1,
+            );
+        }
+        if state.health.capture_deadline_misses.saturating_mul(10) > total {
+            return HealthResult::degrading(
+                format!(
+                    "capture missed the configured cadence {} of {} event(s)",
+                    state.health.capture_deadline_misses, total
+                ),
+                1,
+            );
+        }
+        HealthResult::healthy(1)
+    }
 }
 
 #[async_trait]
@@ -167,7 +247,8 @@ impl HealthCheck for VisionCheck {
         Some("Re-run scripts/download-models.ps1 to reinstall SmolVLM.".into())
     }
     async fn probe(&self) -> HealthResult {
-        let model_path = PathBuf::from(&self.cfg.vision.model_path);
+        let cfg = (self.cfg)();
+        let model_path = PathBuf::from(&cfg.vision.model_path);
         if !model_path.exists() {
             return HealthResult::error("vision model missing on disk", 1);
         }
@@ -255,7 +336,7 @@ impl HealthCheck for OrchestratorCheck {
 
 struct VoiceTtsCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -268,10 +349,11 @@ impl HealthCheck for VoiceTtsCheck {
         Some("Verify Piper voice files exist, rerun scripts/download-models.ps1.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.tts.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.tts.enabled {
             return HealthResult::healthy(1);
         }
-        let Some(primary) = self.cfg.tts.voices.get(&self.cfg.tts.primary) else {
+        let Some(primary) = cfg.tts.voices.get(&cfg.tts.primary) else {
             return HealthResult::error("TTS primary voice key missing from config", 1);
         };
         if !PathBuf::from(&primary.model_path).exists() {
@@ -291,7 +373,7 @@ impl HealthCheck for VoiceTtsCheck {
 
 struct VoiceSttCheck {
     state: Arc<RwLock<StateHandle>>,
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -304,10 +386,11 @@ impl HealthCheck for VoiceSttCheck {
         Some("Verify whisper model at audio.whisper_model_path.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.audio.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.audio.enabled {
             return HealthResult::healthy(1);
         }
-        if !PathBuf::from(&self.cfg.audio.whisper_model_path).exists() {
+        if !PathBuf::from(&cfg.audio.whisper_model_path).exists() {
             return HealthResult::error("whisper model file missing", 1);
         }
         if !runtime_alive(&self.dev_dir) {
@@ -482,7 +565,7 @@ impl HealthCheck for WorkersCheck {
 }
 
 struct SkillsCheck {
-    cfg: Arc<ContinuumConfig>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -495,16 +578,17 @@ impl HealthCheck for SkillsCheck {
         Some("Fix or remove any SKILL.md that failed to parse. See logs.".into())
     }
     async fn probe(&self) -> HealthResult {
-        if !self.cfg.skills.enabled {
+        let cfg = (self.cfg)();
+        if !cfg.skills.enabled {
             return HealthResult::healthy(1);
         }
-        let configured = std::path::PathBuf::from(&self.cfg.skills.dir);
+        let configured = std::path::PathBuf::from(&cfg.skills.dir);
         let root = if configured.is_absolute() && configured.exists() {
             configured
         } else {
             // Try in order: cwd-relative, install-dir-relative (next to the
             // exe — covers packaged installs), dev-dir-relative.
-            let rel = &self.cfg.skills.dir;
+            let rel = &cfg.skills.dir;
             std::env::current_dir()
                 .ok()
                 .map(|cwd| cwd.join(rel))

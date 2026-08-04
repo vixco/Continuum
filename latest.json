@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0-alpha.3",
-  "notes": "Automatic Continuum release v0.1.0-alpha.3. See the GitHub release notes for details.",
-  "pub_date": "2026-08-02T13:07:21.9880283Z",
+  "version": "0.1.0-alpha.6",
+  "notes": "Automatic Continuum release v0.1.0-alpha.6. See the GitHub release notes for details.",
+  "pub_date": "2026-08-04T00:51:28.5271024Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSeVJzOUJHY3lCYWxnSkt2UXVyenZVbHFkSy9qUzIyYXlRQU4veGp5UThqM3NKMDBBZndORyszSmFpcEdldFVPQi96QkNYREVkdkkraGZ1aHMzanF5c3VocWc4NlJVYncwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1Njc2MDA2CWZpbGU6S2Fpcm9fMC4xLjAtYWxwaGEuM194NjQtc2V0dXAuZXhlCjdpU2tPZnJ3V0FpTG8rWFlrQWdEMEUwV0JLQzBnNktuMkEwS3h5UlN2R1duTmxsMWttZnY3eXB6RVg0dlU4ekdDNWJuc3ErWi9jdytqRHFobGNCbUNBPT0K",
-      "url": "https://github.com/vixco/Continuum/releases/download/v0.1.0-alpha.3/kairo-0.1.0-alpha.3-windows-x64-updater.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSeVJzOUJHY3lCYXV5OW5VZkxwY2NQWjlOaVNVSUxVc2NtcEpHaWlKdDF3RUFMRm9QbzhWcEhRcFNGMDVxaUxUVnI2UHltZnBYOUdBN0YyZnZkR2xtZEtFN3BKQ3djTGc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1ODA0Njc5CWZpbGU6Q29udGludXVtXzAuMS4wLWFscGhhLjZfeDY0LXNldHVwLmV4ZQo4bjFFQndoL1l4UUd5a1MrTjZiNTgxdUg5bkFUdzF2MjQvNitYcEVFSlo0TUlZSWJidHE1RXBXcFozdjRBNHZldDFmVnNGL0QwTDY5dUVKUVdNT2xEUT09Cg==",
+      "url": "https://github.com/vixco/Continuum/releases/download/v0.1.0-alpha.6/continuum-0.1.0-alpha.6-windows-x64-setup.exe"
     }
   }
 }

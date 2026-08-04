@@ -190,7 +190,7 @@ function WorkerRow({
         </span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-elevated">
-        <div className="h-full bg-accent-purple" style={{ width: `${progressPct}%` }} />
+        <div className="h-full bg-accent-amber" style={{ width: `${progressPct}%` }} />
       </div>
       <div className="mt-1 flex items-center justify-between text-[11px] text-ink-dim">
         <span className="truncate">{worker.last_line || worker.status}</span>
@@ -293,7 +293,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 function StatusDot({ status }: { status: string }) {
   const color =
     status === "running" || status === "starting"
-      ? "bg-accent-purple"
+      ? "bg-accent-amber"
       : status === "queued" || status === "pending"
         ? "bg-accent-blue"
         : status === "completed"
@@ -466,7 +466,7 @@ function RecentTimeline({ actions }: { actions: RecentAction[] }) {
 function KindDot({ kind }: { kind: RecentAction["kind"] }) {
   const color =
     kind === "wake"
-      ? "bg-accent-purple"
+      ? "bg-accent-amber"
       : kind === "triage"
         ? "bg-accent-blue"
         : kind === "repair"

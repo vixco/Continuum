@@ -1,6 +1,6 @@
 {
   "name": "@continuum/desktop",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.6",
   "private": true,
   "engines": {
     "node": ">=20"
@@ -10,13 +10,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test:logs": "node --experimental-strip-types --test tests/log-view.test.mjs",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check \"src/**/*.{ts,tsx,json}\"",
     "format:fix": "prettier --write \"src/**/*.{ts,tsx,json}\"",
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.1.0",
+    "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.0.0",
@@ -29,6 +30,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
+    "react-virtuoso": "^4.18.11",
+    "remark-gfm": "^4.0.1",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

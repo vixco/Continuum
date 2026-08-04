@@ -4,23 +4,23 @@ Continuum is pre-alpha software. Things break. The **repair agent** is a dedicat
 
 ## What it can do
 
-- Read logs from `~/.continuum/logs/<component>.log`
-- Restart a component (`mcp__continuum__repair_restart_component`)
-- Reinstall a missing or corrupt model (`mcp__continuum__repair_reinstall_model`)
-- Roll back to a previous config from a backup (`mcp__continuum__repair_rollback_config`)
-- Run a component self-test (`mcp__continuum__repair_test_component`)
-- Escalate to the human if it cannot fix the issue
+- Read the generated repair context
+- Start an offline Continuum runtime after a verified backup, then wait for a fresh state heartbeat
+- Run a lightweight component self-test (`mcp__continuum__repair_test_component`)
+- Report explicit manual next steps in the streamed output if it cannot fix the issue
 
 ## What it cannot do
 
-- Edit the Rust source tree directly — it can only touch config, models, and runtime state
+- Run shell commands or edit files
+- Reinstall models or roll back configuration from the safe Health-tab session
+- Claim that queued restart or escalation intents were executed; this release has no runtime consumer for them
 - Push changes to GitHub — it has no network write tools
 - Wake more workers or spawn itself recursively
 - Delete episodic / semantic memory
 
 ## How to trigger a repair
 
-- **From the dashboard:** Health tab → "Fix Issues" button. The repair agent starts and streams its output into a side panel.
+- **From the dashboard:** Health tab → "Fix Issues" → review the live one-time preview → "Run safe repair". If the runtime is offline, the desktop takes a backup, starts it once, and waits for a fresh heartbeat up to the configured bounded timeout (90 seconds by default). Other issues are diagnosed and escalated without pretending a restart occurred.
 - **By voice:** say "continuum, something isn't right" (triage recognises this via `execute_simple`).
 - **From the CLI:** `continuum repair` (coming soon — see [ROADMAP.md](https://github.com/vixco/Continuum/blob/main/ROADMAP.md)).
 
@@ -31,7 +31,7 @@ Every night at 04:00 Continuum runs a self-diagnose pass:
 1. Ping each component's health check
 2. Roll up 24-hour error rates
 3. Warn in the Health tab if any component's error rate exceeds 5%
-4. Take a config snapshot into `~/.continuum-backups/YYYY-MM-DD/` (keeps the last 7)
+4. Take a manifest-verified, versioned config snapshot into `~/.continuum-backups/YYYY-MM-DD/`
 
 ## Backups
 
@@ -43,7 +43,7 @@ Nightly zips at `~/.continuum-backups/YYYY-MM-DD/` contain:
 - `semantic.sqlite`
 - `orchestrator-system.md`
 
-Rotation keeps the 7 most recent. Rollback restores `config.toml` only today; broader restore is on the post-alpha roadmap.
+Retention defaults to the 7 most recent archives and is configurable. Every repair run and every mutating repair tool call creates and verifies a new archive first. Rollback validates the selected archive and TOML, creates another safety backup, and swaps `config.toml` reversibly.
 
 ## What to do if the repair agent can't help
 

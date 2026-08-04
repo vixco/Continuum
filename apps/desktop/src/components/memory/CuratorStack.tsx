@@ -44,7 +44,7 @@ export function CuratorStack({ pending, onResolve, onOpen }: CuratorStackProps) 
             <button
               type="button"
               onClick={() => onOpen(p.id)}
-              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-ink hover:text-accent-purple"
+              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-ink hover:text-accent-amber"
             >
               {p.title}
             </button>

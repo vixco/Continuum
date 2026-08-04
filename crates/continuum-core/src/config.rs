@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContinuumConfig {
+    /// Health polling, backup and guarded repair settings.
+    pub health: HealthConfig,
     /// Vision model configuration.
     pub vision: VisionConfig,
     /// Screen capture configuration.
@@ -49,6 +51,31 @@ pub struct ContinuumConfig {
     /// Chat tab settings.
     #[serde(default)]
     pub chat: ChatConfig,
+}
+
+/// Guardrails for Health-tab repair sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthConfig {
+    /// Hard wall-clock timeout for one repair-agent attempt.
+    pub repair_timeout_secs: u64,
+    /// Maximum time to wait for a newly-started runtime heartbeat.
+    pub runtime_start_timeout_secs: u64,
+    /// Lifetime of the one-time MCP repair grant.
+    pub repair_session_ttl_secs: u64,
+    /// Number of verified versioned backups retained.
+    pub backup_retention: u32,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            repair_timeout_secs: 10 * 60,
+            runtime_start_timeout_secs: 90,
+            repair_session_ttl_secs: 15 * 60,
+            backup_retention: 7,
+        }
+    }
 }
 
 /// Resource-aware profile. Selects a baseline policy; `Custom` uses the
@@ -200,6 +227,9 @@ pub struct ChatConfig {
     /// streaming output is never killed by this, only a CLI that goes
     /// silent mid-send is.
     pub cli_timeout_secs: u64,
+    /// How often the desktop refreshes cached provider model catalogs.
+    /// Set to 0 to disable automatic refresh.
+    pub model_refresh_interval_secs: u64,
     /// Optional path to a custom system prompt file (overrides the built-in).
     pub system_prompt_path: Option<String>,
 }
@@ -212,6 +242,7 @@ impl Default for ChatConfig {
             connect_timeout_secs: 10,
             stream_idle_timeout_secs: 60,
             cli_timeout_secs: 120,
+            model_refresh_interval_secs: 300,
             system_prompt_path: None,
         }
     }
@@ -277,14 +308,28 @@ pub struct VisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScreenConfig {
-    /// Interval between captures in seconds (1-10).
+    /// Master consent boundary for local screen capture.
+    pub enabled: bool,
+    /// Legacy coarse interval retained for backwards-compatible config/UI reads.
     pub interval_secs: u64,
+    /// Target cadence per monitor. Defaults to 200 ms (5 captures/second).
+    pub capture_interval_ms: u64,
     /// Width to downscale captured images to.
     pub capture_width: u32,
     /// Height to downscale captured images to.
     pub capture_height: u32,
     /// Whether to save screenshots to disk.
     pub save_screenshots: bool,
+    /// Capture every connected monitor rather than only the primary display.
+    pub all_monitors: bool,
+    /// Stable xcap monitor ids the user explicitly excluded.
+    pub excluded_monitor_ids: Vec<String>,
+    /// Bounded local capture-event queue capacity.
+    pub buffer_capacity: usize,
+    /// Mean luma-difference threshold that triggers local vision processing.
+    pub meaningful_change_threshold: f32,
+    /// Minimum delay between expensive local VLM calls for one monitor.
+    pub vision_min_interval_ms: u64,
 }
 
 /// Configuration for the audio pipeline.
@@ -339,6 +384,14 @@ pub struct AudioConfig {
 pub struct ContextConfig {
     /// Polling interval in seconds.
     pub poll_interval_secs: u64,
+    /// Replace sensitive foreground titles before they enter shared context.
+    pub redact_sensitive_titles: bool,
+    /// Process names that suppress visual processing while foreground.
+    pub sensitive_process_names: Vec<String>,
+    /// Case-insensitive title fragments that suppress visual processing.
+    pub sensitive_title_keywords: Vec<String>,
+    /// Processes classified as terminal activity without capturing terminal text.
+    pub terminal_process_names: Vec<String>,
 }
 
 /// Configuration for the perception frame builder.
@@ -696,6 +749,7 @@ impl Default for ContinuumConfig {
     fn default() -> Self {
         let base = continuum_dev_dir();
         Self {
+            health: HealthConfig::default(),
             vision: VisionConfig::default(),
             screen: ScreenConfig::default(),
             audio: AudioConfig::default(),
@@ -778,10 +832,17 @@ impl Default for VisionConfig {
 impl Default for ScreenConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             interval_secs: 3,
+            capture_interval_ms: 200,
             capture_width: 1280,
             capture_height: 720,
-            save_screenshots: true,
+            save_screenshots: false,
+            all_monitors: true,
+            excluded_monitor_ids: Vec::new(),
+            buffer_capacity: 64,
+            meaningful_change_threshold: 0.025,
+            vision_min_interval_ms: 2_000,
         }
     }
 }
@@ -834,6 +895,30 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: 1,
+            redact_sensitive_titles: true,
+            sensitive_process_names: vec![
+                "1password.exe".into(),
+                "bitwarden.exe".into(),
+                "keepass.exe".into(),
+                "keepassxc.exe".into(),
+                "credentialuibroker.exe".into(),
+            ],
+            sensitive_title_keywords: vec![
+                "password".into(),
+                "passkey".into(),
+                "two-factor".into(),
+                "2fa".into(),
+                "private key".into(),
+                "seed phrase".into(),
+            ],
+            terminal_process_names: vec![
+                "windowsterminal.exe".into(),
+                "powershell.exe".into(),
+                "pwsh.exe".into(),
+                "cmd.exe".into(),
+                "bash.exe".into(),
+                "wsl.exe".into(),
+            ],
         }
     }
 }
@@ -1053,6 +1138,8 @@ mod tests {
     fn test_default_config_is_valid() {
         let config = ContinuumConfig::default();
         assert_eq!(config.screen.interval_secs, 3);
+        assert_eq!(config.health.backup_retention, 7);
+        assert_eq!(config.health.runtime_start_timeout_secs, 90);
         assert_eq!(config.frame.salience_threshold, 0.10);
         assert_eq!(config.storage.retention_days, 30);
         assert!(config.memory.distillation_enabled);
@@ -1153,14 +1240,18 @@ interval_secs = 5
         assert_eq!(cfg.connect_timeout_secs, 10);
         assert_eq!(cfg.stream_idle_timeout_secs, 60);
         assert_eq!(cfg.cli_timeout_secs, 120);
+        assert_eq!(cfg.model_refresh_interval_secs, 300);
         assert!(cfg.temperature.is_none());
         assert!(cfg.system_prompt_path.is_none());
 
         let parsed: ContinuumConfig =
-            toml::from_str("[chat]\nmax_tokens = 2048\nstream_idle_timeout_secs = 30\n")
+            toml::from_str(
+                "[chat]\nmax_tokens = 2048\nstream_idle_timeout_secs = 30\nmodel_refresh_interval_secs = 90\n",
+            )
                 .expect("parse");
         assert_eq!(parsed.chat.max_tokens, 2048);
         assert_eq!(parsed.chat.stream_idle_timeout_secs, 30);
+        assert_eq!(parsed.chat.model_refresh_interval_secs, 90);
         // Omitting [chat] entirely must also work:
         let empty: ContinuumConfig = toml::from_str("").expect("parse empty");
         assert_eq!(empty.chat.max_tokens, 8192);

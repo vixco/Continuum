@@ -15,6 +15,7 @@
 //! platforms, stub implementations return empty observations so the crate
 //! remains compilable.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -22,6 +23,10 @@ use chrono::Utc;
 use tracing::{debug, error, trace};
 
 use crate::config::ContextConfig;
+use crate::senses::live_context::{
+    InputActivityWorldState, LiveContextHub, PrivacyDisposition, ProjectWorldState,
+    WindowWorldState,
+};
 use crate::senses::types::ContextObservation;
 
 /// Processes whose presence in the foreground strongly indicate the user is
@@ -322,9 +327,10 @@ impl ContextWatcher {
     /// Runs the context poller loop, sending observations to `tx` until the
     /// shutdown signal fires.
     ///
-    /// The loop sleeps for [`ContextConfig::poll_interval_secs`] between polls.
-    /// Each iteration calls [`poll_once`](Self::poll_once) to capture the
-    /// current desktop state and pushes the result through the channel.
+    /// The loop polls immediately, then every
+    /// [`ContextConfig::poll_interval_secs`]. Each observation updates shared
+    /// live context before a non-blocking send to the legacy frame channel, so
+    /// a busy downstream consumer cannot pause context continuity.
     ///
     /// # Shutdown
     ///
@@ -339,9 +345,31 @@ impl ContextWatcher {
     pub async fn run(
         &self,
         tx: tokio::sync::mpsc::Sender<ContextObservation>,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
-        let interval = Duration::from_secs(self.config.poll_interval_secs);
+        self.run_inner(tx, shutdown, None).await
+    }
+
+    /// Run while also projecting safe window, activity, terminal, and project
+    /// events into the shared agent-facing world-state.
+    pub async fn run_with_live_context(
+        &self,
+        tx: tokio::sync::mpsc::Sender<ContextObservation>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        live_context: LiveContextHub,
+    ) -> Result<()> {
+        self.run_inner(tx, shutdown, Some(live_context)).await
+    }
+
+    async fn run_inner(
+        &self,
+        tx: tokio::sync::mpsc::Sender<ContextObservation>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        live_context: Option<LiveContextHub>,
+    ) -> Result<()> {
+        let interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         debug!(
             layer = "senses",
@@ -352,8 +380,30 @@ impl ContextWatcher {
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {
-                    let obs = self.poll_once();
+                _ = ticker.tick() => {
+                    let (obs, privacy) = self.poll_once_with_privacy();
+
+                    if let Some(hub) = &live_context {
+                        hub.record_context(
+                            WindowWorldState {
+                                process_name: obs.foreground_process_name.clone(),
+                                title: obs.foreground_window_title.clone(),
+                                observed_at: obs.ts,
+                                in_call: obs.in_call,
+                                privacy,
+                            },
+                            InputActivityWorldState {
+                                observed_at: obs.ts,
+                                idle_seconds: obs.idle_seconds,
+                                active: obs.idle_seconds < 2,
+                            },
+                        );
+                        hub.record_project(project_world_state(
+                            &obs.foreground_process_name,
+                            &self.config.terminal_process_names,
+                            obs.ts,
+                        ));
+                    }
 
                     trace!(
                         layer = "senses",
@@ -365,14 +415,26 @@ impl ContextWatcher {
                         "Polled context"
                     );
 
-                    if let Err(e) = tx.send(obs).await {
-                        error!(
-                            layer = "senses",
-                            component = "context",
-                            error = %e,
-                            "Observation channel closed, stopping context poller"
-                        );
-                        return Err(e.into());
+                    match tx.try_send(obs) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            if let Some(hub) = &live_context {
+                                hub.record_output_drop(1);
+                            }
+                            tracing::warn!(
+                                layer = "senses",
+                                component = "context",
+                                "Legacy frame channel full; shared live context remains current"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            error!(
+                                layer = "senses",
+                                component = "context",
+                                "Observation channel closed, stopping context poller"
+                            );
+                            return Err(anyhow::anyhow!("context observation channel closed"));
+                        }
                     }
                 }
                 result = shutdown.changed() => {
@@ -409,17 +471,31 @@ impl ContextWatcher {
     /// This is a synchronous function that calls into platform-specific FFI.
     /// It never panics — all errors are logged and produce empty/default values.
     pub fn poll_once(&self) -> ContextObservation {
+        self.poll_once_with_privacy().0
+    }
+
+    fn poll_once_with_privacy(&self) -> (ContextObservation, PrivacyDisposition) {
         let (title, process_name) = win::get_foreground_window_info();
         let idle_seconds = win::get_idle_seconds();
         let in_call = is_in_call(&process_name, &title);
+        let privacy = classify_privacy(&self.config, &process_name, &title);
+        let safe_title =
+            if privacy == PrivacyDisposition::Redacted && self.config.redact_sensitive_titles {
+                "[redacted sensitive window]".to_string()
+            } else {
+                title
+            };
 
-        ContextObservation {
-            foreground_window_title: title,
-            foreground_process_name: process_name,
-            idle_seconds,
-            in_call,
-            ts: Utc::now(),
-        }
+        (
+            ContextObservation {
+                foreground_window_title: safe_title,
+                foreground_process_name: process_name,
+                idle_seconds,
+                in_call,
+                ts: Utc::now(),
+            },
+            privacy,
+        )
     }
 
     /// Returns `true` if the watcher appears to be in a healthy state.
@@ -440,6 +516,82 @@ impl ContextWatcher {
     }
 }
 
+fn classify_privacy(
+    config: &ContextConfig,
+    process_name: &str,
+    window_title: &str,
+) -> PrivacyDisposition {
+    let process = process_name.to_ascii_lowercase();
+    let title = window_title.to_ascii_lowercase();
+    let sensitive_process = config
+        .sensitive_process_names
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&process));
+    let sensitive_title = config
+        .sensitive_title_keywords
+        .iter()
+        .any(|keyword| title.contains(&keyword.to_ascii_lowercase()));
+    if sensitive_process || sensitive_title {
+        PrivacyDisposition::Redacted
+    } else {
+        PrivacyDisposition::Visible
+    }
+}
+
+fn project_world_state(
+    foreground_process: &str,
+    terminal_processes: &[String],
+    observed_at: chrono::DateTime<Utc>,
+) -> ProjectWorldState {
+    let terminal_active = terminal_processes
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(foreground_process));
+    let project_root = std::env::current_dir().ok().and_then(find_git_root);
+    let git_head = project_root.as_deref().and_then(read_git_head);
+    let project_name = project_root
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
+    ProjectWorldState {
+        observed_at,
+        terminal_active,
+        terminal_process: terminal_active.then(|| foreground_process.to_string()),
+        project_root: project_root.map(|root| root.to_string_lossy().into_owned()),
+        project_name,
+        git_head,
+    }
+}
+
+fn find_git_root(start: PathBuf) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+fn read_git_head(root: &Path) -> Option<String> {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let marker = std::fs::read_to_string(dot_git).ok()?;
+        let path = marker.trim().strip_prefix("gitdir:")?.trim();
+        let candidate = PathBuf::from(path);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            root.join(candidate)
+        }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    Some(
+        head.trim()
+            .strip_prefix("ref: refs/heads/")
+            .unwrap_or(head.trim())
+            .to_string(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -452,6 +604,7 @@ mod tests {
     fn test_context_watcher_creation() {
         let config = ContextConfig {
             poll_interval_secs: 2,
+            ..ContextConfig::default()
         };
         let watcher = ContextWatcher::new(config);
         assert_eq!(watcher.config.poll_interval_secs, 2);
@@ -462,6 +615,27 @@ mod tests {
         let config = ContextConfig::default();
         let watcher = ContextWatcher::new(config);
         assert_eq!(watcher.config.poll_interval_secs, 1);
+    }
+
+    #[test]
+    fn sensitive_titles_are_classified_before_publication() {
+        let config = ContextConfig::default();
+        assert_eq!(
+            classify_privacy(&config, "chrome.exe", "Enter password"),
+            PrivacyDisposition::Redacted
+        );
+        assert_eq!(
+            classify_privacy(&config, "Code.exe", "vision.rs - Continuum"),
+            PrivacyDisposition::Visible
+        );
+    }
+
+    #[test]
+    fn terminal_projection_never_contains_terminal_text() {
+        let config = ContextConfig::default();
+        let state = project_world_state("pwsh.exe", &config.terminal_process_names, Utc::now());
+        assert!(state.terminal_active);
+        assert_eq!(state.terminal_process.as_deref(), Some("pwsh.exe"));
     }
 
     #[test]
@@ -594,6 +768,7 @@ mod tests {
     async fn test_context_watcher_run_with_shutdown() {
         let watcher = ContextWatcher::new(ContextConfig {
             poll_interval_secs: 1,
+            ..ContextConfig::default()
         });
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -630,6 +805,7 @@ mod tests {
     async fn test_context_watcher_stops_on_channel_close() {
         let watcher = ContextWatcher::new(ContextConfig {
             poll_interval_secs: 1,
+            ..ContextConfig::default()
         });
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

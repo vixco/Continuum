@@ -454,7 +454,7 @@ impl AudioWatcher {
         // resource plan's GPU decision.
         let params = WhisperContextParameters {
             use_gpu,
-            ..Default::default()
+            ..WhisperContextParameters::default()
         };
         let ctx = WhisperContext::new_with_params(model_path, params)
             .context("Failed to initialize WhisperContext")?;

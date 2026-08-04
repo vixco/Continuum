@@ -17,23 +17,41 @@ The binary loads config from `~/.continuum-dev/config.toml`. If no config file e
 ## Architecture Overview
 
 ```
-VisionWatcher ──> ScreenObservation ──┐
-AudioWatcher  ──> AudioObservation  ──┤──> PerceptionFrameBuilder ──> PerceptionFrame ──> RawLog
-ContextWatcher -> ContextObservation ─┘
+Monitor workers ──> OrderedBuffer ──> change-selected local vision ──┐
+ContextWatcher ──────────────────────────────────────────────────────┼──> LiveContextHub
+                                                                    │        │
+AudioWatcher ──> AudioObservation ──────────────────────────────────┼────────┼──> PerceptionFrameBuilder
+                                                                    │        └──> live-context.json / MCP
+                                                                    └──> ScreenObservation
 ```
 
-Each watcher runs as an independent tokio task. The frame builder combines the latest observation from each source at a fixed interval, computes a salience score, and emits a unified `PerceptionFrame`. Frames are written to the SQLite raw log.
+Each connected monitor has an independent capture task. Capture continuity is
+decoupled from local vision inference by a bounded ordered buffer, so slow
+inference cannot silently pause sensing. The frame builder still combines the
+latest observations at a fixed interval and writes `PerceptionFrame` rows to
+the SQLite raw log. The separate live-context projection gives every agent role
+the same compact current world-state without exposing raw screenshots.
 
 ## The Three Watchers
 
 ### Vision Watcher
 
-Captures the primary monitor using `xcap` (GDI backend, no yellow border), downscales to the configured resolution, and runs the local vision model to produce a one-sentence description.
+Captures all connected monitors concurrently using `xcap` (GDI backend, no
+yellow border). Each display has a stable `display-<xcap id>` identity, geometry,
+per-monitor capture sequence, and timestamp.
 
 - **Crate:** `continuum-core::senses::vision`
 - **Model:** SmolVLM-256M via `ort` (ONNX Runtime). Falls back to a stub model if model files are missing.
-- **Interval:** Every `screen.interval_secs` seconds (default 3).
-- **Screenshots:** Saved to `~/.continuum-dev/screenshots/<YYYY-MM-DD>/<HH-MM-SS>.jpg` when `screen.save_screenshots = true`.
+- **Capture cadence:** `screen.capture_interval_ms` (default 200 ms per monitor).
+- **Backpressure:** `screen.buffer_capacity` pending captures; oldest pending
+  events are dropped under load and reported in health/event counters.
+- **Change selection:** a 64×36 luma signature gates local vision using
+  `screen.meaningful_change_threshold`; inference is independently rate-limited
+  by `screen.vision_min_interval_ms`.
+- **Screenshots:** disabled by default. When explicitly enabled, only selected
+  changed frames are saved under a per-monitor local directory.
+- **Privacy:** sensitive foreground applications or titles are redacted before
+  local vision; startup fails closed until context classification is available.
 
 ### Audio Watcher
 
@@ -50,7 +68,11 @@ Captures microphone audio via `cpal` (WASAPI), detects speech with energy-based 
 Polls Windows APIs once per second. No AI, no models -- pure structured data.
 
 - **Crate:** `continuum-core::senses::context`
-- **Data:** Foreground window title, process name, idle time, in-call detection.
+- **Data:** privacy-filtered foreground title/process, idle time, in-call
+  detection, current Git project/root/head, and terminal-process presence.
+- **Input boundary:** only coarse idle/active state is recorded. Key values,
+  pointer coordinates, click targets, clipboard contents, and terminal text are
+  never collected by live context.
 - **Call detection:** Checks for Discord, Teams, Zoom, Slack processes or browser tabs with "meet"/"zoom" in the title.
 - **Platform:** Windows-only via `#[cfg(windows)]`. Non-Windows gets stub observations.
 
@@ -84,10 +106,16 @@ input_width = 384
 input_height = 384
 
 [screen]
-interval_secs = 3          # Capture interval (1-10)
+enabled = true              # Visible user consent boundary
+capture_interval_ms = 200   # Per-monitor target cadence
 capture_width = 1280        # Downscale width
 capture_height = 720        # Downscale height
-save_screenshots = true     # Save JPEGs to disk
+save_screenshots = false    # Explicit opt-in for selected local JPEGs
+all_monitors = true          # Capture every connected monitor
+excluded_monitor_ids = []    # Optional stable display IDs to exclude
+buffer_capacity = 64         # Oldest-drop pending capture FIFO
+meaningful_change_threshold = 0.025
+vision_min_interval_ms = 2000
 
 [audio]
 enabled = true
@@ -98,6 +126,10 @@ max_segment_secs = 8        # Forced split at this length
 
 [context]
 poll_interval_secs = 1      # Windows API poll rate
+redact_sensitive_titles = true
+sensitive_process_names = ["1password.exe", "bitwarden.exe", "keepass.exe", "keepassxc.exe", "credentialuibroker.exe"]
+sensitive_title_keywords = ["password", "passkey", "two-factor", "2fa", "private key", "seed phrase"]
+terminal_process_names = ["windowsterminal.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "bash.exe", "wsl.exe"]
 
 [frame]
 interval_secs = 3           # Frame assembly interval (2-10)
@@ -134,6 +166,7 @@ All runtime data lives in `~/.continuum-dev/` during development:
 ~/.continuum-dev/
   config.toml              # Runtime configuration
   raw_log.sqlite           # Perception frame database
+  live-context.json        # Compact versioned shared current world-state
   screenshots/             # Saved screenshot JPEGs
     2026-04-10/
       14-30-00.jpg

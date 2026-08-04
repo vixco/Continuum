@@ -121,11 +121,11 @@ Pushing a manually-created tag is a fallback for the normal `main` push flow.
 The release workflow currently watches `main`; to use a manual tag fallback,
 run the workflow manually after the tag exists. A successful run:
 
-1. Builds `continuum.exe`, `continuum-mcp.exe`, and the Tauri desktop bundle in release mode on `windows-latest`.
+1. Builds `continuum.exe`, `continuum-mcp.exe`, and the Tauri desktop bundle in release mode on Windows Server 2022.
 2. Runs the full test suite (last-chance verification).
 3. Produces:
    - `continuum-<version>-windows-x64.zip` (portable) — `continuum.exe`, `continuum-mcp.exe`, `continuum-desktop.exe`, default configs.
-   - `continuum-<version>-windows-x64.msi` (Tauri 2 bundled installer).
+   - `continuum-<version>-windows-x64-setup.exe` (Tauri 2 NSIS installer and signed updater artifact).
 4. Creates and publishes a GitHub release with auto-generated changelog from commits since the previous tag.
 
 ### 4. Finalise the release

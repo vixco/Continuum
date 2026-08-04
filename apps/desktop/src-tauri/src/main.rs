@@ -40,6 +40,10 @@ use continuum_core::runtime::ContinuumRuntime;
 pub struct AppState {
     pub runtime: ContinuumRuntime,
     pub health: continuum_core::health::HealthRegistry,
+    /// Serializes repair runs so two UI invocations cannot race mutations.
+    pub(crate) repair_gate: Arc<tokio::sync::Mutex<()>>,
+    /// One-time live preview required before a repair can start.
+    pub(crate) pending_repair: tokio::sync::Mutex<Option<commands::RepairPreview>>,
 }
 
 fn main() {
@@ -76,6 +80,7 @@ fn main() {
 
     let dev_dir = runtime.dev_dir();
     let backups_dir = continuum_core::config::continuum_backups_dir();
+    let backup_retention = runtime.config_snapshot().health.backup_retention.max(1);
 
     // Memory vault: opened lazily by the first command/health-probe call
     // (see `memory::MemoryState::vault`), not here.
@@ -102,7 +107,7 @@ fn main() {
         dev_dir.clone(),
         backups_dir.clone(),
         continuum_core::health::backup::DEFAULT_BACKUP_HOUR,
-        continuum_core::health::backup::DEFAULT_RETENTION,
+        backup_retention,
         runtime.shutdown_receiver(),
         {
             let state = runtime.state.clone();
@@ -111,9 +116,15 @@ fn main() {
                 let state = state.clone();
                 let bd = bd.clone();
                 tokio::spawn(async move {
-                    let latest = continuum_core::health::backup::latest_backup_ts(&bd);
-                    let count = continuum_core::health::backup::count_backups(&bd);
-                    state.set_backup_status(latest, count).await;
+                    match continuum_core::health::backup::backup_status(&bd) {
+                        Ok((latest, count)) => state.set_backup_status(latest, count).await,
+                        Err(error) => tracing::warn!(
+                            layer = "health",
+                            component = "backup",
+                            error = %error,
+                            "Could not refresh backup status"
+                        ),
+                    }
                 });
             }
         },
@@ -124,15 +135,23 @@ fn main() {
         let state = runtime.state.clone();
         let bd = backups_dir.clone();
         tokio::spawn(async move {
-            let latest = continuum_core::health::backup::latest_backup_ts(&bd);
-            let count = continuum_core::health::backup::count_backups(&bd);
-            state.set_backup_status(latest, count).await;
+            match continuum_core::health::backup::backup_status(&bd) {
+                Ok((latest, count)) => state.set_backup_status(latest, count).await,
+                Err(error) => tracing::warn!(
+                    layer = "health",
+                    component = "backup",
+                    error = %error,
+                    "Could not read backup status at startup"
+                ),
+            }
         });
     }
 
     let app_state = Arc::new(AppState {
         runtime: runtime.clone(),
         health: health.clone(),
+        repair_gate: Arc::new(tokio::sync::Mutex::new(())),
+        pending_repair: tokio::sync::Mutex::new(None),
     });
     let runtime_for_tauri = runtime.clone();
 
@@ -160,6 +179,7 @@ fn main() {
             commands::update_voice_volume,
             commands::update_voice_flag,
             commands::update_screen_interval,
+            commands::update_live_context_config,
             commands::update_triage_threshold,
             commands::get_logs,
             commands::get_memory_summary,
@@ -170,6 +190,7 @@ fn main() {
             commands::delete_automation,
             commands::toggle_automation,
             commands::get_health,
+            commands::preview_repair,
             commands::trigger_repair,
             commands::restart_component,
             commands::run_backup_now,
@@ -192,7 +213,11 @@ fn main() {
             commands::cancel_worker,
             commands::dismiss_worker,
             commands::get_runtime_status,
+            commands::pipe_health,
             commands::start_runtime,
+            commands::list_mcp_tools,
+            commands::list_installed_mcp_servers,
+            commands::install_mcp_server,
             providers::catalog_list,
             providers::providers_list,
             providers::provider_add,

@@ -14,10 +14,17 @@ Every setting Continuum reads, grouped by section. File: `~/.continuum/config/de
 ## `[screen]`
 | Key | Type | Default |
 |---|---|---|
-| `interval_secs` | int | 3 |
+| `enabled` | bool | true |
+| `interval_secs` | int | 3 (legacy compatibility) |
+| `capture_interval_ms` | int | 200 |
 | `capture_width` | int | 1280 |
 | `capture_height` | int | 720 |
-| `save_screenshots` | bool | true |
+| `save_screenshots` | bool | false |
+| `all_monitors` | bool | true |
+| `excluded_monitor_ids` | string[] | `[]` |
+| `buffer_capacity` | int | 64 |
+| `meaningful_change_threshold` | float | 0.025 |
+| `vision_min_interval_ms` | int | 2000 |
 
 ## `[audio]`
 See [Voice settings](/configuration/voice-settings).
@@ -26,6 +33,10 @@ See [Voice settings](/configuration/voice-settings).
 | Key | Type | Default |
 |---|---|---|
 | `poll_interval_secs` | int | 1 |
+| `redact_sensitive_titles` | bool | true |
+| `sensitive_process_names` | string[] | password/credential managers |
+| `sensitive_title_keywords` | string[] | password/passkey/code terms |
+| `terminal_process_names` | string[] | common local terminals |
 
 ## `[frame]`
 | Key | Type | Default |

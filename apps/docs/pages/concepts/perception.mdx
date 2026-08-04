@@ -6,10 +6,12 @@ The perception layer is Continuum's senses. It runs 24/7, captures what you're s
 
 ### Vision
 
-- **Source:** your primary monitor, via the Windows GDI/BitBlt API through the `xcap` crate. No yellow "this app is capturing" border.
-- **Cadence:** one screenshot every 3 seconds by default (configurable — `screen.interval_secs`).
+- **Source:** every connected monitor concurrently, via the Windows GDI/BitBlt API through the `xcap` crate. No yellow "this app is capturing" border.
+- **Cadence:** a 200 ms target per monitor by default (`screen.capture_interval_ms`). Capture stays independent from slower local vision work.
 - **Resolution:** downscaled to 1280×720 before the vision model sees it.
-- **Model:** SmolVLM-256M via ONNX Runtime. Produces a short natural-language description of the screen.
+- **Selection:** cheap luma change detection sends only meaningful changes to the local model, with an independent per-monitor inference interval.
+- **Model:** SmolVLM-256M via ONNX Runtime. Produces compact local descriptions for the shared `live-context.json` world-state.
+- **Overload:** a bounded ordered buffer drops the oldest pending image and reports the gap; capture does not silently pause.
 
 ### Audio
 
@@ -23,6 +25,7 @@ The perception layer is Continuum's senses. It runs 24/7, captures what you're s
 - **Foreground window** title + process name, polled once per second.
 - **Idle time** (time since last mouse / keyboard input).
 - **Call state** — detects Discord, Teams, Zoom, Meet, Slack calls by process inspection.
+- **Terminal/project state** — terminal-process presence and the current local Git root/head, never terminal text.
 
 ## The `PerceptionFrame` object
 
@@ -56,9 +59,10 @@ Frames below the configurable `frame.salience_threshold` (default 0.10) don't ge
 
 ## Privacy
 
-- **Screenshots** can optionally be saved to disk (`screen.save_screenshots`). By default they are, but **only for you** — they live at `~/.continuum/memory/screenshots/` and are never uploaded anywhere.
+- **Screenshots** can optionally be saved to disk (`screen.save_screenshots`). Persistence is off by default; selected changed frames remain local when you opt in.
 - **Audio** is never saved — only the transcripts are stored.
-- **Deny list**: the perception layer respects the foreground-app deny list in `~/.continuum/config/default-permissions.toml`. If you're in a password manager or an app you've blocked, the vision and audio layers pause.
+- **Sensitive foreground content**: configured password/credential processes and title fragments are redacted before vision or publication. Startup fails closed until the foreground privacy classification is available.
+- **Input minimization**: live context records idle/active state only—never keys, pointer coordinates, click targets, clipboard content, or terminal text.
 - **You can pause perception entirely** with the Pause button in the dashboard topbar or the tray menu.
 
 ## Where to look in the dashboard

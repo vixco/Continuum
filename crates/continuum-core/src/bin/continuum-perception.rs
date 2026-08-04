@@ -33,6 +33,7 @@ use continuum_core::memory::raw_log::RawLog;
 use continuum_core::senses::audio::AudioWatcher;
 use continuum_core::senses::context::ContextWatcher;
 use continuum_core::senses::frame::PerceptionFrameBuilder;
+use continuum_core::senses::live_context::{self, LiveContextHub};
 use continuum_core::senses::types::{AudioObservation, ContextObservation, ScreenObservation};
 use continuum_core::senses::vision::VisionWatcher;
 use continuum_core::triage::handlers::handle_decision;
@@ -120,8 +121,15 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx_ctrlc.send(true);
     });
 
-    // Create observation channels.
-    let (screen_tx, screen_rx) = mpsc::channel::<ScreenObservation>(16);
+    // Create the shared agent-facing projection and observation channels.
+    let live_context = LiveContextHub::new(config.screen.buffer_capacity.saturating_mul(4));
+    live_context::spawn_publisher(
+        live_context.clone(),
+        dev_dir.join("live-context.json"),
+        std::time::Duration::from_millis(200),
+        shutdown_rx.clone(),
+    );
+    let (screen_tx, screen_rx) = mpsc::channel::<ScreenObservation>(64);
     let (audio_tx, audio_rx) = mpsc::channel::<AudioObservation>(16);
     let (ctx_tx, ctx_rx) = mpsc::channel::<ContextObservation>(64);
     let (frame_tx, mut frame_rx) = mpsc::channel(32);
@@ -130,10 +138,11 @@ async fn main() -> Result<()> {
     let vision_model = init_vision_model(&config, &resource_plan).await;
 
     // Spawn the three senses watchers.
-    let vision_watcher = VisionWatcher::new(
+    let vision_watcher = VisionWatcher::new_with_live_context(
         config.screen.clone(),
         vision_model,
         PathBuf::from(&config.storage.screenshots_dir),
+        live_context.clone(),
     );
     let vision_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
@@ -148,8 +157,11 @@ async fn main() -> Result<()> {
 
     let context_watcher = ContextWatcher::new(config.context.clone());
     let context_shutdown = shutdown_rx.clone();
+    let context_live_context = live_context.clone();
     tokio::spawn(async move {
-        let _ = context_watcher.run(ctx_tx, context_shutdown).await;
+        let _ = context_watcher
+            .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
+            .await;
     });
 
     // Spawn the frame builder.

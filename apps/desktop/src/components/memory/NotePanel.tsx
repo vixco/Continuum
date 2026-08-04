@@ -21,7 +21,7 @@ const MARKDOWN_CLASSES =
   "break-words text-sm leading-relaxed " +
   "[&_p:not(:last-child)]:mb-2 " +
   "[&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:mb-0.5 " +
-  "[&_a]:text-accent-purple [&_a]:underline [&_strong]:font-semibold " +
+  "[&_a]:text-accent-amber [&_a]:underline [&_strong]:font-semibold " +
   "[&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-black/40 [&_pre]:p-2 [&_code]:text-xs";
 
 const WIDTH_STORAGE_KEY = "continuum-memory-panel-w";
@@ -264,7 +264,7 @@ export function NotePanel({ noteId, onClose, onExpand, onChanged, onNavigate }: 
         onMouseDown={startDrag}
         className="group absolute left-0 top-0 h-full w-1.5 cursor-col-resize"
       >
-        <div className="h-full w-px bg-bg-border group-hover:bg-accent-purple/50" />
+        <div className="h-full w-px bg-bg-border group-hover:bg-accent-amber/50" />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 pl-5">

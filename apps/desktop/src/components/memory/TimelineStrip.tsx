@@ -115,7 +115,7 @@ export function TimelineStrip({ events, window: scrubWindow, onScrub }: Timeline
         className={clsx(
           "shrink-0 rounded-md border px-2 py-1 text-[11px] transition-colors",
           !scrubWindow
-            ? "border-accent-purple/60 text-ink"
+            ? "border-accent-amber/60 text-ink"
             : "border-bg-border text-ink-muted hover:text-ink"
         )}
       >
@@ -145,8 +145,8 @@ export function TimelineStrip({ events, window: scrubWindow, onScrub }: Timeline
                 "absolute bottom-0 left-0 right-0 rounded-sm transition-colors",
                 b.count > 0
                   ? i === activeIdx
-                    ? "bg-accent-purple"
-                    : "bg-accent-purple/60 group-hover:bg-accent-purple/80"
+                    ? "bg-accent-amber"
+                    : "bg-accent-amber/60 group-hover:bg-accent-amber/80"
                   : "bg-transparent group-hover:bg-bg-hover"
               )}
               style={{ height: b.count > 0 ? `${(b.count / maxCount) * 100}%` : "100%" }}

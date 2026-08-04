@@ -38,6 +38,7 @@ memory_wipe_all       = "always-confirm"
 [system]
 system_current_time   = "auto"
 system_active_window  = "auto"
+system_live_context   = "auto"
 system_clipboard_get  = "session-approved"
 system_notification   = "auto"
 
@@ -52,8 +53,10 @@ web_fetch = "auto"
 
 # --- Repair tools (REPAIR AGENT ONLY) ---
 # All destructive / state-mutating. Blocked by default; the repair agent
-# runtime flips these to `session-approved` for the duration of an active
-# repair session spawned via the Health tab's "Run repair" button.
+# A normal MCP process keeps these unreachable. The Health tab spawns a
+# dedicated MCP process with a short-lived capability scoped to read-only tests
+# for components in the user's one-time live preview. Component restart,
+# reinstall, and rollback remain denied in that safe flow.
 [repair]
 repair_restart_component = "blocked"
 repair_reinstall_model   = "blocked"

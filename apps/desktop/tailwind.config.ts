@@ -1,5 +1,7 @@
 import type { Config } from "tailwindcss";
 
+// Amber/gold is Continuum's signature accent per the visual contract in README
+
 const config: Config = {
   content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
   theme: {
@@ -13,8 +15,8 @@ const config: Config = {
           hover: "#20211d",
         },
         accent: {
-          purple: "#f59e0b",
-          "purple-dim": "#b45309",
+          amber: "#f59e0b",
+          "amber-dim": "#b45309",
           blue: "#3b82f6",
           "blue-dim": "#1d4ed8",
         },

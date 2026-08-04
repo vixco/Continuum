@@ -20,6 +20,10 @@ export interface PerceptionState {
   last_salience: number;
   has_error_visible: boolean;
   frames_today: number;
+  monitor_count: number;
+  capture_events: number;
+  dropped_capture_events: number;
+  last_capture_at: string | null;
 }
 
 export interface TriageState {
@@ -357,12 +361,32 @@ export interface MemoryEventPayload {
 export type RepairEvent =
   | { kind: "started"; ts: string }
   | { kind: "context_written"; path: string }
+  | { kind: "backup_created"; path: string; bytes: number; verified: boolean }
+  | { kind: "action_result"; action: string; success: boolean; detail: string }
   | { kind: "assistant_delta"; text: string }
   | { kind: "tool_call"; name: string }
   | { kind: "tool_result"; name: string; summary: string }
   | { kind: "stderr"; line: string }
   | { kind: "finished"; ts: string; success: boolean; cost_usd: number | null }
+  | { kind: "verification"; checked_at: string; unresolved: ComponentHealth[] }
   | { kind: "error"; message: string };
+
+export interface RepairPreviewIssue {
+  component: string;
+  status: ComponentStatus;
+  detail: string;
+  proposed_action: string;
+  actionable: boolean;
+}
+
+export interface RepairPreview {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  issues: RepairPreviewIssue[];
+  backup_required: boolean;
+  allowed_actions: string[];
+}
 
 // Phase 8: skills + workers
 
@@ -421,6 +445,21 @@ export interface WorkerSnapshot {
 }
 
 export interface ContinuumConfig {
+  health: {
+    repair_timeout_secs: number;
+    runtime_start_timeout_secs: number;
+    repair_session_ttl_secs: number;
+    backup_retention: number;
+  };
+  chat: {
+    max_tokens: number;
+    temperature: number | null;
+    connect_timeout_secs: number;
+    stream_idle_timeout_secs: number;
+    cli_timeout_secs: number;
+    model_refresh_interval_secs: number;
+    system_prompt_path: string | null;
+  };
   vision: {
     name: string;
     model_path: string;
@@ -429,10 +468,17 @@ export interface ContinuumConfig {
     input_height: number;
   };
   screen: {
+    enabled: boolean;
     interval_secs: number;
+    capture_interval_ms: number;
     capture_width: number;
     capture_height: number;
     save_screenshots: boolean;
+    all_monitors: boolean;
+    excluded_monitor_ids: string[];
+    buffer_capacity: number;
+    meaningful_change_threshold: number;
+    vision_min_interval_ms: number;
   };
   audio: {
     enabled: boolean;
@@ -444,7 +490,13 @@ export interface ContinuumConfig {
     device_name: string;
     device_index: number | null;
   };
-  context: { poll_interval_secs: number };
+  context: {
+    poll_interval_secs: number;
+    redact_sensitive_titles: boolean;
+    sensitive_process_names: string[];
+    sensitive_title_keywords: string[];
+    terminal_process_names: string[];
+  };
   frame: { interval_secs: number; salience_threshold: number };
   storage: {
     db_path: string;
@@ -670,4 +722,24 @@ export interface ProviderAddInput {
   base_url: string | null;
   api_key: string | null;
   save_anyway: boolean;
+}
+
+/** One entry in the static MCP-tool manifest (see commands.rs::list_mcp_tools). */
+export interface McpTool {
+  namespace: string;
+  name: string;
+  description: string;
+}
+
+/** A validated local stdio MCP server registration. */
+export interface McpServerRegistration {
+  name: string;
+  command: string;
+  args: string[];
+}
+
+export interface InstallMcpServerInput {
+  name: string;
+  command: string;
+  args: string[];
 }
