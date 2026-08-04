@@ -374,12 +374,12 @@ These are registered by `crates/continuum-mcp/src/server.rs` today; CI keeps the
 - `memory_get_fact(key)` — fetch one fact (vault-first, legacy fallback)
 - `memory_set_fact(key, value, source?)` — upsert a fact; writes a `type: fact` vault note (confidence clamped by source)
 
-**Memory vault (`mcp__continuum__memory_vault_*`, Plan B)**
+**Memory vault (the four `mcp__continuum__memory_vault_*` tools, plus `memory_wipe_all`, Plan B)**
 - `memory_vault_search(query, types?, project?, limit?)` — full-text search over vault notes
 - `memory_vault_get(id)` — fetch one note's full frontmatter, body, and backlinks
 - `memory_vault_save(type, title, body, project?, confidence?, importance?, tags?, relations?, source_ref?)` — create, or update-by-title, a confirmed vault note
 - `memory_vault_resolve(id, action, replaces?)` — confirm / reject / supersede a candidate note
-- `memory_wipe_all(confirm)` — queue a derived-data wipe (`confirm` must be the literal string `"WIPE"`); vault markdown is never deleted
+- `memory_wipe_all(confirm)` — queue a derived-data wipe (`confirm` must be the literal string `"WIPE"`); vault markdown is never deleted; not part of the `memory_vault_*` name family despite living in this section
 
 **System (`mcp__continuum__system_*`)**
 - `system_current_time()` — local wall-clock + tz + epoch ms
@@ -544,12 +544,12 @@ the orchestrator drives):
    into, so `bin/continuum.rs` grew one.
 
 Candidates surface to a human or the orchestrator three ways: the wake
-context's "Pending memory decisions" section (below), the five
-`mcp__continuum__memory_vault_*` MCP tools, and the dashboard's Memory tab
-curator-card stack. Every LLM-parse failure retries once before the
-pass/pair is skipped; a window that fails outright 3 times running is
-abandoned rather than wedging the curator forever. Full config keys, prompt
-locations, and the session-boundary algorithm: `docs/memory.md`.
+context's "Pending memory decisions" section (below), the four
+`mcp__continuum__memory_vault_*` MCP tools plus `memory_wipe_all`, and the
+dashboard's Memory tab curator-card stack. Every LLM-parse failure retries
+once before the pass/pair is skipped; a window that fails outright 3 times
+running is abandoned rather than wedging the curator forever. Full config
+keys, prompt locations, and the session-boundary algorithm: `docs/memory.md`.
 
 ### Semantic memory (legacy, superseded by the vault)
 
