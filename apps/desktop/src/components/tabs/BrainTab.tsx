@@ -1,45 +1,20 @@
 "use client";
 
-import { useState } from "react";
 import { clsx } from "clsx";
-import { Eye, Filter, MessageSquare, Users } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { continuum } from "@/lib/tauri";
-import { Button, Card, Select, Slider, Toggle } from "@/components/ui/primitives";
+import { Card, Select, Slider, Toggle } from "@/components/ui/primitives";
 
 export function BrainTab() {
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
   const system = useStore((s) => s.state.system);
   const perception = useStore((s) => s.state.perception);
-  const [testing, setTesting] = useState<string | null>(null);
-
-  async function testLayer(name: string) {
-    setTesting(name);
-    await new Promise((r) => window.setTimeout(r, 800));
-    setTesting(null);
-  }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <LayerDiagram />
-
-      <Card
-        title="Layer 1 - Vision"
-        subtitle={`Active model: ${config.vision.name}`}
-        actions={
-          <Button
-            size="sm"
-            variant="default"
-            onClick={() => testLayer("vision")}
-            disabled={testing === "vision"}
-          >
-            <Eye size={12} />
-            {testing === "vision" ? "Capturing…" : "Test capture"}
-          </Button>
-        }
-      >
+    <div className="mx-auto max-w-4xl space-y-6">
+      <Card title="Layer 1 — Vision" subtitle={`Active model: ${config.vision.name}`}>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <div className="bg-bg-raised/40 flex flex-col justify-end gap-2 rounded-md border border-bg-border px-3 py-2">
             <Toggle
@@ -88,29 +63,14 @@ export function BrainTab() {
           <span className="mx-2 text-ink-dim">•</span>
           bounded ordered buffer ({config.screen.buffer_capacity} events)
           <span className="mx-2 text-ink-dim">•</span>
-          local vision at meaningful changes only
-          <span className="mx-2 text-ink-dim">•</span>
           dropped: {perception.dropped_capture_events}
           <span className="mx-2 text-ink-dim">•</span>
           restart runtime after changing capture settings
         </div>
-        <ModelStatus
-          loaded={system.vision_model_loaded}
-          label="Vision model"
-          appliedModel={config.vision.name}
-        />
+        <ModelStatus loaded={system.vision_model_loaded} appliedModel={config.vision.name} />
       </Card>
 
-      <Card
-        title="Layer 2 - Triage"
-        subtitle="Local LLM gatekeeper"
-        actions={
-          <Button size="sm" onClick={() => testLayer("triage")} disabled={testing === "triage"}>
-            <Filter size={12} />
-            {testing === "triage" ? "Running…" : "Test triage"}
-          </Button>
-        }
-      >
+      <Card title="Layer 2 — Triage" subtitle="Local LLM gatekeeper">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {/* Triage model is loaded at boot from config.toml — the dashboard
               does not yet expose a hot-swap. Until that ships, this control
@@ -141,22 +101,10 @@ export function BrainTab() {
             format={(v) => v.toFixed(2)}
           />
         </div>
-        <ModelStatus
-          loaded={system.triage_model_loaded}
-          label="Triage model"
-          appliedModel="qwen3-8b"
-        />
+        <ModelStatus loaded={system.triage_model_loaded} appliedModel="qwen3-8b" />
       </Card>
 
-      <Card
-        title="Layer 3 - Orchestrator"
-        subtitle="Claude Opus via headless CLI"
-        actions={
-          <Button size="sm" onClick={() => testLayer("orchestrator")}>
-            <MessageSquare size={12} /> Dry-run
-          </Button>
-        }
-      >
+      <Card title="Layer 3 — Orchestrator" subtitle="Claude Opus via headless CLI">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {/* Orchestrator model is owned by the Claude CLI — the dashboard
               can't swap it mid-session. Until the orchestrator profile
@@ -176,108 +124,42 @@ export function BrainTab() {
           {/* Token budget is enforced in the orchestrator prompt template,
               not by the dashboard. There's no live command to push a new
               value yet — surface this as a stat, not a control. */}
-          <Slider
-            label="Token budget (read-only)"
-            value={4000}
-            onChange={() => {}}
-            disabled
-            min={1000}
-            max={16000}
-            step={500}
-            format={(v) => `${Math.round(v)} tokens`}
-          />
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-ink-dim">Token budget</div>
+            <div className="mt-1 font-mono text-sm text-ink">4,000 tokens (read-only)</div>
+          </div>
         </div>
-        <ModelStatus
-          loaded={system.orchestrator_ready}
-          label="Claude CLI reachable"
-          appliedModel="claude-opus-4-6"
-        />
+        <ModelStatus loaded={system.orchestrator_ready} appliedModel="claude-opus-4-6" />
       </Card>
 
       <Card
-        title="Layer 4 - Workers"
+        title="Layer 4 — Workers"
         subtitle="Headless Claude Code sessions spawned by the orchestrator"
-        actions={
-          <Button size="sm" disabled>
-            <Users size={12} /> Phase 8
-          </Button>
-        }
       >
         <p className="text-sm text-ink-muted">
-          Headless Claude Code sessions the orchestrator spawns when a task needs more than a few
-          tool calls. Configuration lands in a later phase — until then, workers run with the
-          runtime defaults.
+          Workers are headless Claude Code sessions the orchestrator spawns when a task needs more
+          than a few tool calls. They run with the runtime defaults for now — configuration lands in
+          a later phase.
         </p>
       </Card>
     </div>
   );
 }
 
-function LayerDiagram() {
-  const items = [
-    { label: "Senses", colour: "from-accent-blue to-accent-blue-dim" },
-    { label: "Triage", colour: "from-accent-amber to-accent-amber-dim" },
-    { label: "Orchestrator", colour: "from-state-healthy to-accent-blue-dim" },
-    { label: "Workers", colour: "from-state-warn to-state-error" },
-  ];
+/** One honest status line per layer: a dot, ready/not-reported, and the
+ *  model the runtime actually has loaded. No disabled toggles pretending
+ *  to be controls. */
+function ModelStatus({ loaded, appliedModel }: { loaded: boolean; appliedModel: string }) {
   return (
-    <Card title="Four-layer pipeline" subtitle="data flows up, commands flow down">
-      <div className="flex items-stretch gap-2">
-        {items.map((item, idx) => (
-          <div key={item.label} className="flex-1">
-            <div
-              className={clsx(
-                "flex h-16 items-center justify-center rounded-md bg-gradient-to-br font-medium text-white",
-                item.colour
-              )}
-            >
-              {item.label}
-            </div>
-            {idx < items.length - 1 && <div className="mx-auto mt-1 h-px w-8 bg-ink-dim" />}
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-/**
- * Honest status row for a layer's model / backend.
- *
- * Replaces the previous "ResourceRow" that hard-coded "RAM/CPU/GPU: –" — we
- * don't have live per-process numbers from the Tauri side, so showing
- * "–" implied we'd eventually fill them in. The model_status plumbing on
- * the runtime side is the source of truth; this row surfaces the bits we
- * actually know.
- */
-function ModelStatus({
-  loaded,
-  label,
-  appliedModel,
-}: {
-  loaded: boolean;
-  label: string;
-  appliedModel: string;
-}) {
-  return (
-    <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-bg-border pt-3 text-xs text-ink-muted">
-      <Toggle checked={loaded} onChange={() => {}} label={label} disabled />
-      <span className="text-ink-dim">
-        applied: <span className="font-mono text-ink-muted">{appliedModel}</span>
-      </span>
+    <div className="mt-3 flex items-center gap-2 border-t border-bg-border pt-3 text-xs">
       <span
-        className={clsx(
-          "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider",
-          loaded ? "bg-state-healthy/20 text-state-healthy" : "bg-state-idle/20 text-state-idle"
-        )}
-        title={
-          loaded
-            ? "Runtime reports this model/backend is reachable"
-            : "Not yet reported by the runtime"
-        }
-      >
+        className={clsx("h-1.5 w-1.5 rounded-full", loaded ? "bg-state-healthy" : "bg-ink-dim")}
+      />
+      <span className={loaded ? "text-state-healthy" : "text-ink-dim"}>
         {loaded ? "ready" : "not reported"}
       </span>
+      <span className="text-ink-dim">·</span>
+      <span className="font-mono text-ink-muted">{appliedModel}</span>
     </div>
   );
 }
