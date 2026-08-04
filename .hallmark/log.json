@@ -1,0 +1,12 @@
+[
+  {
+    "date": "2026-08-04",
+    "scope": "app",
+    "macrostructure": "Workbench",
+    "theme": "custom",
+    "theme_axes": "dark / system-native / warm",
+    "vibe": "quiet technical, graphite, precise amber",
+    "enrichment": "none",
+    "brief": "Continuum desktop app-wide visual redesign"
+  }
+]

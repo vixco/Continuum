@@ -284,7 +284,7 @@ function RepairStream({ events }: { events: RepairEvent[] }) {
     );
   }
   return (
-    <div className="h-64 overflow-y-auto rounded-md border border-bg-border bg-black/40 p-3 font-mono text-[12px] leading-[1.5]">
+    <div className="h-64 overflow-y-auto rounded-md border border-bg-border bg-bg/60 p-3 font-mono text-[12px] leading-[1.5]">
       {events.map((e, idx) => (
         <div key={idx} className="flex gap-2">
           <span className="shrink-0 text-ink-dim">{labelFor(e)}</span>

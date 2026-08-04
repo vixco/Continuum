@@ -1,19 +1,25 @@
+/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
+ * Hallmark · genre: modern-minimal · macrostructure: Workbench · nav: N3 side rail · footer: none · design-system: design.md
+ * contrast: pass (40-41) · honest: pass (46) · chrome: native (47) · tokens: pass for Hallmark layer (48) · viewport: desktop-native
+ */
+@import "../../../../tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --window-bg: #090a09;
-  --bg: #090a09;
-  --surface: rgba(19, 20, 18, 0.78);
-  --elevated: rgba(29, 30, 27, 0.76);
-  --border: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --accent: #f59e0b;
-  --accent-dim: #b45309;
-  --glass-highlight: rgba(255, 255, 255, 0.075);
-  --glass-shadow: rgba(0, 0, 0, 0.42);
-  --motion-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+  --window-bg: var(--color-paper);
+  --bg: var(--color-paper);
+  --surface: var(--color-paper-2);
+  --elevated: var(--color-paper-3);
+  --border: var(--color-rule);
+  --border-strong: var(--color-rule-2);
+  --accent: var(--color-accent);
+  --accent-dim: var(--color-accent-dim);
+  --glass-highlight: oklch(var(--ink-channels) / 0.04);
+  --glass-shadow: color-mix(in oklch, var(--color-deep-shadow) 45%, transparent);
+  --motion-fluid: var(--ease-out);
   color-scheme: dark;
 }
 
@@ -25,8 +31,8 @@ body {
      same color as the shell so the OS-owned corners never expose black
      contrast pixels around the frameless window. */
   background: var(--window-bg);
-  color: #f4f4f2;
-  font-family: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--color-ink);
+  font-family: var(--font-body);
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
 }
@@ -53,8 +59,10 @@ select {
 }
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid rgba(245, 158, 11, 0.6);
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
@@ -67,12 +75,12 @@ textarea:focus-visible {
 }
 ::-webkit-scrollbar-thumb {
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--color-rule-2);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(245, 158, 11, 0.3);
+  background: var(--color-neutral);
   background-clip: padding-box;
 }
 
@@ -80,14 +88,13 @@ textarea:focus-visible {
    answers back. Reduced-motion users get the transition neutralised below. */
 .press {
   transition:
-    transform 0.16s var(--motion-fluid),
-    background-color 0.2s ease-out,
-    border-color 0.2s ease-out,
-    color 0.2s ease-out,
-    box-shadow 0.2s ease-out;
+    transform var(--dur-micro) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
 }
 .press:active {
-  transform: scale(0.97);
+  transform: translateY(1px);
 }
 
 /* ---------- App shell ---------- */
@@ -744,6 +751,351 @@ textarea:focus-visible {
 }
 .w-row + .w-row {
   border-top: 1px solid var(--border);
+}
+
+/* ---------- Hallmark · Foundry Amber app system ---------- */
+
+h1,
+h2,
+h3,
+.font-display {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-display);
+  font-style: normal;
+  letter-spacing: -0.025em;
+}
+
+code,
+pre,
+kbd,
+.font-mono {
+  font-family: var(--font-outlier);
+  font-variant-numeric: tabular-nums;
+}
+
+.app-window {
+  border-color: var(--color-rule);
+  background: var(--color-paper);
+  box-shadow: none;
+}
+
+.titlebar {
+  height: 48px;
+  flex-basis: 48px;
+  gap: var(--space-sm);
+  border-color: var(--color-rule);
+  background: var(--color-paper-2);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding-inline: var(--space-md) var(--space-xs);
+}
+
+.tb-brand {
+  gap: var(--space-xs);
+  color: var(--color-ink);
+  font-family: var(--font-wordmark);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.tb-mark {
+  filter: none;
+}
+
+.tb-status {
+  min-height: 24px;
+  gap: var(--space-xs);
+  border-color: var(--color-rule);
+  color: var(--color-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+}
+
+.tb-runtime {
+  min-height: 30px;
+  border-color: var(--color-rule);
+  border-radius: var(--radius-input);
+  background: var(--color-paper-3);
+  color: var(--color-ink-2);
+  font-size: 11px;
+  transition:
+    transform var(--dur-micro) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.tb-runtime.alive {
+  border-color: oklch(var(--healthy-channels) / 0.42);
+  background: oklch(var(--healthy-channels) / 0.08);
+  color: var(--color-healthy);
+}
+
+.tb-runtime.offline:hover {
+  border-color: oklch(var(--accent-channels) / 0.42);
+  background: oklch(var(--accent-channels) / 0.08);
+  color: var(--color-accent);
+}
+
+.tb-runtime:active,
+.win-btn:active,
+.nav-item:active {
+  transform: translateY(1px);
+}
+
+.win-btn {
+  border-radius: var(--radius-input);
+  color: var(--color-muted);
+  transition:
+    transform var(--dur-micro) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.win-btn:hover {
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+}
+
+.win-btn.close:hover {
+  background: var(--color-error);
+  color: var(--color-paper);
+}
+
+.sidebar {
+  width: 244px;
+  flex-basis: 244px;
+  gap: var(--space-lg);
+  border-color: var(--color-rule);
+  background: var(--color-paper-2);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: var(--space-lg) var(--space-sm) var(--space-md);
+}
+
+.nav-group {
+  gap: var(--space-2xs);
+}
+
+.nav-group-label {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--color-neutral);
+  font-family: var(--font-outlier);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.11em;
+}
+
+.nav-item {
+  min-height: 40px;
+  gap: var(--space-sm);
+  border-radius: var(--radius-input);
+  padding-inline: var(--space-sm);
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  transition:
+    transform var(--dur-micro) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.nav-item::before {
+  content: "";
+  position: absolute;
+  inset-block: 9px;
+  left: 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+}
+
+.nav-item:hover {
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+}
+
+.nav-item.is-active {
+  border-color: var(--color-rule);
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+  box-shadow: none;
+}
+
+.nav-item.is-active::before {
+  background: var(--color-accent);
+}
+
+.nav-item svg {
+  color: var(--color-neutral);
+  transition: color var(--dur-short) var(--ease-out);
+}
+
+.nav-item.is-active svg {
+  color: var(--color-accent);
+}
+
+.sidebar-foot {
+  border-color: var(--color-rule);
+}
+
+.main {
+  background: var(--color-paper);
+}
+
+.main-scroll {
+  padding: var(--space-xl) var(--space-xl) var(--space-2xl);
+}
+
+.main-scroll > * {
+  width: 100%;
+  max-width: 1440px;
+  margin-inline: auto;
+  animation: hallmark-tab-crossfade var(--dur-short) var(--ease-out);
+}
+
+@keyframes hallmark-tab-crossfade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.continuum-card,
+.continuum-modal,
+.liquid-panel {
+  background: var(--color-paper-2) !important;
+  box-shadow: var(--shadow-card);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition: border-color var(--dur-short) var(--ease-out);
+}
+
+.liquid-panel:hover {
+  border-color: var(--color-rule-2);
+  box-shadow: var(--shadow-card);
+}
+
+.update-banner {
+  gap: var(--space-xs);
+  margin: 0 var(--space-xl) var(--space-sm);
+  border-color: oklch(var(--accent-channels) / 0.42);
+  border-radius: var(--radius-input);
+  background: oklch(var(--accent-channels) / 0.08);
+  color: var(--color-ink-2);
+  font-size: 13px;
+}
+
+.command-scrim {
+  z-index: var(--z-modal);
+  background: oklch(var(--paper-channels) / 0.86);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: hallmark-tab-crossfade var(--dur-short) var(--ease-out);
+}
+
+.command-palette {
+  border-color: var(--color-rule-2);
+  border-radius: var(--radius-card);
+  background: var(--color-paper-3);
+  box-shadow: var(--shadow-modal);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.command-palette kbd {
+  border-color: var(--color-rule);
+  background: var(--color-paper-2);
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.continuum-range {
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--continuum-range-fill, 50%),
+    var(--color-rule) var(--continuum-range-fill, 50%),
+    var(--color-rule) 100%
+  );
+}
+
+.continuum-range::-webkit-slider-thumb,
+.continuum-range::-moz-range-thumb {
+  border-color: var(--color-accent);
+  background: var(--color-accent-ink);
+  box-shadow: none;
+  transition: transform var(--dur-micro) var(--ease-out);
+}
+
+.continuum-range::-webkit-slider-thumb:active {
+  transform: translateY(1px);
+}
+
+.continuum-label {
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.startup-intro,
+.wizard {
+  background: var(--color-paper);
+}
+
+.startup-aurora {
+  display: none;
+}
+
+.startup-mark-shell {
+  border-color: var(--color-rule-2);
+  background: var(--color-paper-3);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.startup-mark-shell img,
+.tb-mark img {
+  filter: none;
+}
+
+.startup-ring {
+  border-color: var(--color-rule-2);
+}
+
+.startup-ring-inner {
+  border-color: oklch(var(--accent-channels) / 0.4);
+}
+
+.w-soft {
+  border-color: var(--color-rule);
+  border-radius: var(--radius-card);
+  background: var(--color-paper-2);
+}
+
+.w-dot {
+  background: var(--color-rule);
+  transition:
+    transform var(--dur-short) var(--ease-out),
+    background-color var(--dur-short) var(--ease-out);
+}
+
+.w-dot.done {
+  background: oklch(var(--accent-channels) / 0.55);
+}
+
+.w-dot.active {
+  width: 34px;
+  background: var(--color-accent);
+  box-shadow: none;
 }
 
 @media (max-width: 1180px) {

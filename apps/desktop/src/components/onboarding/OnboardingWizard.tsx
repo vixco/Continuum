@@ -144,7 +144,7 @@ export function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
           className={clsx(
             "press inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px]",
             idx > 0 && !isDone
-              ? "text-ink-muted hover:bg-white/5 hover:text-ink"
+              ? "text-ink-muted hover:bg-ink/5 hover:text-ink"
               : "cursor-not-allowed opacity-30"
           )}
         >
@@ -319,7 +319,7 @@ function ConnectStep({
               onClick={() => setPayload({ ...payload, orchestrator_cli: c.id })}
               className={clsx(
                 "w-row text-left transition-colors",
-                c.installed ? "cursor-pointer hover:bg-white/5" : "cursor-not-allowed opacity-50",
+                c.installed ? "cursor-pointer hover:bg-ink/5" : "cursor-not-allowed opacity-50",
                 selected && "bg-amber-400/10"
               )}
             >
@@ -334,7 +334,7 @@ function ConnectStep({
                 <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
                   {c.name}
                   {c.recommended && (
-                    <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+                    <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
                       Recommended
                     </span>
                   )}
@@ -514,10 +514,10 @@ function ModelsStep({
               <span className="w-36 text-[13px] font-medium text-ink">{m.label}</span>
               <span className="w-20 text-[11px] text-ink-dim">{m.size}</span>
               <span className="flex-1 text-[12px] text-ink-muted">{m.purpose}</span>
-              <div className="h-1 w-24 overflow-hidden rounded-full bg-white/10">
+              <div className="h-1 w-24 overflow-hidden rounded-full bg-ink/10">
                 <div
                   className={clsx(
-                    "h-full transition-all",
+                    "h-full transition-[transform,background-color] duration-200 ease-[var(--ease-out)]",
                     done ? "bg-emerald-400" : "bg-amber-400"
                   )}
                   style={{ width: `${pct}%` }}
@@ -662,12 +662,12 @@ function ToggleRow({
         onClick={() => onChange(!checked)}
         className={clsx(
           "press relative h-6 w-11 rounded-full transition-colors",
-          checked ? "bg-amber-400" : "bg-white/10"
+          checked ? "bg-amber-400" : "bg-ink/10"
         )}
       >
         <span
           className={clsx(
-            "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all",
+            "absolute top-0.5 h-5 w-5 rounded-full bg-ink transition-transform duration-200 ease-[var(--ease-out)]",
             checked ? "left-[22px]" : "left-0.5"
           )}
         />
@@ -692,7 +692,7 @@ function Chip({
         "press rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors",
         active
           ? "border border-amber-400/50 bg-amber-400/15 text-amber-200"
-          : "border border-bg-border text-ink-muted hover:bg-white/5 hover:text-ink"
+          : "border border-bg-border text-ink-muted hover:bg-ink/5 hover:text-ink"
       )}
     >
       {children}
@@ -752,7 +752,7 @@ function DevicePicker({
               setOpen(false);
             }}
             className={clsx(
-              "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-white/5",
+              "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-ink/5",
               !value ? "text-amber-300" : "text-ink-muted"
             )}
           >
@@ -770,7 +770,7 @@ function DevicePicker({
                 setOpen(false);
               }}
               className={clsx(
-                "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-white/5",
+                "flex w-full items-center px-3 py-1.5 text-left text-[13px] hover:bg-ink/5",
                 value === d.id ? "text-amber-300" : "text-ink"
               )}
             >
@@ -1002,7 +1002,7 @@ function DiagnosticsStep() {
                 setRepairHint(`Could not load the Health preview: ${String(error)}`);
               }
             }}
-            className="press rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink"
+            className="press rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-ink/5 hover:text-ink"
           >
             Check repair options
           </button>

@@ -108,7 +108,7 @@ export function LogsTab() {
           role="log"
           aria-label="Continuum live logs"
           className={clsx(
-            "h-[520px] overflow-y-auto rounded-md border border-bg-border bg-black/40 p-3 font-mono text-[12px] leading-[1.5]"
+            "h-[520px] overflow-y-auto rounded-md border border-bg-border bg-bg/60 p-3 font-mono text-[12px] leading-[1.5]"
           )}
         >
           {filtered.length === 0 ? (

@@ -68,7 +68,7 @@ export function SlashCommandMenu({
         className="absolute bottom-full left-0 right-0 mb-1 rounded-md border border-bg-border bg-bg-surface px-3 py-2.5 text-[11px] text-ink-dim shadow-md"
       >
         No matches. Press{" "}
-        <kbd className="rounded border border-bg-border bg-bg-elevated px-1 font-mono text-[9px]">
+        <kbd className="rounded border border-bg-border bg-bg-elevated px-1 font-mono text-[10px]">
           esc
         </kbd>{" "}
         to close.
