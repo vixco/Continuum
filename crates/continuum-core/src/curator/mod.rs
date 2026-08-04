@@ -56,6 +56,59 @@ pub struct CuratorStatus {
 /// read by the runtime snapshot / dashboard / `system_health` MCP tool.
 pub type SharedCuratorStatus = Arc<Mutex<CuratorStatus>>;
 
+/// Wraps an arbitrary prompt in Qwen 3's ChatML format with a `/no_think`
+/// directive. Qwen 3 defaults to emitting a `<think>...</think>` reasoning
+/// block before its actual answer; `/no_think` suppresses it, but only
+/// reliably takes effect inside a proper ChatML turn — see
+/// `triage::prompts::build_triage_prompt` for the triage layer's own
+/// (system-prompt-carrying) version of the same wrapper.
+///
+/// Used by [`crate::triage::llm::TriageLayer::complete`] (I2 fix), the
+/// curator's shared one-shot completion path — extraction
+/// ([`crate::curator::run::extract_pass`]), conflict detection
+/// ([`crate::curator::conflict::detect_conflicts`]), and session summaries
+/// ([`crate::curator::session::write_session_summary`]) all call it, and
+/// without this wrapper every one of those prompts risked a stray
+/// `<think>` block bleeding into `parse_candidates`/`parse_verdict`/the
+/// session prompt's exact `"SKIP"` match, none of which expect one.
+///
+/// Kept here rather than in `triage::prompts` so it stays
+/// featureless-testable: `triage::prompts` is gated behind the `runtime`
+/// feature (it pulls in the llama.cpp-backed `TriageLayer`), but this
+/// module is not (see this module's doc comment).
+///
+/// `#[allow(dead_code)]`: the only non-test caller
+/// ([`crate::triage::llm::TriageLayer::complete`]) is itself gated behind
+/// the `runtime` feature, so a plain `--no-default-features` library build
+/// (no tests, no runtime) genuinely never calls this — that's expected,
+/// not a bug; the desktop crate links this module for its plain types and
+/// never needs the wrapper.
+#[allow(dead_code)]
+pub(crate) fn wrap_no_think(prompt: &str) -> String {
+    format!("<|im_start|>user\n/no_think\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+}
+
+/// Strips a leading `<think>...</think>` reasoning block from a raw
+/// completion, returning the trimmed remainder unchanged when there is no
+/// such block. Mirrors `triage::extract_json_object`'s `</think>`-skip
+/// logic (see that function's doc comment in `triage/mod.rs`), but is not
+/// JSON-specific: the curator's session-summary replies are markdown, not
+/// JSON, so this just returns plain trimmed text rather than hunting for a
+/// brace-balanced object. Paired with [`wrap_no_think`] inside
+/// [`crate::triage::llm::TriageLayer::complete`] (I2 fix).
+///
+/// `#[allow(dead_code)]`: see [`wrap_no_think`]'s doc comment — same
+/// reasoning applies here.
+#[allow(dead_code)]
+pub(crate) fn strip_think_block(raw: &str) -> &str {
+    let s = raw.trim();
+    let after = match s.rfind("</think>") {
+        Some(pos) => &s[pos + "</think>".len()..],
+        None => s,
+    };
+    after.trim()
+}
+
 #[cfg(feature = "runtime")]
 #[async_trait::async_trait]
 impl CuratorLlm for crate::triage::llm::TriageLayer {
@@ -77,6 +130,11 @@ impl CuratorLlm for crate::triage::llm::TriageLayer {
 pub(crate) struct MockLlm {
     replies: std::sync::Mutex<Vec<String>>,
     calls: std::sync::atomic::AtomicU32,
+    /// Every prompt passed to `complete()`, in call order — lets tests
+    /// inspect exactly what was sent (I1 fix regression coverage: the
+    /// prompt-budget cap and the "same prompt + suffix" retry shape) without
+    /// each test needing its own bespoke mock.
+    prompts: std::sync::Mutex<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -88,6 +146,7 @@ impl MockLlm {
         Self {
             replies: std::sync::Mutex::new(queue),
             calls: std::sync::atomic::AtomicU32::new(0),
+            prompts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -101,13 +160,19 @@ impl MockLlm {
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Every prompt seen by `complete()` so far, in call order.
+    pub(crate) fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
 }
 
 #[cfg(test)]
 #[async_trait::async_trait]
 impl CuratorLlm for MockLlm {
-    async fn complete(&self, _prompt: &str, _max_tokens: u32) -> anyhow::Result<String> {
+    async fn complete(&self, prompt: &str, _max_tokens: u32) -> anyhow::Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.prompts.lock().unwrap().push(prompt.to_string());
         self.replies
             .lock()
             .unwrap()
@@ -127,5 +192,35 @@ mod tests {
         assert_eq!(mock.complete("p", 10).await.unwrap(), "two");
         assert!(mock.complete("p", 10).await.is_err());
         assert_eq!(mock.calls(), 3);
+    }
+
+    // --- I2: no_think wrap/strip helpers (featureless-testable) --------
+
+    #[test]
+    fn wrap_no_think_produces_chatml_with_no_think_directive() {
+        let wrapped = wrap_no_think("extract these facts");
+        assert!(wrapped.starts_with("<|im_start|>user\n/no_think\n"));
+        assert!(wrapped.contains("extract these facts"));
+        assert!(wrapped.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn strip_think_block_removes_leading_think_tag() {
+        let raw = "<think>\nreasoning about the candidates\n</think>\n\n[{\"a\":1}]";
+        assert_eq!(strip_think_block(raw), "[{\"a\":1}]");
+    }
+
+    #[test]
+    fn strip_think_block_is_noop_without_think_tag() {
+        assert_eq!(strip_think_block("  [{\"a\":1}]  "), "[{\"a\":1}]");
+    }
+
+    #[test]
+    fn strip_think_block_handles_exact_skip_reply() {
+        // Regression for the session-summary "SKIP" path (write_session_summary
+        // matches the trimmed reply against the literal string "SKIP") — a
+        // <think> block ahead of it must not survive into that comparison.
+        let raw = "<think>this session looks trivial</think>\nSKIP";
+        assert_eq!(strip_think_block(raw), "SKIP");
     }
 }

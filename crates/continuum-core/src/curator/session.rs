@@ -188,6 +188,22 @@ impl SessionTracker {
 /// trimmed reply is exactly `"SKIP"` (see `prompts/curator-session.md`):
 /// the model itself judged the window as trivial/idle-only even though it
 /// cleared the 3-event floor.
+///
+/// C1 fix note: this still queries the vault's timeline by `ts` range
+/// (`started..ended`) rather than by [`continuum_memory::EventRange::since_id`]
+/// — a session is inherently time-bounded, so a ts range is the right
+/// query shape here (unlike [`crate::curator::run::extract_pass`], which
+/// switched to an id watermark). But the same backdating hazard the id
+/// watermark exists to avoid still applies at the *tail* of the window: an
+/// event whose `ts` falls inside `started..ended` can be written by the
+/// distiller up to `distillation_interval_minutes` after that `ts`, so a
+/// query issued right at boundary time can still miss the session's own
+/// last few events. The caller ([`crate::curator::run::run_curator`])
+/// mitigates this by delaying the call to [`write_session_summary`] itself
+/// until `distill_lag_minutes` has elapsed past `ended` (see
+/// `run_curator`'s `pending_sessions`/`flush_due_sessions`), rather than
+/// reworking this query — by the time this function actually runs, the
+/// distiller has had time to catch up.
 pub async fn write_session_summary(
     vault: &Vault,
     llm: &dyn CuratorLlm,
@@ -197,6 +213,7 @@ pub async fn write_session_summary(
         .events(&EventRange {
             since: Some(ended.started),
             until: Some(ended.ended),
+            since_id: None,
             limit: Some(300),
         })
         .await?;

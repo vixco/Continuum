@@ -19,7 +19,7 @@ use crate::curator::conflict::detect_conflicts;
 use crate::curator::extract::{
     candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
 };
-use crate::curator::session::{write_session_summary, SessionTracker};
+use crate::curator::session::{write_session_summary, EndedSession, SessionTracker};
 use crate::curator::{CuratorLlm, SharedCuratorStatus};
 
 /// The extraction prompt template, loaded at compile time from the
@@ -68,12 +68,28 @@ pub(crate) fn build_events_block(events: &[Event]) -> String {
         .join("\n")
 }
 
+/// Truncates `s` to at most `max` **characters** (not bytes — safe on
+/// multi-byte UTF-8), appending an ellipsis when truncated. Used by
+/// [`extract_pass`]'s prompt budgeting (I1 fix): a `char`-count proxy for
+/// token count, deliberately simple and documented as such rather than
+/// pulling in a real tokenizer just to bound prompt size.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Related-notes context for the extraction prompt's `{{RELATED}}` slot:
 /// full-text search over the concatenated text of the most recent (up to
-/// 3) events, top 8 hits rendered as `"- title: snippet"` lines. Empty
-/// (not an error) when there's nothing to search on or nothing found —
-/// the template reads fine either way ("KNOWN MEMORIES possibly related:"
-/// followed by nothing).
+/// 3) events, top 8 hits rendered as `"- title: snippet"` lines with each
+/// snippet capped to 100 characters (I1 fix — part of [`extract_pass`]'s
+/// prompt budgeting). Empty (not an error) when there's nothing to search
+/// on or nothing found — the template reads fine either way ("KNOWN
+/// MEMORIES possibly related:" followed by nothing).
 async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<String> {
     let recent = &events[events.len().saturating_sub(3)..];
     let query: String = recent
@@ -87,7 +103,13 @@ async fn build_related_block(vault: &Vault, events: &[Event]) -> anyhow::Result<
     let hits = vault.search(&query, 8).await?;
     Ok(hits
         .iter()
-        .map(|h| format!("- {}: {}", h.title, h.snippet.clone().unwrap_or_default()))
+        .map(|h| {
+            format!(
+                "- {}: {}",
+                h.title,
+                truncate_chars(&h.snippet.clone().unwrap_or_default(), 100)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -161,35 +183,94 @@ async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) 
     }
 }
 
-/// One extraction pass: fetch vault events since `since`, ask the curator
-/// LLM which of them are worth remembering, and write the routed
-/// candidates into the vault. Public for tests. Returns the ids of the
-/// notes actually created — the caller ([`curator_tick`]) feeds these into
-/// [`detect_conflicts`] (Task 5), and uses `.len()` wherever the old
-/// `usize` count is needed.
+/// Hard character ceiling on the assembled extraction prompt (I1 fix). A
+/// `char`-count proxy for token count (documented, not exact — good enough
+/// to keep a `context_size = 2048` / `max_tokens = 1024` local model from
+/// overflowing without pulling in a real tokenizer just to bound prompt
+/// size). See [`extract_pass`]'s budgeting loop.
+const PROMPT_CHAR_BUDGET: usize = 3500;
+
+/// Maximum number of (already-fetched) events folded into the extraction
+/// prompt itself, most-recent-first (I1 fix). [`extract_pass`] can fetch up
+/// to 200 events per pass (see its `EventRange` query) to keep the id
+/// watermark advancing even when a backlog piles up, but only the newest
+/// [`MAX_PROMPT_EVENTS`] of that batch are ever shown to the LLM — older
+/// events within an overloaded window are deliberately dropped rather than
+/// carried forward, since the watermark still advances past the whole
+/// fetched batch (see the `max_id_seen` computation below).
+const MAX_PROMPT_EVENTS: usize = 40;
+
+/// Per-event text ceiling inside the prompt's `{{EVENTS}}` block (I1 fix).
+const EVENT_TEXT_CHAR_CAP: usize = 160;
+
+/// Outcome of one [`extract_pass`] call.
+pub struct ExtractOutcome {
+    /// Ids of vault notes actually created this pass — feeds
+    /// [`detect_conflicts`] (Task 5) in [`curator_tick`].
+    pub created_ids: Vec<String>,
+    /// Highest event id seen in the *fetched* batch this pass (before the
+    /// [`MAX_PROMPT_EVENTS`]/budget trimming applied to what's actually
+    /// shown to the LLM) — `None` only when the window had no events at
+    /// all. [`curator_tick`] advances its watermark to this value on any
+    /// outcome where it's `Some`, success or LLM failure alike, since the
+    /// whole batch was genuinely fetched and considered (C1 fix).
+    pub max_id_seen: Option<i64>,
+    /// `false` when the curator LLM completion call itself errored (model
+    /// crashed/OOM/unreachable) rather than merely replying with unparsable
+    /// JSON — the latter is handled internally via the existing
+    /// one-retry-then-skip policy and still counts as `true` here. Drives
+    /// [`curator_tick`]'s bounded-failure window-skip policy the same way a
+    /// propagated `Err` used to, but without losing `max_id_seen` in the
+    /// process (a bare `Err` can't carry it).
+    pub llm_reachable: bool,
+}
+
+impl ExtractOutcome {
+    fn empty(max_id_seen: Option<i64>, llm_reachable: bool) -> Self {
+        Self {
+            created_ids: Vec::new(),
+            max_id_seen,
+            llm_reachable,
+        }
+    }
+}
+
+/// One extraction pass: fetch vault events with id greater than
+/// `since_id` (the curator's persisted watermark — C1 fix, replacing the
+/// old `since: DateTime<Utc>` ts-window), ask the curator LLM which of them
+/// are worth remembering, and write the routed candidates into the vault.
+/// Public for tests. See [`ExtractOutcome`] for what's returned.
 ///
-/// Returns `Ok(vec![])` without ever calling the LLM when there are no
-/// events in the window — routine idle periods shouldn't cost a model
-/// call. On a parse failure the LLM gets exactly one retry with the parse
-/// error appended to the prompt; a second failure is logged and treated as
-/// "zero candidates this pass" rather than propagated, since a stubborn
-/// malformed-JSON model is a recoverable condition (the next scheduled pass
-/// tries again), not a hard error for the caller to handle.
+/// Returns an empty, `max_id_seen: None` outcome without ever calling the
+/// LLM when there are no events past the watermark — routine idle periods
+/// shouldn't cost a model call. On a parse failure the LLM gets exactly one
+/// retry with the parse error appended to the *same* prompt (never
+/// reconstructed from scratch — I1 fix), not a whole new copy of the
+/// (already budgeted) events/related blocks; a second failure is logged
+/// and treated as "zero candidates this pass" (`llm_reachable: true`,
+/// since the model *did* respond, just not usefully) rather than
+/// propagated, since a stubborn malformed-JSON model is a recoverable
+/// condition (the next scheduled pass tries again), not a hard error for
+/// the caller to handle.
 ///
-/// Only pre-loop failures — the events fetch and both LLM completion
-/// attempts — can make this function return `Err`; per-candidate failures
-/// are contained by [`write_candidate`] and simply don't add an id to the
-/// returned list.
+/// Only one failure — the events fetch itself — can make this function
+/// return `Err` (there is no batch to report a watermark for in that case).
+/// Every other failure, including both LLM completion attempts, is
+/// contained in the returned [`ExtractOutcome`] (`llm_reachable: false`)
+/// specifically so the watermark information survives; per-candidate write
+/// failures are separately contained by [`write_candidate`] and simply
+/// don't add an id to `created_ids`.
 pub async fn extract_pass(
     vault: &Vault,
     llm: &dyn CuratorLlm,
     cfg: &CuratorConfig,
-    since: DateTime<Utc>,
-) -> anyhow::Result<Vec<String>> {
+    since_id: i64,
+) -> anyhow::Result<ExtractOutcome> {
     let events = vault
         .events(&EventRange {
-            since: Some(since),
+            since: None,
             until: None,
+            since_id: Some(since_id),
             limit: Some(200),
         })
         .await?;
@@ -198,27 +279,74 @@ pub async fn extract_pass(
         tracing::debug!(
             layer = "memory",
             component = "curator",
+            watermark = since_id,
             "No events since last pass; skipping extraction"
         );
-        return Ok(Vec::new());
+        return Ok(ExtractOutcome::empty(None, true));
     }
 
-    let events_block = build_events_block(&events);
+    // I1 fix: the watermark advances past the *whole* fetched batch (up to
+    // 200 events) regardless of how many of them actually make it into the
+    // prompt below — computed now, before any trimming, so it's never lost
+    // on an LLM-failure return path either.
+    let max_id_seen = events.iter().map(|e| e.id).max();
+
+    // Cap to the most recent MAX_PROMPT_EVENTS, then per-event text
+    // truncation, then re-check the assembled prompt against
+    // PROMPT_CHAR_BUDGET and drop oldest-first until it fits.
+    let mut capped: Vec<Event> = events[events.len().saturating_sub(MAX_PROMPT_EVENTS)..]
+        .iter()
+        .map(|e| Event {
+            text: truncate_chars(&e.text, EVENT_TEXT_CHAR_CAP),
+            ..e.clone()
+        })
+        .collect();
+
     let related_block = build_related_block(vault, &events).await?;
 
-    let prompt = EXTRACT_PROMPT
-        .replace("{{MAX}}", &cfg.max_candidates_per_pass.to_string())
-        .replace("{{EVENTS}}", &events_block)
-        .replace("{{RELATED}}", &related_block);
+    let build_prompt = |capped: &[Event], related_block: &str| -> String {
+        EXTRACT_PROMPT
+            .replace("{{MAX}}", &cfg.max_candidates_per_pass.to_string())
+            .replace("{{EVENTS}}", &build_events_block(capped))
+            .replace("{{RELATED}}", related_block)
+    };
 
-    let raw = llm.complete(&prompt, 1024).await?;
+    let mut prompt = build_prompt(&capped, &related_block);
+    while prompt.len() > PROMPT_CHAR_BUDGET && !capped.is_empty() {
+        capped.remove(0); // drop the oldest of the capped set
+        prompt = build_prompt(&capped, &related_block);
+    }
+
+    let raw = match llm.complete(&prompt, 1024).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                error = %e,
+                "Curator LLM completion failed for this extraction pass"
+            );
+            return Ok(ExtractOutcome::empty(max_id_seen, false));
+        }
+    };
     let mut candidates = match parse_candidates(&raw) {
         Ok(c) => c,
         Err(first_err) => {
             let retry_prompt = format!(
                 "{prompt}\n\nYour previous reply was invalid: {first_err}. Reply with ONLY the JSON array."
             );
-            let retry_raw = llm.complete(&retry_prompt, 1024).await?;
+            let retry_raw = match llm.complete(&retry_prompt, 1024).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        layer = "memory",
+                        component = "curator",
+                        error = %e,
+                        "Curator LLM completion failed on the retry attempt"
+                    );
+                    return Ok(ExtractOutcome::empty(max_id_seen, false));
+                }
+            };
             match parse_candidates(&retry_raw) {
                 Ok(c) => c,
                 Err(second_err) => {
@@ -228,7 +356,7 @@ pub async fn extract_pass(
                         error = %second_err,
                         "Curator LLM produced unparsable output twice; skipping this pass"
                     );
-                    return Ok(Vec::new());
+                    return Ok(ExtractOutcome::empty(max_id_seen, true));
                 }
             }
         }
@@ -246,12 +374,17 @@ pub async fn extract_pass(
         layer = "memory",
         component = "curator",
         events = events.len(),
+        prompt_events = capped.len(),
         candidates = candidates.len(),
         written = created_ids.len(),
         "Curator extraction pass complete"
     );
 
-    Ok(created_ids)
+    Ok(ExtractOutcome {
+        created_ids,
+        max_id_seen,
+        llm_reachable: true,
+    })
 }
 
 /// Bounded-failure window-skip policy (self-healing non-negotiable #5:
@@ -266,20 +399,23 @@ pub async fn extract_pass(
 /// not a failure, and never contributes to this streak.
 const MAX_CONSECUTIVE_WINDOW_FAILURES: u32 = 3;
 
-/// Runs one curator tick: an [`extract_pass`] attempt for `window_since`,
-/// a [`detect_conflicts`] pass over any notes it created (Task 5), the
+/// Runs one curator tick: an [`extract_pass`] attempt for `watermark`, a
+/// [`detect_conflicts`] pass over any notes it created (Task 5), the
 /// bounded-failure window-skip policy (see
 /// [`MAX_CONSECUTIVE_WINDOW_FAILURES`]), and a `status` update. Returns the
-/// window start to use for the next tick.
+/// watermark to use for the next tick (C1 fix — an event-id watermark,
+/// replacing the old ts-based `window_since`/`pass_start` pair; persisted
+/// in-memory by the caller exactly as the ts window was).
 ///
-/// `window_failures` is the caller's running count of consecutive `Err`
-/// results *for the current window* — reset to 0 whenever the window
-/// advances, whether by a successful pass or by hitting the failure cap.
-/// This is deliberately separate from `status.consecutive_failures`, an
-/// unbounded lifetime counter for the dashboard/repair agent that this
-/// policy never resets on its own (only a genuinely successful pass resets
-/// it) — the two answer different questions: "is *this* window stuck?" vs.
-/// "how healthy has the curator been overall?".
+/// `window_failures` is the caller's running count of consecutive
+/// LLM-unreachable/fetch-error results *for the current watermark* — reset
+/// to 0 whenever the watermark advances, whether by a successful pass or by
+/// hitting the failure cap. This is deliberately separate from
+/// `status.consecutive_failures`, an unbounded lifetime counter for the
+/// dashboard/repair agent that this policy never resets on its own (only a
+/// genuinely successful pass resets it) — the two answer different
+/// questions: "is *this* watermark stuck?" vs. "how healthy has the
+/// curator been overall?".
 ///
 /// Split out of [`run_curator`] so tests can drive individual ticks
 /// deterministically without running the real interval/shutdown-driven
@@ -289,20 +425,19 @@ async fn curator_tick(
     llm: &dyn CuratorLlm,
     cfg: &CuratorConfig,
     status: &SharedCuratorStatus,
-    window_since: DateTime<Utc>,
+    watermark: i64,
     window_failures: &mut u32,
-) -> DateTime<Utc> {
-    let pass_start = Utc::now();
-    let outcome = extract_pass(vault, llm, cfg, window_since).await;
+) -> i64 {
+    let outcome = extract_pass(vault, llm, cfg, watermark).await;
 
     // Task 5: conflict/supersede detection over whatever this pass just
     // wrote. Deliberately not folded into `outcome`/`window_failures` —
     // a conflict-detection hiccup is a distinct failure mode from
     // extraction itself and must not cause a healthy extraction pass to
     // count as (or be retried like) a failed one.
-    if let Ok(ids) = &outcome {
-        if !ids.is_empty() {
-            if let Err(e) = detect_conflicts(vault, llm, cfg, ids).await {
+    if let Ok(result) = &outcome {
+        if !result.created_ids.is_empty() {
+            if let Err(e) = detect_conflicts(vault, llm, cfg, &result.created_ids).await {
                 tracing::warn!(
                     layer = "memory",
                     component = "curator",
@@ -331,14 +466,19 @@ async fn curator_tick(
         // stop status updates), matching continuum.rs's runtime_state
         // convention.
         let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
-        s.last_pass_at = Some(pass_start);
+        s.last_pass_at = Some(Utc::now());
         if let Some(count) = pending_count {
             s.pending_count = count;
         }
         match &outcome {
-            Ok(ids) => {
+            Ok(result) if result.llm_reachable => {
                 s.consecutive_failures = 0;
-                s.candidates_written_total += ids.len() as u64;
+                s.candidates_written_total += result.created_ids.len() as u64;
+            }
+            Ok(_) => {
+                // LLM unreachable this pass — a failure, even though the
+                // events fetch itself succeeded.
+                s.consecutive_failures += 1;
             }
             Err(_) => {
                 s.consecutive_failures += 1;
@@ -347,9 +487,29 @@ async fn curator_tick(
     }
 
     match outcome {
-        Ok(_) => {
+        Ok(result) if result.llm_reachable => {
             *window_failures = 0;
-            pass_start
+            result.max_id_seen.unwrap_or(watermark)
+        }
+        Ok(result) => {
+            *window_failures += 1;
+            if *window_failures >= MAX_CONSECUTIVE_WINDOW_FAILURES {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "curator",
+                    watermark,
+                    failures = *window_failures,
+                    "skipping memory-extraction window after {MAX_CONSECUTIVE_WINDOW_FAILURES} \
+                     failures: watermark {watermark} unreachable LLM"
+                );
+                *window_failures = 0;
+                // C1 fix: skip by advancing the watermark to the max id of
+                // the failing batch (still known — the events fetch itself
+                // succeeded even though the LLM did not), not to "now".
+                result.max_id_seen.unwrap_or(watermark)
+            } else {
+                watermark
+            }
         }
         Err(err) => {
             tracing::warn!(
@@ -363,46 +523,87 @@ async fn curator_tick(
                 tracing::warn!(
                     layer = "memory",
                     component = "curator",
-                    since = %window_since,
-                    until = %pass_start,
+                    watermark,
                     failures = *window_failures,
                     "skipping memory-extraction window after {MAX_CONSECUTIVE_WINDOW_FAILURES} \
-                     failures: {window_since}..{pass_start}"
+                     failures: watermark {watermark} events fetch failing"
                 );
                 *window_failures = 0;
-                pass_start
+                // No batch was ever fetched on this failure path, so there
+                // is no max id to skip to — the watermark stays put. A
+                // persistently failing vault (not just an unreachable LLM)
+                // is a deeper health problem the repair agent's
+                // consecutive_failures signal (updated above regardless)
+                // surfaces separately.
+                watermark
             } else {
-                window_since
+                watermark
             }
         }
     }
 }
 
 /// Feeds `sig` into `tracker` (Task 6: session summaries); if a session
-/// boundary fired, writes the summary note. Failures are logged and
-/// swallowed here rather than propagated — a session-summary hiccup (a
-/// vault I/O error, an unparsable/erroring LLM reply) must never kill the
-/// curator's own extraction loop, mirroring [`write_candidate`]'s and
-/// [`curator_tick`]'s per-failure containment elsewhere in this module.
-async fn observe_session_boundary(
-    vault: &Vault,
-    llm: &dyn CuratorLlm,
+/// boundary fired, stashes it in `pending_sessions` rather than writing the
+/// summary immediately (C1 fix — see [`flush_due_sessions`] for why session
+/// writes are delayed).
+fn observe_session_boundary(
     tracker: &mut SessionTracker,
+    pending_sessions: &mut Vec<EndedSession>,
     sig: &ActivitySignal,
     idle_limit_min: u64,
 ) {
     let Some(ended) = tracker.observe(sig, idle_limit_min) else {
         return;
     };
+    tracing::debug!(
+        layer = "memory",
+        component = "curator",
+        process = %ended.process,
+        ended = %ended.ended,
+        "Session boundary detected; queued for delayed summary write"
+    );
+    pending_sessions.push(ended);
+}
 
-    if let Err(e) = write_session_summary(vault, llm, &ended).await {
-        tracing::warn!(
-            layer = "memory",
-            component = "curator",
-            process = %ended.process,
-            error = %e,
-            "Failed to write session summary; continuing"
-        );
+/// Writes summaries for any [`EndedSession`]s in `pending_sessions` whose
+/// distillation lag has elapsed (`ended.ended + distill_lag_minutes <=
+/// now`), leaving the rest queued. C1 fix: `write_session_summary` queries
+/// the vault's timeline by `ts` range (`started..ended`), but the
+/// distiller can write an event whose `ts` falls in that range up to
+/// `distillation_interval_minutes` *after* that `ts` — a query issued right
+/// at boundary time can silently miss the session's own last few events.
+/// Delaying the query by `distill_lag_minutes`
+/// (`distillation_interval_minutes + 1`, threaded in from
+/// `bin/continuum.rs` — see [`run_curator`]'s doc comment) gives the
+/// distiller time to catch up first. Failures are logged and swallowed
+/// here rather than propagated — a session-summary hiccup (a vault I/O
+/// error, an unparsable/erroring LLM reply) must never kill the curator's
+/// own extraction loop, mirroring [`write_candidate`]'s and
+/// [`curator_tick`]'s per-failure containment elsewhere in this module.
+async fn flush_due_sessions(
+    vault: &Vault,
+    llm: &dyn CuratorLlm,
+    pending_sessions: &mut Vec<EndedSession>,
+    distill_lag_minutes: u64,
+    now: DateTime<Utc>,
+) {
+    let lag = Duration::minutes(distill_lag_minutes as i64);
+    let (due, still_pending): (Vec<EndedSession>, Vec<EndedSession>) = pending_sessions
+        .drain(..)
+        .partition(|ended| ended.ended + lag <= now);
+    *pending_sessions = still_pending;
+
+    for ended in due {
+        if let Err(e) = write_session_summary(vault, llm, &ended).await {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                process = %ended.process,
+                error = %e,
+                "Failed to write session summary; continuing"
+            );
+        }
     }
 }
 
@@ -573,17 +774,30 @@ async fn run_daily_hygiene(
 /// fixed-interval ticker and the shutdown watch channel.
 ///
 /// Each tick delegates to [`curator_tick`] (see its doc comment for the
-/// per-tick status update and bounded-failure window-skip policy). The
-/// window starts at "one interval ago" so the first pass has something to
-/// look at, and only ever advances via `curator_tick`'s return value —
-/// on an ordinary success it moves to that pass's start time; on a failed
-/// pass it stays put (the next tick retries the same events) *unless* the
-/// failure streak has hit the cap, in which case `curator_tick` itself
-/// advances it past the stuck window.
+/// per-tick status update and bounded-failure window-skip policy). C1 fix:
+/// the watermark starts at `0` (the beginning of whatever history the
+/// vault's 30-day event retention still has) rather than "one interval
+/// ago" — the old ts-window start meant every restart permanently lost any
+/// event older than one interval, which is the exact bug C1 fixes for
+/// ongoing operation too. Starting at `0` costs a few bounded (200 events
+/// per tick, capped further by [`MAX_PROMPT_EVENTS`]) catch-up passes after
+/// a restart with backlog; it never silently drops history the way the ts
+/// window did. The watermark only ever advances via `curator_tick`'s
+/// return value — in-memory only, matching the ts window's own lifetime
+/// (reset on every restart, per the fix request).
 ///
 /// Task 7 also makes this the home of daily hygiene (vault expiry sweep,
 /// event pruning, wipe-request drain — see [`run_daily_hygiene`]) and a
-/// one-shot wipe-request drain at boot. Both need
+/// one-shot wipe-request drain at boot.
+///
+/// C1 fix (session-summary delay-write): `pending_sessions` holds session
+/// boundaries that have fired but haven't been written yet — see
+/// [`flush_due_sessions`]'s doc comment for why. `distill_lag_minutes`
+/// (`MemoryConfig::distillation_interval_minutes + 1`, threaded in from
+/// `bin/continuum.rs`) is how long a boundary waits in that queue before
+/// its summary is actually written.
+///
+/// Both hygiene and the wipe-request drain need
 /// [`RawLog`](crate::memory::raw_log::RawLog) and
 /// [`EpisodicStore`](crate::memory::episodic::EpisodicStore) handles,
 /// which only exist in a `runtime`-feature
@@ -598,8 +812,8 @@ async fn run_daily_hygiene(
 /// references them when they don't exist.
 ///
 /// `#[allow(clippy::too_many_arguments)]`: this is the single wiring
-/// entrypoint spawned once (from the `continuum` binary), passed ten
-/// genuinely distinct dependencies — two configs, three
+/// entrypoint spawned once (from the `continuum` binary), passed eleven
+/// genuinely distinct dependencies — two configs, a lag value, three
 /// channel/status/shutdown handles, and (runtime build only) three store
 /// handles for the wipe-request path. Folding them into a params struct
 /// wouldn't reduce the real complexity here, just relocate it one level
@@ -615,6 +829,7 @@ pub async fn run_curator(
     status: SharedCuratorStatus,
     mut activity: watch::Receiver<ActivitySignal>,
     mut shutdown: watch::Receiver<bool>,
+    distill_lag_minutes: u64,
     #[cfg(feature = "runtime")] dev_dir: std::path::PathBuf,
     #[cfg(feature = "runtime")] raw_log: crate::memory::raw_log::RawLog,
     #[cfg(feature = "runtime")] episodic: Arc<
@@ -654,9 +869,10 @@ pub async fn run_curator(
 
     let interval = StdDuration::from_secs(cfg.interval_minutes.max(1) * 60);
     let mut ticker = tokio::time::interval(interval);
-    let mut window_since = Utc::now() - Duration::minutes(cfg.interval_minutes.max(1) as i64);
+    let mut watermark: i64 = 0;
     let mut window_failures: u32 = 0;
     let mut tracker = SessionTracker::new();
+    let mut pending_sessions: Vec<EndedSession> = Vec::new();
     let mut last_hygiene: Option<chrono::NaiveDate> = None;
 
     loop {
@@ -679,12 +895,12 @@ pub async fn run_curator(
                     last_hygiene = Some(today);
                 }
 
-                window_since = curator_tick(
+                watermark = curator_tick(
                     &vault,
                     llm.as_ref(),
                     &cfg,
                     &status,
-                    window_since,
+                    watermark,
                     &mut window_failures,
                 )
                 .await;
@@ -699,11 +915,23 @@ pub async fn run_curator(
                 // distinct signal to trigger a `changed()` wakeup.
                 let sig = activity.borrow().clone();
                 observe_session_boundary(
-                    &vault,
-                    llm.as_ref(),
                     &mut tracker,
+                    &mut pending_sessions,
                     &sig,
                     cfg.session_summary_idle_minutes,
+                );
+
+                // C1 fix: flush any stashed session boundaries whose
+                // distillation lag has elapsed. Driven off the same
+                // periodic ticker as everything else in this arm — an
+                // idle-only stretch produces no `activity.changed()` wakeup
+                // to hang this off of instead.
+                flush_due_sessions(
+                    &vault,
+                    llm.as_ref(),
+                    &mut pending_sessions,
+                    distill_lag_minutes,
+                    Utc::now(),
                 )
                 .await;
             }
@@ -715,13 +943,11 @@ pub async fn run_curator(
                 // it happens, not just at the next ticker interval.
                 let sig = activity.borrow_and_update().clone();
                 observe_session_boundary(
-                    &vault,
-                    llm.as_ref(),
                     &mut tracker,
+                    &mut pending_sessions,
                     &sig,
                     cfg.session_summary_idle_minutes,
-                )
-                .await;
+                );
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -766,10 +992,10 @@ mod tests {
                 .into(),
         ]);
         let cfg = CuratorConfig::default();
-        let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
-            .await
-            .unwrap();
-        assert_eq!(written.len(), 2); // 0.2 discarded
+        let outcome = extract_pass(&vault, &llm, &cfg, 0).await.unwrap();
+        assert_eq!(outcome.created_ids.len(), 2); // 0.2 discarded
+        assert!(outcome.llm_reachable);
+        assert!(outcome.max_id_seen.is_some());
 
         let pending = vault.pending().await.unwrap();
         assert_eq!(pending.len(), 1); // the 0.5 inferred one
@@ -779,15 +1005,14 @@ mod tests {
             .iter()
             .any(|h| h.status == continuum_memory::NodeStatus::Confirmed)); // 0.9 user_statement auto-confirmed
 
-        // Second pass with the same scripted candidate — dedupe drops it.
+        // Second pass with the same scripted candidate, from the same
+        // watermark (0) — dedupe drops it even though nothing advanced.
         let llm2 = MockLlm::scripted(vec![
             r#"[{"type":"preference","title":"Prefers pnpm over npm","body":"again","confidence":0.9,"source":"user_statement"}]"#
                 .into(),
         ]);
-        let written2 = extract_pass(&vault, &llm2, &cfg, Utc::now() - Duration::hours(1))
-            .await
-            .unwrap();
-        assert_eq!(written2.len(), 0);
+        let outcome2 = extract_pass(&vault, &llm2, &cfg, 0).await.unwrap();
+        assert_eq!(outcome2.created_ids.len(), 0);
     }
 
     #[tokio::test]
@@ -808,11 +1033,99 @@ mod tests {
 
         let llm = MockLlm::scripted(vec!["not json".into(), "still not json".into()]);
         let cfg = CuratorConfig::default();
-        let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
+        let outcome = extract_pass(&vault, &llm, &cfg, 0).await.unwrap();
+        assert_eq!(outcome.created_ids.len(), 0);
+        assert!(outcome.llm_reachable); // model responded, just not usefully
+        assert!(outcome.max_id_seen.is_some()); // the watermark still advances
+        assert_eq!(llm.calls(), 2); // initial + one retry with the error appended
+    }
+
+    /// I1 fix: the retry prompt must be the *same* prompt with a short
+    /// suffix appended, not a whole new copy of the (already budgeted)
+    /// events/related blocks. Regression against a "rebuild the full
+    /// prompt from scratch on retry" implementation, which would either
+    /// duplicate the events block or silently diverge from what the first
+    /// attempt saw.
+    #[tokio::test]
+    async fn extract_pass_retry_prompt_is_same_prompt_plus_suffix_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+        vault
+            .append_event(NewEvent {
+                ts: None,
+                kind: "distilled".to_string(),
+                text: "Something worth remembering happened here".to_string(),
+                project: None,
+                node_id: None,
+                reference: None,
+            })
             .await
             .unwrap();
-        assert_eq!(written.len(), 0);
-        assert_eq!(llm.calls(), 2); // initial + one retry with the error appended
+
+        let llm = MockLlm::scripted(vec![
+            "not json".into(),
+            r#"[{"type":"fact","title":"T","body":"b","confidence":0.9,"source":"observed"}]"#
+                .into(),
+        ]);
+        let cfg = CuratorConfig::default();
+        let outcome = extract_pass(&vault, &llm, &cfg, 0).await.unwrap();
+        assert_eq!(outcome.created_ids.len(), 1);
+
+        let prompts = llm.prompts();
+        assert_eq!(prompts.len(), 2);
+        let suffix = "Your previous reply was invalid:";
+        // The retry prompt starts with the exact first prompt, followed by
+        // exactly one occurrence of the invalid-reply suffix.
+        assert!(prompts[1].starts_with(&prompts[0]));
+        assert_eq!(prompts[1].matches(suffix).count(), 1);
+        assert!(!prompts[0].contains(suffix));
+    }
+
+    /// I1 fix: a 200-event fixture must still produce a prompt under
+    /// `PROMPT_CHAR_BUDGET`, even though the extraction query itself fetches
+    /// up to 200 events per pass — the cap-to-40-most-recent plus
+    /// per-event/related truncation plus the final budget-trim loop must
+    /// keep the assembled prompt bounded regardless of how much raw text
+    /// the fetched batch contains.
+    #[tokio::test]
+    async fn extract_pass_budgets_a_200_event_fixture_under_the_prompt_char_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+        for i in 0..200 {
+            vault
+                .append_event(NewEvent {
+                    ts: None,
+                    kind: "distilled".to_string(),
+                    text: format!(
+                        "Event {i}: {}",
+                        "a very long descriptive sentence about what happened ".repeat(5)
+                    ),
+                    project: None,
+                    node_id: None,
+                    reference: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let llm = MockLlm::scripted(vec!["[]".into()]);
+        let cfg = CuratorConfig::default();
+        let outcome = extract_pass(&vault, &llm, &cfg, 0).await.unwrap();
+        assert_eq!(outcome.created_ids.len(), 0);
+        assert!(outcome.llm_reachable);
+        // The watermark must still advance past the *entire* fetched batch
+        // (up to 200), not just the ~40 events that made it into the
+        // prompt — otherwise the untouched older events would be silently
+        // skipped forever.
+        assert_eq!(outcome.max_id_seen, Some(200));
+
+        let prompts = llm.prompts();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].len() <= PROMPT_CHAR_BUDGET,
+            "prompt was {} chars, budget is {PROMPT_CHAR_BUDGET}",
+            prompts[0].len()
+        );
     }
 
     /// Regression for the "non-atomic per-candidate loop" review finding:
@@ -853,38 +1166,34 @@ mod tests {
         ]);
         let cfg = CuratorConfig::default();
 
-        let written = extract_pass(&vault, &llm, &cfg, Utc::now() - Duration::hours(1))
-            .await
-            .unwrap();
+        let outcome = extract_pass(&vault, &llm, &cfg, 0).await.unwrap();
 
         // The first candidate's write errors internally and is contained
         // (logged, not propagated) — the pass still completes and counts
         // the second candidate, rather than the whole pass aborting on the
         // first candidate's error and losing the second write's count.
-        assert_eq!(written.len(), 1);
+        assert_eq!(outcome.created_ids.len(), 1);
         let hits = vault.search("write fine", 5).await.unwrap();
         assert!(hits.iter().any(|h| h.title == "Will write fine"));
     }
 
     /// Regression for the "permanently-failing window wedges the curator
     /// forever" review finding: three consecutive `extract_pass` failures
-    /// on the same window must cause `curator_tick` to abandon that window
+    /// on the same watermark must cause `curator_tick` to abandon it
     /// (advance past it) rather than retry it forever, while
     /// `status.consecutive_failures` (the dashboard's unbounded lifetime
     /// counter) keeps counting independently of the bounded local streak.
     ///
-    /// Deviation from the fix request's literal test sketch ("6 invalid
-    /// replies (3 passes x initial+retry) + then a valid reply"): that
-    /// recipe can't actually exercise this policy, because
-    /// `extract_pass`'s "LLM produced invalid JSON twice" path returns
-    /// `Ok(vec![])` by design (see its doc comment and
-    /// `extract_pass_retries_once_then_skips` above) — never `Err`. Feeding
-    /// it invalid JSON six times produces three `Ok(vec![])` passes, not
-    /// three failures, and would never trip the failure streak. This test
-    /// instead uses an empty-script `MockLlm` (every `complete()` call
-    /// errors immediately, simulating an unreachable/crashed LLM) to
-    /// produce genuine `Err` results from `extract_pass`, which is what the
-    /// policy is actually keyed on.
+    /// C1 fix: the poisoned-window skip now asserts a *watermark* advance
+    /// (to the max event id of the failing batch) rather than a ts advance
+    /// (to "now") — this test's own vault event never changes ts, only the
+    /// watermark moves.
+    ///
+    /// Uses an empty-script `MockLlm` (every `complete()` call errors
+    /// immediately, simulating an unreachable/crashed LLM) so the events
+    /// fetch itself succeeds on every tick (the batch — and its max id —
+    /// is always known) while the completion call is what actually fails,
+    /// which is what the bounded-failure policy is keyed on.
     #[tokio::test]
     async fn curator_tick_skips_window_after_three_consecutive_failures() {
         let tmp = tempfile::tempdir().unwrap();
@@ -904,45 +1213,135 @@ mod tests {
         let llm = MockLlm::scripted(vec![]);
         let cfg = CuratorConfig::default();
         let status: SharedCuratorStatus = Default::default();
-        let window_since = Utc::now() - Duration::hours(1);
+        let watermark = 0i64;
         let mut window_failures = 0u32;
 
-        // Two failing ticks: below the cap, the window doesn't move yet.
-        let after_1 = curator_tick(
-            &vault,
-            &llm,
-            &cfg,
-            &status,
-            window_since,
-            &mut window_failures,
-        )
-        .await;
-        assert_eq!(after_1, window_since);
+        // Two failing ticks: below the cap, the watermark doesn't move yet.
+        let after_1 =
+            curator_tick(&vault, &llm, &cfg, &status, watermark, &mut window_failures).await;
+        assert_eq!(after_1, watermark);
         assert_eq!(window_failures, 1);
 
         let after_2 =
             curator_tick(&vault, &llm, &cfg, &status, after_1, &mut window_failures).await;
-        assert_eq!(after_2, window_since);
+        assert_eq!(after_2, watermark);
         assert_eq!(window_failures, 2);
         assert_eq!(status.lock().unwrap().consecutive_failures, 2);
 
-        // Third consecutive failure hits the cap: the window is abandoned
-        // (advances to "now"), and the local streak resets — but the
-        // dashboard's lifetime counter does not.
+        // Third consecutive failure hits the cap: the watermark is
+        // advanced to the max id of the failing batch (not to "now" — the
+        // C1 fix), and the local streak resets — but the dashboard's
+        // lifetime counter does not.
         let after_3 =
             curator_tick(&vault, &llm, &cfg, &status, after_2, &mut window_failures).await;
-        assert!(after_3 > window_since);
+        assert!(after_3 > watermark);
         assert_eq!(window_failures, 0);
         assert_eq!(status.lock().unwrap().consecutive_failures, 3);
 
-        // A fourth tick on the new window: the vault's only event now
-        // predates the new window start, so `extract_pass` short-circuits
-        // to `Ok(0)` without even calling the LLM — a real success outcome
-        // that resets the dashboard's consecutive_failures back to 0.
+        // A fourth tick past the new watermark: the vault's only event now
+        // has id <= the new watermark, so `extract_pass` short-circuits to
+        // an empty, llm_reachable outcome without even calling the LLM — a
+        // real success that resets the dashboard's consecutive_failures
+        // back to 0.
         let _after_4 =
             curator_tick(&vault, &llm, &cfg, &status, after_3, &mut window_failures).await;
         assert_eq!(window_failures, 0);
         assert_eq!(status.lock().unwrap().consecutive_failures, 0);
+    }
+
+    /// C1 fix: a session boundary must not immediately write its summary —
+    /// the write is delayed until `distill_lag_minutes` has elapsed past
+    /// `ended`, giving the distiller time to land any tail events whose
+    /// `ts` falls inside the session span but whose row hasn't been
+    /// written yet (see `write_session_summary`'s doc comment). This drives
+    /// `observe_session_boundary`/`flush_due_sessions` directly, the same
+    /// two calls `run_curator`'s loop makes.
+    #[tokio::test]
+    async fn session_boundary_write_is_delayed_until_lag_elapses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let started = Utc::now() - Duration::minutes(60);
+        let ended_ts = started + Duration::minutes(30);
+        for (i, text) in ["one", "two", "three"].iter().enumerate() {
+            vault
+                .append_event(NewEvent {
+                    ts: Some(started + Duration::minutes(i as i64 + 1)),
+                    kind: "distilled".to_string(),
+                    text: text.to_string(),
+                    project: None,
+                    node_id: None,
+                    reference: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let mut tracker = SessionTracker::new();
+        let mut pending_sessions: Vec<EndedSession> = Vec::new();
+
+        // idle_limit_min is deliberately larger than the 30-minute gap
+        // between sig0/sig1 below — otherwise the idle-boundary check
+        // (case 3) would fire before the process-change check (case 4)
+        // this test means to exercise.
+        let idle_limit_min = 45;
+
+        let sig0 = ActivitySignal {
+            project_hint: None,
+            process: "vscode".to_string(),
+            idle_seconds: 0,
+            ts: Some(started),
+        };
+        observe_session_boundary(&mut tracker, &mut pending_sessions, &sig0, idle_limit_min);
+        assert!(pending_sessions.is_empty());
+
+        let sig1 = ActivitySignal {
+            project_hint: None,
+            process: "vscode".to_string(),
+            idle_seconds: 0,
+            ts: Some(ended_ts),
+        };
+        observe_session_boundary(&mut tracker, &mut pending_sessions, &sig1, idle_limit_min);
+        assert!(pending_sessions.is_empty()); // same process, no boundary yet
+
+        // Process change after the session has run >= MIN_SESSION_MINUTES
+        // (30 min here) — a real boundary fires and is queued, not written.
+        let sig2 = ActivitySignal {
+            project_hint: None,
+            process: "chrome".to_string(),
+            idle_seconds: 0,
+            ts: Some(ended_ts + Duration::seconds(10)),
+        };
+        observe_session_boundary(&mut tracker, &mut pending_sessions, &sig2, idle_limit_min);
+        assert_eq!(pending_sessions.len(), 1);
+        assert_eq!(pending_sessions[0].ended, ended_ts);
+        assert_eq!(vault.info().await.unwrap().note_count, 0);
+
+        // Flush right at boundary time — the 16-minute lag hasn't elapsed,
+        // so nothing is written yet. An empty-script MockLlm proves it: any
+        // unexpected `complete()` call would error and fail this test.
+        let llm_not_called = MockLlm::scripted(vec![]);
+        flush_due_sessions(&vault, &llm_not_called, &mut pending_sessions, 16, ended_ts).await;
+        assert_eq!(
+            pending_sessions.len(),
+            1,
+            "still queued before the lag elapses"
+        );
+        assert_eq!(vault.info().await.unwrap().note_count, 0);
+
+        // Flush again once the lag has elapsed — now it's written.
+        let summary_md = "## Goal\nX\n## Changed\n- none\n## Problem\nnone\n## Tried\n\u{2013}\n## Result\nDone\n## Next step\nnone";
+        let llm = MockLlm::scripted(vec![summary_md.to_string()]);
+        flush_due_sessions(
+            &vault,
+            &llm,
+            &mut pending_sessions,
+            16,
+            ended_ts + Duration::minutes(16),
+        )
+        .await;
+        assert!(pending_sessions.is_empty());
+        assert_eq!(vault.info().await.unwrap().note_count, 1);
     }
 
     /// Regression/coverage for Task 7's real derived-data wipe path:
@@ -977,6 +1376,7 @@ mod tests {
         let empty_range = EventRange {
             since: None,
             until: None,
+            since_id: None,
             limit: None,
         };
         assert_eq!(vault.events(&empty_range).await.unwrap().len(), 2);

@@ -188,13 +188,25 @@ impl TriageLayer {
     /// One-shot text completion against the shared local model. Used by the
     /// curator; calls serialize on `LocalLlm`'s internal context mutex, so
     /// concurrent callers queue rather than race the same llama.cpp context.
+    ///
+    /// I2 fix: `prompt` is wrapped in ChatML with a `/no_think` directive
+    /// (via [`crate::curator::wrap_no_think`]) before generation, and any
+    /// leading `<think>...</think>` block is stripped from the reply (via
+    /// [`crate::curator::strip_think_block`]) before it's returned. Qwen 3
+    /// emits thinking tokens by default; without the wrapper, a raw prompt
+    /// doesn't reliably suppress them, and a leaked `<think>` block would
+    /// break every one of this method's callers — the curator's
+    /// `parse_candidates`/`parse_verdict` JSON parsers and the session
+    /// summary's exact `"SKIP"` match all expect the reply to start clean.
     pub async fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String> {
         let opts = GenerateOpts {
             temperature: 0.2,
             max_tokens: Some(max_tokens),
             ..Default::default()
         };
-        self.llm.generate(prompt, &opts).await
+        let wrapped = crate::curator::wrap_no_think(prompt);
+        let raw = self.llm.generate(&wrapped, &opts).await?;
+        Ok(crate::curator::strip_think_block(&raw).to_string())
     }
 
     /// Log the evaluation result with latency tracking.

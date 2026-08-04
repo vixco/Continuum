@@ -686,15 +686,15 @@ impl Vault {
         let mut query =
             "SELECT id, ts, kind, text, project, node_id, \"ref\" FROM events WHERE 1=1"
                 .to_string();
-        let mut args: Vec<String> = Vec::new();
 
-        if let Some(since) = range.since {
+        if range.since.is_some() {
             query.push_str(" AND ts >= ?");
-            args.push(since.to_rfc3339());
         }
-        if let Some(until) = range.until {
+        if range.until.is_some() {
             query.push_str(" AND ts <= ?");
-            args.push(until.to_rfc3339());
+        }
+        if range.since_id.is_some() {
+            query.push_str(" AND id > ?");
         }
 
         query.push_str(" ORDER BY ts ASC LIMIT ?");
@@ -711,8 +711,14 @@ impl Vault {
                 Option<String>,
             ),
         >(&query);
-        for arg in args {
-            qry = qry.bind(arg);
+        if let Some(since) = range.since {
+            qry = qry.bind(since.to_rfc3339());
+        }
+        if let Some(until) = range.until {
+            qry = qry.bind(until.to_rfc3339());
+        }
+        if let Some(since_id) = range.since_id {
+            qry = qry.bind(since_id);
         }
         qry = qry.bind(i64::from(limit));
 
