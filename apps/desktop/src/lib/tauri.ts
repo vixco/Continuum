@@ -472,7 +472,7 @@ export const DEFAULT_STATE: ContinuumState = {
     stt_loaded: false,
     orchestrator_ready: false,
     paused: false,
-    version: "0.1.0-alpha.10",
+    version: "0.1.0-alpha.11",
   },
   recent_actions: [],
 };
