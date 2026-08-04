@@ -132,6 +132,24 @@ pub enum Source {
     Manual,
 }
 
+impl Source {
+    /// snake_case string form (matches serde). Mirrors [`NodeType::as_str`]
+    /// above — lets callers get a label string without round-tripping
+    /// through `serde_json::to_value` (previously duplicated as
+    /// `source_label` in `continuum-core`'s `orchestrator::wake_context`
+    /// and `source_to_string` in `continuum-mcp`'s `tools::memory`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserStatement => "user_statement",
+            Self::Observed => "observed",
+            Self::Inferred => "inferred",
+            Self::AgentRun => "agent_run",
+            Self::Chat => "chat",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 /// Who may see this memory in generated context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -370,6 +388,23 @@ pub struct EventRange {
     pub since: Option<DateTime<Utc>>,
     #[serde(default)]
     pub until: Option<DateTime<Utc>>,
+    /// Exclusive lower bound by event id (the `events` table's
+    /// `AUTOINCREMENT` primary key, returned as [`Event::id`]) — matches
+    /// events with `id > since_id` only. An id watermark, not a
+    /// `since`/`until` timestamp filter: `ts` on a stored event can be
+    /// backdated well before the row is actually written (see
+    /// `continuum-core`'s memory distiller, which stamps `ts` as the
+    /// original frame-capture time but only inserts the row on its own
+    /// periodic pass), so a caller polling by `since`/`until` on a
+    /// steadily-advancing clock can permanently skip an event whose row
+    /// lands after the window has already moved past its `ts`. `since_id`
+    /// has no such race — it only ever depends on what rows exist in the
+    /// table at query time. Combinable with `since`/`until` (all three
+    /// filters `AND` together); the curator's own extraction pass uses
+    /// `since_id` exclusively for this reason (see
+    /// `curator::run::extract_pass`).
+    #[serde(default)]
+    pub since_id: Option<i64>,
     #[serde(default)]
     pub limit: Option<u32>,
 }
@@ -416,6 +451,11 @@ pub struct MigrationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_as_str_matches_serde_repr() {
+        assert_eq!(Source::AgentRun.as_str(), "agent_run");
+    }
 
     #[test]
     fn node_type_roundtrip_and_folders() {

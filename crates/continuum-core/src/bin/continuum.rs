@@ -540,6 +540,12 @@ async fn main() -> Result<()> {
     {
         let status: curator::SharedCuratorStatus = Default::default();
         let llm: Arc<dyn curator::CuratorLlm> = Arc::new(triage);
+        // C1 fix: session-summary writes are delayed by
+        // `distillation_interval_minutes + 1` past their boundary so the
+        // memory distiller has time to land any tail events before
+        // `write_session_summary` queries the vault's timeline — see
+        // `curator::run::run_curator`'s doc comment.
+        let distill_lag_minutes = config.memory.distillation_interval_minutes + 1;
         tokio::spawn(curator::run::run_curator(
             vault.clone(),
             llm,
@@ -548,6 +554,7 @@ async fn main() -> Result<()> {
             status.clone(),
             activity_rx.clone(),
             shutdown_rx.clone(),
+            distill_lag_minutes,
             dev_dir.clone(),
             raw_log.clone(),
             episodic.clone(),

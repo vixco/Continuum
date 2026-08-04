@@ -370,6 +370,7 @@ async fn events_append_query_prune() {
         .events(&continuum_memory::EventRange {
             since: Some(chrono::Utc::now() - chrono::Duration::days(1)),
             until: None,
+            since_id: None,
             limit: None,
         })
         .await
@@ -379,6 +380,62 @@ async fn events_append_query_prune() {
 
     assert_eq!(vault.prune_events(30).await.unwrap(), 1);
     assert_eq!(vault.events(&Default::default()).await.unwrap().len(), 1);
+}
+
+/// Regression for the C1 fix: `since_id` is an id watermark, independent
+/// of `ts` — an event's (possibly backdated) timestamp must never affect
+/// whether `since_id` includes it, only its `id` (insertion order) does.
+#[tokio::test]
+async fn events_since_id_watermark_is_id_based_not_ts_based() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+
+    // Inserted first (lowest id) but with a *newer* ts than the second
+    // event — proves the filter keys off id, not ts.
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(chrono::Utc::now()),
+            kind: "first".into(),
+            text: "first inserted, newest ts".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(chrono::Utc::now() - chrono::Duration::days(10)),
+            kind: "second".into(),
+            text: "second inserted, backdated ts".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+
+    let all = vault
+        .events(&continuum_memory::EventRange::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    let first_id = all.iter().find(|e| e.kind == "first").unwrap().id;
+
+    // since_id excludes the first (id == first_id) but includes the
+    // second (id > first_id), even though the second's ts is far older —
+    // a ts-based `since` filter would have excluded it instead.
+    let watermarked = vault
+        .events(&continuum_memory::EventRange {
+            since: None,
+            until: None,
+            since_id: Some(first_id),
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(watermarked.len(), 1);
+    assert_eq!(watermarked[0].kind, "second");
 }
 
 /// Regression test for the corrupt-index fail-safe in `Vault::open_with`:
