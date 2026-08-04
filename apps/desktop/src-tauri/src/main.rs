@@ -18,6 +18,7 @@
 
 mod chat;
 mod chat_store;
+mod chat_tools;
 mod commands;
 mod components;
 mod events;
