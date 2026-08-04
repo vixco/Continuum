@@ -46,6 +46,10 @@ fn req() -> ChatRequest {
         }],
         max_tokens: 64,
         temperature: None,
+        tools: vec![],
+        executor: None,
+        mcp: None,
+        tool_max_rounds: continuum_gateway::DEFAULT_MAX_TOOL_ROUNDS,
     }
 }
 
@@ -75,6 +79,7 @@ async fn streams_deltas_from_stub() {
                 done = true;
             }
             continuum_gateway::ChatEvent::Error { message, .. } => panic!("{message}"),
+            other => panic!("unexpected event: {other:?}"),
         }
     }
     assert_eq!(text, "Hallo");

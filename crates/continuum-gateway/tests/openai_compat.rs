@@ -17,6 +17,10 @@ fn req() -> ChatRequest {
         }],
         max_tokens: 64,
         temperature: None,
+        tools: vec![],
+        executor: None,
+        mcp: None,
+        tool_max_rounds: continuum_gateway::DEFAULT_MAX_TOOL_ROUNDS,
     }
 }
 
@@ -81,6 +85,7 @@ async fn stream_chat_yields_deltas_then_done() {
                 done = true;
             }
             continuum_gateway::ChatEvent::Error { message, .. } => panic!("error: {message}"),
+            other => panic!("unexpected event: {other:?}"),
         }
     }
     assert_eq!(text, "Hello");
@@ -148,6 +153,7 @@ async fn stream_end_without_done_still_yields_done() {
             continuum_gateway::ChatEvent::Delta { text: t } => text.push_str(&t),
             continuum_gateway::ChatEvent::Done { .. } => done = true,
             continuum_gateway::ChatEvent::Error { message, .. } => panic!("error: {message}"),
+            other => panic!("unexpected event: {other:?}"),
         }
     }
     assert_eq!(text, "Hi");
@@ -280,6 +286,7 @@ async fn mid_stream_stall_yields_timeout_error() {
                 got_timeout = true;
             }
             continuum_gateway::ChatEvent::Done { .. } => panic!("should not complete"),
+            other => panic!("unexpected event: {other:?}"),
         }
     }
     assert!(got_delta && got_timeout);
