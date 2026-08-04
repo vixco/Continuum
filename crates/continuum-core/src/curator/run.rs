@@ -653,15 +653,24 @@ fn wipe_request_path(dev_dir: &std::path::Path) -> std::path::PathBuf {
 /// never calls this function — it only ever *writes* the request file for
 /// the `continuum` runtime binary to pick up.
 ///
-/// A malformed request file (bad JSON) or a mid-wipe store error is
-/// propagated rather than swallowed: unlike a routine extraction-pass
-/// hiccup, a wipe request that silently fails to complete (and silently
-/// deletes itself, or silently never deletes itself) is exactly the kind
-/// of failure a user asking to delete their data needs surfaced, not
-/// contained. Callers ([`run_curator`]'s boot drain and daily hygiene
-/// tick) still log-and-continue on `Err` rather than panicking, per this
-/// module's usual containment policy — but the error reaches them instead
-/// of vanishing here.
+/// A mid-wipe store error is propagated rather than swallowed: unlike a
+/// routine extraction-pass hiccup, a wipe request that silently fails to
+/// complete (and silently deletes itself, or silently never deletes
+/// itself) is exactly the kind of failure a user asking to delete their
+/// data needs surfaced, not contained. Callers ([`run_curator`]'s boot
+/// drain, per-tick drain, and daily hygiene tick) still log-and-continue on
+/// `Err` rather than panicking, per this module's usual containment policy
+/// — but the error reaches them instead of vanishing here.
+///
+/// A malformed request file (bad JSON), by contrast, is *not* propagated
+/// (M3 fix): it's renamed to `wipe-request.json.bad` (mirroring
+/// `workers::intent::drain_intents`'s bad-json quarantine pattern) and this
+/// returns `Ok(false)`, exactly as if no request had been present. Without
+/// this, a hand-corrupted or partially-written request file would
+/// propagate `Err` forever on every single call (boot, every tick, and
+/// daily hygiene, per the I3 fix) without ever being consumed — a
+/// permanent, silently-repeating failure loop rather than a one-time,
+/// inspectable quarantine.
 #[cfg(feature = "runtime")]
 pub async fn process_wipe_request(
     dev_dir: &std::path::Path,
@@ -680,8 +689,28 @@ pub async fn process_wipe_request(
         }
     };
 
-    let request: WipeRequest = serde_json::from_str(&raw)
-        .with_context(|| format!("Failed to parse wipe request at {}", request_path.display()))?;
+    let request: WipeRequest = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                path = %request_path.display(),
+                error = %e,
+                "Unparsable wipe request; quarantining as .json.bad and skipping"
+            );
+            let bad_path = dev_dir.join("wipe-request.json.bad");
+            if let Err(rename_err) = tokio::fs::rename(&request_path, &bad_path).await {
+                tracing::warn!(
+                    layer = "memory",
+                    component = "curator",
+                    error = %rename_err,
+                    "Failed to quarantine corrupt wipe request"
+                );
+            }
+            return Ok(false);
+        }
+    };
 
     if request.scopes.iter().any(|s| s == "raw_log") {
         let deleted = raw_log.wipe_all().await?;
@@ -768,6 +797,33 @@ async fn run_daily_hygiene(
     }
 }
 
+/// I3 fix: drains a pending wipe request at the top of *every* curator
+/// tick, not just once per local calendar day via [`run_daily_hygiene`].
+/// Before this, a request written after that day's one hygiene run (or on
+/// a day when the runtime never restarted) sat untouched until the next
+/// calendar day rolled over — `wake_vault_notes_max`/`interval_minutes`
+/// aside, a user asking to wipe their data has no reason to expect it
+/// might take up to 24 hours. Called unconditionally from the
+/// `ticker.tick()` arm in [`run_curator`], ahead of the daily-hygiene gate.
+/// Failure is logged and swallowed here rather than propagated, mirroring
+/// every other per-tick step in this module.
+#[cfg(feature = "runtime")]
+async fn drain_wipe_request_tick(
+    dev_dir: &std::path::Path,
+    raw_log: &crate::memory::raw_log::RawLog,
+    episodic: &Arc<tokio::sync::Mutex<crate::memory::episodic::EpisodicStore>>,
+    vault: &Vault,
+) {
+    if let Err(e) = process_wipe_request(dev_dir, raw_log, episodic, vault).await {
+        tracing::warn!(
+            layer = "memory",
+            component = "curator",
+            error = %e,
+            "Per-tick wipe-request drain failed"
+        );
+    }
+}
+
 /// Runs the curator's background extraction loop until shutdown, mirroring
 /// `crate::memory::distill::run_memory_distiller`'s shape: a disabled-config
 /// early return that parks on shutdown, then a `tokio::select!` between a
@@ -788,7 +844,10 @@ async fn run_daily_hygiene(
 ///
 /// Task 7 also makes this the home of daily hygiene (vault expiry sweep,
 /// event pruning, wipe-request drain — see [`run_daily_hygiene`]) and a
-/// one-shot wipe-request drain at boot.
+/// one-shot wipe-request drain at boot. I3 fix: a pending wipe request is
+/// now *also* drained at the top of every tick (see
+/// [`drain_wipe_request_tick`]), not just once per day via daily hygiene —
+/// see the `ticker.tick()` arm below.
 ///
 /// C1 fix (session-summary delay-write): `pending_sessions` holds session
 /// boundaries that have fired but haven't been written yet — see
@@ -878,6 +937,13 @@ pub async fn run_curator(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                // I3 fix: drain any pending wipe request at the top of
+                // *every* tick — not just once per day via daily hygiene
+                // below — so a request written mid-day doesn't sit until
+                // the next calendar day rolls over.
+                #[cfg(feature = "runtime")]
+                drain_wipe_request_tick(&dev_dir, &raw_log, &episodic, &vault).await;
+
                 // Task 7: once per local calendar day, run vault
                 // expiry/event-pruning + drain any pending wipe request —
                 // ahead of extraction so a stale/expired window never gets
@@ -1482,5 +1548,119 @@ mod tests {
             .await
             .unwrap();
         assert!(!processed);
+    }
+
+    /// M3 fix regression: a corrupt/unparseable `wipe-request.json` must be
+    /// quarantined (renamed to `wipe-request.json.bad`) and reported as
+    /// `Ok(false)`, not retried forever. Before this fix, a bad-JSON parse
+    /// error propagated as `Err` on every call without ever consuming the
+    /// file — the exact same request would fail again on the very next
+    /// tick, boot, or hygiene run, forever.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn process_wipe_request_quarantines_corrupt_json_instead_of_retrying_forever() {
+        use crate::memory::episodic::EpisodicStore;
+        use crate::memory::raw_log::RawLog;
+        use tokio::sync::Mutex;
+
+        let dev_dir = tempfile::tempdir().unwrap();
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(vault_dir.path()).await.unwrap();
+        let raw_log = RawLog::open("sqlite::memory:").await.unwrap();
+        let episodic_dir = tempfile::tempdir().unwrap();
+        let episodic = Arc::new(Mutex::new(
+            EpisodicStore::open_for_test(episodic_dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+
+        let request_path = dev_dir.path().join("wipe-request.json");
+        std::fs::write(&request_path, "{ this is not valid json").unwrap();
+
+        let processed = process_wipe_request(dev_dir.path(), &raw_log, &episodic, &vault)
+            .await
+            .unwrap();
+        assert!(!processed, "quarantine is Ok(false), not Err");
+        assert!(
+            !request_path.exists(),
+            "the corrupt file must be moved out of the way"
+        );
+        assert!(
+            dev_dir.path().join("wipe-request.json.bad").exists(),
+            "quarantined under the .json.bad name"
+        );
+
+        // A later call — simulating the next tick — must not retry or error:
+        // the corrupt file is already gone.
+        let processed_again = process_wipe_request(dev_dir.path(), &raw_log, &episodic, &vault)
+            .await
+            .unwrap();
+        assert!(!processed_again);
+    }
+
+    /// I3 fix regression: the per-tick drain helper (called unconditionally
+    /// from `run_curator`'s `ticker.tick()` arm, independent of
+    /// `last_hygiene`'s once-per-day gate) must pick up a wipe request that
+    /// appears *between* two ticks on the very same calendar day — i.e.
+    /// without `run_daily_hygiene` ever running again. Calling
+    /// `drain_wipe_request_tick` twice in a row, with the request written
+    /// only after the first call, exercises exactly that: no day boundary,
+    /// no hygiene call, anywhere in this test.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn drain_wipe_request_tick_processes_without_daily_hygiene() {
+        use crate::memory::episodic::EpisodicStore;
+        use crate::memory::raw_log::RawLog;
+        use tokio::sync::Mutex;
+
+        let dev_dir = tempfile::tempdir().unwrap();
+        let vault_dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(vault_dir.path()).await.unwrap();
+        vault
+            .append_event(NewEvent {
+                ts: None,
+                kind: "distilled".to_string(),
+                text: "should be wiped".to_string(),
+                project: None,
+                node_id: None,
+                reference: None,
+            })
+            .await
+            .unwrap();
+        let raw_log = RawLog::open("sqlite::memory:").await.unwrap();
+        let episodic_dir = tempfile::tempdir().unwrap();
+        let episodic = Arc::new(Mutex::new(
+            EpisodicStore::open_for_test(episodic_dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+
+        // "Tick 1": nothing to drain yet.
+        drain_wipe_request_tick(dev_dir.path(), &raw_log, &episodic, &vault).await;
+        let empty_range = EventRange {
+            since: None,
+            until: None,
+            since_id: None,
+            limit: None,
+        };
+        assert_eq!(vault.events(&empty_range).await.unwrap().len(), 1);
+
+        // A wipe request arrives mid-day, well after any daily-hygiene run
+        // would have already happened.
+        std::fs::write(
+            dev_dir.path().join("wipe-request.json"),
+            serde_json::json!({
+                "requested_at": Utc::now().to_rfc3339(),
+                "scopes": ["events"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // "Tick 2", same day — the per-tick drain (not hygiene) must pick
+        // it up.
+        drain_wipe_request_tick(dev_dir.path(), &raw_log, &episodic, &vault).await;
+        assert!(!dev_dir.path().join("wipe-request.json").exists());
+        assert_eq!(vault.events(&empty_range).await.unwrap().len(), 0);
     }
 }
