@@ -24,13 +24,17 @@ memory_set_fact       = "session-approved"
 
 # Vault tools (direct access to the memory vault's full node model — see
 # docs/memory.md). Reads are safe; writes require confirmation for the same
-# reason memory_set_fact does. memory_wipe_all is the most destructive tool
-# in the whole server (queues a wipe of raw log + episodic memory + vault
-# timeline events), so it always requires confirmation, every call.
+# reason memory_set_fact does. memory_vault_delete permanently removes a
+# note's markdown file (unlike memory_vault_resolve's reject/archive, which
+# keeps the file with a new status), so it gets the same confirmation tier
+# as the other vault writes below. memory_wipe_all is the most destructive
+# tool in the whole server (queues a wipe of raw log + episodic memory +
+# vault timeline events), so it always requires confirmation, every call.
 memory_vault_search   = "auto"
 memory_vault_get      = "auto"
 memory_vault_save     = "session-approved"
 memory_vault_resolve  = "session-approved"
+memory_vault_delete   = "session-approved"
 memory_wipe_all       = "always-confirm"
 
 # --- System info tools ---

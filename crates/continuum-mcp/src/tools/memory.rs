@@ -8,8 +8,8 @@
 //!   [`title_from_key`]/[`tag_from_key`]); no longer touches the legacy
 //!   `semantic.sqlite` store.
 //! - `memory_vault_search` / `memory_vault_get` / `memory_vault_save` /
-//!   `memory_vault_resolve` — direct access to the memory vault's full node
-//!   model (see `docs/memory.md`).
+//!   `memory_vault_resolve` / `memory_vault_delete` — direct access to the
+//!   memory vault's full node model (see `docs/memory.md`).
 //! - `memory_wipe_all` — queue a derived-data wipe request for the runtime.
 //!
 //! Request/response types live here. The tool methods themselves are declared
@@ -487,6 +487,22 @@ pub struct MemoryVaultResolveRequest {
 pub struct VaultResolveResponse {
     pub id: String,
     pub ok: bool,
+}
+
+// ---------------------------------------------------------------------------
+// memory_vault_delete
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MemoryVaultDeleteRequest {
+    /// Node id, e.g. "mem_01j8f3a6k2...".
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct VaultDeleteResponse {
+    pub deleted: bool,
+    pub id: String,
 }
 
 // ---------------------------------------------------------------------------
