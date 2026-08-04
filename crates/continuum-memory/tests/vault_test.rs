@@ -438,6 +438,97 @@ async fn events_since_id_watermark_is_id_based_not_ts_based() {
     assert_eq!(watermarked[0].kind, "second");
 }
 
+/// Regression for the "ts-ordered LIMIT under since_id skips a lower id"
+/// data-loss bug found in the scoped re-review of the watermark fix:
+/// `Vault::events()` used to always `ORDER BY ts ASC`, even when
+/// `since_id` was set. Under a `LIMIT`, that let a *higher* id sort ahead
+/// of a *lower* one whenever the lower id's `ts` was backdated later than
+/// the higher id's — so a `since_id`-polling caller (the curator's
+/// watermark) that advances to the fetched batch's max id would
+/// permanently skip the excluded lower id, never seeing it again on any
+/// future poll (every future `since_id` is now past it too).
+///
+/// Exact repro: three events inserted in id order 1, 2, 3, but event 3's
+/// `ts` is backdated *before* event 1's `ts` (1: ts=T, 2: ts=T+1m, 3:
+/// ts=T-1h). Under the old `ORDER BY ts ASC LIMIT 2`, the two
+/// earliest-by-ts rows are 3 (T-1h) and 1 (T) — id 2 (the true "second
+/// oldest by id past the watermark") is silently excluded. With the fix
+/// (`ORDER BY id ASC` whenever `since_id` is set), `since_id=0, limit=2`
+/// must return exactly ids `[1, 2]`, not `[3, 1]`.
+#[tokio::test]
+async fn events_since_id_orders_by_id_not_ts_under_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+
+    let base = chrono::Utc::now();
+
+    // id 1: ts = T
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(base),
+            kind: "one".into(),
+            text: "id 1, ts=T".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+    // id 2: ts = T + 1m
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(base + chrono::Duration::minutes(1)),
+            kind: "two".into(),
+            text: "id 2, ts=T+1m".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+    // id 3: ts = T - 1h (backdated behind both 1 and 2, e.g. a late
+    // distiller write).
+    vault
+        .append_event(continuum_memory::NewEvent {
+            ts: Some(base - chrono::Duration::hours(1)),
+            kind: "three".into(),
+            text: "id 3, ts=T-1h".into(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .unwrap();
+
+    let all = vault
+        .events(&continuum_memory::EventRange::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
+    let id1 = all.iter().find(|e| e.kind == "one").unwrap().id;
+    let id2 = all.iter().find(|e| e.kind == "two").unwrap().id;
+    let id3 = all.iter().find(|e| e.kind == "three").unwrap().id;
+    assert!(id1 < id2 && id2 < id3, "ids assigned in insertion order");
+
+    let batch = vault
+        .events(&continuum_memory::EventRange {
+            since: None,
+            until: None,
+            since_id: Some(0),
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+
+    let batch_ids: Vec<i64> = batch.iter().map(|e| e.id).collect();
+    assert_eq!(
+        batch_ids,
+        vec![id1, id2],
+        "must fetch the two lowest ids past the watermark (contiguous by id), \
+         not the two ts-earliest rows (which would wrongly skip id 2)"
+    );
+}
+
 /// Regression test for the corrupt-index fail-safe in `Vault::open_with`:
 /// a note is created via a first vault instance, `.continuum/index.db` is
 /// then overwritten with garbage bytes (simulating a crash mid-write, a
