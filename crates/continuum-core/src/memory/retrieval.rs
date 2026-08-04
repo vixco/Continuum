@@ -15,6 +15,12 @@ use super::semantic::{Fact, SemanticStore};
 use crate::config::CuratorConfig;
 use crate::senses::types::PerceptionFrame;
 
+/// Minimum age a pending vault candidate must have before it's surfaced in
+/// wake context or counted by the daily maintenance ticker (see
+/// [`filter_pending`]) — gives the curator a moment after writing a
+/// candidate before nudging for review of it.
+const PENDING_MIN_AGE_MINUTES: i64 = 30;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -159,14 +165,48 @@ pub async fn retrieve_vault_context(
         }
     };
 
-    let cutoff = Utc::now() - chrono::Duration::minutes(30);
-    let mut pending: Vec<NodeSummary> = pending_all
+    let mut pending = filter_pending(pending_all, curator_cfg, Utc::now());
+    pending.truncate(curator_cfg.claude_batch as usize);
+
+    debug!(
+        layer = "memory",
+        component = "retrieval",
+        vault_note_count = notes.len(),
+        pending_count = pending.len(),
+        "Vault retrieval complete"
+    );
+
+    (notes, pending)
+}
+
+/// Filters raw `Vault::pending()` results down to candidates actually
+/// worth surfacing to a human/orchestrator: non-sensitive (unless
+/// `cfg.include_sensitive_in_context` opts in) and at least
+/// `PENDING_MIN_AGE_MINUTES` old, so a candidate isn't nudged for review
+/// the instant the curator writes it.
+///
+/// I4 fix: shared by [`retrieve_vault_context`] (which additionally
+/// truncates to `cfg.claude_batch` for the wake message) and
+/// `bin/continuum.rs`'s daily memory-maintenance ticker, which previously
+/// gated on the raw, unfiltered `vault.pending()` list — a vault that only
+/// ever had sensitive-and-excluded or too-fresh candidates would still
+/// report "pending decisions" and could fire a daily wake that then found
+/// nothing to show, forever, every day. Gating the ticker on this same
+/// filtered list instead means "no-op wake" and "nothing shown in the wake
+/// message" can no longer disagree.
+pub fn filter_pending(
+    items: Vec<NodeSummary>,
+    cfg: &CuratorConfig,
+    now: DateTime<Utc>,
+) -> Vec<NodeSummary> {
+    let cutoff = now - chrono::Duration::minutes(PENDING_MIN_AGE_MINUTES);
+    items
         .into_iter()
         .filter(|n| {
-            // Mirrors the `notes` sensitivity gate above: a hand-edited vault
-            // is schema-legal for a Sensitive candidate, and it must not
-            // leak into the wake message unless the operator opted in.
-            (n.sensitivity != Sensitivity::Sensitive || curator_cfg.include_sensitive_in_context)
+            // A hand-edited vault is schema-legal for a Sensitive
+            // candidate, and it must not leak into the wake context unless
+            // the operator opted in.
+            (n.sensitivity != Sensitivity::Sensitive || cfg.include_sensitive_in_context)
                 && match DateTime::parse_from_rfc3339(&n.created) {
                     Ok(created) => created.with_timezone(&Utc) < cutoff,
                     Err(e) => {
@@ -182,18 +222,7 @@ pub async fn retrieve_vault_context(
                     }
                 }
         })
-        .collect();
-    pending.truncate(curator_cfg.claude_batch as usize);
-
-    debug!(
-        layer = "memory",
-        component = "retrieval",
-        vault_note_count = notes.len(),
-        pending_count = pending.len(),
-        "Vault retrieval complete"
-    );
-
-    (notes, pending)
+        .collect()
 }
 
 /// Builds a natural language query string from a perception frame.
@@ -556,5 +585,85 @@ mod tests {
         let (_notes, pending) = retrieve_vault_context(&vault, &frame, &cfg_sensitive).await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, sensitive.frontmatter.id);
+    }
+
+    // -----------------------------------------------------------------
+    // filter_pending (I4 fix) — pure unit tests, no vault needed
+    // -----------------------------------------------------------------
+
+    fn mk_pending_summary(
+        id: &str,
+        created: DateTime<Utc>,
+        sensitivity: Sensitivity,
+    ) -> NodeSummary {
+        NodeSummary {
+            id: id.to_string(),
+            slug: id.to_string(),
+            title: id.to_string(),
+            node_type: NodeType::Fact,
+            status: NodeStatus::Candidate,
+            project: None,
+            confidence: 0.5,
+            importance: 0.5,
+            source: Source::Observed,
+            sensitivity,
+            created: created.to_rfc3339(),
+            updated: created.to_rfc3339(),
+            tags: vec![],
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn filter_pending_keeps_only_old_enough_non_sensitive_items() {
+        let now = Utc::now();
+        let items = vec![
+            mk_pending_summary(
+                "fresh",
+                now - chrono::Duration::minutes(5),
+                Sensitivity::Internal,
+            ),
+            mk_pending_summary(
+                "old",
+                now - chrono::Duration::hours(1),
+                Sensitivity::Internal,
+            ),
+            mk_pending_summary(
+                "old_sensitive",
+                now - chrono::Duration::hours(1),
+                Sensitivity::Sensitive,
+            ),
+        ];
+
+        let cfg = CuratorConfig::default();
+        let filtered = filter_pending(items.clone(), &cfg, now);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "old");
+
+        // Shared behavior with retrieve_vault_context's own sensitivity
+        // gate: include_sensitive_in_context surfaces the sensitive one too
+        // (still subject to the same age cutoff).
+        let cfg_sensitive = CuratorConfig {
+            include_sensitive_in_context: true,
+            ..Default::default()
+        };
+        let filtered_sensitive = filter_pending(items, &cfg_sensitive, now);
+        assert_eq!(filtered_sensitive.len(), 2);
+        assert!(filtered_sensitive.iter().any(|n| n.id == "old_sensitive"));
+    }
+
+    #[test]
+    fn filter_pending_excludes_unparseable_created_timestamp() {
+        let now = Utc::now();
+        let mut bad = mk_pending_summary(
+            "bad_ts",
+            now - chrono::Duration::hours(1),
+            Sensitivity::Internal,
+        );
+        bad.created = "not a timestamp".to_string();
+
+        let cfg = CuratorConfig::default();
+        let filtered = filter_pending(vec![bad], &cfg, now);
+        assert!(filtered.is_empty());
     }
 }
