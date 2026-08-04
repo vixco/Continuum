@@ -41,7 +41,7 @@ export function BrainTab() {
         }
       >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="flex flex-col justify-end gap-2 rounded-md border border-bg-border bg-bg-raised/40 px-3 py-2">
+          <div className="bg-bg-raised/40 flex flex-col justify-end gap-2 rounded-md border border-bg-border px-3 py-2">
             <Toggle
               checked={config.screen.enabled}
               onChange={async (enabled) => {
@@ -82,7 +82,7 @@ export function BrainTab() {
             format={(v) => `${Math.round(v)}ms / monitor`}
           />
         </div>
-        <div className="mt-3 rounded-md border border-bg-border bg-bg-deep px-3 py-2 text-xs text-ink-muted">
+        <div className="bg-bg-deep mt-3 rounded-md border border-bg-border px-3 py-2 text-xs text-ink-muted">
           <span className="font-medium text-ink">All connected monitors</span>
           <span className="ml-1 font-mono text-ink-muted">({perception.monitor_count} live)</span>
           <span className="mx-2 text-ink-dim">•</span>
