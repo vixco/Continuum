@@ -930,7 +930,9 @@ pub async fn run_curator(
     let mut ticker = tokio::time::interval(interval);
     let mut watermark: i64 = 0;
     let mut window_failures: u32 = 0;
-    let mut tracker = SessionTracker::new();
+    // M1 fix: honors the configured session-boundary floor instead of the
+    // tracker's own hardcoded default.
+    let mut tracker = SessionTracker::with_session_min_minutes(cfg.session_min_minutes);
     let mut pending_sessions: Vec<EndedSession> = Vec::new();
     let mut last_hygiene: Option<chrono::NaiveDate> = None;
 

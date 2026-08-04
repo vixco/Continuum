@@ -637,6 +637,14 @@ async fn main() -> Result<()> {
             move || {
                 let guard = state_clone.lock().unwrap_or_else(|p| p.into_inner());
                 let mut snap = guard.clone();
+                // M4 fix: release `runtime_state`'s lock before calling
+                // build_curator_snapshot, which locks a *different* mutex
+                // (`curator_status_for_publisher`) — holding the first
+                // across the second is a latent nested-lock that doesn't
+                // deadlock today only because nothing else acquires them in
+                // the opposite order, but there's no reason to hold it a
+                // moment longer than the `.clone()` above needs.
+                drop(guard);
                 snap.last_update = chrono::Utc::now().to_rfc3339();
                 snap.curator = Some(build_curator_snapshot(
                     curator_status_for_publisher.as_ref(),
@@ -1122,6 +1130,29 @@ async fn do_wake(
 
     // 2. Wake message.
     let user_message = build_wake_message(trigger_frame, history_frames, &memory_context, reason);
+
+    // Spec-gap 1 (cheap timeline win): record the wake itself on the
+    // vault's own event timeline so the Memory tab's timeline strip shows
+    // wakes alongside curator-written events, not just curator activity.
+    // Best-effort — a vault hiccup here must never block the wake.
+    let _ = vault
+        .append_event(continuum_memory::NewEvent {
+            ts: None,
+            kind: "wake".to_string(),
+            text: reason.to_string(),
+            project: None,
+            node_id: None,
+            reference: None,
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                layer = "memory",
+                component = "continuum",
+                error = %e.user_message(),
+                "Failed to append wake event to vault timeline"
+            );
+        });
 
     // Best-effort: mark the injected vault notes as recently used. Spawned
     // so a slow/failing vault write never delays the wake itself; errors

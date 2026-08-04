@@ -49,31 +49,6 @@ pub struct RelationJson {
     pub confidence: f32,
 }
 
-/// Build the extraction prompt sent to the curator LLM: recent activity
-/// plus already-known related notes (so the model doesn't re-propose what
-/// the vault already has), capped to `max_candidates` results.
-pub fn build_extract_prompt(
-    events_block: &str,
-    related_notes_block: &str,
-    max_candidates: u32,
-) -> String {
-    format!(
-        "You are Continuum's memory curator. Review the recent activity below and \
-         extract up to {max_candidates} durable memories worth recording in the vault. \
-         Only extract genuinely reusable facts, preferences, decisions, goals, or \
-         errors — skip anything trivial or already covered by the related notes shown \
-         below.\n\n\
-         Valid node types: project, goal, task, decision, person, preference, fact, \
-         error, session, note.\n\n\
-         Respond with ONLY a JSON array, no prose before or after, matching this shape:\n\
-         [{{\"type\":\"fact\",\"title\":\"...\",\"body\":\"...\",\"project\":null,\
-         \"confidence\":0.0,\"importance\":0.5,\"source\":\"observed\",\
-         \"relations\":[{{\"to\":\"...\",\"rel\":\"...\",\"confidence\":1.0}}],\"tags\":[]}}]\n\n\
-         Recent activity:\n{events_block}\n\n\
-         Related existing notes:\n{related_notes_block}\n"
-    )
-}
-
 /// From a `[` at byte offset `start` in `raw`, scans forward tracking
 /// bracket depth (starting at 1 for the opening `[`) while respecting JSON
 /// string literals — `[`/`]` bytes inside a quoted string don't perturb the

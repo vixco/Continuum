@@ -15,12 +15,6 @@ use super::semantic::{Fact, SemanticStore};
 use crate::config::CuratorConfig;
 use crate::senses::types::PerceptionFrame;
 
-/// Minimum age a pending vault candidate must have before it's surfaced in
-/// wake context or counted by the daily maintenance ticker (see
-/// [`filter_pending`]) — gives the curator a moment after writing a
-/// candidate before nudging for review of it.
-const PENDING_MIN_AGE_MINUTES: i64 = 30;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -182,8 +176,9 @@ pub async fn retrieve_vault_context(
 /// Filters raw `Vault::pending()` results down to candidates actually
 /// worth surfacing to a human/orchestrator: non-sensitive (unless
 /// `cfg.include_sensitive_in_context` opts in) and at least
-/// `PENDING_MIN_AGE_MINUTES` old, so a candidate isn't nudged for review
-/// the instant the curator writes it.
+/// `cfg.pending_min_age_minutes` old (M9 fix — configurable, default 30),
+/// so a candidate isn't nudged for review the instant the curator writes
+/// it.
 ///
 /// I4 fix: shared by [`retrieve_vault_context`] (which additionally
 /// truncates to `cfg.claude_batch` for the wake message) and
@@ -199,7 +194,7 @@ pub fn filter_pending(
     cfg: &CuratorConfig,
     now: DateTime<Utc>,
 ) -> Vec<NodeSummary> {
-    let cutoff = now - chrono::Duration::minutes(PENDING_MIN_AGE_MINUTES);
+    let cutoff = now - chrono::Duration::minutes(cfg.pending_min_age_minutes as i64);
     items
         .into_iter()
         .filter(|n| {
