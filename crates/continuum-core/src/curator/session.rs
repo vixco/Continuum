@@ -10,7 +10,9 @@
 //! candidate review, unlike [`crate::curator::extract`]'s output.
 
 use chrono::{DateTime, Duration, Utc};
-use continuum_memory::{EventRange, NodeStatus, NodeType, NoteDraft, Relation, Source, Vault};
+use continuum_memory::{
+    EventRange, NewEvent, NodeStatus, NodeType, NoteDraft, Relation, Source, Vault,
+};
 
 use crate::curator::run::{build_events_block, ActivitySignal};
 use crate::curator::CuratorLlm;
@@ -21,12 +23,14 @@ use crate::curator::CuratorLlm;
 /// in [`write_session_summary`].
 pub const SESSION_PROMPT: &str = include_str!("../../../../prompts/curator-session.md");
 
-/// A session boundary from a foreground-process change is only worth
-/// acting on once the user has spent at least this long on the process
-/// being left — otherwise a quick alt-tab (checking Slack, glancing at a
-/// browser tab) would fragment one real session into several noise-sized
-/// ones. See [`SessionTracker::observe`].
-const MIN_SESSION_MINUTES: i64 = 5;
+/// Default for [`SessionTracker`]'s `session_min_minutes` (see
+/// [`SessionTracker::new`]) — matches `CuratorConfig::session_min_minutes`'s
+/// own default (M1 fix). A session boundary from a foreground-process
+/// change is only worth acting on once the user has spent at least this
+/// long on the process being left — otherwise a quick alt-tab (checking
+/// Slack, glancing at a browser tab) would fragment one real session into
+/// several noise-sized ones. See [`SessionTracker::observe`].
+const DEFAULT_SESSION_MIN_MINUTES: u64 = 5;
 
 /// In-progress session state tracked by [`SessionTracker`].
 #[derive(Debug, Clone)]
@@ -51,15 +55,38 @@ pub struct EndedSession {
 /// time — so it is deterministic and trivially testable with fabricated
 /// timestamps; the caller ([`crate::curator::run::run_curator`]) feeds it
 /// real signals off a watch channel on every tick and every signal change.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionTracker {
     current: Option<SessionState>,
+    /// M1 fix: configurable replacement for the old hardcoded
+    /// `MIN_SESSION_MINUTES` constant — see [`SessionTracker::observe`]'s
+    /// case 4 and `CuratorConfig::session_min_minutes`.
+    session_min_minutes: u64,
+}
+
+impl Default for SessionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionTracker {
-    /// A tracker with no session in progress.
+    /// A tracker with no session in progress, using the default minimum
+    /// session length ([`DEFAULT_SESSION_MIN_MINUTES`]). Most call sites
+    /// (including every test in this module) want this; the real curator
+    /// loop uses [`SessionTracker::with_session_min_minutes`] to honor the
+    /// configured `CuratorConfig::session_min_minutes` instead.
     pub fn new() -> Self {
-        Self { current: None }
+        Self::with_session_min_minutes(DEFAULT_SESSION_MIN_MINUTES)
+    }
+
+    /// A tracker with no session in progress and an explicit minimum
+    /// session length (M1 fix — see `CuratorConfig::session_min_minutes`).
+    pub fn with_session_min_minutes(session_min_minutes: u64) -> Self {
+        Self {
+            current: None,
+            session_min_minutes,
+        }
     }
 
     /// Feed the latest signal. Returns `Some(ended_session)` exactly when a
@@ -78,7 +105,8 @@ impl SessionTracker {
     ///    Ends the session at `last_activity` (the last moment there was
     ///    actually activity, not the idle-detecting signal's own time).
     /// 4. The foreground process changed *and* the session so far
-    ///    (`last_activity - started`) is at least [`MIN_SESSION_MINUTES`]:
+    ///    (`last_activity - started`) is at least `self.session_min_minutes`
+    ///    (M1 fix — configurable, default [`DEFAULT_SESSION_MIN_MINUTES`]):
     ///    a real handoff to different work. Ends the session at
     ///    `last_activity` (the previous signal's time, before the change).
     /// 5. Otherwise: not a boundary. `last_activity` and `project_hint`
@@ -88,7 +116,7 @@ impl SessionTracker {
     ///    a string of short flicks can never itself accumulate into a false
     ///    boundary. If the flicked-to process sticks around long enough
     ///    that the *original* session's own elapsed time alone crosses
-    ///    [`MIN_SESSION_MINUTES`], case 4 will still eventually fire and
+    ///    `self.session_min_minutes`, case 4 will still eventually fire and
     ///    close out the original session under its original process name.
     ///
     /// Cases 3 and 4 are mutually exclusive in practice (an idle gap and a
@@ -147,7 +175,9 @@ impl SessionTracker {
         }
 
         let session_len = state.last_activity - state.started;
-        if sig.process != state.process && session_len >= Duration::minutes(MIN_SESSION_MINUTES) {
+        if sig.process != state.process
+            && session_len >= Duration::minutes(self.session_min_minutes as i64)
+        {
             let ended = EndedSession {
                 started: state.started,
                 ended: state.last_activity,
@@ -282,6 +312,32 @@ pub async fn write_session_summary(
     };
 
     let note = vault.create(draft).await?;
+
+    // Spec-gap 1 (cheap timeline win): record the summary itself on the
+    // vault's own event timeline, linked via `node_id` so the Memory tab's
+    // timeline strip can jump straight to the note. Best-effort — a vault
+    // hiccup here must never fail the summary write that already
+    // succeeded.
+    let _ = vault
+        .append_event(NewEvent {
+            ts: None,
+            kind: "session".to_string(),
+            text: note.frontmatter.title.clone(),
+            project: ended.project_hint.clone(),
+            node_id: Some(note.frontmatter.id.clone()),
+            reference: None,
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                layer = "memory",
+                component = "curator",
+                id = %note.frontmatter.id,
+                error = %e.user_message(),
+                "Failed to append session event to vault timeline"
+            );
+        });
+
     tracing::info!(
         layer = "memory",
         component = "curator",
@@ -394,6 +450,38 @@ mod tests {
             tracker.observe(&mk_sig(t3, "chrome", Some("web")), 20),
             None
         );
+    }
+
+    /// M1 fix regression: `with_session_min_minutes` must actually change
+    /// the process-change boundary threshold — a ~2-minute-old session that
+    /// would be absorbed under the 5-minute default must fire a boundary
+    /// once the tracker is configured with a lower floor.
+    #[test]
+    fn with_session_min_minutes_changes_the_process_change_floor() {
+        let mut tracker = SessionTracker::with_session_min_minutes(1);
+        let t0 = base_ts();
+        assert_eq!(
+            tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), 20),
+            None
+        );
+
+        // Still vscode 2 minutes later -- advances last_activity so the
+        // next check's session_len is actually 2 minutes, not 0.
+        let t1 = t0 + Duration::minutes(2);
+        assert_eq!(
+            tracker.observe(&mk_sig(t1, "vscode", Some("continuum")), 20),
+            None
+        );
+
+        // Process change: 2-minute session_len would be absorbed under the
+        // 5-minute default (see observe_never_emits_on_a_brief_process_flick
+        // below), but clears this tracker's configured 1-minute floor.
+        let t2 = t1 + Duration::seconds(10);
+        let ended = tracker
+            .observe(&mk_sig(t2, "chrome", Some("web")), 20)
+            .expect("process change after >=1min session should emit a boundary");
+        assert_eq!(ended.started, t0);
+        assert_eq!(ended.process, "vscode");
     }
 
     #[test]
@@ -629,6 +717,49 @@ mod tests {
             .iter()
             .any(|r| r.to == "continuum" && r.rel == "belongs_to"));
         assert_eq!(llm.calls(), 1);
+    }
+
+    /// Spec-gap 1 regression: writing a session summary must also append a
+    /// `"session"`-kind vault timeline event linked to the new note via
+    /// `node_id`, so the Memory tab's timeline strip can jump straight to
+    /// it.
+    #[tokio::test]
+    async fn write_session_summary_appends_timeline_event_with_node_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let started = base_ts();
+        let ended_ts = started + Duration::minutes(30);
+        append_events(
+            &vault,
+            started,
+            &["Opened continuum-core", "Fixed a bug", "Ran tests"],
+        )
+        .await;
+
+        let ended = EndedSession {
+            started,
+            ended: ended_ts,
+            project_hint: Some("continuum".to_string()),
+            process: "Code.exe".to_string(),
+        };
+
+        let summary_md = "## Goal\nX\n## Changed\n- none\n## Problem\nnone\n## Tried\n\u{2013}\n## Result\nDone\n## Next step\nnone";
+        let llm = MockLlm::scripted(vec![summary_md.to_string()]);
+
+        let id = write_session_summary(&vault, &llm, &ended)
+            .await
+            .unwrap()
+            .expect("should create a note");
+
+        let events = vault.events(&EventRange::default()).await.unwrap();
+        let session_event = events
+            .iter()
+            .find(|e| e.kind == "session")
+            .expect("a session-kind timeline event should have been appended");
+        assert_eq!(session_event.node_id.as_deref(), Some(id.as_str()));
+        assert_eq!(session_event.text, "Session: Code.exe — 2026-01-01 09:30");
+        assert_eq!(session_event.project.as_deref(), Some("continuum"));
     }
 
     #[tokio::test]

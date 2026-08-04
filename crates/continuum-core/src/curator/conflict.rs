@@ -286,7 +286,11 @@ pub async fn detect_conflicts(
             note.frontmatter.relations.push(Relation {
                 to: partner.id.clone(),
                 rel: PROPOSES_SUPERSEDE.to_string(),
-                confidence: verdict.confidence,
+                // M2 fix: the curator LLM's confidence is untrusted input —
+                // clamp to the valid [0.0, 1.0] range before it's ever
+                // written into the vault, rather than trusting the model's
+                // own leniency.
+                confidence: verdict.confidence.clamp(0.0, 1.0),
             });
 
             match vault.save(&note).await {
@@ -392,6 +396,57 @@ mod tests {
                 .status,
             NodeStatus::Confirmed
         );
+    }
+
+    /// M2 fix regression: an out-of-range LLM-reported confidence (the
+    /// model's JSON reply is untrusted input) must be clamped to `[0.0,
+    /// 1.0]` before it's ever written into the vault's relation, not
+    /// stored verbatim.
+    #[tokio::test]
+    async fn out_of_range_verdict_confidence_is_clamped_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).await.unwrap();
+
+        let old = vault
+            .create(decision_draft(
+                "Use MongoDB",
+                "We use MongoDB for the primary datastore; PostgreSQL was considered too.",
+                NodeStatus::Confirmed,
+            ))
+            .await
+            .unwrap();
+
+        let cand = decision_draft(
+            "Use PostgreSQL",
+            "switching db to PostgreSQL for better relational guarantees",
+            NodeStatus::Candidate,
+        );
+        let new = vault.create(cand).await.unwrap();
+
+        // 1.4 clears the floor (route past cfg.supersede_confidence_floor)
+        // but is out of the valid confidence range.
+        let llm = MockLlm::scripted(vec![
+            r#"{"verdict":"supersedes","confidence":1.4,"reason":"newer db decision"}"#.into(),
+        ]);
+
+        let n = detect_conflicts(
+            &vault,
+            &llm,
+            &CuratorConfig::default(),
+            std::slice::from_ref(&new.frontmatter.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+
+        let refreshed = vault.get(&new.frontmatter.id).await.unwrap();
+        let rel = refreshed
+            .frontmatter
+            .relations
+            .iter()
+            .find(|r| r.rel == "proposes_supersede" && r.to == old.frontmatter.id)
+            .expect("proposal relation should exist");
+        assert_eq!(rel.confidence, 1.0, "clamped to the valid range");
     }
 
     #[tokio::test]

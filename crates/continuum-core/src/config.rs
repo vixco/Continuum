@@ -495,6 +495,21 @@ pub struct CuratorConfig {
     /// logged at the use site) rather than rejected, since a bad config
     /// value should degrade, not crash the runtime.
     pub maintenance_wake_hour: i32,
+    /// Minimum elapsed time (`last_activity - started`) a session must
+    /// have run before a foreground-process change counts as a real
+    /// session boundary worth summarizing, rather than a brief alt-tab
+    /// (checking Slack, glancing at a browser tab) getting fragmented into
+    /// its own noise-sized session. M1 fix — replaces the previously
+    /// hardcoded `MIN_SESSION_MINUTES` constant in
+    /// `curator::session::SessionTracker`.
+    pub session_min_minutes: u64,
+    /// Minimum age (in minutes) a pending vault candidate must have before
+    /// it's surfaced in wake context or counted by the daily
+    /// memory-maintenance ticker — gives the curator a moment after
+    /// writing a candidate before nudging for review of it. M9 fix —
+    /// replaces the previously hardcoded 30-minute cutoff in
+    /// `memory::retrieval::retrieve_vault_context`/`filter_pending`.
+    pub pending_min_age_minutes: u64,
 }
 
 impl Default for CuratorConfig {
@@ -511,6 +526,8 @@ impl Default for CuratorConfig {
             include_sensitive_in_context: false,
             supersede_confidence_floor: 0.5,
             maintenance_wake_hour: 4,
+            session_min_minutes: 5,
+            pending_min_age_minutes: 30,
         }
     }
 }
@@ -1275,6 +1292,8 @@ interval_secs = 5
         assert!(!cfg.memory.curator.include_sensitive_in_context);
         assert_eq!(cfg.memory.curator.supersede_confidence_floor, 0.5);
         assert_eq!(cfg.memory.curator.maintenance_wake_hour, 4);
+        assert_eq!(cfg.memory.curator.session_min_minutes, 5);
+        assert_eq!(cfg.memory.curator.pending_min_age_minutes, 30);
 
         let parsed: ContinuumConfig = toml::from_str(
             "[memory.vault]\nvault_dir = \"D:/x\"\n[memory.curator]\nenabled = false\n",

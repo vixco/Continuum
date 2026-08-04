@@ -21,7 +21,7 @@ use continuum_core::memory::{
     episodic::EventKind,
     semantic::{Fact, FactSource},
 };
-use continuum_memory::{MemoryError, NodeType, Note, Resolution, Source, Vault};
+use continuum_memory::{MemoryError, NodeType, Note, Resolution, Vault};
 use rmcp::model::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -182,18 +182,6 @@ pub fn key_from_title(title: &str) -> String {
     title.replacen(": ", ".", 1)
 }
 
-/// snake_case string for a vault [`Source`], matching its serde
-/// representation. The equivalent helper inside `continuum_memory::index`
-/// is crate-private, so this goes through a serde round-trip instead of
-/// duplicating the match arms by hand — it can't drift out of sync with
-/// the enum's `#[serde(rename_all = "snake_case")]`.
-pub fn source_to_string(source: Source) -> String {
-    serde_json::to_value(source)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| "manual".to_string())
-}
-
 /// Maps a [`MemoryError`] onto an [`McpError`]. Caller-input problems
 /// (missing note, invalid state transition, bad title) become
 /// `invalid_params`; everything else (disk/db/parse failures) is
@@ -268,7 +256,7 @@ fn fact_view_from_note(key: &str, note: &Note) -> FactView {
         key: key.to_string(),
         value: note.body.clone(),
         confidence: note.frontmatter.confidence,
-        source: source_to_string(note.frontmatter.source),
+        source: note.frontmatter.source.as_str().to_string(),
         updated_at,
     }
 }
@@ -590,13 +578,6 @@ mod tests {
         for key in ["user.name", "project.sidelife.stack", "singleword"] {
             assert_eq!(key_from_title(&title_from_key(key)), key);
         }
-    }
-
-    #[test]
-    fn source_to_string_matches_serde_repr() {
-        assert_eq!(source_to_string(Source::AgentRun), "agent_run");
-        assert_eq!(source_to_string(Source::UserStatement), "user_statement");
-        assert_eq!(source_to_string(Source::Manual), "manual");
     }
 
     #[test]

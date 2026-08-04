@@ -1491,12 +1491,12 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
         McpTool {
             namespace: "memory".into(),
             name: "memory_list_facts".into(),
-            description: "List semantic facts (optional prefix filter)".into(),
+            description: "List facts (vault-first, legacy fallback)".into(),
         },
         McpTool {
             namespace: "memory".into(),
             name: "memory_get_fact".into(),
-            description: "Fetch a single semantic fact by key".into(),
+            description: "Fetch a fact by key (vault-first, legacy fallback)".into(),
         },
         McpTool {
             namespace: "memory".into(),

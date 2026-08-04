@@ -7,7 +7,6 @@
 //! Target: under 600 tokens total for the user message.
 
 use chrono::{DateTime, Utc};
-use continuum_memory::Source;
 
 use crate::memory::retrieval::MemoryContext;
 use crate::senses::types::PerceptionFrame;
@@ -118,7 +117,7 @@ pub fn build_wake_message(
                 note.node_type.as_str(),
                 note.title,
                 note.confidence,
-                source_label(note.source),
+                note.source.as_str(),
             ));
         }
         msg.push_str(
@@ -133,18 +132,6 @@ pub fn build_wake_message(
     msg.push('\n');
 
     msg
-}
-
-/// snake_case label for a [`Source`], matching its serde wire
-/// representation (e.g. `Source::Observed` → `"observed"`).
-/// continuum-memory doesn't expose a public `as_str()` for `Source` (unlike
-/// `NodeType`), so this round-trips through serde instead of duplicating
-/// the match arms here.
-fn source_label(source: Source) -> String {
-    serde_json::to_value(source)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Formats a perception frame as a multi-line description for the "Current moment" section.
@@ -259,7 +246,7 @@ mod tests {
     use crate::memory::semantic::{Fact, FactSource};
     use crate::senses::types::*;
     use chrono::Duration;
-    use continuum_memory::{NodeStatus, NodeSummary, NodeType, Sensitivity};
+    use continuum_memory::{NodeStatus, NodeSummary, NodeType, Sensitivity, Source};
     use uuid::Uuid;
 
     fn test_frame(desc: &str, secs_ago: i64) -> PerceptionFrame {
