@@ -114,8 +114,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   `claude_batch`) into the wake message, both sensitivity-gated (excludes
   `sensitivity: sensitive` notes unless `include_sensitive_in_context =
   true`) and both degrading to empty on any internal failure rather than
-  failing the wake. Confirmed/pending notes' `id`s are marked
-  `touch_last_used` on injection.
+  failing the wake. Confirmed vault-notes' `id`s (not pending candidates')
+  are marked `touch_last_used` on injection.
 - **Curator status on the dashboard (Plan B)**: the runtime's `state.json`
   snapshot gains a `curator` field (last pass time, consecutive failures,
   lifetime candidates written, pending count, enabled); the Home tab renders
