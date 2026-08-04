@@ -47,7 +47,22 @@ function Test-Preqs {
   param([switch]$NeedRust)
   $ok = $true
   if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-    Write-Err "pnpm not on PATH - install Node 20+ then 'npm i -g pnpm'"
+    # pnpm often lives behind corepack instead of on PATH. Try the local
+    # corepack shim dir first, then materialize it via `corepack enable`.
+    # Session-scoped PATH change only; nothing is installed globally.
+    $shims = Join-Path $env:USERPROFILE ".local-tools\corepack-shims"
+    if (-not (Test-Path (Join-Path $shims "pnpm.CMD"))) {
+      if (Get-Command corepack -ErrorAction SilentlyContinue) {
+        New-Item -ItemType Directory -Force $shims | Out-Null
+        corepack enable --install-directory $shims 2>$null
+      }
+    }
+    if (Test-Path (Join-Path $shims "pnpm.CMD")) {
+      $env:Path = "$shims;$env:Path"
+    }
+  }
+  if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+    Write-Err "pnpm not on PATH - install Node 20+ then 'npm i -g pnpm' (or 'corepack enable')"
     $ok = $false
   } else {
     Write-Ok "pnpm found"
