@@ -263,12 +263,12 @@ export function Shell() {
   }
 
   return (
-    <div className="app-window">
+    <div className="app-window" data-active-tab={tab}>
       <ProviderRefreshCoordinator />
       <TitleBar onCommand={() => setCommandOpen(true)} />
       <div className="app-body">
         <Sidebar active={tab} onSelect={setTab} />
-        <div className="main">
+        <main className="main">
           <UpdateBanner state={updates.state} onInstall={updates.installUpdate} />
           <div className="main-scroll">
             {tab === "home" && <HomeTab />}
@@ -291,7 +291,7 @@ export function Shell() {
               />
             )}
           </div>
-        </div>
+        </main>
       </div>
       {commandOpen && (
         <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={navigate} />
@@ -345,7 +345,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
         >
           <Search size={12} />
           <span className="hidden sm:inline">Ask</span>
-          <kbd className="rounded border border-bg-border bg-bg-elevated px-1.5 font-mono text-[9px] text-ink-dim">
+          <kbd className="rounded border border-bg-border bg-bg-elevated px-1.5 font-mono text-[10px] text-ink-dim">
             ⌘K
           </kbd>
         </button>
@@ -508,8 +508,10 @@ function Sidebar({ active, onSelect }: { active: TabId; onSelect: (tab: TabId) =
   return (
     <aside className="sidebar" aria-label="Main navigation">
       {NAV_GROUPS.map((group) => (
-        <div key={group.label} className="nav-group">
-          <div className="nav-group-label">{group.label}</div>
+        <div key={group.label} className="nav-group" aria-label={group.label}>
+          <div className="nav-group-label" aria-hidden="true">
+            {group.label}
+          </div>
           {group.items.map(({ id, label, icon: Icon }) => (
             <button
               key={id}

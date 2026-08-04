@@ -91,7 +91,7 @@ export function ToolInvocationCard({ invocation, defaultOpen = false }: ToolInvo
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-ink-dim/70">
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-dim/70">
         {label}
       </div>
       {children}
@@ -107,7 +107,7 @@ function JsonBlock({ value }: { value: unknown }) {
     text = String(value);
   }
   return (
-    <pre className="max-h-80 overflow-auto rounded border border-bg-border/60 bg-black/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink-muted">
+    <pre className="max-h-80 overflow-auto rounded border border-bg-border/60 bg-bg/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink-muted">
       {text}
     </pre>
   );

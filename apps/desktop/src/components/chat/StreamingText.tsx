@@ -37,7 +37,7 @@ const MARKDOWN_CLASSES =
   "[&_h3]:mb-1 [&_h3]:text-sm [&_h3]:font-semibold " +
   "[&_blockquote]:border-l-2 [&_blockquote]:border-amber-500/30 [&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:text-ink-muted " +
   "[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_th]:border [&_th]:border-bg-border [&_th]:bg-bg-elevated [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_td]:border [&_td]:border-bg-border [&_td]:px-2 [&_td]:py-1 " +
-  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-bg-border [&_pre]:bg-black/40 [&_pre]:px-3 [&_pre]:py-2.5 " +
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-bg-border [&_pre]:bg-bg/60 [&_pre]:px-3 [&_pre]:py-2.5 " +
   "[&_code]:font-mono [&_code]:text-[12.5px] " +
   "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:bg-bg-elevated [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:text-amber-200/90 " +
   "[&_hr]:my-3 [&_hr]:border-bg-border";

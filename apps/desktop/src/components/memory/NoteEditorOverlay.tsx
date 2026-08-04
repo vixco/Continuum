@@ -36,7 +36,7 @@ const MARKDOWN_CLASSES =
   "[&_p:not(:last-child)]:mb-2 " +
   "[&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:mb-0.5 " +
   "[&_a]:text-accent-amber [&_a]:underline [&_strong]:font-semibold " +
-  "[&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-black/40 [&_pre]:p-2 [&_code]:text-xs";
+  "[&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-bg/60 [&_pre]:p-2 [&_code]:text-xs";
 
 export type OverlayMode = { kind: "edit"; id: string } | { kind: "create"; draft: MemoryNoteDraft };
 

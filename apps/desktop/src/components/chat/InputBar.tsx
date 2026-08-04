@@ -266,13 +266,15 @@ export function InputBar({ disabled, placeholder, onToggleVoice, voiceListening 
               disabled={!canSend}
               aria-label="Send message"
               className={clsx(
-                "press shrink-0 rounded-md border border-amber-500/40 bg-amber-500 px-2.5 py-1.5 text-[11px] font-medium text-black transition-all",
+                "press shrink-0 rounded-md border border-accent-amber bg-accent-amber px-2.5 py-1.5 text-xs font-semibold text-accent-ink transition-[transform,background-color] duration-200 ease-[var(--ease-out)]",
                 "hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40 disabled:saturate-50"
               )}
             >
               <ArrowUp size={11} className="mr-0.5 inline" />
               Send
-              <Kbd className="ml-1.5 !border-black/20 !bg-black/20 !text-black/70">⏎</Kbd>
+              <Kbd className="!border-accent-ink/20 !bg-accent-ink/10 !text-accent-ink/75 ml-1.5">
+                ⏎
+              </Kbd>
             </button>
           )}
         </div>

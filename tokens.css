@@ -1,0 +1,96 @@
+/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
+ * Hallmark · genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app
+ * theme: custom · vibe: "quiet technical, graphite, precise amber" · paper: oklch(12.5% 0.01 75) · accent: oklch(72% 0.15 70)
+ * display: Bahnschrift · body: Segoe UI Variable Text · axes: dark / system-native / warm
+ */
+
+:root {
+  --color-paper: oklch(12.5% 0.01 75);
+  --color-paper-2: oklch(15.5% 0.011 75);
+  --color-paper-3: oklch(19.5% 0.012 75);
+  --color-hover: oklch(23% 0.013 75);
+  --color-rule: oklch(28% 0.01 75);
+  --color-rule-2: oklch(34% 0.012 75);
+  --color-muted: oklch(68% 0.01 75);
+  --color-neutral: oklch(56% 0.012 75);
+  --color-ink-2: oklch(82% 0.01 75);
+  --color-ink: oklch(95% 0.008 75);
+  --color-accent: oklch(72% 0.15 70);
+  --color-accent-dim: oklch(58% 0.12 65);
+  --color-accent-ink: oklch(16% 0.012 75);
+  --color-focus: oklch(80% 0.18 75);
+  --color-healthy: oklch(72% 0.16 145);
+  --color-warning: oklch(76% 0.14 78);
+  --color-error: oklch(68% 0.18 25);
+  --color-idle: oklch(55% 0.009 75);
+  --color-voice: oklch(70% 0.12 245);
+  --color-voice-dim: oklch(54% 0.1 245);
+  --color-deep-shadow: oklch(5% 0.008 75);
+
+  /* Channel tokens keep Tailwind 3 opacity modifiers working. */
+  --paper-channels: 12.5% 0.01 75;
+  --paper-2-channels: 15.5% 0.011 75;
+  --paper-3-channels: 19.5% 0.012 75;
+  --hover-channels: 23% 0.013 75;
+  --rule-channels: 28% 0.01 75;
+  --rule-2-channels: 34% 0.012 75;
+  --muted-channels: 68% 0.01 75;
+  --neutral-channels: 56% 0.012 75;
+  --ink-2-channels: 82% 0.01 75;
+  --ink-channels: 95% 0.008 75;
+  --accent-channels: 72% 0.15 70;
+  --accent-dim-channels: 58% 0.12 65;
+  --healthy-channels: 72% 0.16 145;
+  --warning-channels: 76% 0.14 78;
+  --error-channels: 68% 0.18 25;
+  --idle-channels: 55% 0.009 75;
+  --voice-channels: 70% 0.12 245;
+  --voice-dim-channels: 54% 0.1 245;
+
+  --font-display: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  --font-body: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif;
+  --font-outlier: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
+  --font-wordmark: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.25rem;
+  --text-display: clamp(2.25rem, 3vw + 1rem, 4.25rem);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  --rule-hair: 1px;
+  --rule-fine: 2px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
+  --radius-input: 7px;
+  --shadow-card: 0 1px 0 oklch(95% 0.008 75 / 0.025);
+  --shadow-modal: 0 24px 72px oklch(5% 0.008 75 / 0.58);
+
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+}

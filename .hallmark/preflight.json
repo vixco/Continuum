@@ -1,0 +1,22 @@
+{
+  "version": "1.1.0",
+  "scanned_at": "2026-08-04",
+  "framework": "Next.js 15 app router with React 19 and Tailwind CSS 3",
+  "font_stack": "Inter fallback to Segoe UI Variable; no web font loader",
+  "palette": "Graphite and amber split between globals.css and tailwind.config.ts",
+  "motion": "No motion library; CSS and Tailwind animations only",
+  "spacing": "Existing 4px and 8px rhythm without centralized tokens",
+  "preserve": [
+    "ten real navigation tabs",
+    "graphite and amber identity",
+    "operational status semantics",
+    "Lucide icon system",
+    "keyboard focus and reduced motion"
+  ],
+  "introduce": [
+    "portable OKLCH tokens",
+    "Workbench app macrostructure",
+    "native Windows typography pairing",
+    "restrained surfaces and microinteractions"
+  ]
+}

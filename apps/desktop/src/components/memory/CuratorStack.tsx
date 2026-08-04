@@ -39,7 +39,7 @@ export function CuratorStack({ pending, onResolve, onOpen }: CuratorStackProps) 
   return (
     <div className="absolute right-3 top-3 z-20 flex w-full max-w-sm flex-col gap-2">
       {shown.map((p) => (
-        <Card key={p.id} dense className="shadow-lg">
+        <Card key={p.id} dense>
           <div className="flex items-start justify-between gap-2">
             <button
               type="button"

@@ -32,20 +32,22 @@ export function Card({
   return (
     <div
       className={clsx(
-        "liquid-panel rounded-xl border border-bg-border bg-bg-surface shadow-sm",
-        dense ? "p-4" : "p-5",
+        "continuum-card rounded-[var(--radius-card)] border border-bg-border bg-bg-surface",
+        dense ? "p-4" : "p-6",
         className
       )}
     >
       {(title || actions) && (
-        <div className="mb-4 flex items-start justify-between gap-3">
+        <div className="mb-5 flex items-start justify-between gap-4">
           <div className="min-w-0">
             {title && (
-              <div className="text-[13px] font-semibold uppercase tracking-wide text-ink-muted">
+              <div className="font-display text-sm font-bold tracking-[-0.01em] text-ink">
                 {title}
               </div>
             )}
-            {subtitle && <div className="mt-1 text-xs text-ink-dim">{subtitle}</div>}
+            {subtitle && (
+              <div className="mt-1.5 text-[13px] leading-5 text-ink-dim">{subtitle}</div>
+            )}
           </div>
           {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
         </div>
@@ -109,16 +111,17 @@ export function Button({
     <button
       {...props}
       className={clsx(
-        "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-[transform,background-color,border-color,color,box-shadow,filter] duration-200 ease-out active:scale-[0.97]",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-amber/40",
-        "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
-        size === "sm" && "px-2.5 py-1 text-xs",
-        size === "md" && "px-3 py-1.5 text-sm",
-        size === "lg" && "px-4 py-2 text-sm",
+        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[var(--radius-input)] border font-semibold",
+        "transition-[transform,background-color,border-color,color] duration-200 ease-[var(--ease-out)] active:translate-y-px",
+        "focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus)]",
+        "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0",
+        size === "sm" && "min-h-9 px-3 text-xs",
+        size === "md" && "min-h-10 px-3.5 text-sm",
+        size === "lg" && "min-h-11 px-4 text-sm",
         variant === "default" &&
           "border-bg-border bg-bg-elevated text-ink hover:border-bg-hover hover:bg-bg-hover",
         variant === "primary" &&
-          "border-accent-amber/60 bg-accent-amber text-black shadow-sm shadow-accent-amber/25 hover:shadow-accent-amber/40 hover:brightness-105",
+          "border-accent-amber bg-accent-amber text-accent-ink hover:bg-accent-amber-dim",
         variant === "danger" &&
           "border-state-error/40 bg-state-error/15 text-state-error hover:bg-state-error/25",
         variant === "ghost" &&
@@ -153,7 +156,8 @@ export function Toggle({
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={clsx(
-          "inline-flex h-5 w-9 shrink-0 items-center rounded-full border px-0.5 transition-colors active:scale-95",
+          "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border px-1 transition-colors duration-200 ease-[var(--ease-out)] after:absolute after:-inset-y-2 after:inset-x-0 active:translate-y-px",
+          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-focus)]",
           "disabled:cursor-not-allowed disabled:opacity-50",
           checked
             ? "border-accent-amber bg-accent-amber"
@@ -162,8 +166,8 @@ export function Toggle({
       >
         <span
           className={clsx(
-            "block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150",
-            checked ? "translate-x-4" : "translate-x-0"
+            "block h-4 w-4 rounded-full bg-accent-ink transition-transform duration-150 ease-[var(--ease-out)]",
+            checked ? "translate-x-5" : "translate-x-0"
           )}
         />
       </button>
@@ -249,9 +253,9 @@ export function Select<T extends string>({
         value={value}
         onChange={(e) => onChange(e.target.value as T)}
         className={clsx(
-          "continuum-select w-full rounded-md border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
-          "transition-colors hover:border-bg-hover",
-          "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20"
+          "continuum-select min-h-11 w-full rounded-[var(--radius-input)] border border-bg-border bg-bg-elevated py-2 pl-3 pr-8 text-sm text-ink",
+          "transition-colors duration-200 ease-[var(--ease-out)] hover:bg-bg-hover",
+          "focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-[var(--color-focus)]"
         )}
       >
         {options.map((opt) => (
@@ -287,10 +291,10 @@ export function SearchInput({
       onKeyDown={onKeyDown}
       placeholder={placeholder}
       className={clsx(
-        "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
-        "text-ink transition-colors placeholder:text-ink-dim",
-        "hover:border-bg-hover",
-        "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20",
+        "min-h-11 w-full rounded-[var(--radius-input)] border border-bg-border bg-bg-elevated px-3 text-sm",
+        "text-ink transition-colors duration-200 ease-[var(--ease-out)] placeholder:text-ink-dim",
+        "hover:bg-bg-hover",
+        "focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-[var(--color-focus)]",
         className
       )}
     />
@@ -315,10 +319,10 @@ export function TextInput({
       placeholder={placeholder}
       {...props}
       className={clsx(
-        "w-full rounded-md border border-bg-border bg-bg-elevated px-3 py-2 text-sm",
-        "text-ink transition-colors placeholder:text-ink-dim",
-        "hover:border-bg-hover",
-        "focus:border-accent-amber focus:outline-none focus:ring-2 focus:ring-accent-amber/20",
+        "min-h-11 w-full rounded-[var(--radius-input)] border border-bg-border bg-bg-elevated px-3 text-sm",
+        "text-ink transition-colors duration-200 ease-[var(--ease-out)] placeholder:text-ink-dim",
+        "hover:bg-bg-hover",
+        "focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-[var(--color-focus)]",
         props.className
       )}
     />
@@ -349,7 +353,7 @@ export function Modal({
   const widthClass = width === "sm" ? "max-w-sm" : width === "lg" ? "max-w-2xl" : "max-w-md";
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center bg-bg/85 p-4"
       onMouseDown={(e) => {
         pressStartedOnBackdrop.current = e.target === e.currentTarget;
       }}
@@ -360,7 +364,7 @@ export function Modal({
     >
       <div
         className={clsx(
-          "liquid-panel w-full rounded-lg border border-bg-border bg-bg-surface shadow-xl",
+          "continuum-modal w-full rounded-[var(--radius-card)] border border-bg-border bg-bg-elevated",
           widthClass
         )}
         onClick={(e) => e.stopPropagation()}
@@ -402,9 +406,13 @@ export function StatusOrb({ mode, size = "md" }: { mode: VoiceMode; size?: "sm" 
           : "";
   return (
     <div className="relative inline-flex items-center justify-center">
-      <span className={clsx("absolute inset-0 rounded-full opacity-60 blur-lg", ORB_COLOR[mode])} />
       <span
-        className={clsx("relative rounded-full shadow-lg", sizeClass, ORB_COLOR[mode], animClass)}
+        className={clsx(
+          "relative rounded-full ring-1 ring-inset ring-ink/15",
+          sizeClass,
+          ORB_COLOR[mode],
+          animClass
+        )}
       />
     </div>
   );
@@ -416,7 +424,7 @@ export function Kbd({ children, className }: PropsWithChildren<{ className?: str
   return (
     <kbd
       className={clsx(
-        "rounded border border-bg-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-ink-muted",
+        "rounded border border-bg-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-ink-muted",
         className
       )}
     >
@@ -427,9 +435,11 @@ export function Kbd({ children, className }: PropsWithChildren<{ className?: str
 
 export function EmptyState({ title, description }: { title: string; description?: string }) {
   return (
-    <div className="flex h-32 flex-col items-center justify-center text-center">
-      <div className="text-sm text-ink-muted">{title}</div>
-      {description && <div className="mt-1 text-xs text-ink-dim">{description}</div>}
+    <div className="flex min-h-36 flex-col items-center justify-center px-6 text-center">
+      <div className="font-display text-sm font-bold text-ink">{title}</div>
+      {description && (
+        <div className="mt-2 max-w-md text-sm leading-6 text-ink-dim">{description}</div>
+      )}
     </div>
   );
 }

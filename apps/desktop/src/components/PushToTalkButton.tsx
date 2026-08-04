@@ -77,7 +77,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         }
         className={clsx(
           "relative flex h-20 w-20 items-center justify-center rounded-full",
-          "border transition-all duration-150",
+          "border transition-[transform,background-color,border-color,color] duration-150 ease-[var(--ease-out)]",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60",
           "disabled:cursor-not-allowed",
           isListening
