@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0-alpha.8",
-  "notes": "Automatic Continuum release v0.1.0-alpha.8. See the GitHub release notes for details.",
-  "pub_date": "2026-08-04T11:31:32.8014860Z",
+  "version": "0.1.0-alpha.9",
+  "notes": "Automatic Continuum release v0.1.0-alpha.9. See the GitHub release notes for details.",
+  "pub_date": "2026-08-04T20:54:15.5649000Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSeVJzOUJHY3lCYWxKWktoMWVxVzkzd21aeGc2TGdTU1F2VXYrYWpUbytKcFUyaWhpMlR4S3hwSGliUFM0c2pxYVo3cU1qVGxEVUN6RGQ4TUZDcVAyNzdkNmozNGFPa2djPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1ODQzMDgzCWZpbGU6Q29udGludXVtXzAuMS4wLWFscGhhLjhfeDY0LXNldHVwLmV4ZQpIc01QSE5oVEZCTGxCTmR6MnB1WnEzMjJWRW1Oc1JLaWx2RCtrU3pBV2poODJpc0pPWi9BRlZPWjRGbjJ4WitPZDc3Vm9Yay9IOHVTMnQ3Z0FtMTdCZz09Cg==",
-      "url": "https://github.com/vixco/Continuum/releases/download/v0.1.0-alpha.8/continuum-0.1.0-alpha.8-windows-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSeVJzOUJHY3lCYWdkWGZiOTFGTmp2YnJ2U2xaZzlWdHV4VjN3QUFIQjNUWHAyZFZlUjR3cmJJZnlmN1FzeWFTSzhPN0hna0N3NDYzOU50Qllyc1VBcmFFQ09vWGpob0FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1ODc2ODQ1CWZpbGU6Q29udGludXVtXzAuMS4wLWFscGhhLjlfeDY0LXNldHVwLmV4ZQplZnd0anVYSFpOWmlMS2J2VXdUTkV6Y1gwcHcyN0YvK05hQmZ4bSt2Y29ZcVR5eHkyVERUNEVnSmJJOG0xWUJOUlg4dExaQnFqTVU2c1d4QVorVlBEZz09Cg==",
+      "url": "https://github.com/vixco/Continuum/releases/download/v0.1.0-alpha.9/continuum-0.1.0-alpha.9-windows-x64-setup.exe"
     }
   }
 }
