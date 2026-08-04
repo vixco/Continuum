@@ -23,6 +23,36 @@ pub struct StoredMessage {
     pub usage: Option<TokenUsage>,
     #[serde(default)]
     pub aborted: bool,
+    /// Tool invocations the assistant made while producing this message
+    /// (chat memory tools). Empty for user messages and for conversations
+    /// persisted before this field existed.
+    #[serde(default)]
+    pub tool_calls: Vec<StoredToolCall>,
+}
+
+/// One tool invocation persisted alongside an assistant message: the call
+/// (id/name/input) plus its result once it arrived. `output: None` with the
+/// defaults means the stream ended before the matching result event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredToolCall {
+    /// Provider-assigned call id; correlates the call with its result.
+    pub id: String,
+    /// Tool name. Empty when a result arrived without a preceding call
+    /// event (the gateway's orphan-result behavior).
+    #[serde(default)]
+    pub name: String,
+    /// The arguments the model passed.
+    #[serde(default)]
+    pub input: serde_json::Value,
+    /// The string handed back to the model, once the tool finished.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Whether the tool result was an error payload.
+    #[serde(default)]
+    pub is_error: bool,
+    /// Wall-clock duration of the tool execution.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 impl StoredMessage {
@@ -36,6 +66,7 @@ impl StoredMessage {
             duration_ms: None,
             usage: None,
             aborted: false,
+            tool_calls: Vec::new(),
         }
     }
 }
@@ -243,5 +274,53 @@ mod tests {
         c.messages.push(StoredMessage::user(&"é".repeat(100)));
         c.derive_title();
         assert!(c.title.chars().count() <= 41); // 40 + ellipsis
+    }
+
+    #[test]
+    fn tool_calls_roundtrip_through_store() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = ChatStore::new(dir.path().to_path_buf());
+        let mut conv = store.create("prov-1", "m1").expect("create");
+        conv.messages.push(StoredMessage {
+            role: ChatRole::Assistant,
+            content: "saved it".into(),
+            ts: Utc::now(),
+            model: Some("m1".into()),
+            duration_ms: Some(10),
+            usage: None,
+            aborted: false,
+            tool_calls: vec![StoredToolCall {
+                id: "call_1".into(),
+                name: "memory_save".into(),
+                input: serde_json::json!({"title": "User name", "content": "Toshan"}),
+                output: Some(r#"{"id":"mem_1","updated":false}"#.into()),
+                is_error: false,
+                duration_ms: 12,
+            }],
+        });
+        store.save(&conv).expect("save");
+
+        let loaded = store.get(&conv.id).expect("get");
+        assert_eq!(loaded.messages.len(), 1);
+        let tc = &loaded.messages[0].tool_calls[0];
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.name, "memory_save");
+        assert_eq!(tc.input["title"], "User name");
+        assert_eq!(
+            tc.output.as_deref(),
+            Some(r#"{"id":"mem_1","updated":false}"#)
+        );
+        assert!(!tc.is_error);
+        assert_eq!(tc.duration_ms, 12);
+    }
+
+    /// Conversations persisted before `tool_calls` existed must keep
+    /// loading — the field defaults to an empty vec.
+    #[test]
+    fn legacy_message_json_without_tool_calls_loads() {
+        let raw = r#"{"role":"assistant","content":"hi","ts":"2026-08-01T10:00:00Z"}"#;
+        let msg: StoredMessage = serde_json::from_str(raw).expect("parse legacy message");
+        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.content, "hi");
     }
 }

@@ -232,6 +232,18 @@ pub struct ChatConfig {
     pub model_refresh_interval_secs: u64,
     /// Optional path to a custom system prompt file (overrides the built-in).
     pub system_prompt_path: Option<String>,
+    /// Whether the chat AI gets memory tools (search/get/save/delete over
+    /// the memory vault) plus retrieved memory context in its prompt.
+    pub memory_tools_enabled: bool,
+    /// Cap on tool-call rounds within a single chat turn, to bound runaway
+    /// tool-calling loops.
+    pub memory_tool_max_rounds: u32,
+    /// Max vault notes injected as a "## Memory context" system-prompt
+    /// section per turn. 0 disables prompt injection entirely.
+    pub memory_context_notes_max: u32,
+    /// Whether `sensitivity: sensitive` vault notes are exposed to chat
+    /// memory search results and prompt context.
+    pub include_sensitive_memory: bool,
 }
 
 impl Default for ChatConfig {
@@ -244,6 +256,10 @@ impl Default for ChatConfig {
             cli_timeout_secs: 120,
             model_refresh_interval_secs: 300,
             system_prompt_path: None,
+            memory_tools_enabled: true,
+            memory_tool_max_rounds: 8,
+            memory_context_notes_max: 6,
+            include_sensitive_memory: false,
         }
     }
 }
@@ -1260,6 +1276,10 @@ interval_secs = 5
         assert_eq!(cfg.model_refresh_interval_secs, 300);
         assert!(cfg.temperature.is_none());
         assert!(cfg.system_prompt_path.is_none());
+        assert!(cfg.memory_tools_enabled);
+        assert_eq!(cfg.memory_tool_max_rounds, 8);
+        assert_eq!(cfg.memory_context_notes_max, 6);
+        assert!(!cfg.include_sensitive_memory);
 
         let parsed: ContinuumConfig =
             toml::from_str(
@@ -1269,9 +1289,23 @@ interval_secs = 5
         assert_eq!(parsed.chat.max_tokens, 2048);
         assert_eq!(parsed.chat.stream_idle_timeout_secs, 30);
         assert_eq!(parsed.chat.model_refresh_interval_secs, 90);
+        // A partial [chat] section keeps the memory-tool defaults:
+        assert!(parsed.chat.memory_tools_enabled);
+        assert_eq!(parsed.chat.memory_tool_max_rounds, 8);
+        assert_eq!(parsed.chat.memory_context_notes_max, 6);
+        assert!(!parsed.chat.include_sensitive_memory);
         // Omitting [chat] entirely must also work:
         let empty: ContinuumConfig = toml::from_str("").expect("parse empty");
         assert_eq!(empty.chat.max_tokens, 8192);
+        // And every memory-tool knob is overridable (non-negotiable #3):
+        let overridden: ContinuumConfig = toml::from_str(
+            "[chat]\nmemory_tools_enabled = false\nmemory_tool_max_rounds = 3\nmemory_context_notes_max = 0\ninclude_sensitive_memory = true\n",
+        )
+        .expect("parse overrides");
+        assert!(!overridden.chat.memory_tools_enabled);
+        assert_eq!(overridden.chat.memory_tool_max_rounds, 3);
+        assert_eq!(overridden.chat.memory_context_notes_max, 0);
+        assert!(overridden.chat.include_sensitive_memory);
     }
 
     #[test]

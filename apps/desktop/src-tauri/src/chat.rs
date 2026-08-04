@@ -35,11 +35,16 @@
 
 use std::sync::Arc;
 
-use continuum_gateway::{ChatEvent, ChatMessage, ChatRequest, ChatRole};
+use continuum_gateway::{
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ProviderKind, ToolExecutor,
+};
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 
-use crate::chat_store::{ChatStore, Conversation, ConversationSummary, StoredMessage};
+use crate::chat_store::{
+    ChatStore, Conversation, ConversationSummary, StoredMessage, StoredToolCall,
+};
+use crate::chat_tools;
 use crate::providers::{build_adapter, ChatState};
 
 /// Built-in system prompt, embedded at compile time. Overridden per-config
@@ -130,6 +135,36 @@ fn system_prompt(
     format!(
         "{base}\n\n## Live status\n- Continuum version: {version}\n- Background runtime: {}\n- You are: {model} via {provider}\n- Selected response language: {preferred_language}\n\nRespond in the selected response language, even when the user's message is written in another language. A direct request to use another language may override it for that turn only.\n",
         if runtime_running { "running" } else { "not running" }
+    )
+}
+
+/// "## Memory tools" system-prompt section, naming the tools that are
+/// actually active for this provider kind and when to use them. Appended
+/// by `chat_send_message` ONLY on turns where memory tools are wired into
+/// the request (executor for HTTP providers, MCP for the Claude CLI).
+fn memory_tools_section(kind: ProviderKind) -> String {
+    let tools_line = match kind {
+        ProviderKind::ClaudeCli => {
+            "Your memory tools are the `mcp__continuum__memory_vault_*` family: \
+             `memory_vault_search`, `memory_vault_get`, `memory_vault_save`, \
+             `memory_vault_resolve`, and `memory_vault_delete`. Use `memory_vault_delete` \
+             to remove a memory."
+        }
+        ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
+            "Your memory tools are `memory_search`, `memory_get`, `memory_save`, and \
+             `memory_delete`."
+        }
+    };
+    format!(
+        "## Memory tools\n\
+         {tools_line}\n\
+         \n\
+         - Save a memory when the user explicitly asks you to remember something, and \
+         when they state a durable personal fact (their name, a preference, a decision).\n\
+         - Search memory before answering questions about the user or their past work.\n\
+         - Update a memory by saving with the SAME title as the existing one; delete a \
+         memory when the user asks you to forget it.\n\
+         - Keep memory titles short and stable.\n"
     )
 }
 
@@ -240,6 +275,7 @@ pub async fn chat_send_message(
     app: tauri::AppHandle,
     chat_state: tauri::State<'_, Arc<ChatState>>,
     state: tauri::State<'_, Arc<crate::AppState>>,
+    memory: tauri::State<'_, Arc<crate::memory::MemoryState>>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("Empty message.".into());
@@ -324,17 +360,108 @@ pub async fn chat_send_message(
         }
     };
 
+    // Memory tools: when enabled and the vault opens, the chat AI can read
+    // and write the memory vault — via the in-process executor for HTTP
+    // providers, or via an attached continuum-mcp server for the Claude
+    // CLI. A vault that fails to open degrades this send to a tool-less
+    // chat (warn + continue), never to a failed send.
+    let vault = if chat_cfg.memory_tools_enabled {
+        match memory.vault().await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    layer = "desktop",
+                    component = "chat",
+                    error = %e,
+                    "memory vault unavailable — chat runs without memory tools"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut tools = Vec::new();
+    let mut executor: Option<Arc<dyn ToolExecutor>> = None;
+    let mut mcp = None;
+    let mut tools_section = None;
+    if let Some(vault) = &vault {
+        match conn.kind {
+            ProviderKind::ClaudeCli => {
+                // CLI path: tool traffic travels over MCP; continuum-mcp
+                // opens the same vault directory this process uses. A
+                // missing binary means no tools this turn (logged once).
+                if let Some(spec) = chat_tools::mcp_spec(memory.vault_dir(), &dev_dir) {
+                    mcp = Some(spec);
+                    tools_section = Some(memory_tools_section(conn.kind));
+                }
+            }
+            ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
+                tools = chat_tools::memory_tool_defs();
+                executor = Some(Arc::new(chat_tools::VaultToolExecutor {
+                    vault: vault.clone(),
+                    include_sensitive: chat_cfg.include_sensitive_memory,
+                }) as Arc<dyn ToolExecutor>);
+                tools_section = Some(memory_tools_section(conn.kind));
+            }
+        }
+    }
+
+    // Prompt injection: retrieve vault notes matching the new user message
+    // and inject them as a "## Memory context" section. Best-effort — a
+    // search failure (or zero hits) just means no section this turn.
+    let mut memory_context = String::new();
+    if chat_cfg.memory_context_notes_max > 0 {
+        if let Some(vault) = &vault {
+            let query: String = text.trim().chars().take(200).collect();
+            match vault
+                .search(&query, chat_cfg.memory_context_notes_max.saturating_mul(2))
+                .await
+            {
+                Ok(hits) => {
+                    let mut kept: Vec<_> = hits
+                        .into_iter()
+                        .filter(|h| h.status == continuum_memory::NodeStatus::Confirmed)
+                        .filter(|h| {
+                            chat_cfg.include_sensitive_memory
+                                || h.sensitivity != continuum_memory::Sensitivity::Sensitive
+                        })
+                        .collect();
+                    kept.truncate(chat_cfg.memory_context_notes_max as usize);
+                    memory_context = chat_tools::memory_context_section(&kept);
+                }
+                Err(e) => tracing::warn!(
+                    layer = "desktop",
+                    component = "chat",
+                    error = %e,
+                    "memory context search failed — continuing without context"
+                ),
+            }
+        }
+    }
+
     let runtime_running = crate::components::runtime_alive(&dev_dir);
+    let mut system = system_prompt(
+        &chat_cfg,
+        runtime_running,
+        env!("CARGO_PKG_VERSION"),
+        &conn.display_name,
+        &conv.model,
+        &crate::onboarding::preferred_language(&dev_dir),
+    );
+    if let Some(section) = tools_section {
+        system.push('\n');
+        system.push_str(&section);
+    }
+    if !memory_context.is_empty() {
+        system.push('\n');
+        system.push_str(&memory_context);
+    }
+
     let req = ChatRequest {
         model: conv.model.clone(),
-        system: system_prompt(
-            &chat_cfg,
-            runtime_running,
-            env!("CARGO_PKG_VERSION"),
-            &conn.display_name,
-            &conv.model,
-            &crate::onboarding::preferred_language(&dev_dir),
-        ),
+        system,
         messages: conv
             .messages
             .iter()
@@ -345,12 +472,10 @@ pub async fn chat_send_message(
             .collect(),
         max_tokens: chat_cfg.max_tokens,
         temperature: chat_cfg.temperature,
-        // Chat memory tools land in the follow-up wiring task; until then the
-        // chat runs tool-less exactly as before.
-        tools: vec![],
-        executor: None,
-        mcp: None,
-        tool_max_rounds: continuum_gateway::DEFAULT_MAX_TOOL_ROUNDS,
+        tools,
+        executor,
+        mcp,
+        tool_max_rounds: chat_cfg.memory_tool_max_rounds,
     };
 
     let mut stream = match adapter.stream_chat(req, cancel).await {
@@ -377,6 +502,7 @@ pub async fn chat_send_message(
         use futures_util::StreamExt;
         let store = ChatStore::new(dev_dir_task);
         let mut acc = String::new();
+        let mut tool_calls: Vec<StoredToolCall> = Vec::new();
         let mut finished = false;
         while let Some(ev) = stream.next().await {
             let _ = app.emit(
@@ -388,9 +514,43 @@ pub async fn chat_send_message(
             );
             match ev {
                 ChatEvent::Delta { text } => acc.push_str(&text),
-                // Tool events are forwarded to the frontend above; persistence
-                // of tool calls lands with the chat-memory-tools wiring task.
-                ChatEvent::ToolCall { .. } | ChatEvent::ToolResult { .. } => {}
+                ChatEvent::ToolCall { id, name, input } => {
+                    tool_calls.push(StoredToolCall {
+                        id,
+                        name,
+                        input,
+                        output: None,
+                        is_error: false,
+                        duration_ms: 0,
+                    });
+                }
+                ChatEvent::ToolResult {
+                    id,
+                    output,
+                    is_error,
+                    duration_ms,
+                } => {
+                    // Fill the matching (still-unresolved) call entry; an
+                    // orphan result without a preceding call gets its own
+                    // entry with an empty name, matching gateway behavior.
+                    if let Some(entry) = tool_calls
+                        .iter_mut()
+                        .find(|t| t.id == id && t.output.is_none())
+                    {
+                        entry.output = Some(output);
+                        entry.is_error = is_error;
+                        entry.duration_ms = duration_ms;
+                    } else {
+                        tool_calls.push(StoredToolCall {
+                            id,
+                            name: String::new(),
+                            input: serde_json::Value::Null,
+                            output: Some(output),
+                            is_error,
+                            duration_ms,
+                        });
+                    }
+                }
                 ChatEvent::Done { usage, .. } => {
                     finished = true;
                     let _guard = conv_lock.lock().await;
@@ -405,6 +565,7 @@ pub async fn chat_send_message(
                         duration_ms: Some(started.elapsed().as_millis() as u64),
                         usage: Some(usage),
                         aborted: false,
+                        tool_calls: tool_calls.clone(),
                     });
                     if let Err(e) = store.save(&conv) {
                         tracing::error!(
@@ -429,6 +590,7 @@ pub async fn chat_send_message(
                                 duration_ms: Some(started.elapsed().as_millis() as u64),
                                 usage: None,
                                 aborted: true,
+                                tool_calls: tool_calls.clone(),
                             });
                             if let Err(e) = store.save(&conv) {
                                 tracing::error!(
@@ -457,6 +619,7 @@ pub async fn chat_send_message(
                     duration_ms: Some(started.elapsed().as_millis() as u64),
                     usage: None,
                     aborted: true,
+                    tool_calls,
                 });
                 if let Err(e) = store.save(&conv) {
                     tracing::error!(
@@ -516,6 +679,54 @@ mod tests {
 
         assert!(prompt.contains("Selected response language: en"));
         assert!(prompt.contains("Respond in the selected response language"));
+    }
+
+    /// The base system prompt never mentions memory tools — the section is
+    /// appended by `chat_send_message` only on turns where tools are
+    /// actually wired into the request.
+    #[test]
+    fn base_system_prompt_has_no_memory_tools_section() {
+        let prompt = system_prompt(
+            &continuum_core::config::ChatConfig::default(),
+            true,
+            "0.1.0",
+            "Local provider",
+            "test-model",
+            "en",
+        );
+        assert!(!prompt.contains("## Memory tools"));
+    }
+
+    #[test]
+    fn memory_tools_section_names_http_tools() {
+        let s = memory_tools_section(ProviderKind::OpenAiCompat);
+        assert!(s.starts_with("## Memory tools"));
+        for tool in [
+            "memory_search",
+            "memory_get",
+            "memory_save",
+            "memory_delete",
+        ] {
+            assert!(s.contains(tool), "missing {tool}");
+        }
+        assert!(!s.contains("mcp__continuum__"));
+        assert!(s.contains("SAME title"));
+    }
+
+    #[test]
+    fn memory_tools_section_names_mcp_tools_for_cli() {
+        let s = memory_tools_section(ProviderKind::ClaudeCli);
+        assert!(s.starts_with("## Memory tools"));
+        assert!(s.contains("mcp__continuum__memory_vault_"));
+        for tool in [
+            "memory_vault_search",
+            "memory_vault_get",
+            "memory_vault_save",
+            "memory_vault_resolve",
+            "memory_vault_delete",
+        ] {
+            assert!(s.contains(tool), "missing {tool}");
+        }
     }
 
     /// `chat_send_message` itself takes `tauri::State`/`tauri::AppHandle`
@@ -582,6 +793,7 @@ mod tests {
             duration_ms: None,
             usage: None,
             aborted: false,
+            tool_calls: Vec::new(),
         });
         store.save(&conv).expect("save");
         let lock = tokio::sync::Mutex::new(());
