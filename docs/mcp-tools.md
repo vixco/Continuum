@@ -138,7 +138,7 @@ Permanently deletes a vault note: removes its markdown file from disk and its in
 
 Returns `{ deleted: true, id }`. Errors (`invalid_params`) if the id doesn't exist.
 
-Other notes that link to the deleted id (via `[[wiki-links]]`) are not rewritten — the vault degrades this gracefully rather than erroring: on the vault's next reindex of the linking note, that link simply no longer resolves to a node (same as a `[[wiki-link]]` to a title that was never created). This is existing vault behavior, not something `memory_vault_delete` adds. The linking note's own body and relations are untouched; none of the current `memory_vault_*` tools surface unresolved links directly (that's internal index state).
+Other notes that link to the deleted id (via `[[wiki-links]]`) are not rewritten — the vault degrades this gracefully rather than erroring: `Vault::delete` calls `Index::remove_path`, which recomputes the resolved edge graph (`recompute_edges()`, `crates/continuum-memory/src/index.rs`) as part of the same delete call, so the link becomes unresolved immediately, not on some later reindex of the linking note. This is existing vault behavior, not something `memory_vault_delete` adds. The linking note's own body and relations are untouched; none of the current `memory_vault_*` tools surface unresolved links directly (that's internal index state).
 
 #### `memory_wipe_all`
 

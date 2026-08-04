@@ -29,15 +29,111 @@ spec this shipped from.
   model, earlier messages keep whatever model produced them.
 - A built-in system prompt explaining what Continuum is, plus a live status
   footer (app version, whether the background `continuum.exe` runtime is
-  currently running, which provider/model is answering). No perception,
-  memory, or other runtime data is ever injected into chat context — Chat is
-  a separate, sandboxed conversation, not a window into the four-layer
-  runtime.
+  currently running, which provider/model is answering). No perception data
+  or other runtime state is ever injected into chat context — Chat is a
+  separate, sandboxed conversation, not a window into the four-layer
+  runtime. The one deliberate exception is the memory vault: Chat can read
+  and write it explicitly through the memory tools described in
+  [Memory access](#memory-access) below.
 
 Out of scope in this first pass (see the design spec for the full list):
 OAuth-based providers, cloud-platform auth (Bedrock/Vertex/Azure), the
 model router / role-based selection (the data model reserves a `roles`
-field for this), tool use, vision input, and file attachments.
+field for this), tool use beyond the memory tools below, vision input, and
+file attachments.
+
+## Memory access
+
+Chat can read and write your [memory vault](memory.md) — the same
+Obsidian-style note store the Memory tab and the background runtime's
+curator use — through a small, explicit set of tools. This is the one
+deliberate exception to "Chat is sandboxed from the runtime" above: the
+model only sees vault notes it explicitly retrieves or that get injected
+as context for the current message, never perception frames, live-context
+state, or anything else.
+
+### What the AI can do
+
+- **Search** the vault for notes matching a query.
+- **Fetch** one note's full body by id.
+- **Save** a note — creates a new one, or updates an existing note in place
+  if the title matches (case-insensitive) an existing one, so the model
+  should reuse a title to update rather than duplicate.
+- **Delete** a note permanently.
+- On every turn, Continuum separately runs its own vault search using the
+  new user message and injects up to `memory_context_notes_max` matching
+  **confirmed** notes as a "## Memory context" system-prompt section, so
+  the model doesn't have to call a tool just to recall a well-matched fact.
+
+### Tool names
+
+The tool names differ by provider kind: OpenAI-compatible and Anthropic
+providers call back into the desktop process directly
+(`apps/desktop/src-tauri/src/chat_tools.rs`, `VaultToolExecutor`), while
+the Claude CLI provider gets a `continuum-mcp` server attached instead
+(see below), so it uses the MCP tool family's names.
+
+| Purpose | OpenAI-compatible / Anthropic | Claude Code CLI |
+|---|---|---|
+| Search | `memory_search` | `mcp__continuum__memory_vault_search` |
+| Fetch | `memory_get` | `mcp__continuum__memory_vault_get` |
+| Save | `memory_save` | `mcp__continuum__memory_vault_save` |
+| Delete | `memory_delete` | `mcp__continuum__memory_vault_delete` |
+
+The Claude CLI provider additionally gets `memory_vault_resolve`,
+`memory_get_fact`, `memory_list_facts`, and `memory_query_episodic`
+attached — the same vault/fact/episodic tools the orchestrator itself
+uses; see `docs/mcp-tools.md` for what each one does. The four
+HTTP-provider tool names above are the desktop's own in-process
+equivalents, not a subset of the MCP names — a model switching from an
+API provider to the Claude CLI provider mid-project needs to call
+different tool names for the same actions, which is why the system prompt
+states the active provider's exact tool names for that turn rather than a
+generic description.
+
+### Sensitivity gate
+
+Notes with `sensitivity: sensitive` are filtered out of `memory_search`
+results and out of the injected "## Memory context" section unless
+`include_sensitive_memory` is set to `true`. **This filter does not reach
+the Claude CLI provider's MCP vault tools** — `memory_vault_search` /
+`memory_vault_get` there return sensitive notes regardless of
+`include_sensitive_memory`, because the MCP server's permission model
+(confirmation tiers, see `docs/mcp-tools.md`) doesn't currently thread a
+per-caller sensitivity filter through to those tools. The injected
+"## Memory context" section IS still sensitivity-filtered for every
+provider, including the Claude CLI one, since that injection happens in
+the desktop process before the CLI is even spawned. This MCP-tool gap is
+a known, documented limitation, not intended behavior; closing it is
+planned as a follow-up. Until then, treat the Claude CLI provider's
+`memory_vault_search`/`memory_vault_get` as having unfiltered vault read
+access whenever memory tools are enabled.
+
+### Configuration
+
+Four `[chat]` keys govern this (`ChatConfig` in
+`crates/continuum-core/src/config.rs`), alongside the other `[chat]` keys
+documented below:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `memory_tools_enabled` | `true` | Master switch. When `false`, no memory tools are offered to any provider and no context is injected. |
+| `memory_tool_max_rounds` | `8` | Cap on tool-call rounds within one chat turn, to bound a runaway tool-calling loop. |
+| `memory_context_notes_max` | `6` | Max notes injected as "## Memory context" per turn. `0` disables context injection (tools, if enabled, keep working). |
+| `include_sensitive_memory` | `false` | Let `sensitive`-tagged notes appear in `memory_search` results and the injected context — see the sensitivity gate above for what this does and does not cover. |
+
+### Claude CLI provider needs `continuum-mcp.exe`
+
+The Claude CLI provider's memory tools depend on a built `continuum-mcp`
+binary. Continuum looks for it, in this order: the `CONTINUUM_MCP_BIN`
+environment variable, then `continuum-mcp.exe` sitting next to the running
+desktop executable, then a `PATH` scan (`resolve_mcp_binary()` in
+`chat_tools.rs`). If none of those resolve, the Claude CLI chat still
+works — that turn just runs without memory tools, logged once as a
+warning rather than failing the send. Build the binary
+(`cargo build --release -p continuum-mcp`) and either place it next to
+`continuum-desktop.exe` or set `CONTINUUM_MCP_BIN` to its path to enable
+memory access for this provider.
 
 ## Connecting a provider
 
@@ -93,7 +189,7 @@ auth probe; a missing binary or a logged-out CLI produce the
 |---|---|---|
 | Provider connections | `~/.continuum-dev/providers.json` | No — id, display name, kind, base URL, cached model list, default model, `requires_key` (a boolean, not the key itself), last-test timestamp/result. |
 | API keys | Windows Credential Manager, service `Continuum`, account `provider:<connection_id>` | Yes — this is the *only* place a key is ever written. |
-| Conversations | `~/.continuum-dev/chats/<conversation_id>.json` | No — title, provider/model, and each message's role/content/timestamp/model/duration/token-usage/`aborted` flag. |
+| Conversations | `~/.continuum-dev/chats/<conversation_id>.json` | No — title, provider/model, and each message's role/content/timestamp/model/duration/token-usage/`aborted` flag/`tool_calls` (memory tool invocations: id, name, input, output, error flag, duration). |
 
 You can open `providers.json` yourself and confirm there is no key material
 in it — a unit test in `crates/continuum-gateway/src/error.rs`
@@ -124,6 +220,10 @@ All knobs live under `[chat]` in `~/.continuum-dev/config.toml`
 | `cli_timeout_secs` | `120` | Idle timeout for a single Claude CLI send: max seconds allowed to pass WITHOUT a new line of CLI stdout before the send is aborted. Resets on every line, so it is not an overall/end-to-end timeout — a steadily-streaming long generation is never killed by this. |
 | `model_refresh_interval_secs` | `300` | Refresh cached model lists in the desktop app every N seconds (minimum effective interval: 30). Set to `0` to disable automatic refresh. |
 | `system_prompt_path` | unset | Path to a file that replaces the built-in system prompt (`apps/desktop/src-tauri/assets/chat-system-prompt.md`). The live-status footer is still appended after whatever text this file contains. |
+| `memory_tools_enabled` | `true` | Master switch for the memory tools and "## Memory context" injection described in [Memory access](#memory-access) above. |
+| `memory_tool_max_rounds` | `8` | Cap on tool-call rounds within one chat turn. |
+| `memory_context_notes_max` | `6` | Max notes injected as "## Memory context" per turn; `0` disables injection. |
+| `include_sensitive_memory` | `false` | Let `sensitive`-tagged notes into `memory_search` results and injected context (with the Claude CLI MCP-tool exception noted in [Memory access](#memory-access)). |
 
 Example override:
 
