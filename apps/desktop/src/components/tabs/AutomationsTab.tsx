@@ -78,10 +78,32 @@ export function AutomationsTab() {
         }
       >
         {items.length === 0 ? (
-          <EmptyState
-            title="No automations yet"
-            description="Schedule a morning briefing, a weekly digest, or a reminder."
-          />
+          <div className="space-y-4">
+            <EmptyState
+              title="No automations yet"
+              description="Schedule a morning briefing, a weekly digest, or a reminder."
+            />
+            <div className="flex flex-wrap gap-2">
+              {TEMPLATES.map((t) => (
+                <button
+                  key={t.task}
+                  onClick={() => {
+                    setDraft({
+                      task: t.task,
+                      kind: "recurring",
+                      schedule: t.schedule,
+                      enabled: true,
+                    });
+                    setEditingId(null);
+                    setShowForm(true);
+                  }}
+                  className="press rounded-md border border-bg-border bg-bg-elevated px-3 py-1.5 text-xs text-ink transition-colors hover:border-amber-500/40 hover:bg-bg-hover"
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
         ) : (
           <table className="w-full text-sm">
             <thead className="text-[11px] uppercase tracking-wider text-ink-dim">
@@ -187,3 +209,9 @@ export function AutomationsTab() {
     </div>
   );
 }
+
+const TEMPLATES: Array<{ label: string; task: string; schedule: string }> = [
+  { label: "Morning briefing", task: "Give me a morning briefing", schedule: "0 8 * * *" },
+  { label: "Weekly digest", task: "Summarize my week and plan next week", schedule: "0 18 * * 5" },
+  { label: "Tidy Downloads", task: "Tidy my Downloads folder", schedule: "0 11 * * 6" },
+];

@@ -203,45 +203,11 @@ export function BrainTab() {
           </Button>
         }
       >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          {/* Worker mode/policy lives in the runtime; not yet editable from
-              the dashboard. Keep the controls visible so users see the
-              knobs exist, but disable until the wiring lands. */}
-          <Select
-            label="Mode"
-            value="auto"
-            onChange={() => {}}
-            disabled
-            title="Worker mode is set in config.toml under [workers].mode; hot-swap not yet wired."
-            options={[
-              { value: "auto", label: "Auto" },
-              { value: "budget", label: "Budget (Sonnet)" },
-              { value: "power", label: "Power (Opus)" },
-            ]}
-          />
-          <Slider
-            label="Max concurrent (read-only)"
-            value={3}
-            onChange={() => {}}
-            disabled
-            min={1}
-            max={10}
-            step={1}
-            format={(v) => `${Math.round(v)}`}
-          />
-          <Select
-            label="Default worker model"
-            value="claude-sonnet-4-6"
-            onChange={() => {}}
-            disabled
-            title="Default worker model is set in config.toml under [workers]; not yet dashboard-editable."
-            options={[
-              { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
-              { value: "claude-opus-4-6", label: "claude-opus-4-6" },
-              { value: "claude-haiku-4-5", label: "claude-haiku-4-5" },
-            ]}
-          />
-        </div>
+        <p className="text-sm text-ink-muted">
+          Headless Claude Code sessions the orchestrator spawns when a task needs more than a few
+          tool calls. Configuration lands in a later phase — until then, workers run with the
+          runtime defaults.
+        </p>
       </Card>
     </div>
   );
