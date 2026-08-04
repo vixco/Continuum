@@ -55,6 +55,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "memory_vault_get",
     "memory_vault_save",
     "memory_vault_resolve",
+    "memory_vault_delete",
     "memory_wipe_all",
 ];
 
@@ -454,11 +455,53 @@ async fn vault_tools_round_trip() {
         "expected an error for supersede without replaces: {bad_resolve}"
     );
 
+    // ---- memory_vault_delete: unknown id maps to a graceful tool error, not a crash ----
+    let bad_delete = call_tool(
+        &mut stdin,
+        &mut reader,
+        8,
+        "memory_vault_delete",
+        json!({ "id": "mem_does_not_exist" }),
+    )
+    .await;
+    assert!(
+        is_tool_error(&bad_delete),
+        "expected an error deleting an unknown id: {bad_delete}"
+    );
+
+    // ---- memory_vault_delete: removes the note's markdown file for real ----
+    let delete_resp = call_tool(
+        &mut stdin,
+        &mut reader,
+        9,
+        "memory_vault_delete",
+        json!({ "id": saved_id }),
+    )
+    .await;
+    assert!(!is_tool_error(&delete_resp), "delete failed: {delete_resp}");
+    let deleted = tool_output(&delete_resp);
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["id"], saved_id);
+
+    // ---- memory_vault_get: the deleted note is really gone ----
+    let get_after_delete = call_tool(
+        &mut stdin,
+        &mut reader,
+        10,
+        "memory_vault_get",
+        json!({ "id": saved_id }),
+    )
+    .await;
+    assert!(
+        is_tool_error(&get_after_delete),
+        "expected the deleted note to be gone: {get_after_delete}"
+    );
+
     // ---- memory_wipe_all: wrong confirm string errors, no file written ----
     let bad_wipe = call_tool(
         &mut stdin,
         &mut reader,
-        8,
+        11,
         "memory_wipe_all",
         json!({ "confirm": "please" }),
     )
@@ -473,7 +516,7 @@ async fn vault_tools_round_trip() {
     let wipe_resp = call_tool(
         &mut stdin,
         &mut reader,
-        9,
+        12,
         "memory_wipe_all",
         json!({ "confirm": "WIPE" }),
     )

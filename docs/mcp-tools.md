@@ -128,6 +128,18 @@ Resolves a candidate note. `action` is `confirm` | `reject` | `supersede`; `supe
 
 Errors if `id` is not currently a candidate, or if `action` is `"supersede"` without `replaces`.
 
+#### `memory_vault_delete`
+
+Permanently deletes a vault note: removes its markdown file from disk and its index entry. This is different from `memory_vault_resolve`'s `reject` (or the curator's `archive` transition) — those keep the file in place and just change its `status`; `memory_vault_delete` removes the file itself, and that removal cannot be undone by any other vault tool.
+
+```jsonc
+{ "name": "mcp__continuum__memory_vault_delete", "arguments": { "id": "mem_01j8f3a6k2..." } }
+```
+
+Returns `{ deleted: true, id }`. Errors (`invalid_params`) if the id doesn't exist.
+
+Other notes that link to the deleted id (via `[[wiki-links]]`) are not rewritten — the vault degrades this gracefully rather than erroring: on the vault's next reindex of the linking note, that link simply no longer resolves to a node (same as a `[[wiki-link]]` to a title that was never created). This is existing vault behavior, not something `memory_vault_delete` adds. The linking note's own body and relations are untouched; none of the current `memory_vault_*` tools surface unresolved links directly (that's internal index state).
+
 #### `memory_wipe_all`
 
 Requests a wipe of derived memory data (raw perception log, episodic memory, the vault's timeline events). Requires `confirm` to equal the literal string `"WIPE"`.

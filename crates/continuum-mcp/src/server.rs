@@ -35,9 +35,9 @@ use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
-    MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultGetRequest,
-    MemoryVaultResolveRequest, MemoryVaultSaveRequest, MemoryVaultSearchRequest,
-    MemoryWipeAllRequest, SetFactResponse,
+    MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultDeleteRequest,
+    MemoryVaultGetRequest, MemoryVaultResolveRequest, MemoryVaultSaveRequest,
+    MemoryVaultSearchRequest, MemoryWipeAllRequest, SetFactResponse,
 };
 use crate::tools::repair::{
     self as repairtool, EscalateRequest, ReinstallRequest, RestartRequest, RollbackRequest,
@@ -780,6 +780,27 @@ impl ContinuumMcpServer {
             Ok(memtool::VaultResolveResponse {
                 id: req.id.clone(),
                 ok: true,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Permanently delete a vault note: removes its markdown file from disk and its index entry. Unlike memory_vault_resolve's reject/archive-style transitions, this is irreversible — the note is gone, not just re-statused. Other notes with a wiki-link (`[[...]]`) pointing at the deleted id keep their link text, but it becomes an unresolved/ghost reference; their own content and relations are otherwise untouched. Errors if `id` doesn't exist."
+    )]
+    async fn memory_vault_delete(
+        &self,
+        Parameters(req): Parameters<MemoryVaultDeleteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("memory_vault_delete", &req, || async {
+            let vault = self.vault().await?;
+            vault
+                .delete(&req.id)
+                .await
+                .map_err(|e| memtool::vault_err_to_mcp(&e))?;
+            Ok(memtool::VaultDeleteResponse {
+                deleted: true,
+                id: req.id.clone(),
             })
         })
         .await
