@@ -427,6 +427,7 @@ export const DEFAULT_STATE: ContinuumState = {
     episodic_count: 0,
     semantic_count: 0,
     last_distill_ts: null,
+    curator: null,
   },
   health: {
     components: [],

@@ -6,9 +6,9 @@ import { AlertCircle, MessagesSquare, Sparkles, Users, Wallet, X } from "lucide-
 
 import { useStore } from "@/lib/store";
 import { continuum } from "@/lib/tauri";
-import { Button, Card, StatusOrb } from "@/components/ui/primitives";
+import { Button, Card, StatusBadge, StatusOrb } from "@/components/ui/primitives";
 import { PushToTalkButton } from "@/components/PushToTalkButton";
-import type { RecentAction, VoiceMode, WorkerSnapshot } from "@/lib/types";
+import type { CuratorSnapshot, RecentAction, VoiceMode, WorkerSnapshot } from "@/lib/types";
 
 const ACTIVE_STATUSES = new Set(["queued", "starting", "running", "pending"]);
 
@@ -83,6 +83,8 @@ export function HomeTab() {
         episodic={state.memory.episodic_count}
         uptime={state.system.uptime_secs}
       />
+
+      <CuratorRow curator={state.memory.curator} />
 
       <section className="col-span-12 md:col-span-7">
         <Card title="Workers" subtitle={`${active.length} running · ${completed.length} recent`}>
@@ -347,6 +349,46 @@ function Stats({
           <div className="mt-2 font-mono text-2xl text-ink">{value}</div>
         </div>
       ))}
+    </section>
+  );
+}
+
+/** Compact curator (Plan B memory-vault) health strip, beside the memory
+ * stats above. `curator` is `undefined`/`null` until the dashboard's
+ * runtime bridge has read a state.json at least once, or when running
+ * outside Tauri (see DEFAULT_STATE) — treated the same as "off" here since
+ * there is nothing meaningful to report either way. */
+function CuratorRow({ curator }: { curator: CuratorSnapshot | null | undefined }) {
+  if (!curator || !curator.enabled) {
+    return (
+      <section className="col-span-12 flex items-center gap-2 rounded-lg border border-bg-border bg-bg-surface px-4 py-2 text-xs text-ink-dim">
+        <StatusBadge status="unknown" label="Curator: off" />
+      </section>
+    );
+  }
+
+  const failing = curator.consecutive_failures >= 3;
+  const lastPass = curator.last_pass_at
+    ? new Date(curator.last_pass_at).toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "never";
+
+  return (
+    <section className="col-span-12 flex flex-wrap items-center gap-3 rounded-lg border border-bg-border bg-bg-surface px-4 py-2 text-xs text-ink-muted">
+      <StatusBadge status={failing ? "degrading" : "healthy"} label="Curator" />
+      <span>last pass {lastPass}</span>
+      <span className="text-ink-dim">·</span>
+      <span>{curator.pending_count.toLocaleString()} pending</span>
+      <span className="text-ink-dim">·</span>
+      <span>{curator.candidates_written_total.toLocaleString()} written</span>
+      {failing && (
+        <span className="ml-auto rounded-md border border-state-warn/30 bg-state-warn/15 px-2 py-0.5 font-medium text-state-warn">
+          {curator.consecutive_failures} consecutive failures
+        </span>
+      )}
     </section>
   );
 }

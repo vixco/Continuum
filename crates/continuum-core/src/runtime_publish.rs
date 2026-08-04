@@ -53,6 +53,44 @@ pub struct RuntimeSnapshot {
     /// has resolved it. Read by the dashboard's resource panel.
     #[serde(default)]
     pub resource_plan: Option<ResolvedResourcePlan>,
+    /// Memory-vault curator (Plan B) health — last pass time, consecutive
+    /// failures, and pending/written counts. `None` only for snapshots
+    /// written before this field existed (`#[serde(default)]` keeps old
+    /// `state.json` files parsing); the runtime always publishes `Some`
+    /// once it starts, using `enabled: false` and zeroed counters when the
+    /// curator hasn't spawned (no triage model loaded). Read by the
+    /// dashboard's Curator row.
+    #[serde(default)]
+    pub curator: Option<CuratorSnapshot>,
+}
+
+/// Curator (Plan B memory-vault) health surfaced to the dashboard. Mirrors
+/// [`crate::curator::CuratorStatus`] plus an `enabled` flag derived from
+/// config — see `build_curator_snapshot` in the `continuum` binary, which
+/// fills this in on every publish tick from the curator's
+/// [`crate::curator::SharedCuratorStatus`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CuratorSnapshot {
+    /// RFC3339 timestamp of the most recent curator pass, successful or
+    /// not. `None` until the first pass completes.
+    #[serde(default)]
+    pub last_pass_at: Option<String>,
+    /// Consecutive failed passes. The dashboard shows a warning badge once
+    /// this crosses the same threshold (3) the repair agent escalates on.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Lifetime count of candidate/confirmed notes the curator has written.
+    #[serde(default)]
+    pub candidates_written_total: u64,
+    /// Current count of notes awaiting human review.
+    #[serde(default)]
+    pub pending_count: u64,
+    /// Whether the curator pipeline is actually running: both
+    /// `[memory.curator] enabled = true` in config and a triage model
+    /// loaded at boot. `false` (with zeroed counters above) means the
+    /// dashboard should render "Curator: off".
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 pub fn write_snapshot(path: &Path, snapshot: &RuntimeSnapshot) -> anyhow::Result<()> {
@@ -146,5 +184,73 @@ mod tests {
         .unwrap();
         assert!(path.exists());
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    /// Task 11: a `state.json` written before the `curator` field existed
+    /// must still parse — `#[serde(default)]` on both the field and every
+    /// `CuratorSnapshot` member is what makes that true.
+    #[test]
+    fn snapshot_deserializes_without_curator_field() {
+        let json = r#"{
+            "triage_model_loaded": true,
+            "vision_model_loaded": false,
+            "tts_loaded": false,
+            "stt_loaded": false,
+            "orchestrator_ready": true,
+            "frame_count": 12,
+            "wake_count": 1,
+            "last_update": "2026-04-14T10:00:00Z"
+        }"#;
+        let snap: RuntimeSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snap.curator.is_none());
+    }
+
+    /// Round trip with the field present: serialize, reparse, and confirm
+    /// every `CuratorSnapshot` member survives — this is the shape the
+    /// `continuum` binary's publisher actually writes once a curator status
+    /// is available.
+    #[test]
+    fn snapshot_roundtrip_with_curator_field() {
+        let snap = RuntimeSnapshot {
+            curator: Some(CuratorSnapshot {
+                last_pass_at: Some("2026-04-14T10:05:00+00:00".to_string()),
+                consecutive_failures: 2,
+                candidates_written_total: 7,
+                pending_count: 3,
+                enabled: true,
+            }),
+            last_update: "2026-04-14T10:05:02Z".into(),
+            ..RuntimeSnapshot::default()
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: RuntimeSnapshot = serde_json::from_str(&json).unwrap();
+        let curator = parsed.curator.expect("curator field should round-trip");
+        assert_eq!(
+            curator.last_pass_at.as_deref(),
+            Some("2026-04-14T10:05:00+00:00")
+        );
+        assert_eq!(curator.consecutive_failures, 2);
+        assert_eq!(curator.candidates_written_total, 7);
+        assert_eq!(curator.pending_count, 3);
+        assert!(curator.enabled);
+    }
+
+    /// The "curator never spawned" shape (Task 11 brief): `Some` with
+    /// `enabled: false` and zeroed counters, not `None` — the dashboard
+    /// tells "off" apart from "old state.json" this way.
+    #[test]
+    fn snapshot_roundtrip_curator_disabled_is_some_with_zeros() {
+        let snap = RuntimeSnapshot {
+            curator: Some(CuratorSnapshot::default()),
+            ..RuntimeSnapshot::default()
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: RuntimeSnapshot = serde_json::from_str(&json).unwrap();
+        let curator = parsed.curator.expect("curator field should round-trip");
+        assert!(!curator.enabled);
+        assert_eq!(curator.consecutive_failures, 0);
+        assert_eq!(curator.candidates_written_total, 0);
+        assert_eq!(curator.pending_count, 0);
+        assert!(curator.last_pass_at.is_none());
     }
 }

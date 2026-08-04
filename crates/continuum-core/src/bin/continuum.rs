@@ -521,8 +521,10 @@ async fn main() -> Result<()> {
     // (never wakes the orchestrator for routine memory bookkeeping — see
     // non-negotiable #4), so the curator only runs when triage loaded.
     let (activity_tx, activity_rx) = watch::channel(curator::run::ActivitySignal::default());
-    // Task 11 wires this into the runtime snapshot publisher.
-    let _curator_status: Option<curator::SharedCuratorStatus> = if let Some(triage) = triage.clone()
+    // Task 11: cloned into the runtime snapshot publisher below so the
+    // dashboard can surface curator health (last pass, pending count,
+    // consecutive failures) from `~/.continuum-dev/state.json`.
+    let curator_status: Option<curator::SharedCuratorStatus> = if let Some(triage) = triage.clone()
     {
         let status: curator::SharedCuratorStatus = Default::default();
         let llm: Arc<dyn curator::CuratorLlm> = Arc::new(triage);
@@ -590,10 +592,21 @@ async fn main() -> Result<()> {
                 hardware_specs: Some(hardware_specs.clone()),
                 resource_plan: Some(resource_plan.clone()),
                 last_update: chrono::Utc::now().to_rfc3339(),
+                // Overwritten every tick by the publisher closure below
+                // (via `build_curator_snapshot`); `None` here is never
+                // actually published.
+                curator: None,
             },
         ));
     {
         let state_clone = runtime_state.clone();
+        // Task 11: the curator only actually runs when both the triage
+        // model loaded (so `curator_status` is `Some`) and
+        // `[memory.curator] enabled = true` — see `build_curator_snapshot`.
+        // Capturing the bool by value (not `config`) keeps `config` usable
+        // for the rest of `main` below this block.
+        let curator_status_for_publisher = curator_status.clone();
+        let curator_enabled = config.memory.curator.enabled;
         continuum_core::runtime_publish::spawn_publisher(
             dev_dir.join("state.json"),
             2,
@@ -602,6 +615,10 @@ async fn main() -> Result<()> {
                 let guard = state_clone.lock().unwrap_or_else(|p| p.into_inner());
                 let mut snap = guard.clone();
                 snap.last_update = chrono::Utc::now().to_rfc3339();
+                snap.curator = Some(build_curator_snapshot(
+                    curator_status_for_publisher.as_ref(),
+                    curator_enabled,
+                ));
                 snap
             },
         );
@@ -1234,6 +1251,42 @@ async fn do_wake(
     );
 
     Ok(())
+}
+
+/// Builds the [`continuum_core::runtime_publish::CuratorSnapshot`] published
+/// into `state.json` (Task 11).
+///
+/// `status` is `None` when the curator never spawned at all (no triage
+/// model loaded at boot — see the `curator_status` binding in `main`); that
+/// always publishes `enabled: false` with zeroed counters regardless of the
+/// `[memory.curator] enabled` config value, since nothing is running to
+/// report on. When `status` is `Some`, `enabled` reflects `curator_enabled`
+/// (the config flag) directly: `run_curator` itself no-ops forever without
+/// touching `status` when the config disables it (see
+/// `curator::run::run_curator`'s early return), so a disabled-but-spawned
+/// curator also correctly reports zeroed counters via `status`'s untouched
+/// defaults.
+fn build_curator_snapshot(
+    status: Option<&curator::SharedCuratorStatus>,
+    curator_enabled: bool,
+) -> continuum_core::runtime_publish::CuratorSnapshot {
+    use continuum_core::runtime_publish::CuratorSnapshot;
+    match status {
+        Some(status) => {
+            let guard = status.lock().unwrap_or_else(|p| p.into_inner());
+            CuratorSnapshot {
+                last_pass_at: guard.last_pass_at.map(|t| t.to_rfc3339()),
+                consecutive_failures: guard.consecutive_failures,
+                candidates_written_total: guard.candidates_written_total,
+                pending_count: guard.pending_count,
+                enabled: curator_enabled,
+            }
+        }
+        None => CuratorSnapshot {
+            enabled: false,
+            ..CuratorSnapshot::default()
+        },
+    }
 }
 
 /// Atomically claims `orchestrator_busy`, returning `true` only if this

@@ -82,6 +82,14 @@ async fn tick_once(path: &PathBuf, state: &StateHandle) -> anyhow::Result<()> {
             s.orchestrator_ready = snap.orchestrator_ready;
         })
         .await;
+    // Task 11: mirror the runtime's curator (Plan B memory-vault) status
+    // into the dashboard's own state store, alongside the memory stats
+    // it already renders. `snap.curator` is only `None` for a `state.json`
+    // written before this field existed — everything since then is `Some`
+    // (with `enabled: false` and zeroed counters when the curator itself
+    // hasn't spawned), which the dashboard needs to tell apart from
+    // "haven't heard from the runtime at all yet".
+    state.set_curator_snapshot(snap.curator.clone()).await;
     if let Some(mode) = snap.voice_mode.as_deref() {
         let parsed = match mode {
             "idle" => VoiceMode::Idle,
