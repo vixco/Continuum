@@ -11,9 +11,12 @@
 // The streaming tail follows the bottom of the scroll region by default
 // (followOutput="smooth") — if the user scrolls up to read an earlier
 // tool card, Virtuoso pauses autoscroll and they can scroll back down
-// without the live tail grabbing focus.
+// without the live tail grabbing focus. A floating "jump to latest"
+// pill appears whenever the viewport leaves the bottom so the user can
+// snap back in one click instead of scrolling manually.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown } from "lucide-react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 import { MessageBubble } from "./MessageBubble";
@@ -31,6 +34,7 @@ interface MessageListProps {
 
 export function MessageList({ messages, streamingMessage, isStreaming }: MessageListProps) {
   const ref = useRef<VirtuosoHandle | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
 
   // The list we render = persisted messages + (optional) ephemeral tail.
   const data = useMemo<ChatMessage[]>(
@@ -46,26 +50,46 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function jumpToLatest() {
+    ref.current?.scrollToIndex({ index: data.length - 1, align: "end", behavior: "smooth" });
+  }
+
+  const showJump = !atBottom && data.length > 0;
+
   return (
-    <Virtuoso
-      ref={ref}
-      data={data}
-      followOutput={isStreaming ? "smooth" : false}
-      initialTopMostItemIndex={Math.max(0, data.length - 1)}
-      itemContent={(index, message) => (
-        <div className="mx-auto w-full max-w-3xl px-4 pb-5">
-          <MessageBubble
-            message={message}
-            isStreaming={Boolean(streamingMessage) && index === data.length - 1}
-            isLast={index === data.length - 1}
-          />
-        </div>
+    <div className="relative h-full">
+      <Virtuoso
+        ref={ref}
+        data={data}
+        followOutput={isStreaming ? "smooth" : false}
+        atBottomStateChange={setAtBottom}
+        initialTopMostItemIndex={Math.max(0, data.length - 1)}
+        itemContent={(index, message) => (
+          <div className="mx-auto w-full max-w-3xl px-4 pb-5">
+            <MessageBubble
+              message={message}
+              isStreaming={Boolean(streamingMessage) && index === data.length - 1}
+              isLast={index === data.length - 1}
+            />
+          </div>
+        )}
+        components={{
+          // Empty list placeholder is rendered by the tab itself, not here.
+          Footer: () => (isStreaming ? <div className="h-2" /> : null),
+        }}
+        className="h-full"
+      />
+      {showJump && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          aria-label="Jump to latest"
+          className="press absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-bg-border bg-bg-elevated px-3 py-1.5 text-[11px] font-medium text-ink shadow-lg transition-colors hover:border-amber-500/40 hover:text-ink"
+        >
+          <ArrowDown size={12} className="text-amber-400/80" />
+          Latest
+        </button>
       )}
-      components={{
-        // Empty list placeholder is rendered by the tab itself, not here.
-        Footer: () => (isStreaming ? <div className="h-2" /> : null),
-      }}
-      className="h-full"
-    />
+    </div>
   );
 }
