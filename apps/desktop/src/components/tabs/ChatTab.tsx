@@ -27,12 +27,13 @@ import { isTauri } from "@/lib/tauri";
 import type { ProviderConnection } from "@/lib/types";
 
 import { useChatStore } from "../chat/state";
+import { storedMessageParts } from "../chat/toolInvocations";
 import { InputBar } from "../chat/InputBar";
 import { MessageList } from "../chat/MessageList";
 import { ChatEmptyState } from "../chat/EmptyState";
 import { VoiceInputBubble } from "../chat/VoiceInputBubble";
 import { ModelSwitcher } from "../chat/ModelSwitcher";
-import type { ChatMessage } from "../chat/types";
+import type { ChatMessage, ContentPart } from "../chat/types";
 
 export function ChatTab() {
   const [tauriReady, setTauriReady] = useState<boolean | null>(null);
@@ -67,6 +68,7 @@ function ChatWorkspace() {
   const skills = useChatStore((s) => s.skills);
   const sendingId = useChatStore((s) => s.sendingId);
   const streamBuffers = useChatStore((s) => s.streamBuffers);
+  const streamToolCalls = useChatStore((s) => s.streamToolCalls);
   const errors = useChatStore((s) => s.errors);
   const globalError = useChatStore((s) => s.globalError);
   const retryInfo = useChatStore((s) => s.retryInfo);
@@ -93,7 +95,7 @@ function ChatWorkspace() {
     return activeConv.messages.map((m, i) => ({
       id: `m_${i}_${m.ts}`,
       role: m.role,
-      parts: [{ kind: "text", text: m.content }],
+      parts: storedMessageParts(m),
       text: m.content,
       model: m.model,
       durationMs: m.duration_ms,
@@ -110,16 +112,23 @@ function ChatWorkspace() {
   // polluting the persisted history.
   const streamingMessage: ChatMessage | null = useMemo(() => {
     if (!isStreaming || !activeId) return null;
+    // In-flight tool invocations render before the text tail, in arrival
+    // order — matching how the persisted message will look after reload.
+    const invocations = streamToolCalls[activeId] ?? [];
+    const parts: ContentPart[] = [
+      ...invocations.map((invocation): ContentPart => ({ kind: "tool", invocation })),
+      { kind: "text", text: streamBuffer },
+    ];
     return {
       id: "streaming_tail",
       role: "assistant",
-      parts: [{ kind: "text", text: streamBuffer }],
+      parts,
       text: streamBuffer,
       status: "streaming",
       ts: new Date().toISOString(),
       conversationId: activeId,
     };
-  }, [isStreaming, activeId, streamBuffer]);
+  }, [isStreaming, activeId, streamBuffer, streamToolCalls]);
 
   const activeProvider = providers.find((p) => p.id === activeConv?.provider_id) ?? null;
   const activeError = activeId ? (errors[activeId] ?? globalError) : globalError;
