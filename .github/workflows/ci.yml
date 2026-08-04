@@ -63,9 +63,8 @@ jobs:
         run: cargo clippy -p continuum-desktop --no-deps -- -D warnings
 
   clippy-full:
-    # Exhaustive native linting runs once before merge. Main is validated by
-    # the fast checks plus the real production compile in release.yml.
-    if: github.event_name == 'pull_request'
+    # Exhaustive native linting runs on every push to main so PR authors see
+    # failures before review and main stays green at all times.
     name: Clippy (full workspace — with native deps)
     runs-on: windows-latest
     steps:
@@ -129,8 +128,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   full-test:
-    # Avoid compiling llama/whisper/Lance again after an already-green PR.
-    if: github.event_name == 'pull_request'
+    # Full workspace test runs on every push to main. The native build cache
+    # makes the second run cheap; this keeps main green at all times.
     name: Full test suite
     runs-on: windows-latest
     needs: [fmt, clippy-light]
@@ -171,8 +170,11 @@ jobs:
             throw "libclang.dll was not found under LIBCLANG_PATH=$env:LIBCLANG_PATH"
           }
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
+      # The full Clippy job owns writes for this shared native cache key. This
+      # test job runs in parallel and must only restore it; otherwise both jobs
+      # can spend many minutes compressing/uploading the same multi-GB target.
+      - name: Restore cargo artifacts
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry

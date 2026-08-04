@@ -17,6 +17,9 @@ import type {
   Conversation,
   ConversationSummary,
   LogEntry,
+  InstallMcpServerInput,
+  McpServerRegistration,
+  McpTool,
   MemoryEvent,
   MemoryEventPayload,
   MemoryEventRange,
@@ -32,6 +35,7 @@ import type {
   ProviderAddInput,
   ProviderConnection,
   RepairEvent,
+  RepairPreview,
   ResourceConfig,
   ResourceProfile,
   ResourceProfileUpdate,
@@ -235,6 +239,12 @@ export const continuum = {
     invoke<ContinuumConfig>("update_voice_flag", { flag, value }, DEFAULT_CONFIG),
   updateScreenInterval: (seconds: number) =>
     invoke<ContinuumConfig>("update_screen_interval", { seconds }, DEFAULT_CONFIG),
+  updateLiveContextConfig: (update: {
+    enabled?: boolean;
+    capture_interval_ms?: number;
+    all_monitors?: boolean;
+    save_screenshots?: boolean;
+  }) => invoke<ContinuumConfig>("update_live_context_config", { update }, DEFAULT_CONFIG),
   updateTriageThreshold: (threshold: number) =>
     invoke<ContinuumConfig>("update_triage_threshold", { threshold }, DEFAULT_CONFIG),
   getLogs: (query?: {
@@ -286,7 +296,9 @@ export const continuum = {
   toggleAutomation: (id: string, enabled: boolean) =>
     invoke<void>("toggle_automation", { id, enabled }),
   getHealth: () => invoke<ComponentHealth[]>("get_health", undefined, []),
-  triggerRepair: (reason?: string) => invoke<void>("trigger_repair", { reason }),
+  previewRepair: () => invoke<RepairPreview>("preview_repair"),
+  triggerRepair: (previewId: string, reason?: string) =>
+    invoke<void>("trigger_repair", { previewId, reason }),
   restartComponent: (name: string) =>
     invoke<ComponentHealth | null>("restart_component", { name }, null),
   runBackupNow: () => invoke<string>("run_backup_now"),
@@ -309,6 +321,11 @@ export const continuum = {
   toggleSkill: (name: string, enabled: boolean) =>
     invoke<ContinuumConfig>("toggle_skill", { name, enabled }),
   installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
+  listMcpTools: () => invoke<McpTool[]>("list_mcp_tools", undefined, []),
+  listInstalledMcpServers: () =>
+    invoke<McpServerRegistration[]>("list_installed_mcp_servers", undefined, []),
+  installMcpServer: (input: InstallMcpServerInput) =>
+    invoke<McpServerRegistration>("install_mcp_server", { input }),
   listWorkers: (limit?: number) => invoke<WorkerSnapshot[]>("list_workers", { limit }, []),
   getWorker: (id: string) => invoke<WorkerSnapshot | null>("get_worker", { id }, null),
   cancelWorker: (id: string) => invoke<void>("cancel_worker", { id }),
@@ -393,6 +410,10 @@ export const DEFAULT_STATE: ContinuumState = {
     last_salience: 0,
     has_error_visible: false,
     frames_today: 0,
+    monitor_count: 0,
+    capture_events: 0,
+    dropped_capture_events: 0,
+    last_capture_at: null,
   },
   triage: {
     last_decision: null,
@@ -451,7 +472,7 @@ export const DEFAULT_STATE: ContinuumState = {
     stt_loaded: false,
     orchestrator_ready: false,
     paused: false,
-    version: "0.1.0-alpha.3",
+    version: "0.1.0-alpha.6",
   },
   recent_actions: [],
 };
@@ -474,6 +495,21 @@ export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
 };
 
 export const DEFAULT_CONFIG: ContinuumConfig = {
+  health: {
+    repair_timeout_secs: 600,
+    runtime_start_timeout_secs: 90,
+    repair_session_ttl_secs: 900,
+    backup_retention: 7,
+  },
+  chat: {
+    max_tokens: 8192,
+    temperature: null,
+    connect_timeout_secs: 10,
+    stream_idle_timeout_secs: 60,
+    cli_timeout_secs: 120,
+    model_refresh_interval_secs: 300,
+    system_prompt_path: null,
+  },
   vision: {
     name: "SmolVLM-256M",
     model_path: "",
@@ -482,10 +518,17 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     input_height: 384,
   },
   screen: {
+    enabled: true,
     interval_secs: 3,
+    capture_interval_ms: 200,
     capture_width: 1280,
     capture_height: 720,
-    save_screenshots: true,
+    save_screenshots: false,
+    all_monitors: true,
+    excluded_monitor_ids: [],
+    buffer_capacity: 64,
+    meaningful_change_threshold: 0.025,
+    vision_min_interval_ms: 2000,
   },
   audio: {
     enabled: true,
@@ -497,7 +540,33 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     device_name: "",
     device_index: null,
   },
-  context: { poll_interval_secs: 1 },
+  context: {
+    poll_interval_secs: 1,
+    redact_sensitive_titles: true,
+    sensitive_process_names: [
+      "1password.exe",
+      "bitwarden.exe",
+      "keepass.exe",
+      "keepassxc.exe",
+      "credentialuibroker.exe",
+    ],
+    sensitive_title_keywords: [
+      "password",
+      "passkey",
+      "two-factor",
+      "2fa",
+      "private key",
+      "seed phrase",
+    ],
+    terminal_process_names: [
+      "windowsterminal.exe",
+      "powershell.exe",
+      "pwsh.exe",
+      "cmd.exe",
+      "bash.exe",
+      "wsl.exe",
+    ],
+  },
   frame: { interval_secs: 3, salience_threshold: 0.1 },
   storage: { db_path: "", screenshots_dir: "", retention_days: 30 },
   memory: {

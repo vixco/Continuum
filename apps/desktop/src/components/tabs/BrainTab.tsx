@@ -12,6 +12,7 @@ export function BrainTab() {
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
   const system = useStore((s) => s.state.system);
+  const perception = useStore((s) => s.state.perception);
   const [testing, setTesting] = useState<string | null>(null);
 
   async function testLayer(name: string) {
@@ -39,7 +40,21 @@ export function BrainTab() {
           </Button>
         }
       >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="bg-bg-raised/40 flex flex-col justify-end gap-2 rounded-md border border-bg-border px-3 py-2">
+            <Toggle
+              checked={config.screen.enabled}
+              onChange={async (enabled) => {
+                const cfg = await continuum.updateLiveContextConfig({ enabled });
+                setConfig(cfg);
+              }}
+              label="Continuous local context"
+            />
+            <p className="text-[11px] leading-4 text-ink-dim">
+              All displays, processed locally. Raw keys, pointer positions, and clipboard text are
+              never collected.
+            </p>
+          </div>
           <Select
             label="Model"
             value={config.vision.name}
@@ -52,19 +67,38 @@ export function BrainTab() {
             ]}
           />
           <Slider
-            label="Capture interval (s)"
-            value={config.screen.interval_secs}
+            label="Capture cadence"
+            value={config.screen.capture_interval_ms}
             onChange={async (v) => {
-              const cfg = await continuum.updateScreenInterval(Math.round(v));
+              const cfg = await continuum.updateLiveContextConfig({
+                capture_interval_ms: Math.round(v),
+                all_monitors: true,
+              });
               setConfig(cfg);
             }}
-            min={1}
-            max={10}
-            step={1}
-            format={(v) => `${Math.round(v)}s`}
+            min={100}
+            max={2000}
+            step={100}
+            format={(v) => `${Math.round(v)}ms / monitor`}
           />
         </div>
-        <ResourceRow loaded={system.vision_model_loaded} label="Vision model" />
+        <div className="bg-bg-deep mt-3 rounded-md border border-bg-border px-3 py-2 text-xs text-ink-muted">
+          <span className="font-medium text-ink">All connected monitors</span>
+          <span className="ml-1 font-mono text-ink-muted">({perception.monitor_count} live)</span>
+          <span className="mx-2 text-ink-dim">•</span>
+          bounded ordered buffer ({config.screen.buffer_capacity} events)
+          <span className="mx-2 text-ink-dim">•</span>
+          local vision at meaningful changes only
+          <span className="mx-2 text-ink-dim">•</span>
+          dropped: {perception.dropped_capture_events}
+          <span className="mx-2 text-ink-dim">•</span>
+          restart runtime after changing capture settings
+        </div>
+        <ModelStatus
+          loaded={system.vision_model_loaded}
+          label="Vision model"
+          appliedModel={config.vision.name}
+        />
       </Card>
 
       <Card
@@ -78,10 +112,15 @@ export function BrainTab() {
         }
       >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* Triage model is loaded at boot from config.toml — the dashboard
+              does not yet expose a hot-swap. Until that ships, this control
+              is read-only and reflects the model the runtime currently has. */}
           <Select
             label="Model"
             value="qwen3-8b"
             onChange={() => {}}
+            disabled
+            title="Hot-swap is not wired yet. Edit config.toml under [triage].model."
             options={[
               { value: "qwen3-8b", label: "Qwen 3 8B (default, 95% acc.)" },
               { value: "qwen25-3b", label: "Qwen 2.5 3B" },
@@ -102,7 +141,11 @@ export function BrainTab() {
             format={(v) => v.toFixed(2)}
           />
         </div>
-        <ResourceRow loaded={system.triage_model_loaded} label="Triage model" />
+        <ModelStatus
+          loaded={system.triage_model_loaded}
+          label="Triage model"
+          appliedModel="qwen3-8b"
+        />
       </Card>
 
       <Card
@@ -115,26 +158,40 @@ export function BrainTab() {
         }
       >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* Orchestrator model is owned by the Claude CLI — the dashboard
+              can't swap it mid-session. Until the orchestrator profile
+              plugin ships, this is fixed at the value the CLI was launched
+              with. */}
           <Select
             label="Model"
             value="claude-opus-4-6"
             onChange={() => {}}
+            disabled
+            title="Orchestrator model is selected at launch via providers.json; hot-swap not yet wired."
             options={[
               { value: "claude-opus-4-6", label: "claude-opus-4-6 (default)" },
               { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
             ]}
           />
+          {/* Token budget is enforced in the orchestrator prompt template,
+              not by the dashboard. There's no live command to push a new
+              value yet — surface this as a stat, not a control. */}
           <Slider
-            label="Token budget"
+            label="Token budget (read-only)"
             value={4000}
             onChange={() => {}}
+            disabled
             min={1000}
             max={16000}
             step={500}
             format={(v) => `${Math.round(v)} tokens`}
           />
         </div>
-        <ResourceRow loaded={system.orchestrator_ready} label="Claude CLI reachable" />
+        <ModelStatus
+          loaded={system.orchestrator_ready}
+          label="Claude CLI reachable"
+          appliedModel="claude-opus-4-6"
+        />
       </Card>
 
       <Card
@@ -147,10 +204,15 @@ export function BrainTab() {
         }
       >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {/* Worker mode/policy lives in the runtime; not yet editable from
+              the dashboard. Keep the controls visible so users see the
+              knobs exist, but disable until the wiring lands. */}
           <Select
             label="Mode"
             value="auto"
             onChange={() => {}}
+            disabled
+            title="Worker mode is set in config.toml under [workers].mode; hot-swap not yet wired."
             options={[
               { value: "auto", label: "Auto" },
               { value: "budget", label: "Budget (Sonnet)" },
@@ -158,9 +220,10 @@ export function BrainTab() {
             ]}
           />
           <Slider
-            label="Max concurrent"
+            label="Max concurrent (read-only)"
             value={3}
             onChange={() => {}}
+            disabled
             min={1}
             max={10}
             step={1}
@@ -170,6 +233,8 @@ export function BrainTab() {
             label="Default worker model"
             value="claude-sonnet-4-6"
             onChange={() => {}}
+            disabled
+            title="Default worker model is set in config.toml under [workers]; not yet dashboard-editable."
             options={[
               { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
               { value: "claude-opus-4-6", label: "claude-opus-4-6" },
@@ -185,7 +250,7 @@ export function BrainTab() {
 function LayerDiagram() {
   const items = [
     { label: "Senses", colour: "from-accent-blue to-accent-blue-dim" },
-    { label: "Triage", colour: "from-accent-purple to-accent-purple-dim" },
+    { label: "Triage", colour: "from-accent-amber to-accent-amber-dim" },
     { label: "Orchestrator", colour: "from-state-healthy to-accent-blue-dim" },
     { label: "Workers", colour: "from-state-warn to-state-error" },
   ];
@@ -210,13 +275,43 @@ function LayerDiagram() {
   );
 }
 
-function ResourceRow({ loaded, label }: { loaded: boolean; label: string }) {
+/**
+ * Honest status row for a layer's model / backend.
+ *
+ * Replaces the previous "ResourceRow" that hard-coded "RAM/CPU/GPU: –" — we
+ * don't have live per-process numbers from the Tauri side, so showing
+ * "–" implied we'd eventually fill them in. The model_status plumbing on
+ * the runtime side is the source of truth; this row surfaces the bits we
+ * actually know.
+ */
+function ModelStatus({
+  loaded,
+  label,
+  appliedModel,
+}: {
+  loaded: boolean;
+  label: string;
+  appliedModel: string;
+}) {
   return (
-    <div className="mt-4 flex items-center gap-4 border-t border-bg-border pt-3 text-xs text-ink-muted">
+    <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-bg-border pt-3 text-xs text-ink-muted">
       <Toggle checked={loaded} onChange={() => {}} label={label} disabled />
-      <span className="text-ink-dim">RAM: –</span>
-      <span className="text-ink-dim">CPU: –</span>
-      <span className="text-ink-dim">GPU: –</span>
+      <span className="text-ink-dim">
+        applied: <span className="font-mono text-ink-muted">{appliedModel}</span>
+      </span>
+      <span
+        className={clsx(
+          "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider",
+          loaded ? "bg-state-healthy/20 text-state-healthy" : "bg-state-idle/20 text-state-idle"
+        )}
+        title={
+          loaded
+            ? "Runtime reports this model/backend is reachable"
+            : "Not yet reported by the runtime"
+        }
+      >
+        {loaded ? "ready" : "not reported"}
+      </span>
     </div>
   );
 }

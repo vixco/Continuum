@@ -297,7 +297,7 @@ export function MemoryTab() {
               className={
                 "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors " +
                 (active
-                  ? "border-accent-purple/60 bg-accent-purple/15 text-ink"
+                  ? "border-accent-amber/60 bg-accent-amber/15 text-ink"
                   : "border-bg-border bg-bg-elevated text-ink-muted hover:text-ink")
               }
             >
@@ -311,7 +311,7 @@ export function MemoryTab() {
           className={
             "rounded-md border px-2 py-1 text-xs " +
             (showHidden
-              ? "border-accent-purple/60 text-ink"
+              ? "border-accent-amber/60 text-ink"
               : "border-bg-border text-ink-muted hover:text-ink")
           }
         >
@@ -380,7 +380,7 @@ export function MemoryTab() {
                       setViewName("");
                       setSaveViewOpen(true);
                     }}
-                    className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-accent-purple hover:bg-bg-hover"
+                    className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-accent-amber hover:bg-bg-hover"
                   >
                     <Plus size={12} /> Save current view
                   </button>

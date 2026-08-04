@@ -4,6 +4,16 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
+- **Windows updater retry loop**: release publishing now clears cached Tauri
+  bundles, selects exactly one installer matching the calculated version, and
+  rejects mismatched signature metadata. The desktop app remembers an
+  interrupted install attempt per release, stops automatic retries on later
+  launches, and keeps an actionable manual retry path without altering user
+  data or configuration.
+
 ### Added
 
 - **Memory vault + graph-centric Memory tab (Plan A)**: a new
@@ -141,6 +151,17 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   appends a `kind: "distilled"` event into the vault's event timeline for
   every frame it distills, giving the curator's extraction pass something to
   read from process start.
+- **Continuous all-monitor live context**: independent 200 ms capture workers
+  for every connected display feed a bounded ordered FIFO with explicit drop
+  accounting; luma change detection selects local vision work without pausing
+  capture. A privacy-filtered, source-attributed `live-context.json` projection
+  combines monitor summaries with foreground window, coarse idle/active input,
+  and local terminal/project metadata. The Brain tab exposes consent/cadence
+  controls and health, while the read-only `system_live_context` MCP tool gives
+  image-incompatible agents one compact shared current world-state. Screenshot
+  persistence remains off by default and raw keys, pointer data, clipboard data,
+  and terminal text are excluded.
+- **Guarded Health self-heal**: Advanced → Health now refreshes the authoritative live probes and offers a one-time repair preview before execution. The supported automatic fix starts an offline runtime only after an atomic, versioned, manifest-verified backup, then waits for a fresh heartbeat before reporting success. Other issues are tested and escalated by a main-window-authorized, short-lived, single-use, component-scoped repair session with built-in tools disabled; unsupported component restart intents remain denied. Rollback validates its source, creates a safety backup, and publishes config reversibly. Local NDJSON audit records capture previews, grants, backups, actions, and outcomes.
 - **Chat tab + model gateway**: a new `crates/continuum-gateway` crate (a
   `ChatProvider` trait, three adapters — OpenAI-compatible, Anthropic, and
   Claude Code CLI — plus a static provider catalog covering ~18 presets such
@@ -157,7 +178,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   `Continuum`); adding a connection tests it before saving, with an explicit
   "Save anyway" escape hatch. New `[chat]` config section (`max_tokens`,
   `temperature`, `connect_timeout_secs`, `stream_idle_timeout_secs`,
-  `cli_timeout_secs`, `system_prompt_path`) makes every knob overridable per
+  `cli_timeout_secs`, `model_refresh_interval_secs`, `system_prompt_path`)
+  makes every knob overridable per
   non-negotiable #3. A new `chat_providers` health probe reports Degraded
   when a configured provider's last connection test failed. Per
   non-negotiable #2: the only new network calls this feature introduces go
@@ -190,18 +212,38 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
-- **Wake-word test fixtures + a stray clippy lint (found during Plan B)**:
-  four `voice::wake` tests were asserting against the pre-rename "Kairo"
-  wake word's K→C whisper-homophone behavior (`"hey cairo"`) while being fed
-  the post-rename `"hey continuum"` keyword — `"continuum"` has no `k` for
-  the substitution to act on, so the asserted variants could never be
-  produced by the real code. Fixtures restored to use a keyword that
-  actually contains a `k`, with recomputed expected outputs; the module's
-  doc comments' stale "Continuum mistranscribes to Cairo" claim corrected
-  back to "Kairo mistranscribes to Cairo". Production wake-detection code
-  was already correct and needed no changes. Also fixed one pre-existing
-  `clippy::field_reassign_with_default` in `senses/audio/full.rs`'s whisper
-  init (struct-literal instead of default-then-mutate).
+- **Readable live logs**: adjacent content-identical events are condensed into
+  explicit expandable groups without changing the raw buffer or NDJSON export,
+  while severity now has accessible text labels plus clear error, warning,
+  informational, debug, trace, and fallback styling.
+- **Windows system tray identity**: register one intentional Continuum tray
+  icon instead of overlapping declarative and Rust-owned icons, retain the
+  dashboard and quick-action menu behavior, and use the quiet
+  `Continuum · Idle` tooltip.
+- Provider model catalogs now support refresh-all and a configurable periodic refresh, propagate changes immediately to Chat, and power a unified searchable ChatGPT-style model switcher with provider branding.
+- **Blocking CI gates**: restore the explicit `continuum` → `cairo` Whisper
+  wake-word alias that the Kairo rename accidentally made unreachable, update
+  Whisper parameter construction for Rust 1.94's strict Clippy gate, and apply
+  the desktop Prettier format expected by the blocking build job. Releases now
+  wait for a successful `CI` workflow on `main` and reject stale validated
+  SHAs, so red or superseded commits cannot be published concurrently. The
+  parallel full-test job restores but no longer races to upload the same
+  multi-gigabyte native cache already owned by the full Clippy job.
+- **English language consistency**: the desktop voice controls no longer leak
+  Dutch labels, and Chat now reads the saved onboarding language preference for
+  every response with a safe English fallback for missing or invalid settings.
+- **Windows installer release**: packaging is permanently NSIS-only because
+  WiX 3.14 `candle.exe` fails to start on multiple GitHub-hosted Windows
+  images. Both Tauri config and the release command exclude MSI/WiX, with a
+  preflight guard that rejects target drift before compilation. The release
+  also uses an absolute workspace `CARGO_TARGET_DIR`, preventing a duplicate
+  Tauri compile and ensuring NSIS assets land where publishing expects them.
+- **Desktop release blockers**: declare the `react-virtuoso` and `remark-gfm`
+  packages already imported by the new chat UI, and correct the Windows named
+  pipe bindings/features so the Tauri desktop binary compiles on Windows.
+- **Release Tauri version gate**: align `@tauri-apps/api` with the resolved
+  Tauri 2.11 Rust crate so signed desktop packaging no longer stops on a
+  frontend/backend minor-version mismatch.
 - **CI format gate**: 9 dashboard files that `pnpm format` (Prettier `--check`)
   flagged in the `build-desktop` job are reformatted; `prettier --write` was
   applied so `pnpm format` now passes.

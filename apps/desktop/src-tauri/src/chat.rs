@@ -120,6 +120,7 @@ fn system_prompt(
     version: &str,
     provider: &str,
     model: &str,
+    preferred_language: &str,
 ) -> String {
     let base = cfg
         .system_prompt_path
@@ -127,7 +128,7 @@ fn system_prompt(
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
     format!(
-        "{base}\n\n## Live status\n- Continuum version: {version}\n- Background runtime: {}\n- You are: {model} via {provider}\n",
+        "{base}\n\n## Live status\n- Continuum version: {version}\n- Background runtime: {}\n- You are: {model} via {provider}\n- Selected response language: {preferred_language}\n\nRespond in the selected response language, even when the user's message is written in another language. A direct request to use another language may override it for that turn only.\n",
         if runtime_running { "running" } else { "not running" }
     )
 }
@@ -332,6 +333,7 @@ pub async fn chat_send_message(
             env!("CARGO_PKG_VERSION"),
             &conn.display_name,
             &conv.model,
+            &crate::onboarding::preferred_language(&dev_dir),
         ),
         messages: conv
             .messages
@@ -491,6 +493,21 @@ pub fn chat_cancel(conversation_id: String, chat_state: tauri::State<'_, Arc<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_enforces_selected_english_language() {
+        let prompt = system_prompt(
+            &continuum_core::config::ChatConfig::default(),
+            true,
+            "0.1.0",
+            "Local provider",
+            "test-model",
+            "en",
+        );
+
+        assert!(prompt.contains("Selected response language: en"));
+        assert!(prompt.contains("Respond in the selected response language"));
+    }
 
     /// `chat_send_message` itself takes `tauri::State`/`tauri::AppHandle`
     /// params that need a running Tauri app to construct, so it isn't

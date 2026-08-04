@@ -1,21 +1,17 @@
 //! # Repair tools (`mcp__continuum__repair_*`)
 //!
-//! Exposed exclusively to the repair agent session. Each tool writes an
-//! **intent file** under `~/.continuum-dev/repair-intents/` that the running
-//! Continuum runtime watches for. The runtime then executes the intent (for
-//! example, tearing down and re-spawning the TTS subsystem) and writes an
-//! outcome file back. This indirection lets the repair agent stay inside
-//! its Claude Code sandbox without the runtime giving the agent direct
-//! process-control primitives.
+//! Published compatibility tools for repair sessions. The restart, reinstall,
+//! and escalation helpers can write intent files under
+//! `~/.continuum-dev/repair-intents/`, but this release has no runtime consumer
+//! for those files. The guarded Health flow therefore denies those tools and
+//! performs its one supported mutation (starting an offline runtime) directly
+//! in the desktop after preview and backup authorization.
 //!
 //! For `rollback_config` and `test_component` we can answer directly from
 //! the MCP process because the work is pure disk I/O.
 //!
-//! `escalate` writes a user-visible notification file that the dashboard
-//! Health tab surfaces as a red banner until acknowledged.
-//!
-//! The Continuum runtime picks intents up every 2 s; the dashboard reports
-//! their status via the normal health stream.
+//! `escalate` also remains only a compatibility intent writer. Manual actions
+//! are surfaced truthfully in the repair agent's streamed output.
 
 use std::path::{Path, PathBuf};
 
@@ -99,7 +95,7 @@ pub struct TestResponse {
     pub note: Option<String>,
 }
 
-/// Queue a restart intent for the runtime to pick up.
+/// Queue a legacy restart intent. No consumer exists in this release.
 pub fn restart(data_dir: &Path, target: RepairTarget) -> anyhow::Result<IntentResponse> {
     queue_intent(
         data_dir,
@@ -110,7 +106,7 @@ pub fn restart(data_dir: &Path, target: RepairTarget) -> anyhow::Result<IntentRe
     )
 }
 
-/// Queue a model reinstall intent.
+/// Queue a legacy model reinstall intent. No consumer exists in this release.
 pub fn reinstall(data_dir: &Path, target: RepairTarget) -> anyhow::Result<IntentResponse> {
     queue_intent(
         data_dir,
@@ -131,9 +127,8 @@ pub fn rollback(data_dir: &Path, date: &str) -> anyhow::Result<RollbackResponse>
 }
 
 /// Run the component's light-weight file-presence check. For the full
-/// health probe the repair agent should prefer `restart_component`
-/// (which triggers a re-spawn + probe), but this gives Claude a quick
-/// sanity check that doesn't require runtime round-trip.
+/// health probe this gives Claude only a quick sanity check; it is not proof
+/// of a live restart or recovery.
 pub fn test(data_dir: &Path, target: RepairTarget) -> TestResponse {
     let (status, note) = match target {
         RepairTarget::Vision => file_status(data_dir.join("models/vision")),
@@ -171,7 +166,7 @@ pub fn test(data_dir: &Path, target: RepairTarget) -> TestResponse {
     }
 }
 
-/// Write an escalation file the dashboard surfaces as a banner.
+/// Write a legacy escalation intent. No dashboard consumer exists currently.
 pub fn escalate(data_dir: &Path, message: &str) -> anyhow::Result<IntentResponse> {
     queue_intent(
         data_dir,
@@ -254,19 +249,23 @@ fn queue_intent(
     };
     let filename = format!("{ts}-{kind}-{nonce:06x}.json");
     let path = intents_dir.join(&filename);
+    let temp = intents_dir.join(format!(".{filename}.tmp"));
     let payload = serde_json::json!({
         "kind": kind,
         "queued_at": Utc::now().to_rfc3339(),
         "body": body,
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
+    std::fs::write(&temp, serde_json::to_string_pretty(&payload)?)?;
+    std::fs::rename(&temp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })?;
     Ok(IntentResponse {
         intent_file: path.display().to_string(),
         queued_at: Utc::now().to_rfc3339(),
     })
 }
 
-fn backups_dir_for(data_dir: &Path) -> PathBuf {
+pub(crate) fn backups_dir_for(data_dir: &Path) -> PathBuf {
     data_dir
         .parent()
         .map(|p| p.join(".continuum-backups"))
@@ -311,15 +310,15 @@ mod tests {
             .unwrap()
             .join(".continuum-backups");
         std::fs::create_dir_all(&dev).unwrap();
-        std::fs::write(dev.join("config.toml"), "original").unwrap();
+        std::fs::write(dev.join("config.toml"), "[screen]\ninterval_secs = 4\n").unwrap();
         continuum_core::health::backup::run_backup(&dev, &backups).unwrap();
-        std::fs::write(dev.join("config.toml"), "corrupted").unwrap();
+        std::fs::write(dev.join("config.toml"), "[screen]\ninterval_secs = 8\n").unwrap();
 
         let date = Utc::now().format("%Y-%m-%d").to_string();
         let resp = rollback(&dev, &date).unwrap();
         assert!(resp.restored_path.ends_with("config.toml"));
         let contents = std::fs::read_to_string(dev.join("config.toml")).unwrap();
-        assert_eq!(contents, "original");
+        assert_eq!(contents, "[screen]\ninterval_secs = 4\n");
     }
 
     #[test]

@@ -23,8 +23,8 @@ import type { VoiceMode } from "@/lib/types";
  *                 row)
  *   - thinking / speaking → dimmed, no-op (Continuum is busy responding)
  *
- * Tweede klik tijdens listening: no-op visueel + geen extra request - past
- * bij de one-shot intent semantiek.
+ * A second click while listening is a visual no-op and sends no extra request,
+ * matching the one-shot intent semantics.
  */
 export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
   const [isPressed, setIsPressed] = useState(false);
@@ -67,13 +67,13 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         type="button"
         onClick={onClick}
         disabled={disabled}
-        aria-label={isListening ? "Aan het luisteren" : "Klik om te praten met Continuum"}
+        aria-label={isListening ? "Listening" : "Click to talk to Continuum"}
         title={
           isListening
-            ? "Aan het luisteren - praat nu"
+            ? "Listening - speak now"
             : isBusy
-              ? "Continuum is bezig"
-              : "Klik om te praten (of zeg 'hey Continuum' / Ctrl+Shift+K)"
+              ? "Continuum is busy"
+              : "Click to talk (or say 'hey Continuum' / Ctrl+Shift+K)"
         }
         className={clsx(
           "relative flex h-20 w-20 items-center justify-center rounded-full",
@@ -105,17 +105,17 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
 function hintFor(mode: VoiceMode): string {
   switch (mode) {
     case "listening":
-      return "Aan het luisteren…";
+      return "Listening…";
     case "thinking":
-      return "Aan het denken…";
+      return "Thinking…";
     case "speaking":
-      return "Aan het spreken…";
+      return "Speaking…";
     case "muted":
-      return "Voice gedempt";
+      return "Voice muted";
     case "error":
-      return "Voice fout";
+      return "Voice error";
     default:
-      return "Klik om te praten";
+      return "Click to talk";
   }
 }
 

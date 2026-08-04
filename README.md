@@ -1,5 +1,7 @@
 # Continuum
 
+[![CI](https://github.com/vixco/continuum/actions/workflows/ci.yml/badge.svg)](https://github.com/vixco/continuum/actions/workflows/ci.yml)
+
 **Local context, handoff, and permission infrastructure for coding agents.**
 
 Continuum is evolving from the Apache-2.0 Continuum codebase into a local control

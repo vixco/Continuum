@@ -73,6 +73,28 @@ Local sources
 The event store is authoritative. The world model is a rebuildable projection.
 Embeddings help retrieval, but never decide whether a fact is current or true.
 
+### Continuous live context
+
+Layer 1 continuously captures every connected monitor through an independent
+local worker (200 ms target cadence by default). Capture events enter one
+bounded, globally ordered FIFO; when downstream vision work falls behind, the
+oldest pending image is dropped and the gap is recorded instead of silently
+stopping capture. Cheap luma differencing keeps unchanged frames out of the
+local vision model while preserving capture timestamps and counters.
+
+The senses layer projects monitor descriptions, foreground application/window,
+coarse keyboard/mouse activity (idle/active only), and local terminal/project
+metadata into `~/.continuum-dev/live-context.json`. This compact, versioned,
+source-attributed projection is the shared current world-state consumed by
+triage and exposed read-only to planner/executor/verifier/safety agents through
+`system_live_context`; agents do not independently process raw screenshots.
+
+Capture and vision remain local by default. Screen observation is explicitly
+configurable in the Brain tab, screenshot persistence is opt-in, configured
+sensitive applications/titles are redacted before vision or publication, and
+no key values, pointer coordinates, clipboard contents, or terminal text enter
+the live-context contract.
+
 ## Domain model
 
 The first typed entities are:
@@ -154,10 +176,17 @@ No adapter may become the authoritative owner of project memory.
 
 ## Desktop UI contract
 
-The six approved reference screens define the visual contract for the desktop
-app. The shell contains real navigation for Home, Projects, Memory, Agents,
-Permissions, Timeline, and Settings. Agents contains both Handoff/Relay and
-Context Compiler/Launch Pad views.
+The Continuum shell exposes real navigation for ten tabs, grouped as:
+
+- **Daily**: Home, Chat, Voice, Memory
+- **Configure**: Brain, Tools & Skills, Automations
+- **Advanced**: Health, Logs
+- **Settings** (system-level)
+
+The four-layer pipeline (Senses, Triage, Orchestrator, Workers) is reflected
+in the Brain tab. The full per-tab status, scope (live / fixture / hybrid),
+and known gaps is tracked in `docs/CURRENT_TABS.md` — that file is the
+source of truth for what each tab actually does today.
 
 Phase 0 may display fixture data. Fixture data must stay isolated from runtime
 state and must not be presented as a live integration. The visual language is:
@@ -179,7 +208,7 @@ Tauri updater after its artifact signature has been verified.
 
 1. Make CI and dependency installation reproducible and blocking.
 2. Ship the approved Continuum shell with fixture-backed tabs.
-3. Add `continuum-domain`, `continuum-store`, and schema migrations.
+3. Add schema migrations against the typed world model.
 4. Implement project detection and `continuum context --project current`.
 5. Implement Codex/Claude handoff with evidence capture.
 6. Enforce permission policy on brokered actions.

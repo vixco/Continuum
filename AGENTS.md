@@ -107,7 +107,16 @@ cargo run --bin continuum-triage-bench       # runs 20-frame benchmark, reports 
 
 ## Current project status
 
-Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 11 tools exposed via a standalone `continuum-mcp` binary: memory (query/list/get/set), system info (time/window/clipboard/notification), filesystem (read/list, read-only with allowlist + hardcoded deny list), and web fetch (GET only, public-IP only, redirects disabled). Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
+Phases 0–4 are complete (bootstrap, perception, triage, orchestrator, MCP tools). The orchestrator wakes with 20 tools exposed via a standalone `continuum-mcp` binary, organized in six namespaces. Every tool name is namespaced (`<ns>_<action>`) so MCP clients can disambiguate them at a glance. The current registry:
+
+- **memory** — `memory_query_episodic`, `memory_list_facts`, `memory_get_fact`, `memory_set_fact`
+- **system** — `system_current_time`, `system_active_window`, `system_clipboard_get`, `system_notification`
+- **filesystem** — `fs_read_file`, `fs_list_dir` (read-only with allowlist + hardcoded deny list)
+- **web** — `web_fetch` (GET only, public-IP only, redirects disabled)
+- **repair** — `repair_restart_component`, `repair_reinstall_model`, `repair_rollback_config`, `repair_test_component`, `repair_escalate`
+- **workers** — `workers_spawn_worker`, `workers_worker_status`, `workers_worker_cancel`, `workers_worker_wait`, `workers_worker_list`
+
+Every tool call is audited to episodic memory. Next: Phase 5 (voice). See `ROADMAP.md` for full phase status. Triage layer remains on Qwen 3 8B (95% benchmark accuracy).
 
 ## Coding standards
 
@@ -233,6 +242,18 @@ Rules for local model code:
 For any task with more than 3 steps, create a todo list at the start of your work and update it as you go. The maintainer can see your progress in the dashboard and will intervene if something looks wrong. Aim for at least 5 items in any substantial todo list so the plan is legible.
 
 ## How to use sub-agents
+
+Before doing substantial coding reasoning or spawning cloud Codex sub-agents,
+use the global `use-local-north` skill and `north-mini-code-1.0` as the primary
+local worker. Delegate repository analysis, plans, implementation drafts,
+debugging, tests, mechanical refactors, localization audits, and focused diff
+review. For larger tasks, use focused North calls for plan, implementation, and
+review/test while keeping only relevant output in Codex context. Tell the
+maintainer immediately when LM Studio or North is unavailable; use the
+`use-local-sera` skill only as a disclosed fallback. Cloud sub-agents are a last
+resort when explicitly requested or genuinely required for independent
+high-confidence verification. Codex remains responsible for repository truth,
+reviewed edits, validation, commits, pushes, releases, and final claims.
 
 When you are implementing a feature that touches multiple crates or has a distinct research phase, use the `Task` tool to spawn sub-agents. Examples of good sub-agent delegation:
 

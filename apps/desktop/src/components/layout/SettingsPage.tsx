@@ -79,7 +79,7 @@ export function SettingsPage({
           {updateState.phase === "current" && "You are up to date."}
           {updateState.phase === "available" && updateState.update && (
             <span className="flex flex-wrap items-center gap-3 text-amber-300">
-              Update v{updateState.update.version} is available.
+              {updateState.message ?? `Update v${updateState.update.version} is available.`}
               <Button size="sm" variant="primary" onClick={onInstallUpdate}>
                 Install now
               </Button>
@@ -92,7 +92,14 @@ export function SettingsPage({
             </>
           )}
           {updateState.phase === "error" && (
-            <span className="text-red-300">{updateState.message ?? "Update check failed."}</span>
+            <span className="flex flex-wrap items-center gap-3 text-red-300">
+              {updateState.message ?? "Update check failed."}
+              {updateState.update && (
+                <Button size="sm" variant="danger" onClick={onInstallUpdate}>
+                  Retry install
+                </Button>
+              )}
+            </span>
           )}
         </div>
       </Card>

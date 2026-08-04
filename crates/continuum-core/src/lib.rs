@@ -25,6 +25,7 @@ pub mod curator;
 pub mod hardware;
 pub mod health;
 pub mod logs;
+pub mod mcp_registry;
 pub mod runtime;
 pub mod runtime_publish;
 pub mod senses;

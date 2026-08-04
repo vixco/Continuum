@@ -122,6 +122,7 @@ All knobs live under `[chat]` in `~/.continuum-dev/config.toml`
 | `connect_timeout_secs` | `10` | HTTP connect timeout for provider requests. |
 | `stream_idle_timeout_secs` | `60` | Abort a stream if no delta arrives for this many seconds. |
 | `cli_timeout_secs` | `120` | Idle timeout for a single Claude CLI send: max seconds allowed to pass WITHOUT a new line of CLI stdout before the send is aborted. Resets on every line, so it is not an overall/end-to-end timeout — a steadily-streaming long generation is never killed by this. |
+| `model_refresh_interval_secs` | `300` | Refresh cached model lists in the desktop app every N seconds (minimum effective interval: 30). Set to `0` to disable automatic refresh. |
 | `system_prompt_path` | unset | Path to a file that replaces the built-in system prompt (`apps/desktop/src-tauri/assets/chat-system-prompt.md`). The live-status footer is still appended after whatever text this file contains. |
 
 Example override:
@@ -132,6 +133,10 @@ max_tokens = 4096
 stream_idle_timeout_secs = 30
 system_prompt_path = "C:/Users/you/my-continuum-prompt.md"
 ```
+
+Provider logos shown in Settings and the Chat model switcher are bundled local
+raster assets sourced once through Google's favicon service. The running app
+does not contact Google for logos; custom providers use a neutral fallback icon.
 
 ## Error glossary
 
