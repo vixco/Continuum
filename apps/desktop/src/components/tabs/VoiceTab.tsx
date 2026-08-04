@@ -1,10 +1,10 @@
 "use client";
 
-import { Info, Volume2 } from "lucide-react";
+import { Info } from "lucide-react";
 
 import { useStore } from "@/lib/store";
 import { continuum } from "@/lib/tauri";
-import { Button, Card, Kbd, Select, Slider, Toggle } from "@/components/ui/primitives";
+import { Card, Kbd, Select, Slider, Toggle } from "@/components/ui/primitives";
 
 export function VoiceTab() {
   const voice = useStore((s) => s.state.voice);
@@ -104,14 +104,6 @@ export function VoiceTab() {
             max={1.4}
             step={0.05}
           />
-        </div>
-        <div className="mt-4 flex items-center gap-2">
-          <Button size="sm" variant="default">
-            <Volume2 size={12} /> Preview
-          </Button>
-          <span className="text-xs text-ink-muted">
-            Plays "Continuum checking in" using the primary voice.
-          </span>
         </div>
       </Card>
 

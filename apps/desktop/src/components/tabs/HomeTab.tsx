@@ -443,11 +443,7 @@ function CuratorRow({ curator }: { curator: CuratorSnapshot | null | undefined }
 
 function ScreenshotThumb({ path }: { path: string | null }) {
   if (!path) {
-    return (
-      <div className="flex h-20 w-32 items-center justify-center rounded-md border border-dashed border-bg-border text-xs text-ink-dim">
-        no screenshot
-      </div>
-    );
+    return null;
   }
   return (
     <div
