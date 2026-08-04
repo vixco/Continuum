@@ -679,8 +679,15 @@ impl Vault {
     }
 
     /// Query events within an optional time range, ordered ascending by
-    /// timestamp. `limit` defaults to 500 if not specified; `since` and
-    /// `until` are inclusive when provided.
+    /// timestamp — *unless* `range.since_id` is set, in which case the
+    /// result is ordered ascending by `id` instead (see
+    /// [`EventRange::since_id`]'s doc comment for why: a `since_id` caller
+    /// is polling a watermark under a `LIMIT`, and needs the fetched batch
+    /// to be *contiguous by id* — the lowest ids past the watermark — not
+    /// whichever ids happen to sort earliest by `ts`, which can skip a
+    /// lower id whose `ts` is backdated ahead of a higher id's. `limit`
+    /// defaults to 500 if not specified; `since` and `until` are inclusive
+    /// when provided.
     pub async fn events(&self, range: &EventRange) -> Result<Vec<Event>> {
         let limit = range.limit.unwrap_or(500);
         let mut query =
@@ -697,7 +704,11 @@ impl Vault {
             query.push_str(" AND id > ?");
         }
 
-        query.push_str(" ORDER BY ts ASC LIMIT ?");
+        if range.since_id.is_some() {
+            query.push_str(" ORDER BY id ASC LIMIT ?");
+        } else {
+            query.push_str(" ORDER BY ts ASC LIMIT ?");
+        }
 
         let mut qry = sqlx::query_as::<
             _,

@@ -266,6 +266,18 @@ pub async fn extract_pass(
     cfg: &CuratorConfig,
     since_id: i64,
 ) -> anyhow::Result<ExtractOutcome> {
+    // Scoped re-review fix: `Vault::events` orders by `id` ascending (not
+    // `ts` ascending) whenever `since_id` is set — see `EventRange::since_id`'s
+    // doc comment for why (a ts-ordered fetch under this `limit` could skip
+    // a lower id whose `ts` is backdated later than a higher id's, and this
+    // function's watermark advance would then lose it permanently). This
+    // batch — and the events/related blocks built from it below, and the
+    // "most recent 3" slice `build_related_block` takes off its tail — is
+    // therefore in id (insertion) order, not strictly chronological order.
+    // That's an acceptable approximation for the prompt: id order tracks
+    // insertion order, which for real-time events (wake/session) is exactly
+    // chronological and for backdated distilled events is off only by the
+    // distillation lag, not scrambled.
     let events = vault
         .events(&EventRange {
             since: None,

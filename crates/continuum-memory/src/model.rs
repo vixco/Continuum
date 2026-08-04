@@ -403,6 +403,15 @@ pub struct EventRange {
     /// filters `AND` together); the curator's own extraction pass uses
     /// `since_id` exclusively for this reason (see
     /// `curator::run::extract_pass`).
+    ///
+    /// Ordering guarantee: whenever `since_id` is set, [`crate::Vault::events`]
+    /// orders the result by `id` ascending (not `ts` ascending, its
+    /// default) — under a `limit`-bounded fetch, this is what keeps the
+    /// returned batch *contiguous by id* (the lowest ids past the
+    /// watermark). Ordering by `ts` instead could return a higher id while
+    /// skipping a lower one whose `ts` happens to sort later (e.g. a
+    /// backdated row), and a watermark caller that then advances past the
+    /// batch's max id would permanently lose the skipped one.
     #[serde(default)]
     pub since_id: Option<i64>,
     #[serde(default)]
