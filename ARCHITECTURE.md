@@ -370,9 +370,16 @@ These are registered by `crates/continuum-mcp/src/server.rs` today; CI keeps the
 
 **Memory (`mcp__continuum__memory_*`)**
 - `memory_query_episodic(query, limit?)` — vector search over episodic memory
-- `memory_list_facts(prefix?, limit?)` — list semantic facts by dotted key prefix
-- `memory_get_fact(key)` — fetch one semantic fact
-- `memory_set_fact(key, value, source?)` — upsert a semantic fact (confidence clamped by source)
+- `memory_list_facts(prefix?, limit?)` — list facts by dotted key prefix (vault-first, legacy `semantic.sqlite` fallback)
+- `memory_get_fact(key)` — fetch one fact (vault-first, legacy fallback)
+- `memory_set_fact(key, value, source?)` — upsert a fact; writes a `type: fact` vault note (confidence clamped by source)
+
+**Memory vault (`mcp__continuum__memory_vault_*`, Plan B)**
+- `memory_vault_search(query, types?, project?, limit?)` — full-text search over vault notes
+- `memory_vault_get(id)` — fetch one note's full frontmatter, body, and backlinks
+- `memory_vault_save(type, title, body, project?, confidence?, importance?, tags?, relations?, source_ref?)` — create, or update-by-title, a confirmed vault note
+- `memory_vault_resolve(id, action, replaces?)` — confirm / reject / supersede a candidate note
+- `memory_wipe_all(confirm)` — queue a derived-data wipe (`confirm` must be the literal string `"WIPE"`); vault markdown is never deleted
 
 **System (`mcp__continuum__system_*`)**
 - `system_current_time()` — local wall-clock + tz + epoch ms
@@ -425,8 +432,8 @@ Memory is arguably the hardest part of Continuum and what separates it from ever
 |---|---|---|---|
 | Raw log (SQLite) | Everything the senses produce, verbatim | itself | unchanged |
 | Episodic memory (LanceDB) | Distilled "things worth remembering" from the day, vector-searchable | itself | unchanged |
-| **Memory vault (markdown + derived SQLite index)** | Structured, linked, user-ownable knowledge (decisions, facts, people, projects, preferences, …) | **the markdown files** — the index is fully derived and disposable | current (Plan A, shipped) |
-| ~~Semantic memory (flat key/value SQLite)~~ | Legacy stable facts (`user.name`, `project.x.stack`, …) | itself | **legacy** — superseded by the vault, migrated on request, retired once the curator (Plan B) lands |
+| **Memory vault (markdown + derived SQLite index)** | Structured, linked, user-ownable knowledge (decisions, facts, people, projects, preferences, …), kept current by a background **curator** pipeline | **the markdown files** — the index is fully derived and disposable | current (Plan A + Plan B, shipped) |
+| ~~Semantic memory (flat key/value SQLite)~~ | Legacy stable facts (`user.name`, `project.x.stack`, …) | itself | **legacy** — superseded by the vault; migrated on request; the orchestrator's fact tools (`memory_set_fact` et al.) write exclusively to the vault now, so this store is read-only from the runtime's own perspective, kept only as a fallback for facts never migrated |
 
 The vault is described in full in `docs/memory.md`; this section covers how all four stores relate.
 
@@ -502,18 +509,47 @@ isn't running. Cross-process change propagation is a debounced file-watcher
 in each process — an edit made by one process (or by hand, or in Obsidian)
 is picked up and reindexed by the other without polling.
 
-The vault ships as **Plan A**: crate, index, watcher, migration, the
+The vault shipped as **Plan A**: crate, index, watcher, migration, the
 Tauri command surface, and the graph-centric Memory tab rebuild (see
-"Dashboard" below) are all live today. The **curator** — a background
-pipeline (local triage LLM + batched orchestrator review) that continuously
-turns perception into proposed vault candidates, plus the MCP tools that let
-the orchestrator read/write the vault directly — is **Plan B** and has not
-been built yet (tracked as a follow-up plan once written, alongside
-`docs/superpowers/plans/…-plan-b`). Until then, `memory.curator` config
-exists and is honored by config loading (per non-negotiable #3, nothing is
-hardcoded ahead of being wired up) but nothing reads it at runtime, and the
-vault only changes through the desktop UI, the file-watcher picking up
-external edits, or the one-shot legacy migration below.
+"Dashboard" below). The **curator** — a background pipeline (local triage
+LLM + orchestrator review via MCP) that continuously turns perception into
+proposed vault candidates, detects contradictions between existing notes,
+summarizes finished work sessions, and keeps the vault tidy — shipped as
+**Plan B** (`docs/superpowers/plans/2026-08-03-memory-vault-plan-b.md`) and
+is described in full in `docs/memory.md`'s "The curator" section.
+
+### The curator (Plan B)
+
+`crates/continuum-core/src/curator/` implements the pipeline; it only spawns
+when a triage LLM is loaded at boot, and runs its own background loop
+independent of orchestrator wakes (a fixed-interval ticker, not something
+the orchestrator drives):
+
+1. **Extraction** — reads new vault events, asks the triage LLM to propose
+   candidate notes, routes each by confidence (auto-confirm above
+   `auto_confirm_threshold`, candidate in between, discarded below
+   `discard_floor`).
+2. **Conflict detection** — for each newly-written note, asks the LLM
+   whether a same-type/same-project confirmed note it resembles is
+   `unrelated`/`supersedes`/`contradicts`, attaching a `proposes_supersede`
+   relation above `supersede_confidence_floor` — never auto-resolving it.
+3. **Session summaries** — a curator-owned `SessionTracker` (idle timeout or
+   a sustained foreground-process change) compresses a finished work session
+   into a `Session` note.
+4. **Daily hygiene** — event pruning, expired-node sweeping, and draining
+   any pending derived-data wipe request, once per local calendar day.
+5. **A daily maintenance wake** — a purpose-built ticker (`maintenance_wake_hour`)
+   wakes the orchestrator specifically to drain pending decisions on a day
+   nothing else would have; there was no pre-existing scheduler to hook this
+   into, so `bin/continuum.rs` grew one.
+
+Candidates surface to a human or the orchestrator three ways: the wake
+context's "Pending memory decisions" section (below), the five
+`mcp__continuum__memory_vault_*` MCP tools, and the dashboard's Memory tab
+curator-card stack. Every LLM-parse failure retries once before the
+pass/pair is skipped; a window that fails outright 3 times running is
+abandoned rather than wedging the curator forever. Full config keys, prompt
+locations, and the session-boundary algorithm: `docs/memory.md`.
 
 ### Semantic memory (legacy, superseded by the vault)
 
@@ -540,12 +576,12 @@ CREATE TABLE semantic_edges (
 This store is **legacy**: `crates/continuum-memory::migrate_legacy_semantic`
 (exposed as the Memory tab's "Import legacy memory" action) converts every
 row into a vault `fact` note, idempotently, without ever modifying or
-deleting the original database. The orchestrator's existing MCP tools
-(`memory_list_facts`, `memory_get_fact`, `memory_set_fact`, below) keep
-reading and writing this store exactly as before — no breaking change mid
-transition — until the curator (Plan B) lands and takes over fact writing
-through the new `memory_vault_*` MCP tools, at which point semantic-store
-writes retire for good.
+deleting the original database. `memory_set_fact` now writes exclusively
+into the vault (a `type: fact` note, matched/updated by title); the legacy
+database is never written to again. `memory_get_fact`/`memory_list_facts`
+still read it, but only as a fallback when the vault has no matching note or
+is itself unavailable — for facts written before this redirect shipped, or
+never migrated.
 
 ### Memory retrieval flow
 
@@ -557,22 +593,36 @@ When the orchestrator wakes up, Continuum Core runs a two-step retrieval:
 The top 3 episodic memories, plus all relevant semantic facts (selected by
 tag and key matching), are added to the orchestrator's context. The
 orchestrator never sees the raw log directly — no MCP tool exposes it today;
-only the episodic top-3 (`memory_query_episodic`) and semantic facts
-(`memory_list_facts` / `memory_get_fact`) reach the wake context. **Vault
-notes are not yet part of wake-context retrieval** — that FTS +
-graph-neighborhood injection (`wake_vault_notes_max`, sensitivity filtering)
-is part of Plan B; today the vault is a manual, desktop-first store.
+the episodic top-3 (`memory_query_episodic`) and semantic facts
+(`memory_list_facts` / `memory_get_fact`) reach the wake context this way.
+
+**Vault notes are also injected on every wake**, independent of the
+episodic/semantic flow above: `retrieve_vault_context` FTS-matches the
+trigger frame against confirmed vault notes (up to `wake_vault_notes_max`,
+sensitivity-gated) into a `## Long-term memory (vault)` wake-message
+section, and pulls candidate notes older than 30 minutes (oldest-first, up
+to `claude_batch`, also sensitivity-gated) into a `## Pending memory
+decisions` section with an instruction to resolve them via
+`memory_vault_resolve`/`memory_vault_save`. Every internal failure here
+(a vault search error, an unparseable timestamp) degrades to an empty
+section rather than failing the wake — a memory-retrieval hiccup must never
+block the orchestrator from waking. See `docs/memory.md`'s curator section
+and `docs/mcp-tools.md`.
 
 ### Memory writing
 
-The orchestrator can write to memory via the `memory_set_fact` MCP tool —
-when something important is discussed or decided, it upserts a semantic
-fact (confidence clamped by source; see `docs/mcp-tools.md`). That is the
-only memory-writing tool that exists today: there is no generic "write a
-note" tool, and writing to the **vault** currently happens through the
-Memory tab (create/edit a note) or the legacy migration —
-orchestrator-driven vault writes (`memory_vault_save`,
-`memory_vault_resolve`, …) are part of Plan B.
+The orchestrator writes to memory two ways. `memory_set_fact` — the
+simplest path, for a flat dotted-key fact (confidence clamped by source) —
+now writes a `type: fact` vault note under the hood rather than the legacy
+store (see `docs/mcp-tools.md`). For anything richer — a decision, a
+person, a nuanced preference — `memory_vault_save` writes (or, matched by
+title, updates) a full vault node directly: type, body, project, tags,
+relations. `memory_vault_resolve` lets it act on candidates the curator
+proposed (confirm / reject / supersede). Outside the orchestrator, the
+vault also changes through the Memory tab (create/edit a note directly), the
+legacy migration, and the curator pipeline itself (above) — the vault has no
+single writer, by design; every writer goes through the same file-watcher
+reindex.
 
 ---
 
@@ -647,15 +697,17 @@ Model configuration for all four layers with dropdowns, test buttons, and a visu
 Graph-centric: a full-bleed force-directed graph of the vault (`docs/memory.md`)
 is the page itself, not a sub-tab. Click a node to open a docked, resizable
 detail/edit panel; expand it to a full-screen markdown editor. Floating
-curator cards (empty until Plan B ships) and a bottom timeline scrub strip
-sit over the graph; the topbar has search, type/status/project filters,
-saved views, and a "…" vault-actions menu (rebuild the derived index, import
-the legacy semantic store, wipe derived memory data). "Wipe" never deletes
-vault markdown — but the underlying `wipe_memory` command is currently a
-stub that validates the confirmation and logs the request without yet
-clearing the raw log/episodic/events stores; the actual clear ships with a
-follow-up `memory__wipe_all` MCP tool it will forward to. See
-`docs/dashboard.md` for the full tab breakdown.
+curator cards (populated once the curator pipeline writes its first
+candidate) and a bottom timeline scrub strip sit over the graph; the topbar
+has search, type/status/project filters, saved views, and a "…"
+vault-actions menu (rebuild the derived index, import the legacy semantic
+store, wipe derived memory data). "Wipe" never deletes vault markdown: it
+writes `<dev_dir>/wipe-request.json` (same contract the MCP `memory_wipe_all`
+tool uses), immediately prunes vault events + rebuilds the index from the
+dashboard process, and the `continuum` runtime clears raw log/episodic at
+its next boot or daily hygiene tick. The Home tab also shows a Curator
+status row (last pass, pending/written counts, a degrading badge at 3+
+consecutive failures). See `docs/dashboard.md` for the full tab breakdown.
 
 ### Tools
 

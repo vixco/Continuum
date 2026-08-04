@@ -105,6 +105,75 @@ Recovery:
 - The Memory tab's **Open vault folder** and **Rebuild index** actions (in the "…" vault-actions menu, "Open vault" also has its own topbar button) are the user-facing versions of the two recovery steps above and are always available, even when the vault has failed to open — `memory_open_vault` deliberately does not depend on a healthy index (see the comment on `MemoryState::vault_dir` in `memory.rs`).
 - Full data model, config, and quarantine details: `docs/memory.md`.
 
+## Memory Curator
+
+Component: `memory/curator`
+
+Logs:
+
+- `layer = "memory"`, `component = "curator"` for extraction passes, conflict
+  detection, session summaries, hygiene, and wipe-request draining.
+- Every LLM parse failure logs a `warn` and retries once before the pass (or
+  pair, for conflict detection) is skipped; a window that fails outright 3
+  times in a row logs a `warn` and is abandoned (see `docs/memory.md`'s
+  "Failure policy").
+
+Health check — there is **no dedicated MCP health tool and no runtime
+`HealthRegistry` entry** for the curator (unlike the repair-agent tools
+above, which are a separate subsystem). The curator's health surfaces
+through the same 2 s `state.json` publish loop every other runtime counter
+uses:
+
+- The runtime publishes a `CuratorSnapshot` (`last_pass_at`,
+  `consecutive_failures`, `candidates_written_total`, `pending_count`,
+  `enabled`) as part of `RuntimeSnapshot.curator` in
+  `crates/continuum-core/src/runtime_publish.rs`. `None` only for a
+  `state.json` written before this field existed; once the runtime is up it
+  is always `Some` — `enabled: false` with zeroed counters is how a
+  never-spawned or config-disabled curator reports, not `None`.
+- The desktop dashboard mirrors this into `MemoryState.curator` and renders
+  it as a "Curator" row on the Home tab (`docs/dashboard.md`): a
+  `StatusBadge` showing `healthy` normally, `degrading` once
+  `consecutive_failures >= 3` (the same threshold the doc-comment on
+  `CuratorSnapshot::consecutive_failures` calls out), plus last-pass time,
+  pending count, and written count. `!curator || !curator.enabled` renders
+  "Curator: off" — this covers both "runtime never connected" and "runtime
+  connected, curator genuinely off" identically, since there's no
+  user-facing reason to distinguish them.
+- The curator has **no** `should_restart()`/`repair_test_component` probe —
+  it is not registered in `apps/desktop/src-tauri/src/components.rs`'s
+  health-check grid, and there is no `repair_restart_component` target for
+  it. This is a real gap against this doc's usual self-healing contract,
+  not an oversight to paper over: the dashboard's Home-tab row is currently
+  the only signal a degrading curator surfaces.
+
+Recovery:
+
+- **`consecutive_failures >= 3` (degrading)**: the underlying cause is
+  almost always the local triage LLM being unreachable or producing
+  consistently unparseable output — check the triage component's own health
+  first (Brain tab / `docs/self-healing.md`'s triage entries), then restart
+  the `continuum` runtime. The curator is stateless across restarts (its
+  only persistent state is the vault itself, which is unaffected); a
+  restart clears `consecutive_failures` back to 0 and picks up wherever the
+  vault's events left off.
+- **Curator shows "off" but should be running**: confirm
+  `[memory.curator] enabled = true` in `config.toml` and that a triage model
+  actually loaded at boot (the curator never spawns without one — see
+  `docs/memory.md`'s curator section). Fix the triage model path/config and
+  restart.
+- **A pending wipe request never clears** (`~/.continuum-dev/wipe-request.json`
+  still present after a restart or a full day): open the file and check it's
+  valid JSON matching `{ requested_at, scopes: [...] }`. A malformed request
+  file is **not** silently discarded — `process_wipe_request` returns an
+  error, leaves the file in place, and logs the failure — so as of this
+  writing a corrupt request file is retried (and re-logged) on every boot
+  and every daily hygiene tick until a human fixes or deletes it by hand.
+  Fixing the JSON (or deleting the file to abandon the request) resolves it
+  on the next boot or tick, no restart-with-a-flag needed.
+- Full pipeline, config keys, and prompt locations: `docs/memory.md`'s
+  "The curator" section.
+
 ## Voice Wake And STT Session
 
 Component: `voice/wake`, `voice/stt`
