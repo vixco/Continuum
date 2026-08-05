@@ -23,6 +23,11 @@
 //!   Pure serde/std; available without the `runtime` feature so the Tauri
 //!   crate can write intents.
 //! - [`health`] — component-level health checks used by the repair agent.
+//! - [`frontend`] — [`frontend::VoiceFrontend`] trait abstracting the
+//!   realtime voice path: the existing `PipelineFrontend` (wake→STT→
+//!   triage→orchestrator→TTS) and, behind the `moshi` cargo feature, the
+//!   full-duplex [`moshi::MoshiFrontend`] S2S subprocess.
+//! - [`moshi`] — Kyutai Moshi speech-to-speech front-end (feature = "moshi").
 //!
 //! ## Architectural placement
 //!
@@ -32,6 +37,11 @@
 //! Nothing here speaks to the MCP server directly.
 
 pub mod intent;
+
+#[cfg(feature = "runtime")]
+pub mod frontend;
+#[cfg(feature = "moshi")]
+pub mod moshi;
 
 #[cfg(feature = "runtime")]
 pub mod health;

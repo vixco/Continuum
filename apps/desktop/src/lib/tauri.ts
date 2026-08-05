@@ -314,6 +314,12 @@ export const continuum = {
     invoke<ContinuumConfig>("update_tts_engine", { engine }, DEFAULT_CONFIG),
   updateTtsPrimaryVoice: (voice: string) =>
     invoke<ContinuumConfig>("update_tts_primary_voice", { voice }, DEFAULT_CONFIG),
+  updateKokorosVoice: (voice: string) =>
+    invoke<ContinuumConfig>("update_kokoros_voice", { voice }, DEFAULT_CONFIG),
+  updateKokorosSpeed: (value: number) =>
+    invoke<ContinuumConfig>("update_kokoros_speed", { value }, DEFAULT_CONFIG),
+  updateVoiceFrontendMode: (mode: string) =>
+    invoke<ContinuumConfig>("update_voice_frontend_mode", { mode }, DEFAULT_CONFIG),
   quit: () => invoke<void>("quit_app"),
   listSkills: () => invoke<Skill[]>("list_skills", undefined, []),
   saveSkill: (input: SaveSkillInput) => invoke<Skill>("save_skill", { input }),
@@ -441,6 +447,8 @@ export const DEFAULT_STATE: ContinuumState = {
     detected_call_app: null,
     wake_word_enabled: true,
     last_heard_at: null,
+    voice_frontend_mode: "pipeline",
+    moshi_loaded: false,
   },
   memory: {
     raw_log_rows: 0,
@@ -593,6 +601,14 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     feedback_sounds: true,
     hotkey: "Ctrl+Shift+K",
     conversation_followup_seconds: 5,
+    frontend: {
+      mode: "pipeline",
+      moshi_model_repo: "kyutai/moshiko-candle-q8",
+      moshi_device: "cuda",
+      moshi_port: 8084,
+      moshi_bin: "",
+      moshi_tap_enabled: true,
+    },
   },
   tts: {
     enabled: true,
@@ -607,6 +623,12 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
       model_id: "eleven_turbo_v2_5",
       stability: 0.5,
       similarity_boost: 0.75,
+    },
+    kokoros: {
+      model_path: "",
+      voices_path: "",
+      voice_name: "af_sky",
+      speed: 1.0,
     },
   },
   workers: {

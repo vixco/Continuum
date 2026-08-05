@@ -988,9 +988,9 @@ pub async fn update_tts_engine(
     app: State<'_, Arc<AppState>>,
     engine: String,
 ) -> Result<ContinuumConfig, String> {
-    if engine != "piper" && engine != "elevenlabs" {
+    if engine != "piper" && engine != "kokoros" && engine != "elevenlabs" {
         return Err(format!(
-            "Unknown TTS engine '{engine}'; expected 'piper' or 'elevenlabs'"
+            "Unknown TTS engine '{engine}'; expected 'piper', 'kokoros', or 'elevenlabs'"
         ));
     }
     app.runtime
@@ -1008,6 +1008,51 @@ pub async fn update_tts_primary_voice(
     }
     app.runtime
         .update_config(|c| c.tts.primary = voice.clone())
+        .map_err(|e| e.to_string())
+}
+
+/// Set the Kokoros voice style (e.g. `af_sky` or `af_sarah.4+af_nicole.6`).
+/// Only meaningful when `tts.engine = "kokoros"`.
+#[tauri::command]
+pub async fn update_kokoros_voice(
+    app: State<'_, Arc<AppState>>,
+    voice: String,
+) -> Result<ContinuumConfig, String> {
+    if voice.trim().is_empty() {
+        return Err("Kokoros voice name cannot be empty".to_string());
+    }
+    app.runtime
+        .update_config(|c| c.tts.kokoros.voice_name = voice.clone())
+        .map_err(|e| e.to_string())
+}
+
+/// Set the Kokoros speech-rate multiplier (1.0 = native).
+#[tauri::command]
+pub async fn update_kokoros_speed(
+    app: State<'_, Arc<AppState>>,
+    value: f32,
+) -> Result<ContinuumConfig, String> {
+    app.runtime
+        .update_config(|c| c.tts.kokoros.speed = value.clamp(0.5, 2.0))
+        .map_err(|e| e.to_string())
+}
+
+/// Select the realtime voice front-end. `"pipeline"` (default, whisper→
+/// triage→orchestrator→TTS) or `"moshi"` (Kyutai Moshi S2S subprocess;
+/// requires the `moshi` cargo feature + a CUDA-capable GPU + a built
+/// `moshi-backend.exe`). Takes effect on the next daemon start.
+#[tauri::command]
+pub async fn update_voice_frontend_mode(
+    app: State<'_, Arc<AppState>>,
+    mode: String,
+) -> Result<ContinuumConfig, String> {
+    if mode != "pipeline" && mode != "moshi" {
+        return Err(format!(
+            "Unknown voice front-end mode '{mode}'; expected 'pipeline' or 'moshi'"
+        ));
+    }
+    app.runtime
+        .update_config(|c| c.voice.frontend.mode = mode.clone())
         .map_err(|e| e.to_string())
 }
 

@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { clsx } from "clsx";
 import { invoke } from "@tauri-apps/api/core";
+import { useTheme, type Theme } from "@/lib/theme";
 
 type StepId =
   "welcome" | "claude" | "models" | "voice" | "permissions" | "personal" | "diagnostics" | "done";
@@ -231,7 +232,89 @@ function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
         <Bullet>Microphone and speaker recommended.</Bullet>
         <Bullet>About 6.5 GB of models download once.</Bullet>
       </ul>
+
+      <ThemePicker />
     </StepContainer>
+  );
+}
+
+function ThemePicker() {
+  const [theme, setTheme] = useTheme();
+  return (
+    <div className="mt-1 flex flex-col gap-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[12px] font-semibold uppercase tracking-[0.12em] text-ink-dim">
+          Appearance
+        </span>
+        <span className="text-[11px] text-ink-dim">Change anytime in Settings</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2.5">
+        <ThemeOption
+          id="light"
+          label="Light"
+          hint="Cool paper · day"
+          active={theme === "light"}
+          onSelect={setTheme}
+        />
+        <ThemeOption
+          id="dark"
+          label="Dark"
+          hint="Slate console · night"
+          active={theme === "dark"}
+          onSelect={setTheme}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ThemeOption({
+  id,
+  label,
+  hint,
+  active,
+  onSelect,
+}: {
+  id: Theme;
+  label: string;
+  hint: string;
+  active: boolean;
+  onSelect: (t: Theme) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(id)}
+      className={clsx(
+        "press group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-colors",
+        active
+          ? "border-accent-amber/60 bg-accent-amber/10"
+          : "border-bg-border bg-bg-elevated hover:border-bg-hover"
+      )}
+    >
+      {/* Mini preview: a faux app shell that reads the live tokens, so it
+          reflects the exact palette the user will get. */}
+      <div
+        data-theme={id}
+        className="flex h-16 overflow-hidden rounded-md border border-bg-border bg-bg"
+      >
+        <div className="flex w-1/4 flex-col gap-1 bg-bg-surface p-1.5">
+          <span className="h-1 w-3/4 rounded-full bg-accent-amber/70" />
+          <span className="h-1 w-2/3 rounded-full bg-ink/20" />
+          <span className="h-1 w-1/2 rounded-full bg-ink/15" />
+        </div>
+        <div className="flex flex-1 flex-col gap-1 p-1.5">
+          <span className="h-1.5 w-1/2 rounded-full bg-ink/40" />
+          <span className="h-1 w-3/4 rounded-full bg-ink/15" />
+          <span className="mt-auto h-2 w-2/3 rounded bg-accent-amber/25" />
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] font-medium text-ink">{label}</span>
+        {active && <Check size={14} className="text-accent-amber" />}
+      </div>
+      <span className="-mt-1 text-[11px] text-ink-dim">{hint}</span>
+    </button>
   );
 }
 
@@ -363,7 +446,7 @@ function ConnectStep({
       <button
         onClick={runCheck}
         disabled={checking}
-        className="press w-fit rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-white/5 hover:text-ink disabled:opacity-50"
+        className="press w-fit rounded-lg border border-bg-border px-3 py-1.5 text-[12px] text-ink-muted hover:bg-ink/5 hover:text-ink disabled:opacity-50"
       >
         {checking ? "Detecting…" : "Detect again"}
       </button>

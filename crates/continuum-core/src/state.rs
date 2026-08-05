@@ -111,6 +111,13 @@ pub struct VoiceState {
     pub detected_call_app: Option<String>,
     pub wake_word_enabled: bool,
     pub last_heard_at: Option<DateTime<Utc>>,
+    /// Active voice front-end mode: `"pipeline"` or `"moshi"`. Mirrors
+    /// `VoiceFrontendConfig::mode` applied at boot. Surfaced on the dashboard
+    /// Voice tab.
+    pub voice_frontend_mode: String,
+    /// Whether the Moshi S2S backend subprocess is loaded and its WebSocket
+    /// is connected. Only meaningful when `voice_frontend_mode == "moshi"`.
+    pub moshi_loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -495,6 +502,26 @@ impl StateHandle {
         {
             let mut s = self.inner.write().await;
             s.voice.tts_queue_len = len;
+        }
+        self.notify(StateEvent::Voice);
+    }
+
+    /// Mirror the active voice front-end mode + Moshi backend loaded flag
+    /// from the runtime snapshot into the dashboard's voice state. Called by
+    /// the dashboard's runtime bridge on every `state.json` tick.
+    pub async fn set_voice_frontend_status(
+        &self,
+        mode: Option<String>,
+        moshi_loaded: Option<bool>,
+    ) {
+        {
+            let mut s = self.inner.write().await;
+            if let Some(m) = mode {
+                s.voice.voice_frontend_mode = m;
+            }
+            if let Some(loaded) = moshi_loaded {
+                s.voice.moshi_loaded = loaded;
+            }
         }
         self.notify(StateEvent::Voice);
     }

@@ -275,6 +275,32 @@ export function HealthTab() {
   );
 }
 
+type RenderItem = { kind: "assistant"; text: string } | { event: RepairEvent };
+
+// Fold consecutive assistant_delta tokens into one readable prose block so
+// the stream doesn't render as hundreds of one-word rows. Non-delta events
+// (tool calls, results, errors, verification) stay on their own labelled row.
+function groupEvents(events: RepairEvent[]): RenderItem[] {
+  const items: RenderItem[] = [];
+  let buf = "";
+  const flush = () => {
+    if (buf) {
+      items.push({ kind: "assistant", text: buf });
+      buf = "";
+    }
+  };
+  for (const e of events) {
+    if (e.kind === "assistant_delta") {
+      buf += e.text;
+    } else {
+      flush();
+      items.push({ event: e });
+    }
+  }
+  flush();
+  return items;
+}
+
 function RepairStream({ events }: { events: RepairEvent[] }) {
   if (events.length === 0) {
     return (
@@ -283,14 +309,21 @@ function RepairStream({ events }: { events: RepairEvent[] }) {
       </div>
     );
   }
+  const items = groupEvents(events);
   return (
     <div className="h-64 overflow-y-auto rounded-md border border-bg-border bg-bg/60 p-3 font-mono text-[12px] leading-[1.5]">
-      {events.map((e, idx) => (
-        <div key={idx} className="flex gap-2">
-          <span className="shrink-0 text-ink-dim">{labelFor(e)}</span>
-          <span className={clsx("text-ink", styleFor(e))}>{bodyFor(e)}</span>
-        </div>
-      ))}
+      {items.map((item, idx) =>
+        "kind" in item ? (
+          <div key={idx} className="mb-1 whitespace-pre-wrap break-words text-ink">
+            {item.text}
+          </div>
+        ) : (
+          <div key={idx} className="flex gap-2">
+            <span className="shrink-0 text-ink-dim">{labelFor(item.event)}</span>
+            <span className={clsx("text-ink", styleFor(item.event))}>{bodyFor(item.event)}</span>
+          </div>
+        )
+      )}
     </div>
   );
 }

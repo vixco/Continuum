@@ -55,7 +55,14 @@ use continuum_core::voice::playback::PlaybackStream;
 use continuum_core::voice::sounds::{FeedbackCue, FeedbackPlayer};
 use continuum_core::voice::streaming::SpeechController;
 use continuum_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
-use continuum_core::voice::tts::{set_espeak_data_dir, ElevenLabsEngine, PiperEngine, TtsEngine};
+use continuum_core::voice::tts::{
+    set_espeak_data_dir, ElevenLabsEngine, KokorosEngine, PiperEngine, TtsEngine,
+};
+// Phase 3 tier-split: the Moshi front-end exposes `interrupt()` via the
+// `VoiceFrontend` trait (and `resume()` as a concrete method). Only needed
+// when the `moshi` feature is on.
+#[cfg(feature = "moshi")]
+use continuum_core::voice::frontend::VoiceFrontend;
 use continuum_core::voice::wake::TranscriptWakeDetector;
 use continuum_core::workers::{EventSink, FinishSink, WorkerPool, WorkerPoolOptions};
 
@@ -436,8 +443,33 @@ async fn main() -> Result<()> {
     // --- Audio ---
     let audio_watcher = AudioWatcher::new(config.audio.clone());
     let audio_shutdown = shutdown_rx.clone();
+    // Moshi S2S front-end (feature = "moshi"): when `voice.frontend.mode =
+    // "moshi"`, the audio watcher forks 16 kHz mono PCM into a tap channel
+    // that the Moshi front-end consumes. The channel is created here (cheap,
+    // no runtime_state needed); the MoshiFrontend + its event consumer are
+    // wired later (`wire_moshi_voice`) once `runtime_state` is in scope, so
+    // the consumer can publish `partial_transcript` / `moshi_loaded`. The
+    // pipeline path (`mode = "pipeline"`) passes `None` and is unchanged.
+    #[cfg(feature = "moshi")]
+    let moshi_active: bool =
+        config.voice.frontend.mode == "moshi" && config.voice.frontend.moshi_tap_enabled;
+    #[cfg(not(feature = "moshi"))]
+    let moshi_active: bool = false;
+    #[cfg(feature = "moshi")]
+    #[allow(clippy::type_complexity)]
+    let (moshi_tap, moshi_tap_rx): (
+        Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>>,
+        Option<tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>>,
+    ) = if moshi_active {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(feature = "moshi"))]
+    let moshi_tap: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> = None;
     tokio::spawn(async move {
-        audio_watcher.run(audio_tx, audio_shutdown).await;
+        audio_watcher.run(audio_tx, audio_shutdown, moshi_tap).await;
     });
 
     // --- Context ---
@@ -611,6 +643,8 @@ async fn main() -> Result<()> {
                 ambient_mute_active: Some(false),
                 detected_call_app: None,
                 wake_word_enabled: Some(config.voice.wake_word_enabled),
+                voice_frontend_mode: Some(config.voice.frontend.mode.clone()),
+                moshi_loaded: Some(false),
                 frame_count: 0,
                 monitor_count: 0,
                 capture_event_count: 0,
@@ -626,6 +660,41 @@ async fn main() -> Result<()> {
                 curator: None,
             },
         ));
+    // Moshi S2S front-end (feature = "moshi"): now that `runtime_state` is in
+    // scope, build the Moshi backend + wire the tap receiver + event consumer
+    // created earlier at the audio-spawn site. The consumer publishes
+    // `partial_transcript` / `moshi_loaded` into the runtime snapshot. The
+    // returned handle drives the Phase 3 tier-split bridge: on a
+    // `WakeOrchestrator` triage decision we `interrupt()` Moshi (mute its
+    // output + send EndTurn) while the orchestrator + Kokoros speak, then
+    // `resume()` it when the wake completes.
+    #[cfg(feature = "moshi")]
+    let moshi_frontend: Option<std::sync::Arc<continuum_core::voice::moshi::MoshiFrontend>> =
+        if moshi_active {
+            match wire_moshi_voice(&config, moshi_tap_rx, runtime_state.clone()) {
+                Ok(handle) => {
+                    tracing::info!(
+                        layer = "voice",
+                        component = "moshi",
+                        "Moshi S2S front-end wired"
+                    );
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        layer = "voice",
+                        component = "moshi",
+                        error = %e,
+                        "Moshi front-end failed to start; S2S tap will be inert"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    #[cfg(not(feature = "moshi"))]
+    let _moshi_frontend: Option<()> = None;
     {
         let state_clone = runtime_state.clone();
         // Task 11: the curator only actually runs when both the triage
@@ -850,6 +919,27 @@ async fn main() -> Result<()> {
                     recent_frames.remove(0);
                 }
 
+                // In Moshi S2S mode the front-end is always-listening — skip
+                // the wake-word / pipeline voice-session machinery. Triage
+                // still runs on the whisper user transcript (above) and
+                // drives escalation via the `WakeOrchestrator` arm, which
+                // `interrupt()`s Moshi while the orchestrator speaks.
+                #[cfg(feature = "moshi")]
+                let voice_decision = if moshi_frontend.is_some() {
+                    None
+                } else {
+                    update_voice_session(
+                        &frame,
+                        &config,
+                        &wake_detector,
+                        &mut voice_session,
+                        &followup_until,
+                        &mut hotkey_pending,
+                        speech.as_ref(),
+                        &feedback,
+                    )
+                };
+                #[cfg(not(feature = "moshi"))]
                 let voice_decision = update_voice_session(
                     &frame,
                     &config,
@@ -860,7 +950,9 @@ async fn main() -> Result<()> {
                     speech.as_ref(),
                     &feedback,
                 );
-                if !orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
+                if !moshi_active
+                    && !orchestrator_busy.load(std::sync::atomic::Ordering::Acquire)
+                {
                     if let Ok(mut s) = runtime_state.lock() {
                         if let Some(session) = voice_session.as_ref() {
                             s.voice_mode = Some("listening".to_string());
@@ -911,6 +1003,20 @@ async fn main() -> Result<()> {
                                     speech.clone()
                                 };
 
+                                // Phase 3 tier-split: mute Moshi's assistant
+                                // output + send EndTurn so the orchestrator +
+                                // Kokoros speak unobstructed. `resume()` runs in
+                                // the spawned task once the wake finishes.
+                                #[cfg(feature = "moshi")]
+                                if let Some(fe) = moshi_frontend.as_ref() {
+                                    fe.interrupt();
+                                    tracing::info!(
+                                        layer = "voice",
+                                        component = "moshi",
+                                        "Moshi interrupted for orchestrator escalation"
+                                    );
+                                }
+
                                 // Spawn the wake as a tokio task so the main loop
                                 // keeps draining frame_rx. If we awaited here,
                                 // triage would queue up 5–15 stale frames while
@@ -938,6 +1044,8 @@ async fn main() -> Result<()> {
                                 let skill_budget = config.skills.token_budget;
                                 let dev_dir_clone = dev_dir.clone();
                                 let mut wake_shutdown = shutdown_rx.clone();
+                                #[cfg(feature = "moshi")]
+                                let moshi_frontend_clone = moshi_frontend.clone();
 
                                 tokio::spawn(async move {
                                     // Race the wake against the runtime's shutdown
@@ -1023,6 +1131,18 @@ async fn main() -> Result<()> {
                                     busy_flag.store(false, std::sync::atomic::Ordering::Release);
                                     if let Ok(mut s) = runtime_state_clone.lock() {
                                         s.voice_mode = Some("idle".to_string());
+                                    }
+                                    // Phase 3 tier-split: hand the conversation back
+                                    // to Moshi — unmute its assistant output so
+                                    // the S2S front-end resumes natural turn-taking.
+                                    #[cfg(feature = "moshi")]
+                                    if let Some(fe) = moshi_frontend_clone.as_ref() {
+                                        fe.resume();
+                                        tracing::info!(
+                                            layer = "voice",
+                                            component = "moshi",
+                                            "Moshi resumed after orchestrator turn"
+                                        );
                                     }
                                 });
                             }
@@ -1612,6 +1732,105 @@ fn spawn_maintenance_wake_ticker(
     });
 }
 
+/// Build + start the Moshi S2S front-end and wire the tap receiver (created
+/// at the audio-spawn site) + event consumer. Only compiled with the `moshi`
+/// cargo feature; the runtime also requires `voice.frontend.mode = "moshi"`,
+/// a CUDA-built `moshi-backend.exe` on PATH / `CONTINUUM_MOSHI_BIN`, and (for
+/// audio) the `moshi-opus` feature + libopus.
+///
+/// Returns the `Arc<MoshiFrontend>` handle for the main loop / Phase 3 bridge.
+///
+/// **Not runtime-verified in this environment** (no CUDA / moshi-backend.exe /
+/// libopus). Compile-verified with `cargo check --features moshi`.
+#[cfg(feature = "moshi")]
+fn wire_moshi_voice(
+    config: &ContinuumConfig,
+    moshi_tap_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>>,
+    runtime_state: Arc<std::sync::Mutex<continuum_core::runtime_publish::RuntimeSnapshot>>,
+) -> Result<std::sync::Arc<continuum_core::voice::moshi::MoshiFrontend>> {
+    use continuum_core::voice::frontend::VoiceFrontend;
+    use continuum_core::voice::moshi::{MoshiConfig, MoshiEvent, MoshiFrontend};
+
+    let fc = &config.voice.frontend;
+    let cfg = MoshiConfig {
+        host: "127.0.0.1".to_string(),
+        port: fc.moshi_port,
+        model_repo: fc.moshi_model_repo.clone(),
+        device: fc.moshi_device.clone(),
+        bin: if fc.moshi_bin.is_empty() {
+            PathBuf::new()
+        } else {
+            PathBuf::from(&fc.moshi_bin)
+        },
+    };
+    let frontend = std::sync::Arc::new(MoshiFrontend::new(cfg));
+
+    if let Err(e) = frontend.start() {
+        tracing::error!(layer = "voice", component = "moshi", error = %e, "moshi-backend start failed");
+        // Fall through: health reports moshi_loaded=false; the tap (if any)
+        // just drains to nothing.
+    }
+    if let Ok(mut s) = runtime_state.lock() {
+        s.moshi_loaded = Some(frontend.loaded());
+    }
+
+    // Tap consumer: drain the 16 kHz mono PCM the audio watcher forks in, and
+    // feed it to the frontend. Only spawned when the tap channel was created.
+    if let Some(mut tap_rx) = moshi_tap_rx {
+        let fe_tap = frontend.clone();
+        tokio::spawn(async move {
+            while let Some(samples) = tap_rx.recv().await {
+                fe_tap.feed_pcm(&samples);
+            }
+        });
+    }
+
+    // Event consumer: route assistant text deltas to `partial_transcript` so
+    // the dashboard shows the live Moshi transcript. Audio events (only with
+    // `moshi-opus`) are Phase-3-routed to PlaybackStream; for now logged.
+    let fe_events = frontend.clone();
+    let rs = runtime_state.clone();
+    tokio::spawn(async move {
+        let mut rx = match fe_events.events() {
+            Some(r) => r,
+            None => return, // already taken — shouldn't happen
+        };
+        let mut text_acc = String::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                MoshiEvent::Text(t) => {
+                    text_acc.push_str(&t);
+                    if let Ok(mut s) = rs.lock() {
+                        s.partial_transcript = Some(text_acc.clone());
+                        s.voice_mode = Some("speaking".to_string());
+                        s.moshi_loaded = Some(true);
+                    }
+                }
+                MoshiEvent::Audio(_pcm) => {
+                    // Phase 3: route 24 kHz mono f32 to PlaybackStream
+                    // (resample 24k→device rate). Only produced with the
+                    // `moshi-opus` feature; no-op otherwise.
+                }
+                MoshiEvent::Error(e) => {
+                    tracing::warn!(layer = "voice", component = "moshi", "server error: {e}");
+                    if let Ok(mut s) = rs.lock() {
+                        s.moshi_loaded = Some(false);
+                        s.voice_mode = Some("error".to_string());
+                    }
+                }
+                MoshiEvent::Disconnected(msg) => {
+                    tracing::warn!(layer = "voice", component = "moshi", "disconnected: {msg}");
+                    if let Ok(mut s) = rs.lock() {
+                        s.moshi_loaded = Some(false);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(frontend)
+}
+
 /// Updates the post-wake voice session and returns an explicit wake decision
 /// once the spoken command is complete. Also manages the conversation
 /// follow-up window and hotkey push-to-talk trigger.
@@ -1954,34 +2173,72 @@ fn init_tts_and_feedback(
     let espeak_dir = expand_home(&cfg.espeak_data_dir);
     set_espeak_data_dir(&espeak_dir);
 
-    let voice_cfg = match cfg.voices.get(&cfg.primary) {
-        Some(v) => v,
-        None => {
+    // Piper voice resolution is only needed for the piper / elevenlabs paths.
+    // Kokoros resolves its own model + voices files inside its arm below.
+    let piper_voice = if cfg.engine != "kokoros" {
+        let voice_cfg = match cfg.voices.get(&cfg.primary) {
+            Some(v) => v,
+            None => {
+                tracing::warn!(
+                    layer = "voice",
+                    component = "continuum",
+                    primary = %cfg.primary,
+                    "Primary voice key missing from [tts.voices]; TTS disabled"
+                );
+                return (None, FeedbackPlayer::disabled());
+            }
+        };
+        let model_path = expand_home(&voice_cfg.model_path);
+        let config_path = expand_home(&voice_cfg.config_path);
+        if !model_path.exists() || !config_path.exists() {
             tracing::warn!(
                 layer = "voice",
                 component = "continuum",
-                primary = %cfg.primary,
-                "Primary voice key missing from [tts.voices]; TTS disabled"
+                model = %model_path.display(),
+                config = %config_path.display(),
+                "Piper voice files missing — run scripts/download-models.ps1. TTS disabled."
             );
             return (None, FeedbackPlayer::disabled());
         }
+        Some((model_path, config_path, voice_cfg.speaker_id))
+    } else {
+        None
     };
 
-    let model_path = expand_home(&voice_cfg.model_path);
-    let config_path = expand_home(&voice_cfg.config_path);
-
-    if !model_path.exists() || !config_path.exists() {
-        tracing::warn!(
-            layer = "voice",
-            component = "continuum",
-            model = %model_path.display(),
-            config = %config_path.display(),
-            "Piper voice files missing — run scripts/download-models.ps1. TTS disabled."
-        );
-        return (None, FeedbackPlayer::disabled());
-    }
-
     let engine: Arc<dyn TtsEngine> = match cfg.engine.as_str() {
+        "kokoros" => {
+            let kcfg = &cfg.kokoros;
+            let model_path = expand_home(&kcfg.model_path);
+            let voices_path = expand_home(&kcfg.voices_path);
+            if !model_path.exists() || !voices_path.exists() {
+                tracing::warn!(
+                    layer = "voice",
+                    component = "continuum",
+                    model = %model_path.display(),
+                    voices = %voices_path.display(),
+                    "Kokoros model/voices files missing — run scripts/download-models.ps1. \
+                     TTS disabled."
+                );
+                return (None, FeedbackPlayer::disabled());
+            }
+            match KokorosEngine::new(
+                &model_path,
+                &voices_path,
+                kcfg.voice_name.clone(),
+                kcfg.speed,
+            ) {
+                Ok(e) => Arc::new(e),
+                Err(e) => {
+                    tracing::error!(
+                        layer = "voice",
+                        component = "continuum",
+                        error = %e,
+                        "Kokoros engine init failed; TTS disabled"
+                    );
+                    return (None, FeedbackPlayer::disabled());
+                }
+            }
+        }
         "elevenlabs" => {
             tracing::warn!(
                 layer = "voice",
@@ -1993,12 +2250,9 @@ fn init_tts_and_feedback(
                 cfg.elevenlabs.voice_id.clone(),
                 cfg.elevenlabs.model_id.clone(),
             );
-            match PiperEngine::new(
-                &model_path,
-                &config_path,
-                cfg.length_scale,
-                voice_cfg.speaker_id,
-            ) {
+            let (model_path, config_path, speaker_id) =
+                piper_voice.expect("piper_voice is resolved for non-kokoros engines");
+            match PiperEngine::new(&model_path, &config_path, cfg.length_scale, speaker_id) {
                 Ok(e) => Arc::new(e),
                 Err(e) => {
                     tracing::error!(
@@ -2013,12 +2267,9 @@ fn init_tts_and_feedback(
         }
         _ => {
             // Default: Piper local.
-            match PiperEngine::new(
-                &model_path,
-                &config_path,
-                cfg.length_scale,
-                voice_cfg.speaker_id,
-            ) {
+            let (model_path, config_path, speaker_id) =
+                piper_voice.expect("piper_voice is resolved for non-kokoros engines");
+            match PiperEngine::new(&model_path, &config_path, cfg.length_scale, speaker_id) {
                 Ok(e) => Arc::new(e),
                 Err(e) => {
                     tracing::error!(

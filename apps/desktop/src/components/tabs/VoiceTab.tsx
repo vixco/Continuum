@@ -16,6 +16,29 @@ export function VoiceTab() {
       ? Object.keys(config.tts.voices).map((k) => ({ value: k, label: k }))
       : [{ value: config.tts.primary || "en", label: config.tts.primary || "en" }];
 
+  const isKokoros = config.tts.engine === "kokoros";
+
+  // Common Kokoro v1.0 voices. The value is free-form (supports blends like
+  // `af_sarah.4+af_nicole.6`), so if the configured voice isn't listed we
+  // prepend it as a custom option.
+  const kokorosVoiceOptions = [
+    "af_sky",
+    "af_sarah",
+    "af_nicole",
+    "af_bella",
+    "af_heart",
+    "am_adam",
+    "am_michael",
+    "bf_emma",
+    "bm_george",
+  ];
+  const kokorosOptions = [
+    ...kokorosVoiceOptions.map((v) => ({ value: v, label: v })),
+    ...(kokorosVoiceOptions.includes(config.tts.kokoros.voice_name)
+      ? []
+      : [{ value: config.tts.kokoros.voice_name, label: config.tts.kokoros.voice_name }]),
+  ];
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <RestartNotice />
@@ -29,6 +52,18 @@ export function VoiceTab() {
             value={voice.ambient_mute_active ? `yes (${voice.detected_call_app ?? "call"})` : "no"}
           />
         </div>
+        {voice.voice_frontend_mode === "moshi" && (
+          <div className="mt-4 rounded-md border border-bg-border bg-bg-elevated p-3 text-sm">
+            <div className="text-[11px] uppercase tracking-wider text-ink-dim">
+              moshi s2s backend
+            </div>
+            <div className="mt-1 text-ink">
+              {voice.moshi_loaded
+                ? "loaded + connected"
+                : "not loaded (needs moshi-backend.exe + CUDA; see download-models.ps1)"}
+            </div>
+          </div>
+        )}
         {voice.partial_transcript && (
           <div className="mt-4 rounded-md border border-bg-border bg-bg-elevated p-3 text-sm">
             <div className="text-[11px] uppercase tracking-wider text-ink-dim">
@@ -46,6 +81,7 @@ export function VoiceTab() {
             value={config.tts.engine}
             options={[
               { value: "piper", label: "Piper (local)" },
+              { value: "kokoros", label: "Kokoros (local ONNX)" },
               { value: "elevenlabs", label: "ElevenLabs (cloud plugin)" },
             ]}
             onChange={async (v) => {
@@ -53,15 +89,27 @@ export function VoiceTab() {
               setConfig(cfg);
             }}
           />
-          <Select
-            label="Primary voice"
-            value={config.tts.primary}
-            options={voiceOptions}
-            onChange={async (v) => {
-              const cfg = await continuum.updateTtsPrimaryVoice(v);
-              setConfig(cfg);
-            }}
-          />
+          {isKokoros ? (
+            <Select
+              label="Kokoros voice"
+              value={config.tts.kokoros.voice_name}
+              options={kokorosOptions}
+              onChange={async (v) => {
+                const cfg = await continuum.updateKokorosVoice(v);
+                setConfig(cfg);
+              }}
+            />
+          ) : (
+            <Select
+              label="Primary voice"
+              value={config.tts.primary}
+              options={voiceOptions}
+              onChange={async (v) => {
+                const cfg = await continuum.updateTtsPrimaryVoice(v);
+                setConfig(cfg);
+              }}
+            />
+          )}
           <Slider
             label="Volume"
             value={config.voice.volume}
@@ -71,22 +119,49 @@ export function VoiceTab() {
             }}
             format={(v) => `${Math.round(v * 100)}%`}
           />
-          <Slider
-            label="Length scale (speed)"
-            value={config.tts.length_scale ?? 1}
-            onChange={async (v) => {
-              const cfg = await continuum.updateTtsLengthScale(v);
-              setConfig(cfg);
-            }}
-            min={0.7}
-            max={1.4}
-            step={0.05}
-          />
+          {isKokoros ? (
+            <Slider
+              label="Speed"
+              value={config.tts.kokoros.speed}
+              onChange={async (v) => {
+                const cfg = await continuum.updateKokorosSpeed(v);
+                setConfig(cfg);
+              }}
+              min={0.5}
+              max={2.0}
+              step={0.05}
+            />
+          ) : (
+            <Slider
+              label="Length scale (speed)"
+              value={config.tts.length_scale ?? 1}
+              onChange={async (v) => {
+                const cfg = await continuum.updateTtsLengthScale(v);
+                setConfig(cfg);
+              }}
+              min={0.7}
+              max={1.4}
+              step={0.05}
+            />
+          )}
         </div>
       </Card>
 
       <Card title="Behaviour">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <Select
+            label="Voice front-end"
+            value={config.voice.frontend.mode}
+            options={[
+              { value: "pipeline", label: "Pipeline (whisper → triage → orchestrator)" },
+              { value: "moshi", label: "Moshi (full-duplex S2S, CUDA)" },
+            ]}
+            onChange={async (v) => {
+              const cfg = await continuum.updateVoiceFrontendMode(v);
+              setConfig(cfg);
+            }}
+          />
+          <div className="hidden md:block" />
           <Toggle
             checked={config.voice.wake_word_enabled}
             onChange={async (v) => {

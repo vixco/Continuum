@@ -37,6 +37,12 @@ const PIPER_SYNTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often to poll for child exit while waiting inside the timeout window.
 const PIPER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Hard wall-clock ceiling for a single Kokoros synthesis call. Kokoro-82M
+/// inference is fast once the ONNX session is loaded, but the per-call
+/// subprocess pays a model-load + phonemization cost; 30 s is the same safety
+/// ceiling Piper uses and is well outside any normal utterance.
+const KOKOROS_SYNTH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A single synthesised utterance: mono f32 PCM at a known sample rate.
 #[derive(Debug, Clone)]
 pub struct SynthesizedAudio {
@@ -265,8 +271,8 @@ impl TtsEngine for PiperEngine {
             drop(stdin);
         }
 
-        let output =
-            wait_child_with_timeout(&mut child, PIPER_SYNTH_TIMEOUT).inspect_err(|_| {
+        let output = wait_child_with_timeout(&mut child, PIPER_SYNTH_TIMEOUT, "Piper")
+            .inspect_err(|_| {
                 let _ = child.kill();
                 let _ = child.wait();
             })?;
@@ -315,9 +321,12 @@ impl TtsEngine for PiperEngine {
 /// stdout/stderr the same shape `wait_with_output` would have. On timeout
 /// the child is killed and `Err` is returned so the caller can propagate
 /// an "engine stuck" diagnostic without sacrificing the TTS worker thread.
+///
+/// `label` names the engine for diagnostics (e.g. `"Piper"`, `"Kokoros"`).
 fn wait_child_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
+    label: &str,
 ) -> Result<std::process::Output> {
     let deadline = Instant::now() + timeout;
     let mut stdout = child.stdout.take();
@@ -326,7 +335,10 @@ fn wait_child_with_timeout(
     let mut stderr_buf = Vec::new();
 
     loop {
-        match child.try_wait().context("Failed to poll Piper process")? {
+        match child
+            .try_wait()
+            .with_context(|| format!("Failed to poll {label} process"))?
+        {
             Some(status) => {
                 // Child exited; drain any remaining pipe data.
                 if let Some(mut s) = stdout.take() {
@@ -346,7 +358,7 @@ fn wait_child_with_timeout(
                     let _ = child.kill();
                     let _ = child.wait();
                     anyhow::bail!(
-                        "Piper synthesis exceeded {} s timeout — killed",
+                        "{label} synthesis exceeded {} s timeout — killed",
                         timeout.as_secs()
                     );
                 }
@@ -413,6 +425,278 @@ impl TtsEngine for ElevenLabsEngine {
     fn name(&self) -> &'static str {
         "elevenlabs"
     }
+}
+
+/// Kokoros local TTS backend — [Kokoro-82M](https://github.com/lucasjinreal/Kokoros)
+/// invoked as a subprocess via the `koko` CLI.
+///
+/// Mirrors [`PiperEngine`]: each `synthesize` call spawns `koko stream`, feeds
+/// one utterance as a single stdin line, and reads 32-bit IEEE-float WAV
+/// (24 kHz, mono) from stdout. Running Kokoros as a subprocess keeps its ONNX
+/// Runtime dependency out of Continuum's Rust dependency graph — the same
+/// reason Piper is a subprocess (see the module docs and the `ort` conflict
+/// note). The `koko` binary must be installed separately (see
+/// `scripts/download-models.ps1`); it is resolved via `resolve_koko_binary`.
+///
+/// Kokoros is the intended TTS for orchestrator/reasoning turns (see the
+/// realtime voice plan): those turns are already multi-second, so the
+/// per-call model-load cost (~150–300 ms) is acceptable. A long-running
+/// `koko openai` server mode is a future optimisation if Kokoros is ever
+/// needed on the sub-second conversational path.
+pub struct KokorosEngine {
+    model_path: PathBuf,
+    voices_path: PathBuf,
+    voice_name: String,
+    speed: f32,
+    sample_rate: u32,
+    koko_bin: PathBuf,
+}
+
+impl KokorosEngine {
+    /// Load a Kokoros voice.
+    ///
+    /// * `model_path` — `kokoro-v1.0.onnx`.
+    /// * `voices_path` — `voices-v1.0.bin` (the bundled voice-style catalog).
+    /// * `voice_name` — Kokoros style spec, e.g. `af_sky` or a blend like
+    ///   `af_sarah.4+af_nicole.6`. Passed to `koko --style`.
+    /// * `speed` — speech-rate multiplier (1.0 = native).
+    ///
+    /// The sample rate is fixed at 24 kHz for Kokoro-82M; the playback
+    /// resampler is sized from this value.
+    pub fn new(
+        model_path: &Path,
+        voices_path: &Path,
+        voice_name: impl Into<String>,
+        speed: f32,
+    ) -> Result<Self> {
+        let koko_bin = resolve_koko_binary();
+        let sample_rate = 24_000;
+        let voice_name = voice_name.into();
+
+        tracing::info!(
+            layer = "voice",
+            component = "tts",
+            model = %model_path.display(),
+            voices = %voices_path.display(),
+            voice = %voice_name,
+            speed,
+            sample_rate,
+            "Kokoros engine loaded"
+        );
+
+        Ok(Self {
+            model_path: model_path.to_path_buf(),
+            voices_path: voices_path.to_path_buf(),
+            voice_name,
+            speed,
+            sample_rate,
+            koko_bin,
+        })
+    }
+}
+
+impl TtsEngine for KokorosEngine {
+    fn synthesize(&self, text: &str) -> Result<SynthesizedAudio> {
+        let start = std::time::Instant::now();
+        // `koko stream` reads stdin line-by-line; collapse internal newlines so
+        // a multi-line utterance is treated as one synthesis unit.
+        let sanitized = text.replace(['\n', '\r'], " ");
+
+        let mut cmd = Command::new(&self.koko_bin);
+        cmd.arg("stream")
+            .arg("--model")
+            .arg(&self.model_path)
+            .arg("--data")
+            .arg(&self.voices_path)
+            .arg("--style")
+            .arg(&self.voice_name)
+            .arg("--speed")
+            .arg(self.speed.to_string())
+            .arg("--mono")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "Failed to spawn Kokoros binary '{}'",
+                self.koko_bin.display()
+            )
+        })?;
+
+        // Feed the utterance as a single stdin line, then close stdin to
+        // signal EOF so `koko stream` flushes and exits.
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(sanitized.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "Failed to write text to Kokoros stdin: {e}"
+                ));
+            }
+            if let Err(e) = stdin.write_all(b"\n") {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "Failed to write newline to Kokoros stdin: {e}"
+                ));
+            }
+            drop(stdin);
+        }
+
+        let output = wait_child_with_timeout(&mut child, KOKOROS_SYNTH_TIMEOUT, "Kokoros")
+            .inspect_err(|_| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Kokoros synthesis failed: {stderr}");
+        }
+
+        let samples =
+            parse_kokoros_wav(&output.stdout).context("Failed to parse Kokoros WAV output")?;
+        let sr = self.sample_rate;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let audio_ms = if sr > 0 {
+            (samples.len() as u64 * 1000) / sr as u64
+        } else {
+            0
+        };
+
+        tracing::debug!(
+            layer = "voice",
+            component = "tts",
+            text_len = text.len(),
+            samples = samples.len(),
+            sample_rate = sr,
+            synth_ms = duration_ms,
+            audio_ms,
+            "Synthesized utterance (Kokoros)"
+        );
+
+        Ok(SynthesizedAudio {
+            samples,
+            sample_rate: sr,
+        })
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn name(&self) -> &'static str {
+        "kokoros"
+    }
+}
+
+/// Parse the 32-bit IEEE-float WAV (RIFF/WAVE, format code 3) that `koko
+/// stream` writes to stdout. Returns the audio body as mono f32 samples.
+///
+/// Only the structural container is parsed — we scan for the `data` chunk and
+/// copy its bytes as f32. The `fmt` chunk is inspected only to assert the
+/// format is float (code 3) and to record the channel count so a stereo body
+/// can be de-interleaved to channel 0. Kokoros with `--mono` emits one
+/// channel, so the stereo path is a defensive fallback.
+fn parse_kokoros_wav(bytes: &[u8]) -> Result<Vec<f32>> {
+    if bytes.len() < 12 {
+        anyhow::bail!("Kokoros WAV output too short ({} bytes)", bytes.len());
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        anyhow::bail!("Kokoros stdout is not a RIFF/WAVE container");
+    }
+
+    let mut pos = 12;
+    let mut channels: u16 = 1;
+    let mut fmt_seen = false;
+    let mut data: Option<&[u8]> = None;
+
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_len = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        let body_start = pos + 8;
+        let body_end = body_start + chunk_len;
+        if body_end > bytes.len() {
+            // Truncated chunk — take what remains as the data body.
+            if chunk_id == b"data" {
+                data = Some(&bytes[body_start..]);
+            }
+            break;
+        }
+
+        if chunk_id == b"fmt " {
+            if chunk_len >= 4 {
+                let format_code = u16::from_le_bytes([bytes[body_start], bytes[body_start + 1]]);
+                if format_code != 3 {
+                    anyhow::bail!("Kokoros WAV fmt code is {format_code}, expected 3 (IEEE float)");
+                }
+            }
+            if chunk_len >= 6 {
+                channels = u16::from_le_bytes([bytes[body_start + 2], bytes[body_start + 3]]);
+            }
+            fmt_seen = true;
+        } else if chunk_id == b"data" {
+            data = Some(&bytes[body_start..body_end]);
+        }
+
+        // Chunks are word-aligned; skip the pad byte if the length is odd.
+        let next = body_end + (chunk_len & 1);
+        pos = next;
+    }
+
+    let data = data.context("Kokoros WAV has no data chunk")?;
+    if !fmt_seen {
+        tracing::warn!(
+            layer = "voice",
+            component = "tts",
+            "Kokoros WAV had no fmt chunk; assuming mono float32"
+        );
+    }
+
+    // 32-bit IEEE float samples.
+    let floats: Vec<f32> = data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    if channels > 1 {
+        // De-interleave to channel 0.
+        Ok(floats.into_iter().step_by(channels as usize).collect())
+    } else {
+        Ok(floats)
+    }
+}
+
+/// Resolve the Kokoros (`koko`) binary path.
+///
+/// Resolution order:
+/// 1. `CONTINUUM_KOKO_BIN` environment variable (explicit override)
+/// 2. `~/.continuum-dev/bin/kokoros/koko.exe` on Windows (installed by
+///    `download-models.ps1`)
+/// 3. `~/.continuum-dev/bin/kokoros/koko` on Unix (same install tree)
+/// 4. Fallback `"koko"` — rely on PATH lookup.
+fn resolve_koko_binary() -> PathBuf {
+    if let Some(override_bin) = env_or_legacy("CONTINUUM_KOKO_BIN", "KAIRO_KOKO_BIN") {
+        return PathBuf::from(override_bin);
+    }
+
+    let dev = continuum_dev_dir();
+    let bundled = if cfg!(windows) {
+        dev.join("bin").join("kokoros").join("koko.exe")
+    } else {
+        dev.join("bin").join("kokoros").join("koko")
+    };
+    if bundled.exists() {
+        return bundled;
+    }
+
+    PathBuf::from("koko")
 }
 
 /// Resolve the Piper binary path.
@@ -564,6 +848,91 @@ mod tests {
         assert!(err.contains("voice-xyz"), "error should include voice id");
         assert_eq!(engine.name(), "elevenlabs");
         assert_eq!(engine.sample_rate(), 22_050);
+    }
+
+    /// Build a minimal 32-bit IEEE-float WAV (format code 3) in memory for
+    /// parser tests. `channels` controls the interleaving.
+    fn build_float_wav(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<u8> {
+        let data_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let data_len = data_bytes.len() as u32;
+
+        let mut fmt_body: Vec<u8> = Vec::new();
+        fmt_body.extend_from_slice(&3u16.to_le_bytes()); // format code 3 = IEEE float
+        fmt_body.extend_from_slice(&channels.to_le_bytes());
+        fmt_body.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * channels as u32 * 4;
+        fmt_body.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = (channels as u32 * 4) as u16;
+        fmt_body.extend_from_slice(&block_align.to_le_bytes());
+        fmt_body.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
+
+        let fmt_len = fmt_body.len() as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&fmt_len.to_le_bytes());
+        out.extend_from_slice(&fmt_body);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.extend_from_slice(&data_bytes);
+        out
+    }
+
+    #[test]
+    fn test_parse_kokoros_wav_mono_float() {
+        let samples = vec![0.0_f32, 0.5, -0.5, 1.0];
+        let wav = build_float_wav(&samples, 1, 24_000);
+        let got = parse_kokoros_wav(&wav).unwrap();
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[0], 0.0);
+        assert!((got[1] - 0.5).abs() < 1e-5);
+        assert!((got[2] - (-0.5)).abs() < 1e-5);
+        assert!((got[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_kokoros_wav_stereo_deinterleaves() {
+        // Interleaved stereo: [L0, R0, L1, R1]
+        let samples = vec![0.1_f32, 0.9, 0.2, 0.8];
+        let wav = build_float_wav(&samples, 2, 24_000);
+        let got = parse_kokoros_wav(&wav).unwrap();
+        // Channel 0 only.
+        assert_eq!(got.len(), 2);
+        assert!((got[0] - 0.1).abs() < 1e-5);
+        assert!((got[1] - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_kokoros_wav_rejects_non_wav() {
+        assert!(parse_kokoros_wav(b"not a wav at all").is_err());
+        assert!(parse_kokoros_wav(b"RIFF\x00\x00\x00\x00XXXX").is_err());
+    }
+
+    #[test]
+    fn test_parse_kokoros_wav_rejects_pcm_format() {
+        // Format code 1 (PCM) instead of 3 (float) — should be rejected.
+        let mut wav = build_float_wav(&[0.0_f32, 0.5], 1, 24_000);
+        // Patch the format code at the start of the fmt body (offset 20).
+        wav[20] = 1;
+        wav[21] = 0;
+        assert!(parse_kokoros_wav(&wav).is_err());
+    }
+
+    #[test]
+    fn kokoros_engine_metadata() {
+        // Construction does not require the binary to exist; only synthesis
+        // spawns it. We exercise the metadata accessors here.
+        let engine = KokorosEngine::new(
+            Path::new("/nonexistent/kokoro-v1.0.onnx"),
+            Path::new("/nonexistent/voices-v1.0.bin"),
+            "af_sky",
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(engine.name(), "kokoros");
+        assert_eq!(engine.sample_rate(), 24_000);
     }
 
     #[test]

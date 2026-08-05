@@ -168,6 +168,12 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
             snap.detected_call_app.clone(),
         )
         .await;
+    state
+        .set_voice_frontend_status(
+            snap.voice_frontend_mode.clone(),
+            snap.moshi_loaded,
+        )
+        .await;
 }
 
 #[cfg(test)]

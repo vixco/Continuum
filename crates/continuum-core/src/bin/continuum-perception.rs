@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let audio_watcher = AudioWatcher::new(config.audio.clone());
     let audio_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        audio_watcher.run(audio_tx, audio_shutdown).await;
+        audio_watcher.run(audio_tx, audio_shutdown, None).await;
     });
 
     let context_watcher = ContextWatcher::new(config.context.clone());

@@ -689,6 +689,42 @@ Wake detection runs on the continuous whisper transcript stream — the same whi
 - **Kokoro TTS** — local, better quality than Piper, English only
 - **ElevenLabs streaming** — best quality, cloud, requires API key, costs per character
 
+### Voice front-end: pipeline vs Moshi
+
+Continuum has two realtime voice front-ends, selected by
+`voice.frontend.mode` (cargo feature `moshi` gates the Moshi path):
+
+- **`pipeline`** (default) — the segment-granular loop above:
+  wake → whisper STT → triage → orchestrator → TTS. Works on CPU,
+  interruptible, full tool/memory access. This is what shipped through
+  Phase 5.
+- **`moshi`** — Kyutai Moshi full-duplex speech-to-speech, run as a
+  `moshi-backend.exe` subprocess driven over its standalone WebSocket
+  protocol (`wss://127.0.0.1:<port>/api/chat`). Moshi owns turn-taking
+  for short conversational exchanges (~200–400 ms, interruptible) the way
+  ChatGPT's Advanced Voice Mode does. Requires a CUDA-built
+  `moshi-backend.exe` and, for audio, libopus + the `moshi-opus` cargo
+  feature (Opus-in-OGG, 24 kHz mono). Windows support is community-grade.
+
+The two share a `VoiceFrontend` trait. The audio watcher forks 16 kHz mono
+PCM into `MoshiFrontend::feed_pcm` when Moshi is active; assistant text
+deltas flow back as `MoshiEvent`s. Because the standalone Moshi backend
+does **not** transcribe user audio, the parallel whisper path stays the
+source of user transcripts for triage — that is how the tier-split
+escalates from a Moshi conversation to the orchestrator. In Moshi mode the
+wake-word / pipeline voice-session machinery is skipped (Moshi is
+always-listening), but triage still runs on every perception frame's
+whisper transcript. On a `WakeOrchestrator` decision the Moshi front-end
+is `interrupt()`ed (output muted + `EndTurn` control frame sent) before
+the orchestrator wake is spawned; `do_wake` runs and its streamed answer
+is spoken via Kokoros through the shared `SpeechController` / playback
+path. When the wake completes, the spawned task calls `resume()` on the
+Moshi front-end, unmuting its assistant output so S2S turn-taking
+continues. The orchestrator only fires for reasoning/tool/memory turns;
+chitchat stays local in Moshi. Barge-in during an orchestrator turn uses
+the existing `SpeechController` interrupt path; Moshi is already muted
+for the duration.
+
 ### Interrupt handling
 
 The microphone keeps listening while Continuum speaks. If the user starts talking, playback is cut within 50 ms and the new input goes into the pipeline. This is what makes it feel like a conversation instead of a walkie-talkie.

@@ -244,6 +244,15 @@ pub struct ChatConfig {
     /// Whether `sensitivity: sensitive` vault notes are exposed to chat
     /// memory search results and prompt context.
     pub include_sensitive_memory: bool,
+    /// How many of the most recent messages to send to the model each turn.
+    /// The whole conversation is persisted on disk, but only this tail is
+    /// shipped in the request, so per-turn input tokens stay bounded as a
+    /// chat grows instead of growing linearly with its full history. 0 sends
+    /// the entire history (the pre-window behavior). After slicing, any
+    /// leading non-`user` messages are dropped so the first message the
+    /// provider sees is a user turn (Anthropic requires this), which also
+    /// keeps the kept context coherent.
+    pub history_message_window: u32,
 }
 
 impl Default for ChatConfig {
@@ -260,6 +269,7 @@ impl Default for ChatConfig {
             memory_tool_max_rounds: 8,
             memory_context_notes_max: 6,
             include_sensitive_memory: false,
+            history_message_window: 20,
         }
     }
 }
@@ -571,6 +581,60 @@ pub struct MemoryConfig {
     pub curator: CuratorConfig,
 }
 
+/// Configuration for the realtime voice front-end selector.
+///
+/// Continuum has two voice front-ends:
+/// - `"pipeline"` (default) — the existing wake → whisper STT → triage →
+///   orchestrator → TTS loop. Segment-granular, interruptible, works on CPU.
+/// - `"moshi"` — Kyutai Moshi full-duplex speech-to-speech, run as a
+///   `moshi-backend.exe` subprocess speaking a local WebSocket protocol.
+///   Requires the `moshi` cargo feature and a CUDA-capable GPU. Short
+///   conversational turns are handled natively by Moshi; reasoning/tool
+///   turns escalate to the orchestrator (triage-driven, see Phase 3).
+///
+/// Mode switching takes effect on the next daemon start (the daemon loads
+/// voice config once at boot); the dashboard surfaces this via RestartNotice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceFrontendConfig {
+    /// `"pipeline"` (default) or `"moshi"`.
+    pub mode: String,
+    /// Hugging Face repo id for the Moshi model checkpoint, e.g.
+    /// `kyutai/moshiko-candle-q8`. Passed to `moshi-backend` via its config.
+    pub moshi_model_repo: String,
+    /// Compute device for Moshi: `"cuda"` (recommended, ~8 GB VRAM q8) or
+    /// `"cpu"` (far too slow for realtime — documented fallback only).
+    pub moshi_device: String,
+    /// Local TCP port the Moshi backend should serve its WebSocket on.
+    /// Continuum spawns the subprocess with this port and connects to
+    /// `ws://127.0.0.1:<port>`.
+    pub moshi_port: u16,
+    /// Override path to the `moshi-backend` executable. Empty resolves via
+    /// `CONTINUUM_MOSHI_BIN` env → `~/.continuum-dev/bin/moshi/moshi-backend.exe`
+    /// → `moshi-backend` on PATH (see `resolve_moshi_binary` in voice/moshi.rs).
+    pub moshi_bin: String,
+    /// Whether the audio tap in `senses/audio/full.rs` forks 16 kHz mono PCM
+    /// to the Moshi front-end. Separate from `mode` so the tap can be
+    /// disabled for debugging without flipping the whole mode. Only
+    /// consulted when `mode == "moshi"`.
+    pub moshi_tap_enabled: bool,
+}
+
+impl Default for VoiceFrontendConfig {
+    fn default() -> Self {
+        Self {
+            mode: "pipeline".to_string(),
+            // Kyutai's quantized 8-bit Moshi checkpoint — ~8 GB VRAM, the
+            // lowest-VRAM realtime option. See scripts/download-models.ps1.
+            moshi_model_repo: "kyutai/moshiko-candle-q8".to_string(),
+            moshi_device: "cuda".to_string(),
+            moshi_port: 8084,
+            moshi_bin: String::new(),
+            moshi_tap_enabled: true,
+        }
+    }
+}
+
 /// Configuration for the voice input loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -612,6 +676,9 @@ pub struct VoiceConfig {
     /// seconds so the user can ask a follow-up without re-triggering the wake
     /// word. `0` disables conversation mode.
     pub conversation_followup_seconds: u64,
+    /// Selects the realtime voice front-end (`pipeline` vs `moshi`). See
+    /// [`VoiceFrontendConfig`].
+    pub frontend: VoiceFrontendConfig,
 }
 
 /// Configuration for the text-to-speech pipeline.
@@ -626,8 +693,9 @@ pub struct TtsConfig {
     /// Whether TTS is enabled at all. When `false`, whisper triage
     /// decisions and orchestrator responses are logged but not spoken.
     pub enabled: bool,
-    /// Which TTS engine to use. `"piper"` (default, local) or `"elevenlabs"`
-    /// (cloud plugin, requires API key).
+    /// Which TTS engine to use. `"piper"` (default, local),
+    /// `"kokoros"` (local ONNX, higher quality), or `"elevenlabs"` (cloud
+    /// plugin, requires API key — stub).
     pub engine: String,
     /// Directory holding the espeak-ng dictionary files required by
     /// Piper's phonemizer. Must exist at runtime.
@@ -643,6 +711,8 @@ pub struct TtsConfig {
     pub length_scale: Option<f32>,
     /// ElevenLabs streaming cloud TTS (optional plugin backend).
     pub elevenlabs: ElevenLabsConfig,
+    /// Kokoros local ONNX TTS (optional, higher-quality Piper alternative).
+    pub kokoros: KokorosConfig,
 }
 
 /// A single Piper voice entry.
@@ -688,6 +758,50 @@ impl Default for ElevenLabsConfig {
             model_id: "eleven_turbo_v2_5".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,
+        }
+    }
+}
+
+/// Kokoros local TTS configuration (ONNX backend, optional).
+///
+/// Kokoros ([Kokoro-82M](https://github.com/lucasjinreal/Kokoros)) is a
+/// higher-quality, more natural-sounding local alternative to Piper at the
+/// cost of slightly higher latency. Like Piper it is invoked as a subprocess
+/// (`koko`) so the ONNX Runtime dependency stays out of Continuum's Rust
+/// dependency graph. The `koko` binary is resolved at runtime by
+/// [`crate::voice::tts::resolve_koko_binary`] (env override
+/// `CONTINUUM_KOKO_BIN`, then `~/.continuum-dev/bin/kokoros/koko.exe`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KokorosConfig {
+    /// Path to `kokoro-v1.0.onnx`.
+    pub model_path: String,
+    /// Path to `voices-v1.0.bin` (the bundled voice-style catalog).
+    pub voices_path: String,
+    /// Kokoros voice style, e.g. `af_sky` or a blend like
+    /// `af_sarah.4+af_nicole.6`. Passed to `koko --style`.
+    pub voice_name: String,
+    /// Speech-rate multiplier (1.0 = native). Passed to `koko --speed`.
+    pub speed: f32,
+}
+
+impl Default for KokorosConfig {
+    fn default() -> Self {
+        let kokoro_dir = continuum_dev_dir()
+            .join("models")
+            .join("tts")
+            .join("kokoro");
+        Self {
+            model_path: kokoro_dir
+                .join("kokoro-v1.0.onnx")
+                .to_string_lossy()
+                .into_owned(),
+            voices_path: kokoro_dir
+                .join("voices-v1.0.bin")
+                .to_string_lossy()
+                .into_owned(),
+            voice_name: "af_sky".to_string(),
+            speed: 1.0,
         }
     }
 }
@@ -1018,6 +1132,7 @@ impl Default for VoiceConfig {
             feedback_sounds: true,
             hotkey: "Ctrl+Shift+K".to_string(),
             conversation_followup_seconds: 5,
+            frontend: VoiceFrontendConfig::default(),
         }
     }
 }
@@ -1056,6 +1171,7 @@ impl Default for TtsConfig {
             primary: "en".to_string(),
             length_scale: None,
             elevenlabs: ElevenLabsConfig::default(),
+            kokoros: KokorosConfig::default(),
         }
     }
 }
@@ -1280,6 +1396,7 @@ interval_secs = 5
         assert_eq!(cfg.memory_tool_max_rounds, 8);
         assert_eq!(cfg.memory_context_notes_max, 6);
         assert!(!cfg.include_sensitive_memory);
+        assert_eq!(cfg.history_message_window, 20);
 
         let parsed: ContinuumConfig =
             toml::from_str(
@@ -1306,6 +1423,10 @@ interval_secs = 5
         assert_eq!(overridden.chat.memory_tool_max_rounds, 3);
         assert_eq!(overridden.chat.memory_context_notes_max, 0);
         assert!(overridden.chat.include_sensitive_memory);
+        // The history window is overridable, and 0 opts out of windowing:
+        let windowed: ContinuumConfig =
+            toml::from_str("[chat]\nhistory_message_window = 0\n").expect("parse window");
+        assert_eq!(windowed.chat.history_message_window, 0);
     }
 
     #[test]
