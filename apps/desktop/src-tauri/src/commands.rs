@@ -1385,12 +1385,12 @@ pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<Runtime
     })
 }
 
-/// Health of the named-pipe bridge to the running `continuum.exe` process.
+/// Health of the low-latency runtime bridge to the running Continuum process.
 ///
 /// Surfaces the two latches maintained by [`runtime_bridge::pipe`] on
-/// Windows. On non-Windows the result reports `connected = false` and
-/// `pipe_name = None` so the UI can render "not available" honestly
-/// instead of an error.
+/// Windows currently uses a named pipe. macOS uses the portable `state.json`
+/// bridge, so the result reports `connected = false` and `pipe_name = None`
+/// without treating the running runtime as unhealthy.
 #[tauri::command]
 pub async fn pipe_health() -> Result<PipeHealth, String> {
     Ok(runtime_bridge::current_pipe_health())
@@ -1400,31 +1400,63 @@ pub async fn pipe_health() -> Result<PipeHealth, String> {
 pub async fn start_runtime() -> Result<(), String> {
     let Some(bin) = locate_runtime_binary() else {
         return Err(
-            "continuum.exe not found next to continuum-desktop.exe — install may be incomplete"
+            "continuum runtime binary not found next to the desktop app — install may be incomplete"
                 .to_string(),
         );
     };
     // Set cwd to the install dir so the runtime can find its sibling
     // `prompts/`, `skills/` and `config/` folders via relative paths.
-    let working_dir = bin
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let working_dir = runtime_working_dir(&bin);
     runtime_command(&bin, &working_dir)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to spawn {}: {}", bin.display(), e))
 }
 
+pub(crate) fn bundled_binary_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = vec![
+        exe_dir.join(name),
+        exe_dir.join("resources").join("bin").join(name),
+    ];
+    // Tauri puts resources at `Continuum.app/Contents/Resources` on macOS.
+    // The desktop executable itself lives in `Contents/MacOS`.
+    if let Some(contents_dir) = exe_dir.parent() {
+        candidates.push(contents_dir.join("Resources").join("bin").join(name));
+    }
+    candidates
+}
+
 fn locate_runtime_binary() -> Option<std::path::PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    for name in ["continuum.exe", "continuum"] {
-        let p = exe_dir.join(name);
-        if p.exists() {
-            return Some(p);
+    ["continuum.exe", "continuum"].into_iter().find_map(|name| {
+        bundled_binary_candidates(name)
+            .into_iter()
+            .find(|candidate| candidate.exists())
+    })
+}
+
+fn runtime_working_dir(binary: &std::path::Path) -> std::path::PathBuf {
+    let binary_dir = binary.parent().unwrap_or_else(|| std::path::Path::new("."));
+    // Packaged Tauri resources keep binaries in `Resources/bin` and runtime
+    // assets in its parent. Development and portable installs keep them all
+    // together, so preserve the binary directory there.
+    if binary_dir.file_name().is_some_and(|name| name == "bin") {
+        if let Some(resources_dir) = binary_dir.parent() {
+            if resources_dir.join("config").is_dir()
+                && resources_dir.join("prompts").is_dir()
+                && resources_dir.join("skills").is_dir()
+            {
+                return resources_dir.to_path_buf();
+            }
         }
     }
-    None
+    binary_dir.to_path_buf()
 }
 
 // --- MCP tool registry (static manifest) ---

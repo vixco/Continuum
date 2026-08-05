@@ -60,8 +60,9 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, id: &str) -> Result<()>;
 }
 
-/// Windows Credential Manager (via keyring). Account name is namespaced so
-/// other Continuum secrets can share the service later.
+/// Native OS credential store (via keyring). The account name is namespaced so
+/// other Continuum secrets can share the service later. This resolves to
+/// Windows Credential Manager on Windows and Keychain on macOS.
 pub struct KeyringSecretStore;
 
 impl KeyringSecretStore {

@@ -13,102 +13,80 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.94.0"
-  # Keep every Cargo invocation in one workspace-level directory. Tauri runs
-  # Cargo from src-tauri, so a relative value creates a second target tree and
-  # leaves the asset assembly step looking in the wrong place.
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  # sccache wraps rustc/cc; mozilla-actions/sccache-action (run later) manages
-  # SCCACHE_DIR + the GitHub Actions cache backing. These are plain values,
-  # so workflow-level env is valid (no `runner` context needed here).
-  RUSTC_WRAPPER: sccache
-  SCCACHE_CACHE_SIZE: 4G
-  # Route the cmake-built native libs (whisper.cpp + llama.cpp) through sccache.
-  # RUSTC_WRAPPER alone only caches rustc — the slow 15-20 min is the C/C++
-  # compile of those two libs. cmake reads CMAKE_<LANG>_COMPILER_LAUNCHER from
-  # the env and runs `sccache cl` for each translation unit, so after the first
-  # release they become cache hits.
-  CMAKE_C_COMPILER_LAUNCHER: sccache
-  CMAKE_CXX_COMPILER_LAUNCHER: sccache
 
 jobs:
-  release:
-    name: Build and publish Windows release
-    # Never publish a main commit until the blocking CI workflow has passed.
-    # Manual dispatch remains available for an intentional retry.
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    # Keep the native toolchain stable. Packaging itself is NSIS-only because
-    # WiX 3 candle.exe fails to start on multiple hosted Windows images.
-    runs-on: windows-2022
-    # sccache wraps rustc/cc so whisper.cpp + llama.cpp + ort + lancedb native
-    # compiles are cache hits across releases. First release is full speed;
-    # every subsequent release reuses the C/C++ objects in seconds. The
-    # mozilla-actions/sccache-action manages SCCACHE_DIR + GitHub Actions
-    # cache restore/save itself, so only the wrapper flag and size are set
-    # here (plain values, valid in workflow-level env). The wrapper is
-    # installed before the first cargo build below, so it never poisons an
-    # earlier cargo step.
-    concurrency:
-      group: continuum-release-main
-      cancel-in-progress: false
+    outputs:
+      should_release: ${{ steps.current.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # workflow_run otherwise checks out the latest default-branch SHA,
-          # which may differ from the exact commit that CI validated.
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Verify release commit is current main
-        shell: pwsh
+      - name: Skip superseded CI cleanly
+        id: current
+        env:
+          RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
         run: |
-          git fetch origin main --no-tags
-          $releaseSha = (git rev-parse HEAD).Trim()
-          $mainSha = (git rev-parse origin/main).Trim()
-          if ($releaseSha -ne $mainSha) {
-            throw "Refusing to release stale CI commit $releaseSha; current main is $mainSha."
-          }
-
-      - name: Verify NSIS-only packaging contract
-        shell: pwsh
-        run: |
-          $config = Get-Content "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-          $targets = @($config.bundle.targets)
-          if ($targets.Count -ne 1 -or $targets[0] -ne "nsis") {
-            throw "Release packaging must remain NSIS-only; configured targets: $($targets -join ', ')"
-          }
+          main_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "CI commit $RELEASE_SHA was superseded by $main_sha; nothing to publish."
+            exit 0
+          fi
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Calculate next release version
         id: version
+        if: steps.current.outputs.should_release == 'true'
+        run: |
+          current="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ "$current" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$ ]]; then
+            next="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+          elif [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            next="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+          else
+            echo "Unsupported SemVer in Cargo.toml: $current" >&2
+            exit 1
+          fi
+          while git rev-parse "v$next" >/dev/null 2>&1; do
+            if [[ "$next" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$ ]]; then
+              next="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+            else
+              echo "Release tag v$next already exists; bump the source version manually." >&2
+              exit 1
+            fi
+          done
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Build Windows release
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify NSIS packaging contract
         shell: pwsh
         run: |
-          $line = Get-Content "Cargo.toml" | Select-String '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if (-not $line) { throw "Could not find the workspace version in Cargo.toml" }
-          $current = $line.Matches[0].Groups[1].Value
-          if ($current -match '^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$') {
-            $base = $Matches[1]
-            $channel = $Matches[2]
-            $nextNumber = [int]$Matches[3] + 1
-            $next = "$base-$channel.$nextNumber"
-          } elseif ($current -match '^([0-9]+)\.([0-9]+)\.([0-9]+)$') {
-            $next = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)"
-          } else {
-            throw "Unsupported SemVer in Cargo.toml: $current"
+          $config = Get-Content "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          if (@($config.bundle.targets) -notcontains "nsis") {
+            throw "Tauri bundle targets must include nsis for Windows releases."
           }
-
-          while (git tag --list "v$next") {
-            if ($next -match '^([0-9]+\.[0-9]+\.[0-9]+)-([A-Za-z][A-Za-z0-9-]*)\.([0-9]+)$') {
-              $next = "$($Matches[1])-$($Matches[2]).$([int]$Matches[3] + 1)"
-            } else {
-              throw "Release tag v$next already exists; bump the source version manually."
-            }
-          }
-
-          "version=$next" >> $env:GITHUB_OUTPUT
-          "tag=v$next" >> $env:GITHUB_OUTPUT
-          Write-Host "Current source version: $current"
-          Write-Host "Next release version: $next"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
@@ -118,10 +96,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # whisper-rs-sys bindgen needs libclang. windows-2022 ships LLVM, but
-      # pin the path explicitly (mirrors ci.yml clippy-full) so an image change
-      # never silently breaks the release build at the bindgen step.
-      - name: Configure LLVM + ninja for bindgen / cmake
+      - name: Configure LLVM and Ninja
         shell: pwsh
         run: |
           $llvmBin = "C:\Program Files\LLVM\bin"
@@ -129,12 +104,6 @@ jobs:
           echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
           choco install ninja --no-progress --confirm --skip-if-not-installed
-
-      - name: Install sccache
-        # Pinned to a real tag: this action publishes only `v0.0.x` tags (no
-        # moving `v0` major ref), so `@v0` is unresolvable and fails the whole
-        # workflow run before any job starts. Bump explicitly when upgrading.
-        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -155,7 +124,6 @@ jobs:
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
             throw "TAURI_SIGNING_PRIVATE_KEY is not configured. Signed updater releases cannot be published safely."
@@ -163,158 +131,240 @@ jobs:
 
       - name: Bump version in release checkout
         shell: pwsh
-        run: .\scripts\bump-version.ps1 -NewVersion "${{ steps.version.outputs.version }}"
+        run: .\scripts\bump-version.ps1 -NewVersion "${{ needs.prepare.outputs.version }}"
 
-      # Cache failure must never block a signed release. The stable restore key
-      # reuses native dependencies across incrementing alpha versions.
-      - name: Restore release compiler cache
-        continue-on-error: true
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-release-
-
-      # CI is the test gate. Build only the dep graph of the two shipped bins
-      # (continuum + continuum-mcp); continuum-gateway and the Tauri desktop
-      # crate are not deps of either bin and are built in their own step.
-      # sccache (set via RUSTC_WRAPPER in the job env) turns the whisper.cpp /
-      # llama.cpp / ort / lancedb native compiles into cache hits after the
-      # first release.
-      - name: Build release binaries
+      - name: Build runtime and MCP binaries
         run: cargo build --release --locked --bin continuum --bin continuum-mcp
 
-      # `target` is restored from cache, including old Tauri bundles. Remove
-      # only packaged outputs so asset assembly can never select an installer
-      # from an earlier version while retaining the expensive compiler cache.
-      - name: Clear stale Tauri bundles
+      - name: Stage runtime resources for the desktop bundle
         shell: pwsh
         run: |
-          $bundleRoot = Join-Path $env:CARGO_TARGET_DIR "release\bundle"
-          if (Test-Path -LiteralPath $bundleRoot) {
-            Remove-Item -LiteralPath $bundleRoot -Recurse -Force
-          }
+          $binDir = "apps/desktop/src-tauri/resources/bin"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Copy-Item "target/release/continuum.exe" "$binDir/continuum.exe" -Force
+          Copy-Item "target/release/continuum-mcp.exe" "$binDir/continuum-mcp.exe" -Force
 
-      - name: Build Tauri desktop app with signed updater artifacts
+      - name: Build signed Tauri desktop app
         working-directory: apps/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        # Defense in depth: never invoke WiX even if the config later drifts.
         run: pnpm tauri build --bundles nsis
 
-      - name: Assemble release assets and updater metadata
-        id: assets
+      - name: Assemble Windows release assets
         shell: pwsh
         run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $tag = "${{ steps.version.outputs.tag }}"
-          $repo = "${{ github.repository }}"
-          $stage = "staging\continuum-$version-windows-x64"
+          $version = "${{ needs.prepare.outputs.version }}"
+          $assets = "release-assets"
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          $stage = "staging/continuum-$version-windows-x64"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/continuum.exe" "$stage/"
+          Copy-Item "target/release/continuum-mcp.exe" "$stage/"
+          Copy-Item "config" "$stage/config" -Recurse
+          Copy-Item "prompts" "$stage/prompts" -Recurse
+          Copy-Item "skills" "$stage/skills" -Recurse
+          Copy-Item "README.md","LICENSE","KNOWN_ISSUES.md" "$stage/"
+          Copy-Item "scripts/install.ps1" "$stage/install.ps1"
+          Compress-Archive -Path "$stage/*" -DestinationPath "$assets/continuum-$version-windows-x64.zip" -Force
+          $bundleRoot = "target/release/bundle/nsis"
+          $nsis = @(Get-ChildItem $bundleRoot -File -Filter "*-setup.exe" | Where-Object Name -Match "_$([Regex]::Escape($version))(?:_|-)")
+          if ($nsis.Count -ne 1) { throw "Expected one NSIS installer for $version; found $($nsis.Name -join ', ')" }
+          $sig = Get-Item "$($nsis[0].FullName).sig" -ErrorAction Stop
+          Copy-Item $nsis[0].FullName "$assets/continuum-$version-windows-x64-setup.exe"
+          Copy-Item $sig.FullName "$assets/continuum-$version-windows-x64-setup.exe.sig"
 
-          Copy-Item "target\release\continuum.exe" "$stage\"
-          Copy-Item "target\release\continuum-mcp.exe" "$stage\"
-          $desktop = Get-ChildItem "target\release" -Filter "continuum-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($desktop) { Copy-Item $desktop.FullName "$stage\" }
-          Copy-Item "config" "$stage\config" -Recurse
-          Copy-Item "prompts" "$stage\prompts" -Recurse
-          Copy-Item "skills" "$stage\skills" -Recurse
-          Copy-Item "README.md" "$stage\"
-          Copy-Item "LICENSE" "$stage\"
-          Copy-Item "KNOWN_ISSUES.md" "$stage\"
-          Copy-Item "scripts\install.ps1" "$stage\install.ps1"
-          $portable = "continuum-$version-windows-x64.zip"
-          Compress-Archive -Path "$stage\*" -DestinationPath $portable -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release-assets/
+          if-no-files-found: error
 
-          $bundleRoot = "target\release\bundle"
-          $versionPattern = [Regex]::Escape($version)
-          $nsisCandidates = @(
-            Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" |
-              Where-Object { $_.Name -match "_$versionPattern(?:_|-)" }
-          )
-          if ($nsisCandidates.Count -ne 1) {
-            $found = @(Get-ChildItem "$bundleRoot\nsis" -File -Filter "*-setup.exe" -ErrorAction SilentlyContinue).Name -join ", "
-            throw "Expected exactly one NSIS installer for $version; found: $found"
+  build-macos:
+    name: Build macOS release (${{ matrix.arch }})
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify DMG packaging contract
+        run: |
+          jq -e '.bundle.targets | index("dmg")' apps/desktop/src-tauri/tauri.conf.json >/dev/null
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install native build prerequisites
+        run: brew install ninja protobuf llvm
+
+      - name: Configure LLVM for bindgen
+        run: |
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot $(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure updater signing
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || {
+            echo "TAURI_SIGNING_PRIVATE_KEY is not configured. Signed updater releases cannot be published safely." >&2
+            exit 1
           }
-          $nsis = $nsisCandidates[0]
-          $nsisSig = Get-Item "$($nsis.FullName).sig" -ErrorAction SilentlyContinue
-          if (-not $nsisSig) { throw "Tauri did not produce an updater signature for $($nsis.Name)" }
 
-          $installerName = "continuum-$version-windows-x64-setup.exe"
-          $signatureName = "$installerName.sig"
-          Copy-Item $nsis.FullName $installerName
-          Copy-Item $nsisSig.FullName $signatureName
-          $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
-          $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
-          if ($signatureText -notmatch $versionPattern) {
-            throw "Updater signature does not identify the expected version $version. Refusing to publish mismatched metadata."
-          }
-          $latest = [ordered]@{
-            version = $version
-            notes = "Automatic Continuum release $tag. See the GitHub release notes for details."
-            pub_date = [DateTime]::UtcNow.ToString("o")
-            platforms = [ordered]@{
-              "windows-x86_64" = [ordered]@{
-                signature = $signature
-                url = "https://github.com/$repo/releases/download/$tag/$installerName"
-              }
-            }
-          }
-          $latest | ConvertTo-Json -Depth 5 | Set-Content -Path "latest.json" -Encoding utf8NoBOM
+      - name: Bump version in release checkout
+        shell: pwsh
+        run: ./scripts/bump-version.ps1 -NewVersion "${{ needs.prepare.outputs.version }}"
 
-          $shaFiles = @($portable, $installerName, $signatureName, "latest.json")
-          $shaLines = foreach ($file in $shaFiles) {
-            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
-            "$hash  $(Split-Path -Leaf $file)"
-          }
-          $shaLines | Set-Content -Path "SHA256SUMS.txt" -Encoding ascii
+      - name: Build runtime and MCP binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin continuum --bin continuum-mcp
 
-          "installer_name=$installerName" >> $env:GITHUB_OUTPUT
-          "signature_name=$signatureName" >> $env:GITHUB_OUTPUT
-          Get-Content "latest.json"
-          Get-Content "SHA256SUMS.txt"
+      - name: Stage runtime resources for the desktop bundle
+        run: |
+          mkdir -p apps/desktop/src-tauri/resources/bin
+          cp "target/${{ matrix.target }}/release/continuum" apps/desktop/src-tauri/resources/bin/continuum
+          cp "target/${{ matrix.target }}/release/continuum-mcp" apps/desktop/src-tauri/resources/bin/continuum-mcp
+          chmod +x apps/desktop/src-tauri/resources/bin/continuum apps/desktop/src-tauri/resources/bin/continuum-mcp
+
+      - name: Build signed Tauri desktop app
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --bundles dmg --target ${{ matrix.target }}
+
+      - name: Assemble macOS release assets
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          target="${{ matrix.target }}"
+          arch="${{ matrix.arch }}"
+          mkdir -p release-assets "staging/continuum-$version-macos-$arch"
+          stage="staging/continuum-$version-macos-$arch"
+          cp "target/$target/release/continuum" "$stage/"
+          cp "target/$target/release/continuum-mcp" "$stage/"
+          cp -R config "$stage/config"
+          cp -R prompts "$stage/prompts"
+          cp -R skills "$stage/skills"
+          cp README.md LICENSE KNOWN_ISSUES.md "$stage/"
+          tar -C staging -czf "release-assets/continuum-$version-macos-$arch.tar.gz" "continuum-$version-macos-$arch"
+          dmg=(target/$target/release/bundle/dmg/*.dmg)
+          updater=(target/$target/release/bundle/macos/*.app.tar.gz)
+          if [ "${#dmg[@]}" -ne 1 ] || [ "${#updater[@]}" -ne 1 ] || [ ! -f "${updater[0]}.sig" ]; then
+            echo "Expected exactly one DMG and updater archive with signature for $target" >&2
+            find "target/$target/release/bundle" -type f -print >&2
+            exit 1
+          fi
+          cp "${dmg[0]}" "release-assets/continuum-$version-macos-$arch.dmg"
+          cp "${updater[0]}" "release-assets/continuum-$version-macos-$arch.app.tar.gz"
+          cp "${updater[0]}.sig" "release-assets/continuum-$version-macos-$arch.app.tar.gz.sig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: release-assets/
+          if-no-files-found: error
+
+  publish:
+    name: Publish cross-platform release
+    needs: [prepare, build-windows, build-macos]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: continuum-release-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Assemble updater metadata and checksums
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          tag="${{ needs.prepare.outputs.tag }}"
+          repo="${{ github.repository }}"
+          cd release-assets
+          win_sig="$(tr -d '\r\n' < "continuum-$version-windows-x64-setup.exe.sig")"
+          arm_sig="$(tr -d '\r\n' < "continuum-$version-macos-aarch64.app.tar.gz.sig")"
+          intel_sig="$(tr -d '\r\n' < "continuum-$version-macos-x86_64.app.tar.gz.sig")"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "Automatic Continuum release $tag. See the GitHub release notes for details." \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg repo "$repo" \
+            --arg tag "$tag" \
+            --arg win_sig "$win_sig" \
+            --arg arm_sig "$arm_sig" \
+            --arg intel_sig "$intel_sig" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"windows-x86_64": {signature: $win_sig, url: ("https://github.com/" + $repo + "/releases/download/" + $tag + "/continuum-" + $version + "-windows-x64-setup.exe")}, "darwin-aarch64": {signature: $arm_sig, url: ("https://github.com/" + $repo + "/releases/download/" + $tag + "/continuum-" + $version + "-macos-aarch64.app.tar.gz")}, "darwin-x86_64": {signature: $intel_sig, url: ("https://github.com/" + $repo + "/releases/download/" + $tag + "/continuum-" + $version + "-macos-x86_64.app.tar.gz")}}}' > latest.json
+          sha256sum * > SHA256SUMS.txt
+          cp latest.json ../latest.json
 
       - name: Commit version and updater metadata to main
         shell: pwsh
         run: |
+          ./scripts/bump-version.ps1 -NewVersion "${{ needs.prepare.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock apps/desktop/package.json apps/desktop/src-tauri/tauri.conf.json apps/desktop/src/lib/tauri.ts latest.json
-          git commit -m "chore(release): prepare ${{ steps.version.outputs.tag }} [skip ci]"
-          git tag -a "${{ steps.version.outputs.tag }}" -m "Continuum ${{ steps.version.outputs.tag }}"
+          git commit -m "chore(release): prepare ${{ needs.prepare.outputs.tag }} [skip ci]"
+          git tag -a "${{ needs.prepare.outputs.tag }}" -m "Continuum ${{ needs.prepare.outputs.tag }}"
           git push origin HEAD:main --follow-tags
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Continuum ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Continuum ${{ needs.prepare.outputs.tag }}
           draft: false
-          # Continuum publishes every successful main build as a normal GitHub
-          # Release, including alpha/beta SemVer tags, so it remains visible as
-          # the latest release and is discoverable from the Releases page.
           prerelease: false
           generate_release_notes: true
           files: |
-            continuum-${{ steps.version.outputs.version }}-windows-x64.zip
-            ${{ steps.assets.outputs.installer_name }}
-            ${{ steps.assets.outputs.signature_name }}
-            latest.json
-            SHA256SUMS.txt
+            release-assets/*
           body: |
-            ## Continuum ${{ steps.version.outputs.tag }}
+            ## Continuum ${{ needs.prepare.outputs.tag }}
 
             This release was published automatically after a successful push to `main`.
-            The Windows updater artifact is signed and is described by `latest.json`.
+            Signed updater artifacts are available for Windows, Apple Silicon Macs, and Intel Macs.
 
-            **Install from this release:**
+            **Windows install:**
             ```powershell
-            irm https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.version.outputs.tag }}/scripts/install.ps1 | iex
+            irm https://raw.githubusercontent.com/${{ github.repository }}/${{ needs.prepare.outputs.tag }}/scripts/install.ps1 | iex
             ```
 
-            Windows binaries remain unsigned; Windows SmartScreen may warn on first launch.
+            On macOS, open the DMG matching your processor architecture. The
+            `latest.json` updater metadata is signed independently of the app bundle.

@@ -26,15 +26,6 @@ use crate::memory::MemoryState;
 
 type ConfigProvider = Arc<dyn Fn() -> ContinuumConfig + Send + Sync>;
 
-/// Directory where continuum-desktop.exe was started from. Used by checks that
-/// need to find sibling files (continuum-mcp.exe, prompts/, skills/) that the
-/// installer places next to the binaries.
-fn install_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-}
-
 /// True if `continuum.exe` has touched `~/.continuum-dev/state.json` recently.
 /// Used to avoid screaming "Degrading" across every model/voice/orchestrator
 /// probe when the runtime simply isn't running (the common case for dashboard-only
@@ -489,10 +480,10 @@ impl HealthCheck for McpCheck {
         // both packaged installs (next to continuum-desktop.exe) and local dev
         // layouts (target/release/... from a repo cwd).
         let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(dir) = install_dir() {
-            candidates.push(dir.join("continuum-mcp.exe"));
-            candidates.push(dir.join("continuum-mcp"));
-        }
+        candidates.extend(crate::commands::bundled_binary_candidates(
+            "continuum-mcp.exe",
+        ));
+        candidates.extend(crate::commands::bundled_binary_candidates("continuum-mcp"));
         candidates.extend(
             [
                 "target/release/continuum-mcp.exe",

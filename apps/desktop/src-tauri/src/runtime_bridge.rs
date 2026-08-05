@@ -169,10 +169,7 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
         )
         .await;
     state
-        .set_voice_frontend_status(
-            snap.voice_frontend_mode.clone(),
-            snap.moshi_loaded,
-        )
+        .set_voice_frontend_status(snap.voice_frontend_mode.clone(), snap.moshi_loaded)
         .await;
 }
 
