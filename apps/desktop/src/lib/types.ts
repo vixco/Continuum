@@ -68,6 +68,12 @@ export interface VoiceState {
   detected_call_app: string | null;
   wake_word_enabled: boolean;
   last_heard_at: string | null;
+  /** Active voice front-end: `"pipeline"` or `"moshi"`. Mirrors
+   *  `voice.frontend.mode` applied at daemon boot. */
+  voice_frontend_mode: string;
+  /** Whether the Moshi S2S backend subprocess is loaded+connected. Only
+   *  meaningful when `voice_frontend_mode === "moshi"`. */
+  moshi_loaded: boolean;
 }
 
 // Mirrors crates/continuum-core/src/runtime_publish.rs's CuratorSnapshot,
@@ -527,6 +533,14 @@ export interface ContinuumConfig {
     feedback_sounds: boolean;
     hotkey: string;
     conversation_followup_seconds: number;
+    frontend: {
+      mode: string;
+      moshi_model_repo: string;
+      moshi_device: string;
+      moshi_port: number;
+      moshi_bin: string;
+      moshi_tap_enabled: boolean;
+    };
   };
   tts: {
     enabled: boolean;
@@ -541,6 +555,12 @@ export interface ContinuumConfig {
       model_id: string;
       stability: number;
       similarity_boost: number;
+    };
+    kokoros: {
+      model_path: string;
+      voices_path: string;
+      voice_name: string;
+      speed: number;
     };
   };
   workers: {

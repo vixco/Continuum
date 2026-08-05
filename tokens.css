@@ -1,57 +1,80 @@
-/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
- * Hallmark · genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app
- * theme: custom · vibe: "quiet technical, graphite, precise amber" · paper: oklch(12.5% 0.01 75) · accent: oklch(72% 0.15 70)
- * display: Bahnschrift · body: Segoe UI Variable Text · axes: dark / system-native / warm
+/* Hallmark · Nous Indigo · "the next step in AGI"
+ * genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app
+ * vibe: "calm AGI console, cool slate, one restrained indigo accent"
+ * philosophy: flat-not-boxed · hairlines over borders · one accent · downward-weighted layered shadows
+ * paper: oklch(13% 0.008 260) · accent: oklch(70% 0.14 277)
+ * display: Bahnschrift · body: Segoe UI Variable Text · axes: dark / system-native / cool
  */
 
-:root {
-  --color-paper: oklch(12.5% 0.01 75);
-  --color-paper-2: oklch(15.5% 0.011 75);
-  --color-paper-3: oklch(19.5% 0.012 75);
-  --color-hover: oklch(23% 0.013 75);
-  --color-rule: oklch(28% 0.01 75);
-  --color-rule-2: oklch(34% 0.012 75);
-  --color-muted: oklch(68% 0.01 75);
-  --color-neutral: oklch(56% 0.012 75);
-  --color-ink-2: oklch(82% 0.01 75);
-  --color-ink: oklch(95% 0.008 75);
-  --color-accent: oklch(72% 0.15 70);
-  --color-accent-dim: oklch(58% 0.12 65);
-  --color-accent-ink: oklch(16% 0.012 75);
-  --color-focus: oklch(80% 0.18 75);
-  --color-healthy: oklch(72% 0.16 145);
-  --color-warning: oklch(76% 0.14 78);
-  --color-error: oklch(68% 0.18 25);
-  --color-idle: oklch(55% 0.009 75);
-  --color-voice: oklch(70% 0.12 245);
-  --color-voice-dim: oklch(54% 0.1 245);
-  --color-deep-shadow: oklch(5% 0.008 75);
+/* `:root` carries the dark default; `[data-theme="dark"]` mirrors it so a
+   scoped preview element can render dark even when the app root is light. */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
 
-  /* Channel tokens keep Tailwind 3 opacity modifiers working. */
-  --paper-channels: 12.5% 0.01 75;
-  --paper-2-channels: 15.5% 0.011 75;
-  --paper-3-channels: 19.5% 0.012 75;
-  --hover-channels: 23% 0.013 75;
-  --rule-channels: 28% 0.01 75;
-  --rule-2-channels: 34% 0.012 75;
-  --muted-channels: 68% 0.01 75;
-  --neutral-channels: 56% 0.012 75;
-  --ink-2-channels: 82% 0.01 75;
-  --ink-channels: 95% 0.008 75;
-  --accent-channels: 72% 0.15 70;
-  --accent-dim-channels: 58% 0.12 65;
-  --healthy-channels: 72% 0.16 145;
-  --warning-channels: 76% 0.14 78;
-  --error-channels: 68% 0.18 25;
-  --idle-channels: 55% 0.009 75;
-  --voice-channels: 70% 0.12 245;
-  --voice-dim-channels: 54% 0.1 245;
+  /* ---------- Surfaces: cool near-black slate, hue 260 ---------- */
+  --color-paper: oklch(13% 0.008 260);
+  --color-paper-2: oklch(16.5% 0.009 260);
+  --color-paper-3: oklch(20% 0.010 260);
+  --color-hover: oklch(23.5% 0.011 260);
+  --color-rule: oklch(26% 0.008 260);
+  --color-rule-2: oklch(32% 0.010 260);
 
+  /* ---------- Text hierarchy ---------- */
+  --color-muted: oklch(66% 0.012 260);
+  --color-neutral: oklch(54% 0.013 260);
+  --color-ink-2: oklch(82% 0.010 260);
+  --color-ink: oklch(96% 0.004 260);
+
+  /* ---------- Accent: one restrained electric indigo, hue 277 ---------- */
+  --color-accent: oklch(70% 0.14 277);
+  --color-accent-dim: oklch(54% 0.11 277);
+  --color-accent-ink: oklch(16% 0.012 277);
+  --color-focus: oklch(72% 0.16 277);
+
+  /* ---------- State colors (functional, not chrome accent) ---------- */
+  --color-healthy: oklch(70% 0.13 175);
+  --color-warning: oklch(78% 0.13 75);
+  --color-error: oklch(66% 0.17 25);
+  --color-idle: oklch(52% 0.010 260);
+  --color-voice: oklch(70% 0.12 250);
+  --color-voice-dim: oklch(54% 0.10 250);
+  --color-deep-shadow: oklch(3% 0.006 260);
+
+  /* ---------- Channel tokens keep Tailwind 3 opacity modifiers working ---------- */
+  --paper-channels: 13% 0.008 260;
+  --paper-2-channels: 16.5% 0.009 260;
+  --paper-3-channels: 20% 0.010 260;
+  --hover-channels: 23.5% 0.011 260;
+  --rule-channels: 26% 0.008 260;
+  --rule-2-channels: 32% 0.010 260;
+  --muted-channels: 66% 0.012 260;
+  --neutral-channels: 54% 0.013 260;
+  --ink-2-channels: 82% 0.010 260;
+  --ink-channels: 96% 0.004 260;
+  --accent-channels: 70% 0.14 277;
+  --accent-dim-channels: 54% 0.11 277;
+  --healthy-channels: 70% 0.13 175;
+  --warning-channels: 78% 0.13 75;
+  --error-channels: 66% 0.17 25;
+  --idle-channels: 52% 0.010 260;
+  --voice-channels: 70% 0.12 250;
+  --voice-dim-channels: 54% 0.10 250;
+
+  /* ---------- Hermes-style hairlines (currentColor-tinted, theme-adaptive) ---------- */
+  --stroke-nous: oklch(96% 0.004 260 / 0.10);
+  --ui-stroke-primary: oklch(96% 0.004 260 / 0.14);
+  --ui-stroke-secondary: oklch(96% 0.004 260 / 0.10);
+  --ui-stroke-tertiary: oklch(96% 0.004 260 / 0.06);
+  --ui-stroke-quaternary: oklch(96% 0.004 260 / 0.04);
+
+  /* ---------- Fonts ---------- */
   --font-display: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
   --font-body: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif;
   --font-outlier: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
   --font-wordmark: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
 
+  /* ---------- Spacing scale ---------- */
   --space-3xs: 0.125rem;
   --space-2xs: 0.25rem;
   --space-xs: 0.5rem;
@@ -62,6 +85,7 @@
   --space-2xl: 4rem;
   --space-3xl: 6rem;
 
+  /* ---------- Type scale ---------- */
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
   --text-base: 1rem;
@@ -71,6 +95,7 @@
   --text-2xl: 2.25rem;
   --text-display: clamp(2.25rem, 3vw + 1rem, 4.25rem);
 
+  /* ---------- Motion ---------- */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
@@ -78,14 +103,19 @@
   --dur-short: 220ms;
   --dur-long: 420ms;
 
+  /* ---------- Radii + rules ---------- */
   --rule-hair: 1px;
   --rule-fine: 2px;
   --radius-card: 10px;
   --radius-pill: 999px;
   --radius-input: 7px;
-  --shadow-card: 0 1px 0 oklch(95% 0.008 75 / 0.025);
-  --shadow-modal: 0 24px 72px oklch(5% 0.008 75 / 0.58);
 
+  /* ---------- Elevation: downward-weighted, layered (shadow-nous family) ---------- */
+  --shadow-card: 0 1px 0 oklch(96% 0.004 260 / 0.025), 0 1px 2px oklch(3% 0.006 260 / 0.10);
+  --shadow-nous: 0 1px 1px oklch(3% 0.006 260 / 0.04), 0 4px 10px oklch(3% 0.006 260 / 0.12), 0 14px 32px oklch(3% 0.006 260 / 0.20);
+  --shadow-modal: 0 2px 4px oklch(3% 0.006 260 / 0.12), 0 18px 44px oklch(3% 0.006 260 / 0.52), 0 40px 90px oklch(3% 0.006 260 / 0.36);
+
+  /* ---------- Z-index ---------- */
   --z-base: 1;
   --z-raised: 10;
   --z-dropdown: 100;
@@ -93,4 +123,68 @@
   --z-modal: 400;
   --z-toast: 500;
   --z-tooltip: 600;
+}
+
+/* ---------- Light theme · "Nous Indigo · day" ----------
+ * Premium cool paper white, same single indigo accent tuned darker for
+ * contrast on light. Hairlines become dark-tinted; shadows soften downward.
+ * Every token name mirrors :root so nothing downstream needs branching. */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --color-paper: oklch(98.5% 0.003 260);
+  --color-paper-2: oklch(96.5% 0.004 260);
+  --color-paper-3: oklch(94% 0.005 260);
+  --color-hover: oklch(91% 0.006 260);
+  --color-rule: oklch(90% 0.005 260);
+  --color-rule-2: oklch(84% 0.007 260);
+
+  --color-muted: oklch(46% 0.012 260);
+  --color-neutral: oklch(52% 0.013 260);
+  --color-ink-2: oklch(38% 0.014 260);
+  --color-ink: oklch(24% 0.016 260);
+
+  --color-accent: oklch(52% 0.17 277);
+  --color-accent-dim: oklch(42% 0.14 277);
+  --color-accent-ink: oklch(99% 0.003 277);
+  --color-focus: oklch(50% 0.18 277);
+
+  --color-healthy: oklch(48% 0.13 175);
+  --color-warning: oklch(55% 0.14 70);
+  --color-error: oklch(52% 0.18 25);
+  --color-idle: oklch(50% 0.010 260);
+  --color-voice: oklch(48% 0.13 250);
+  --color-voice-dim: oklch(38% 0.10 250);
+  --color-deep-shadow: oklch(20% 0.010 260);
+
+  --paper-channels: 98.5% 0.003 260;
+  --paper-2-channels: 96.5% 0.004 260;
+  --paper-3-channels: 94% 0.005 260;
+  --hover-channels: 91% 0.006 260;
+  --rule-channels: 90% 0.005 260;
+  --rule-2-channels: 84% 0.007 260;
+  --muted-channels: 46% 0.012 260;
+  --neutral-channels: 52% 0.013 260;
+  --ink-2-channels: 38% 0.014 260;
+  --ink-channels: 24% 0.016 260;
+  --accent-channels: 52% 0.17 277;
+  --accent-dim-channels: 42% 0.14 277;
+  --healthy-channels: 48% 0.13 175;
+  --warning-channels: 55% 0.14 70;
+  --error-channels: 52% 0.18 25;
+  --idle-channels: 50% 0.010 260;
+  --voice-channels: 48% 0.13 250;
+  --voice-dim-channels: 38% 0.10 250;
+
+  /* Hairlines: dark-tinted on light (currentColor = ink). */
+  --stroke-nous: oklch(24% 0.016 260 / 0.10);
+  --ui-stroke-primary: oklch(24% 0.016 260 / 0.14);
+  --ui-stroke-secondary: oklch(24% 0.016 260 / 0.10);
+  --ui-stroke-tertiary: oklch(24% 0.016 260 / 0.06);
+  --ui-stroke-quaternary: oklch(24% 0.016 260 / 0.04);
+
+  /* Shadows: soft, downward, dark-on-light. */
+  --shadow-card: 0 1px 0 oklch(24% 0.016 260 / 0.03), 0 1px 2px oklch(24% 0.016 260 / 0.05);
+  --shadow-nous: 0 1px 1px oklch(24% 0.016 260 / 0.04), 0 6px 14px oklch(24% 0.016 260 / 0.08), 0 18px 40px oklch(24% 0.016 260 / 0.12);
+  --shadow-modal: 0 2px 4px oklch(24% 0.016 260 / 0.08), 0 18px 44px oklch(24% 0.016 260 / 0.18), 0 40px 90px oklch(24% 0.016 260 / 0.22);
 }

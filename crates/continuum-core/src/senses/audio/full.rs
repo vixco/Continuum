@@ -481,6 +481,7 @@ impl AudioWatcher {
         &self,
         tx: tokio_mpsc::Sender<AudioObservation>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        moshi_tap: Option<tokio_mpsc::UnboundedSender<Vec<f32>>>,
     ) {
         if !self.config.enabled {
             tracing::info!(
@@ -643,7 +644,17 @@ impl AudioWatcher {
             if needs_resample {
                 let to_resample = std::mem::take(&mut raw_buffer);
                 match resample_to_16khz(&to_resample, native_rate, native_channels) {
-                    Ok(resampled) => vad_buffer.extend(resampled),
+                    Ok(resampled) => {
+                        // Moshi full-duplex front-end: fork the post-resample
+                        // 16 kHz mono stream to the S2S subprocess. The tap is
+                        // only wired when `voice.frontend.mode == "moshi"` and
+                        // `moshi_tap_enabled`; see `bin/continuum.rs`. Non-blocking
+                        // — if the consumer lags, samples are dropped silently.
+                        if let Some(tap) = moshi_tap.as_ref() {
+                            let _ = tap.send(resampled.clone());
+                        }
+                        vad_buffer.extend(resampled);
+                    }
                     Err(err) => {
                         tracing::warn!(
                             layer = "senses",
@@ -655,6 +666,10 @@ impl AudioWatcher {
                     }
                 }
             } else {
+                // Already 16 kHz mono — fork directly from the raw buffer.
+                if let Some(tap) = moshi_tap.as_ref() {
+                    let _ = tap.send(raw_buffer.clone());
+                }
                 vad_buffer.append(&mut raw_buffer);
             }
 
@@ -1495,7 +1510,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
+            watcher.run(tx, shutdown_rx, None).await;
         });
 
         // Signal shutdown. The disabled watcher should exit promptly.

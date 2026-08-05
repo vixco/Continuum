@@ -1,12 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { RefreshCw, RotateCcw } from "lucide-react";
+import { clsx } from "clsx";
+import { Check, RefreshCw, RotateCcw } from "lucide-react";
 
 import { IntegrationsPanel } from "@/components/continuum/IntegrationsPanel";
 import { ResourcePanel } from "@/components/continuum/ResourcePanel";
 import { Button, Card, Modal } from "@/components/ui/primitives";
 import { useStore } from "@/lib/store";
+import { useTheme, type Theme } from "@/lib/theme";
 import { continuum } from "@/lib/tauri";
 import type { UpdateInfo } from "@/lib/tauri";
 
@@ -47,6 +49,8 @@ export function SettingsPage({
           runtime start.
         </p>
       </header>
+
+      <AppearanceCard />
 
       <IntegrationsPanel />
 
@@ -186,5 +190,77 @@ function Row({ label, value }: { label: string; value: string }) {
       <dt className="text-ink-muted">{label}</dt>
       <dd className="font-mono text-ink">{value}</dd>
     </div>
+  );
+}
+
+function AppearanceCard() {
+  const [theme, setTheme] = useTheme();
+  return (
+    <Card title="Appearance" subtitle="How Continuum looks. Applied instantly across the app.">
+      <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+        <ThemeOption
+          id="light"
+          label="Light"
+          hint="Cool paper · day"
+          active={theme === "light"}
+          onSelect={setTheme}
+        />
+        <ThemeOption
+          id="dark"
+          label="Dark"
+          hint="Slate console · night"
+          active={theme === "dark"}
+          onSelect={setTheme}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function ThemeOption({
+  id,
+  label,
+  hint,
+  active,
+  onSelect,
+}: {
+  id: Theme;
+  label: string;
+  hint: string;
+  active: boolean;
+  onSelect: (t: Theme) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(id)}
+      className={clsx(
+        "press group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-colors",
+        active
+          ? "border-accent-amber/60 bg-accent-amber/10"
+          : "border-bg-border bg-bg-elevated hover:border-bg-hover"
+      )}
+    >
+      <div
+        data-theme={id}
+        className="flex h-16 overflow-hidden rounded-md border border-bg-border bg-bg"
+      >
+        <div className="flex w-1/4 flex-col gap-1 bg-bg-surface p-1.5">
+          <span className="h-1 w-3/4 rounded-full bg-accent-amber/70" />
+          <span className="h-1 w-2/3 rounded-full bg-ink/20" />
+          <span className="h-1 w-1/2 rounded-full bg-ink/15" />
+        </div>
+        <div className="flex flex-1 flex-col gap-1 p-1.5">
+          <span className="h-1.5 w-1/2 rounded-full bg-ink/40" />
+          <span className="h-1 w-3/4 rounded-full bg-ink/15" />
+          <span className="mt-auto h-2 w-2/3 rounded bg-accent-amber/25" />
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] font-medium text-ink">{label}</span>
+        {active && <Check size={14} className="text-accent-amber" />}
+      </div>
+      <span className="-mt-1 text-[11px] text-ink-dim">{hint}</span>
+    </button>
   );
 }

@@ -69,6 +69,19 @@ function AssistantBubble({
   isStreaming?: boolean;
 }) {
   const isError = message.status === "error";
+  // "Thinking" = the assistant turn is live but has produced no visible
+  // content yet (no streamed text, no tool calls, no thinking block). This
+  // is the window between send and the first token — show breathing dots
+  // so the user sees the AI is busy, not a frozen empty bubble. As soon as
+  // the first delta or tool_call lands, this flips off and the real content
+  // (with the streaming cursor) takes over.
+  const isThinking =
+    Boolean(isStreaming) &&
+    !isError &&
+    (message.text?.length ?? 0) === 0 &&
+    !message.parts.some(
+      (p) => p.kind === "tool" || p.kind === "tool_group" || p.kind === "thinking"
+    );
   return (
     <div className="flex animate-[msg-in_180ms_ease-out] justify-start">
       <div className="w-full max-w-full space-y-2">
@@ -109,11 +122,33 @@ function AssistantBubble({
         )}
         {!isError && (
           <div className="rounded-lg border border-bg-border bg-bg-surface px-3.5 py-3 text-sm text-ink shadow-[inset_0_1px_0_rgba(255,255,255,0.015)]">
-            <Parts parts={message.parts} isStreaming={isStreaming} />
+            {isThinking ? (
+              <ThinkingDots />
+            ) : (
+              <Parts parts={message.parts} isStreaming={isStreaming} />
+            )}
           </div>
         )}
         {message.status === "aborted" && <div className="text-[10px] text-ink-dim">stopped</div>}
       </div>
+    </div>
+  );
+}
+
+/// Three breathing dots shown while the model is working but has not yet
+/// emitted its first token (or tool call). Replaced by streaming text the
+/// moment content arrives. `prefers-reduced-motion` collapses the animation
+/// to a static dim row so it never fights a motion-sensitive user.
+function ThinkingDots() {
+  return (
+    <div className="flex items-center gap-1" aria-label="Continuum is thinking" role="status">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400/70 motion-safe:animate-[chat-thinking-dot_1.2s_ease-in-out_infinite]"
+          style={{ animationDelay: `${i * 0.18}s` }}
+        />
+      ))}
     </div>
   );
 }

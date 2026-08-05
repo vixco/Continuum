@@ -27,6 +27,21 @@ runtime = [
 ]
 cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
 vulkan = ["runtime", "continuum-llm/vulkan"]
+# Moshi full-duplex speech-to-speech front-end (kyutai-labs/moshi). Off by
+# default: it pulls in `tokio-tungstenite` + `native-tls` and requires a
+# separately-built `moshi-backend.exe` (CUDA) at runtime. The base `moshi`
+# feature covers the WSS transport + binary message framing + assistant-text
+# channel + control messages — enough to connect to the backend and drive
+# the text transcript path. The default voice path stays the
+# whisper→triage→orchestrator→TTS pipeline (`voice.frontend.mode = "pipeline"`).
+moshi = ["runtime", "dep:tokio-tungstenite", "dep:native-tls"]
+# Opus/OGG audio codec for the Moshi WebSocket protocol (the backend speaks
+# Opus-in-OGG, not raw PCM — see `voice/moshi.rs` protocol notes). Requires
+# libopus at build time (vcpkg `opus`, or the `opus` crate's vendored build).
+# Without this feature `MoshiFrontend` connects and handles text/control,
+# but audio I/O returns a configured error. Kept separate so the base
+# `moshi` feature compiles on machines without libopus.
+moshi-opus = ["moshi", "dep:opus", "dep:ogg"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -64,6 +79,17 @@ futures = { version = "0.3", optional = true }
 cpal = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 rubato = { version = "2", optional = true }
+# WebSocket client for the Moshi S2S backend (feature = "moshi"). The backend
+# serves `wss://` with a self-signed `localhost` cert, so we need `native-tls`
+# (SChannel on Windows) and accept invalid certs at connect time.
+tokio-tungstenite = { version = "0.24", optional = true, default-features = false, features = ["connect", "native-tls"] }
+# `native-tls` is re-exported through tokio-tungstenite, but we need it as a
+# direct dep to build the `TlsConnector` with `danger_accept_invalid_certs`.
+native-tls = { version = "0.2", optional = true }
+# Opus + OGG codec for Moshi audio (feature = "moshi-opus"). `ogg` is pure
+# Rust; `opus` wraps libopus (native, via pkg-config/vcpkg/vendored).
+ogg = { version = "0.9", optional = true }
+opus = { version = "0.3", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [

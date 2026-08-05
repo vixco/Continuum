@@ -178,6 +178,35 @@ fn should_persist_assistant_turn(acc: &str, tool_calls: &[StoredToolCall]) -> bo
     !acc.is_empty() || !tool_calls.is_empty()
 }
 
+/// Selects which stored messages to send to the model this turn. The full
+/// conversation is persisted on disk; only this tail goes into the request so
+/// per-turn input tokens stay bounded as a chat grows.
+///
+/// `window == 0` sends every message (the pre-window behavior). Otherwise the
+/// last `window` messages are taken, and any leading non-`user` messages are
+/// then dropped so the first message the provider sees is a user turn — the
+/// Anthropic Messages API rejects a request whose first message is not
+/// `user`, and starting the kept context at a user turn is also the most
+/// coherent slice for the model. The just-sent user message is always the
+/// last entry of `messages`, so it is always retained.
+fn window_messages(messages: &[StoredMessage], window: u32) -> &[StoredMessage] {
+    if window == 0 {
+        return messages;
+    }
+    let take = window as usize;
+    let start = messages.len().saturating_sub(take);
+    let mut slice = &messages[start..];
+    // Drop leading assistant/tool turns so the first kept message is a user
+    // turn. Stop at the first user message — never skip past it.
+    while let Some(first) = slice.first() {
+        if first.role == ChatRole::User {
+            break;
+        }
+        slice = &slice[1..];
+    }
+    slice
+}
+
 /// Lists every conversation, newest-updated first.
 #[tauri::command]
 pub fn chat_list_conversations(
@@ -472,8 +501,10 @@ pub async fn chat_send_message(
     let req = ChatRequest {
         model: conv.model.clone(),
         system,
-        messages: conv
-            .messages
+        // Ship only the recent tail of the conversation, not the whole
+        // history — see `window_messages`. The full transcript stays on
+        // disk; this bounds per-turn input tokens as the chat grows.
+        messages: window_messages(&conv.messages, chat_cfg.history_message_window)
             .iter()
             .map(|m| ChatMessage {
                 role: m.role,
@@ -861,5 +892,78 @@ mod tests {
         // Must not panic when the conversation is gone (e.g. deleted
         // concurrently with the failed send) - just do nothing.
         unwind_pending_user_message(&lock, &store, "does-not-exist", "hello").await;
+    }
+
+    /// Helper to build a small alternating user/assistant transcript without
+    /// touching disk — `window_messages` is pure and only needs the slice.
+    fn transcript(n_turns: usize) -> Vec<StoredMessage> {
+        let mut out = Vec::with_capacity(n_turns * 2);
+        for i in 0..n_turns {
+            out.push(StoredMessage::user(&format!("q{i}")));
+            out.push(StoredMessage {
+                role: ChatRole::Assistant,
+                content: format!("a{i}"),
+                ts: chrono::Utc::now(),
+                model: None,
+                duration_ms: None,
+                usage: None,
+                aborted: false,
+                tool_calls: Vec::new(),
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn window_zero_sends_entire_history() {
+        let msgs = transcript(5);
+        let win = window_messages(&msgs, 0);
+        assert_eq!(win.len(), msgs.len(), "window 0 must opt out of windowing");
+    }
+
+    #[test]
+    fn window_keeps_tail_and_last_is_user() {
+        // 5 turns = 10 messages, plus a trailing user message simulating the
+        // just-appended send -> 11 messages. Window of 4 starts at index 7
+        // (an assistant turn), which the helper then drops, so 3 survive.
+        // The invariant is: at most `window` kept, first is user, last is
+        // the just-sent user message.
+        let mut msgs = transcript(5);
+        msgs.push(StoredMessage::user("current question"));
+        let win = window_messages(&msgs, 4);
+        assert!(win.len() <= 4, "window keeps at most `window` messages");
+        assert_eq!(
+            win[0].role,
+            ChatRole::User,
+            "first kept must be a user turn"
+        );
+        assert_eq!(win.last().unwrap().role, ChatRole::User);
+        assert_eq!(win.last().unwrap().content, "current question");
+    }
+
+    #[test]
+    fn window_drops_leading_assistant_so_first_is_user() {
+        // Construct a slice boundary that lands on an assistant turn: 5
+        // turns (10 msgs) + trailing user = 11; window 5 starts at index 6,
+        // which is the assistant "a3". The helper must skip it.
+        let mut msgs = transcript(5);
+        msgs.push(StoredMessage::user("current question"));
+        let win = window_messages(&msgs, 5);
+        assert!(win.len() <= 5);
+        assert_eq!(
+            win[0].role,
+            ChatRole::User,
+            "leading assistant turns must be dropped so the first message is user"
+        );
+    }
+
+    #[test]
+    fn window_larger_than_history_returns_everything_starting_at_user() {
+        let mut msgs = transcript(2);
+        msgs.push(StoredMessage::user("current question"));
+        let win = window_messages(&msgs, 999);
+        // No truncation, and still starts at the first user turn.
+        assert_eq!(win.len(), msgs.len());
+        assert_eq!(win[0].role, ChatRole::User);
     }
 }

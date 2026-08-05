@@ -55,6 +55,15 @@ pub struct RuntimeSnapshot {
     /// Wake-word setting applied by this runtime process at boot.
     #[serde(default)]
     pub wake_word_enabled: Option<bool>,
+    /// Active voice front-end mode (`"pipeline"` / `"moshi"`). `None` on
+    /// snapshots from runtimes that predate the Moshi front-end.
+    #[serde(default)]
+    pub voice_frontend_mode: Option<String>,
+    /// Whether the Moshi S2S backend is loaded+connected. `None` on older
+    /// snapshots; `Some(false)` means Moshi mode is selected but the backend
+    /// isn't up yet (binary missing, CUDA unavailable, still connecting).
+    #[serde(default)]
+    pub moshi_loaded: Option<bool>,
     #[serde(default)]
     pub frame_count: u64,
     #[serde(default)]

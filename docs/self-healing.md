@@ -258,6 +258,61 @@ Recovery:
 - Install or repair the Piper CLI and set `CONTINUUM_PIPER_BIN` if it is not on `PATH`.
 - Use `--no-tts` to keep Continuum running in log-only voice output mode while repairing audio output.
 
+### Kokoros TTS
+
+Component: `voice/tts` (engine = `kokoros`)
+
+Logs: `layer = "voice"`, `component = "tts"`, engine `kokoros`.
+
+Health check (`kokoros_health_from_paths`):
+
+- `tts.kokoros.model_path` (`kokoro-v1.0.onnx`) and `tts.kokoros.voices_path`
+  (`voices-v1.0.bin`) must exist.
+- The `koko` binary must resolve (`CONTINUUM_KOKO_BIN` →
+  `~/.continuum-dev/bin/kokoros/koko.exe` → `koko` on PATH).
+
+Recovery:
+
+- Re-run `scripts/download-models.ps1` to fetch the Kokoro model + voices.
+- Build/install `koko` (no official Windows prebuilt — see download script)
+  and set `CONTINUUM_KOKO_BIN`.
+- Fall back to `tts.engine = "piper"` until Kokoros is repaired.
+
+## Moshi S2S Front-end
+
+Component: `moshi` (active only when `voice.frontend.mode = "moshi"`; requires
+the `moshi` cargo feature).
+
+Logs: `layer = "voice"`, `component = "moshi"`.
+
+Health check (`moshi_health_from_paths`):
+
+- Disabled when the active front-end is not `"moshi"`.
+- The `moshi-backend` binary must resolve: `voice.frontend.moshi_bin` →
+  `CONTINUUM_MOSHI_BIN` → `~/.continuum-dev/bin/moshi/moshi-backend.exe` →
+  `moshi-backend` on PATH. A bare PATH fallback is reported healthy-but-
+  unverified; an explicit missing path is `Unhealthy`.
+- Live liveness is the runtime snapshot's `moshi_loaded` field (subprocess
+  up + WebSocket handshake done), set by the event consumer in
+  `bin/continuum.rs::build_moshi_voice`.
+
+Recovery:
+
+- If `moshi_loaded` flips to false mid-session, the `Disconnected` /
+  `Error` event is logged; the repair agent may restart the component
+  (re-spawn the subprocess + reconnect WebSocket). The standalone server
+  also enforces a 360 s hard connection timeout, so long sessions must
+  reconnect.
+- Build `moshi-backend.exe` with CUDA (kyutai-labs/moshi `rust/`), or set
+  `CONTINUUM_MOSHI_BIN` to an existing build. CUDA is required for realtime;
+  CPU is documented-only.
+- For audio I/O, enable the `moshi-opus` cargo feature and install libopus
+  (vcpkg `opus`). Without it, the transport + text channel still work but
+  no audio flows.
+- Switch `voice.frontend.mode` back to `"pipeline"` to fall back to the
+  existing whisper → triage → orchestrator → TTS loop while repairing Moshi.
+  Mode changes take effect on the next daemon start.
+
 ## Chat Providers
 
 Component: `chat_providers`

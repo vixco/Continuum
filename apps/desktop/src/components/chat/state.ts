@@ -386,10 +386,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     lastSentTextRef[activeId] = wire;
     STREAM_FINISHED.delete(activeId);
+    // Seed the stream buffer immediately so the assistant "thinking" bubble
+    // appears the instant the user hits send — the user sees the AI is busy
+    // right away, instead of a bare "Sending…" footer while the backend
+    // spins up the adapter / runs memory search / spawns the CLI (any of
+    // which can take a beat before the first token). The first delta event
+    // from the backend then appends to this seeded buffer.
     set({
       composerText: "",
       composerAttachments: [],
       sendingId: activeId,
+      streamBuffers: {
+        ...get().streamBuffers,
+        [activeId]: get().streamBuffers[activeId] ?? "",
+      },
       errors: (() => {
         const next = { ...get().errors };
         delete next[activeId];
@@ -399,10 +409,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     try {
       await continuum.chatSendMessage(activeId, wire);
-      if (!STREAM_FINISHED.has(activeId)) {
-        set((s) => ({
-          streamBuffers: { ...s.streamBuffers, [activeId]: s.streamBuffers[activeId] ?? "" },
-        }));
+      if (STREAM_FINISHED.has(activeId)) {
+        // Stream already terminated (or the conversation was deleted) while
+        // the send command was in flight — don't resurrect a buffer entry.
+        set((s) => {
+          if (!(activeId in s.streamBuffers)) return {};
+          const next = { ...s.streamBuffers };
+          delete next[activeId];
+          return { streamBuffers: next };
+        });
       }
       if (activeIdRef.current === activeId) {
         const conv = await continuum.chatGetConversation(activeId).catch(() => null);
@@ -410,11 +425,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      set((s) => ({
-        errors: { ...s.errors, [activeId]: msg },
-        retryInfo: { conversationId: activeId, text: wire },
-        sendingId: null,
-      }));
+      set((s) => {
+        const next = { ...s.streamBuffers };
+        delete next[activeId];
+        return {
+          errors: { ...s.errors, [activeId]: msg },
+          retryInfo: { conversationId: activeId, text: wire },
+          sendingId: null,
+          streamBuffers: next,
+        };
+      });
       return;
     }
     set({ sendingId: null });
@@ -431,7 +451,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!r) return;
     lastSentTextRef[r.conversationId] = r.text;
     STREAM_FINISHED.delete(r.conversationId);
-    set({ sendingId: r.conversationId, retryInfo: null });
+    // Same immediate seed as `send` — show the thinking bubble right away.
+    set((s) => ({
+      sendingId: r.conversationId,
+      retryInfo: null,
+      streamBuffers: { ...s.streamBuffers, [r.conversationId]: "" },
+      errors: (() => {
+        const next = { ...s.errors };
+        delete next[r.conversationId];
+        return next;
+      })(),
+    }));
     try {
       await continuum.chatSendMessage(r.conversationId, r.text);
       if (activeIdRef.current === r.conversationId) {
@@ -439,11 +469,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (conv) set({ activeConv: conv });
       }
     } catch (e) {
-      set((s) => ({
-        errors: { ...s.errors, [r.conversationId]: e instanceof Error ? e.message : String(e) },
-        retryInfo: { conversationId: r.conversationId, text: r.text },
-        sendingId: null,
-      }));
+      set((s) => {
+        const next = { ...s.streamBuffers };
+        delete next[r.conversationId];
+        return {
+          errors: { ...s.errors, [r.conversationId]: e instanceof Error ? e.message : String(e) },
+          retryInfo: { conversationId: r.conversationId, text: r.text },
+          sendingId: null,
+          streamBuffers: next,
+        };
+      });
       return;
     }
     set({ sendingId: null });

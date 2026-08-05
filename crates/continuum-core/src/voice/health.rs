@@ -168,6 +168,69 @@ pub fn tts_health_from_paths(
     ComponentHealth::healthy("tts", "Piper model files present")
 }
 
+/// Scans the Kokoros model + voices paths and reports whether the
+/// `koko` subprocess can plausibly run. Mirrors [`tts_health_from_paths`]
+/// but for the Kokoros ONNX backend. Does not synthesize — cheap file
+/// checks only, same as the Piper probe.
+pub fn kokoros_health_from_paths(
+    enabled: bool,
+    model_path: &Path,
+    voices_path: &Path,
+) -> ComponentHealth {
+    if !enabled {
+        return ComponentHealth::disabled("kokoros", "TTS disabled in config");
+    }
+    if !model_path.exists() {
+        return ComponentHealth::unhealthy(
+            "kokoros",
+            format!("Kokoros model missing at {}", model_path.display()),
+        );
+    }
+    if !voices_path.exists() {
+        return ComponentHealth::unhealthy(
+            "kokoros",
+            format!("Kokoros voices file missing at {}", voices_path.display()),
+        );
+    }
+    ComponentHealth::healthy("kokoros", "Kokoros model + voices present")
+}
+
+/// Health for the Moshi S2S front-end. Cheap path checks only — we cannot
+/// cheaply probe whether the CUDA subprocess + WebSocket are alive, so the
+/// runtime's `moshi_loaded` snapshot field is the live liveness signal; this
+/// probe answers "could plausibly start".
+///
+/// - `enabled`: false when `voice.frontend.mode != "moshi"` (the pipeline
+///   is the active front-end, so Moshi health is reported disabled).
+/// - `bin`: resolved `moshi-backend` executable path (config override, env,
+///   `~/.continuum-dev/bin/moshi/moshi-backend.exe`, or `moshi-backend` on
+///   PATH). Unhealthy when the explicit override / dev path is missing; the
+///   bare `moshi-backend` PATH fallback is treated as "present, unverified".
+pub fn moshi_health_from_paths(enabled: bool, mode: &str, bin: &Path) -> ComponentHealth {
+    if !enabled || mode != "moshi" {
+        return ComponentHealth::disabled("moshi", "voice front-end is not 'moshi'");
+    }
+    let bin_str = bin.to_string_lossy();
+    if bin_str == "moshi-backend" || bin_str == "moshi-backend.exe" {
+        // PATH fallback — we can't verify it here without a `which` probe.
+        return ComponentHealth::healthy(
+            "moshi",
+            "moshi-backend on PATH (unverified); awaiting subprocess start",
+        );
+    }
+    if !bin.exists() {
+        return ComponentHealth::unhealthy(
+            "moshi",
+            format!(
+                "moshi-backend binary missing at {} (build with CUDA, or set \
+                 CONTINUUM_MOSHI_BIN / voice.frontend.moshi_bin)",
+                bin.display()
+            ),
+        );
+    }
+    ComponentHealth::healthy("moshi", "moshi-backend binary present")
+}
+
 /// Health for the wake-word detector. The transcript detector has no
 /// runtime state to corrupt, so it's either healthy or disabled.
 pub fn wake_health(enabled: bool, keyword: &str) -> ComponentHealth {

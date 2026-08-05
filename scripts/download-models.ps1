@@ -363,6 +363,92 @@ if (-not $NeedsPiper -and -not $NeedsEspeak) {
 }
 
 # ============================================================================
+# Kokoros TTS (optional, higher-quality local alternative to Piper)
+# ============================================================================
+# Kokoros (Kokoro-82M) is an optional TTS engine selected with
+# `tts.engine = "kokoros"`. It is NOT required -- Piper remains the default.
+# We download the ONNX model + voices catalog so the engine is ready if the
+# user switches to it. The `koko` CLI binary has no official Windows prebuilt,
+# so we only check for it and print build instructions when missing (see
+# voice::tts::resolve_koko_binary for the resolution order).
+
+Write-Host "`n--- Kokoros TTS (optional -- Kokoro-82M ONNX) ---" -ForegroundColor Cyan
+
+$KokoroDir = Join-Path $TtsDir "kokoro"
+$KokoroOnnxBase = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+
+Download-Model `
+    -Name "Kokoro ONNX model" `
+    -Url "$KokoroOnnxBase/kokoro-v1.0.onnx" `
+    -OutPath (Join-Path $KokoroDir "kokoro-v1.0.onnx") `
+    -ExpectedSizeMB 100
+
+Download-Model `
+    -Name "Kokoro voices catalog" `
+    -Url "$KokoroOnnxBase/voices-v1.0.bin" `
+    -OutPath (Join-Path $KokoroDir "voices-v1.0.bin") `
+    -ExpectedSizeMB 60
+
+# `koko` binary -- manual step. No official Windows prebuilt exists as of
+# 2026-08. Build it from the Kokoros repo (requires libopus for the opus
+# encoder used by the `openai` subcommand; the `stream`/`text` modes we use
+# output WAV and do not need opus at runtime, but the crate may still require
+# the headers to compile).
+$KokorosBinRoot = Join-Path $env:USERPROFILE ".continuum-dev\bin\kokoros"
+$KokoExe = Join-Path $KokorosBinRoot "koko.exe"
+if (Test-Path $KokoExe) {
+    Write-Host "[OK] koko binary already installed at $KokoExe" -ForegroundColor Green
+} else {
+    Write-Host "[INFO] koko binary not found (optional -- Piper is the default TTS)." -ForegroundColor Yellow
+    Write-Host "       To enable Kokoros TTS, build the 'koko' binary from" -ForegroundColor Gray
+    Write-Host "       https://github.com/lucasjinreal/Kokoros and copy koko.exe to:" -ForegroundColor Gray
+    Write-Host "         $KokorosBinRoot" -ForegroundColor Gray
+    Write-Host "       or set CONTINUUM_KOKO_BIN to its location." -ForegroundColor Gray
+    Write-Host "       Build: git clone the repo, then 'cargo build --release --bin koko'" -ForegroundColor Gray
+    Write-Host "       (Windows may need libopus headers for the opus encoder crate.)" -ForegroundColor Gray
+}
+
+# ============================================================================
+# Moshi S2S front-end (optional, full-duplex voice)
+# ============================================================================
+# Moshi (Kyutai) is an optional full-duplex speech-to-speech front-end,
+# selected with `voice.frontend.mode = "moshi"` + the `moshi` cargo feature.
+# It is NOT required -- the pipeline (whisper -> triage -> orchestrator -> TTS)
+# is the default. Moshi needs a CUDA-built `moshi-backend.exe` and (for audio)
+# libopus + the `moshi-opus` cargo feature. There is no prebuilt Windows
+# binary; this section only checks for it and prints build instructions.
+
+Write-Host "`n--- Moshi S2S front-end (optional -- needs CUDA) ---" -ForegroundColor Cyan
+
+$MoshiBinRoot = Join-Path $env:USERPROFILE ".continuum-dev\bin\moshi"
+$MoshiBackendExe = Join-Path $MoshiBinRoot "moshi-backend.exe"
+$MoshiModelDir = Join-Path $env:USERPROFILE ".continuum-dev\models\moshi\moshiko-candle-q8"
+
+if (Test-Path $MoshiBackendExe) {
+    Write-Host "[OK] moshi-backend already installed at $MoshiBackendExe" -ForegroundColor Green
+} else {
+    Write-Host "[INFO] moshi-backend.exe not found (optional -- pipeline voice is the default)." -ForegroundColor Yellow
+    Write-Host "       To enable Moshi S2S voice:" -ForegroundColor Gray
+    Write-Host "         1. Build the Kyutai moshi-backend with CUDA:" -ForegroundColor Gray
+    Write-Host "            git clone https://github.com/kyutai-labs/moshi" -ForegroundColor Gray
+    Write-Host "            cd moshi/rust && cargo build --release --bin moshi-backend --features cuda" -ForegroundColor Gray
+    Write-Host "         2. Copy moshi-backend.exe to:" -ForegroundColor Gray
+    Write-Host "            $MoshiBinRoot" -ForegroundColor Gray
+    Write-Host "            (or set CONTINUUM_MOSHI_BIN to its full path)" -ForegroundColor Gray
+    Write-Host "         3. On first run the backend auto-downloads the model files" -ForegroundColor Gray
+    Write-Host "            from kyutai/moshiko-candle-q8 into $MoshiModelDir" -ForegroundColor Gray
+    Write-Host "         4. Build Continuum with: cargo build --release --features moshi" -ForegroundColor Gray
+    Write-Host "            For realtime audio (talk + listen) add the moshi-opus feature" -ForegroundColor Gray
+    Write-Host "            AND install libopus, then build with --features moshi,moshi-opus:" -ForegroundColor Gray
+    Write-Host "              vcpkg install opus:x64-windows" -ForegroundColor Gray
+    Write-Host "              (or set OPUS_LIB_DIR to a prebuilt opus.lib + headers dir)" -ForegroundColor Gray
+    Write-Host "            Without moshi-opus, Moshi connects and the assistant text" -ForegroundColor Gray
+    Write-Host "            transcript flows, but mic/assistant audio I/O is disabled." -ForegroundColor Gray
+    Write-Host "         5. Set voice.frontend.mode = 'moshi' in config.toml" -ForegroundColor Gray
+    Write-Host "       Windows support is community-grade; expect upstream fixes." -ForegroundColor Gray
+}
+
+# ============================================================================
 # Summary
 # ============================================================================
 

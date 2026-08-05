@@ -4,6 +4,71 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- **Moshi full-duplex S2S voice front-end** (cargo feature `moshi`): an
+  alternative realtime voice path that runs Kyutai
+  [Moshi](https://github.com/kyutai-labs/moshi) as a `moshi-backend.exe`
+  subprocess driven over its standalone WebSocket protocol — the local
+  counterpart to ChatGPT's Advanced Voice Mode. Selected by
+  `voice.frontend.mode = "moshi"` (default `"pipeline"`). The existing
+  wake → whisper → triage → orchestrator → TTS loop is unchanged and
+  remains the default. New `VoiceFrontend` trait (`pipeline` vs `moshi`
+  implementations), `voice/moshi.rs` (WSS transport + binary message
+  framing + assistant-text channel + control messages, verified against
+  the kyutai-labs source), `[voice.frontend]` config section, an audio
+  tap in `senses/audio/full.rs` that forks 16 kHz mono PCM to the S2S
+  subprocess, `voice_frontend_mode` / `moshi_loaded` runtime-snapshot
+  fields, an `update_voice_frontend_mode` dashboard command + Voice-tab
+  selector, and a `moshi` health probe. The Opus/OGG audio codec is gated
+  behind a separate `moshi-opus` feature (needs libopus) and left as a
+  documented stub; the base `moshi` feature compiles without it. Runtime
+  also requires a CUDA-built `moshi-backend.exe` (placed by
+  `scripts/download-models.ps1`). Tier-split escalation to the orchestrator
+  (triage on the parallel whisper transcript) is wired: on a
+  `WakeOrchestrator` decision the Moshi front-end is `interrupt()`ed (output
+  muted + EndTurn) while the orchestrator + Kokoros speak, then `resume()`d
+  when the wake completes; in Moshi mode the wake-word / pipeline
+  voice-session machinery is skipped so Moshi owns turn-taking and triage
+  owns escalation. The Opus/OGG audio codec (assistant audio playback + mic
+  encode) is implemented behind the separate `moshi-opus` cargo feature —
+  `OpusOggCodec` translates the reference client's send/receive audio arms
+  (`rust/moshi-cli/src/multistream.rs`) and the backend OpusHead/OpusTags
+  layout (`rust/moshi-backend/src/audio.rs`); the send side is an
+  `ogg::PacketWriter` + `opus::Encoder` (24 kHz mono, Voip, 960-sample
+  frames), the receive side is a seek-free `PageParser` + `BasePacketReader`
+  OGG demux + `opus::Decoder`. `moshi-opus` requires libopus at build time
+  (`vcpkg install opus` or the `opus` crate's system-lib path).
+- **Kokoros local TTS engine**: `tts.engine = "kokoros"` selects
+  [Kokoro-82M](https://github.com/lucasjinreal/Kokoros) as the TTS backend,
+  a higher-quality, more natural-sounding local alternative to Piper. Like
+  Piper it runs as a subprocess (`koko`) so the ONNX Runtime dependency
+  stays out of Continuum's Rust dependency graph. Per-utterance synthesis
+  feeds one line to `koko stream` and parses the 32-bit float 24 kHz WAV
+  output. New `[tts.kokoros]` config section (`model_path`, `voices_path`,
+  `voice_name`, `speed`), `update_kokoros_voice` / `update_kokoros_speed`
+  dashboard commands, a Kokoros option in the Voice-tab engine selector
+  with a voice/speed control, a `kokoros` component health probe, and
+  Kokoros model/voice downloads in `scripts/download-models.ps1`. The
+  `koko` binary has no official Windows prebuilt and is documented as a
+  manual build step; Piper remains the default.
+- **Chat history window**: the chat tab now ships only the recent tail of a
+  conversation to the model each turn instead of the entire history, so
+  per-turn input tokens stay bounded as a chat grows rather than growing
+  linearly with its full transcript. The full conversation is still
+  persisted on disk. New `[chat].history_message_window` knob (default 20
+  most-recent messages; 0 sends the whole history, the previous behavior).
+  After slicing, leading non-user turns are dropped so the first message the
+  provider sees is a user turn (Anthropic requires this), which also keeps
+  the kept context coherent.
+- **Chat streaming feedback**: the assistant "thinking" indicator now appears
+  the instant a message is sent, not after the backend acknowledges the
+  stream. Three breathing dots show in the assistant bubble while the model
+  is working but has not yet emitted its first token (or tool call); the
+  streaming text cursor takes over the moment content arrives. The user
+  sees the AI is busy right away instead of a bare "Sending…" footer while
+  the adapter spins up.
+
 ### Fixed
 
 - Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
