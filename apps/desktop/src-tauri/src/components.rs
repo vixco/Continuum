@@ -26,6 +26,22 @@ use crate::memory::MemoryState;
 
 type ConfigProvider = Arc<dyn Fn() -> ContinuumConfig + Send + Sync>;
 
+/// Root containing the packaged runtime assets. Tauri puts those assets under
+/// `Contents/Resources` on macOS; portable and Windows installs keep them next
+/// to the desktop executable.
+fn install_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))?;
+    let macos_resources = exe_dir
+        .parent()
+        .map(|contents| contents.join("Resources"));
+    if let Some(resources) = macos_resources.filter(|path| path.is_dir()) {
+        return Some(resources);
+    }
+    Some(exe_dir)
+}
+
 /// True if `continuum.exe` has touched `~/.continuum-dev/state.json` recently.
 /// Used to avoid screaming "Degrading" across every model/voice/orchestrator
 /// probe when the runtime simply isn't running (the common case for dashboard-only
