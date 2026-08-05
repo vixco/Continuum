@@ -6,6 +6,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **macOS desktop distribution**: the Tauri desktop build now ships a native
+  Keychain-backed provider-secret store, runtime/MCP binaries and their
+  config/prompt/skill resources inside the app bundle, and macOS CI coverage.
+  Every successful `main` CI run now publishes signed updater artifacts plus
+  DMG and portable archives for Apple Silicon and Intel Macs alongside Windows.
+
 - **Moshi full-duplex S2S voice front-end** (cargo feature `moshi`): an
   alternative realtime voice path that runs Kyutai
   [Moshi](https://github.com/kyutai-labs/moshi) as a `moshi-backend.exe`

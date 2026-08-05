@@ -317,7 +317,7 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path) -> Option<McpSpec> {
 }
 
 /// Locates the `continuum-mcp` binary: `CONTINUUM_MCP_BIN` env var, then a
-/// sibling of the current executable, then a PATH scan (mirrors
+/// packaged Tauri resources, then a PATH scan (mirrors
 /// `resolve_mcp_binary` in `continuum-core`'s orchestrator spawn path).
 /// `None` — with a once-per-process warning — when none of those exist.
 fn resolve_mcp_binary() -> Option<PathBuf> {
@@ -327,13 +327,11 @@ fn resolve_mcp_binary() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let candidate = dir.join(MCP_BIN_NAME);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
+    if let Some(candidate) = crate::commands::bundled_binary_candidates(MCP_BIN_NAME)
+        .into_iter()
+        .find(|candidate| candidate.exists())
+    {
+        return Some(candidate);
     }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {

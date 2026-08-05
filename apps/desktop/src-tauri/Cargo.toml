@@ -33,7 +33,9 @@ continuum-memory = { path = "../../../crates/continuum-memory" }
 cpal = { version = "0.17", optional = true }
 dirs = "6"
 futures-util = "0.3"
-keyring = { version = "3", features = ["windows-native"] }
+# Keep provider secrets in the native credential store on every shipped
+# desktop platform: Windows Credential Manager and macOS Keychain.
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 parking_lot = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 tempfile = "3"
