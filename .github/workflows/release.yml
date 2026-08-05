@@ -184,15 +184,17 @@ jobs:
     name: Build macOS release (${{ matrix.arch }})
     needs: prepare
     if: needs.prepare.outputs.should_release == 'true'
-    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
+            runner: macos-14
           - arch: x86_64
             target: x86_64-apple-darwin
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
