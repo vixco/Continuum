@@ -33,9 +33,7 @@ fn install_dir() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))?;
-    let macos_resources = exe_dir
-        .parent()
-        .map(|contents| contents.join("Resources"));
+    let macos_resources = exe_dir.parent().map(|contents| contents.join("Resources"));
     if let Some(resources) = macos_resources.filter(|path| path.is_dir()) {
         return Some(resources);
     }
