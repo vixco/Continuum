@@ -1,9 +1,16 @@
-/* Hallmark · Nous Indigo · "the next step in AGI"
+/* Foundry · "the next step in AGI"
  * genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app
- * vibe: "calm AGI console, cool slate, one restrained indigo accent"
+ * vibe: "calm AGI console — cool slate paper, one restrained electric indigo accent that earns its place"
  * philosophy: flat-not-boxed · hairlines over borders · one accent · downward-weighted layered shadows
  * paper: oklch(13% 0.008 260) · accent: oklch(70% 0.14 277)
  * display: Bahnschrift · body: Segoe UI Variable Text · axes: dark / system-native / cool
+ *
+ * Naming note: Tailwind exposes the indigo accent through the `amber-*`
+ * and `accent.amber` channels on purpose — using a real `indigo` palette
+ * name invites AI-vibecoded gradients and clashes with the brand intent.
+ * The visual hue lives in the 277 OKLCH channel so changing it here
+ * ripples everywhere atomically. If you need to grep the accent, search
+ * for `--accent-channels`; do not be misled by the class names.
  */
 
 /* `:root` carries the dark default; `[data-theme="dark"]` mirrors it so a
@@ -125,7 +132,7 @@
   --z-tooltip: 600;
 }
 
-/* ---------- Light theme · "Nous Indigo · day" ----------
+/* ---------- Light theme · "Foundry · day" ----------
  * Premium cool paper white, same single indigo accent tuned darker for
  * contrast on light. Hairlines become dark-tinted; shadows soften downward.
  * Every token name mirrors :root so nothing downstream needs branching. */

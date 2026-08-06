@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import {
   BrainCircuit,
@@ -552,6 +552,10 @@ function Sidebar({ active, onSelect }: { active: TabId; onSelect: (tab: TabId) =
   );
 }
 
+// Command palette — fuzzy filter over the nav + a quick recent-actions
+// index (filled in later when we have more than the nav). Keyboard:
+// up/down to move, enter to commit, esc to dismiss. Auto-focuses the
+// search field. Keeps a clean rest of <header /> kbd hint visible.
 function CommandPalette({
   onClose,
   onNavigate,
@@ -559,33 +563,137 @@ function CommandPalette({
   onClose: () => void;
   onNavigate: (tab: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+
+  const allEntries: NavEntry[] = [
+    ...FLAT_NAV,
+    { id: "settings", label: "Settings", icon: SettingsIcon },
+  ];
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return allEntries;
+    return allEntries.filter((e) => e.label.toLowerCase().includes(q) || e.id.includes(q));
+  }, [query, allEntries]);
+
+  // Reset highlight when the filter changes so the user never lands on a
+  // hidden row. Clamp on the way down too — if `filtered` shrinks below
+  // the current `active` index we keep the highlight inside the list.
+  useEffect(
+    () => setActive((i) => Math.min(i, Math.max(0, filtered.length - 1))),
+    [query, filtered.length]
+  );
+
+  // Hold the latest values in refs so the global keyboard handler can read
+  // them without re-binding the listener on every keystroke. Without this
+  // `useEffect` would churn the `keydown` listener on each character.
+  const filteredRef = useRef(filtered);
+  const activeRef = useRef(active);
+  const onNavigateRef = useRef(onNavigate);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    filteredRef.current = filtered;
+  }, [filtered]);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  }, [onNavigate]);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const list = filteredRef.current;
+      if (list.length === 0) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCloseRef.current();
+        }
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const next = Math.min(list.length - 1, activeRef.current + 1);
+        activeRef.current = next;
+        setActive(next);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = Math.max(0, activeRef.current - 1);
+        activeRef.current = next;
+        setActive(next);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const idx = activeRef.current;
+        const target = list[idx];
+        if (target) {
+          onNavigateRef.current(target.id);
+          onCloseRef.current();
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
-    <div className="command-scrim" role="dialog" aria-modal="true" aria-label="Ask Continuum">
+    <div
+      className="command-scrim"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Ask Continuum"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="command-palette">
         <div className="flex items-center gap-3 border-b border-bg-border px-4">
-          <Search size={18} className="text-amber-400" />
+          <Search size={18} className="text-amber-400/80" />
           <input
             autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
             placeholder="Jump to a page…"
             className="h-14 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-dim"
           />
           <kbd>Esc</kbd>
         </div>
-        <div className="p-2">
-          {[...FLAT_NAV, { id: "settings" as TabId, label: "Settings", icon: SettingsIcon }].map(
-            ({ id, label, icon: Icon }) => (
+        <div className="max-h-80 overflow-y-auto p-1">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[11px] text-ink-dim">No matching pages.</div>
+          ) : (
+            filtered.map(({ id, label, icon: Icon }, i) => (
               <button
                 key={id}
+                onMouseEnter={() => setActive(i)}
                 onClick={() => {
                   onNavigate(id);
                   onClose();
                 }}
-                className="press flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-[12px] text-ink-muted hover:bg-amber-500/[.08] hover:text-ink"
+                className={clsx(
+                  "press flex min-h-10 w-full items-center gap-3 rounded-md px-3 text-[12.5px] transition-colors",
+                  i === active
+                    ? "bg-amber-500/[0.08] text-ink"
+                    : "text-ink-muted hover:bg-bg-elevated"
+                )}
               >
-                <Icon size={15} className="text-amber-400" /> {label}
+                <Icon size={15} className="text-amber-400/80" />
+                <span>{label}</span>
+                {i === active && (
+                  <span className="ml-auto font-mono text-[10px] text-ink-dim">⏎</span>
+                )}
               </button>
-            )
+            ))
           )}
+        </div>
+        <div className="border-t border-bg-border px-3 py-1.5 text-[10px] text-ink-dim">
+          ↑↓ navigate · ⏎ open · Esc close
         </div>
       </div>
     </div>
