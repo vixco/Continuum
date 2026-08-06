@@ -1,7 +1,11 @@
-/* Hallmark · Nous Indigo · "the next step in AGI"
+/* Foundry · "the next step in AGI"
  * genre: modern-minimal · macrostructure: Workbench · nav: N3 side rail · footer: none
- * philosophy: flat-not-boxed · hairlines over borders · one restrained accent · downward-weighted layered shadows
+ * philosophy: flat-not-boxed · hairlines over borders · one restrained electric indigo accent · downward-weighted layered shadows
  * contrast: pass · chrome: native · viewport: desktop-native
+ *
+ * The indigo accent lives in `--accent-channels` (hue 277). It is exposed
+ * via Tailwind as `amber-*` and `accent.amber` on purpose — see tokens.css
+ * for why the class names don't match the hue.
  */
 @import "../../../../tokens.css";
 

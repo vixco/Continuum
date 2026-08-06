@@ -20,21 +20,27 @@ instrument panel: dense enough for real work, quiet enough to leave running.
 - Content/settings pages: Workbench document lane — one readable column with
   sections divided by spacing and surface lightness.
 
-## Theme — Foundry Amber
+## Theme — Foundry
 
-- `--color-paper` `oklch(12.5% 0.01 75)`
-- `--color-paper-2` `oklch(15.5% 0.011 75)`
-- `--color-paper-3` `oklch(19.5% 0.012 75)`
-- `--color-ink` `oklch(95% 0.008 75)`
-- `--color-ink-2` `oklch(82% 0.01 75)`
-- `--color-rule` `oklch(28% 0.01 75)`
-- `--color-muted` `oklch(68% 0.01 75)`
-- `--color-accent` `oklch(72% 0.15 70)`
-- `--color-focus` `oklch(80% 0.18 75)`
+The palette is **cool slate paper with a single electric indigo accent**.
+Hue 260 for surfaces and ink, hue 277 for the accent. The accent class
+names in Tailwind are deliberately `amber-*` / `accent.amber` instead of
+`indigo-*` — see the "Naming note" in `tokens.css` for the rationale.
 
-Amber marks selection, primary actions, and focus. Green, orange, and red are
-reserved for operational state. Blue remains limited to the listening state.
-No decorative gradients, coloured glows, or glass panels.
+- `--color-paper` `oklch(13% 0.008 260)`
+- `--color-paper-2` `oklch(16.5% 0.009 260)`
+- `--color-paper-3` `oklch(20% 0.010 260)`
+- `--color-ink` `oklch(96% 0.004 260)`
+- `--color-ink-2` `oklch(82% 0.010 260)`
+- `--color-rule` `oklch(26% 0.008 260)`
+- `--color-muted` `oklch(66% 0.012 260)`
+- `--color-accent` `oklch(70% 0.14 277)`
+- `--color-focus` `oklch(72% 0.16 277)`
+
+Indigo marks selection, primary actions, and focus. Teal/green, amber,
+and red are reserved for operational state (healthy / warn / error).
+Blue (hue 250) remains limited to the listening state. No decorative
+gradients, coloured glows, or glass panels.
 
 ## Typography
 
@@ -71,7 +77,7 @@ not all use the same spacing value.
 
 ## CTA voice
 
-- Primary: compact amber fill, dark text, square-soft corners, direct verb.
+- Primary: compact indigo fill, dark text, square-soft corners, direct verb.
 - Secondary: graphite surface with a visible neutral rule.
 - Ghost: text and surface shift only; no shadow or scale lift.
 
@@ -86,7 +92,7 @@ not all use the same spacing value.
 ## What pages MUST share
 
 - Continuum wordmark and mark.
-- Foundry Amber palette and native type system.
+- Foundry palette (cool slate paper, indigo accent) and native type system.
 - Button, input, card, badge, modal, focus, and spacing language.
 - Real sidebar navigation and `Ctrl+K` command access.
 - Explicit live, hybrid, unavailable, disabled, error, and fixture meaning.
@@ -108,13 +114,13 @@ desktop entry stylesheet.
 
 ```css
 @theme {
-  --color-paper: oklch(12.5% 0.01 75);
-  --color-paper-2: oklch(15.5% 0.011 75);
-  --color-paper-3: oklch(19.5% 0.012 75);
-  --color-ink: oklch(95% 0.008 75);
-  --color-ink-2: oklch(82% 0.01 75);
-  --color-rule: oklch(28% 0.01 75);
-  --color-accent: oklch(72% 0.15 70);
+  --color-paper: oklch(13% 0.008 260);
+  --color-paper-2: oklch(16.5% 0.009 260);
+  --color-paper-3: oklch(20% 0.010 260);
+  --color-ink: oklch(96% 0.004 260);
+  --color-ink-2: oklch(82% 0.010 260);
+  --color-rule: oklch(26% 0.008 260);
+  --color-accent: oklch(70% 0.14 277);
   --font-display: "Bahnschrift", "Segoe UI Variable Display", sans-serif;
   --font-body: "Segoe UI Variable Text", "Segoe UI", sans-serif;
   --font-outlier: "Cascadia Mono", "JetBrains Mono", monospace;
@@ -130,11 +136,11 @@ desktop entry stylesheet.
 {
   "$schema": "https://design-tokens.github.io/community-group/format/",
   "color": {
-    "paper": { "$value": "oklch(12.5% 0.01 75)", "$type": "color" },
-    "paper-2": { "$value": "oklch(15.5% 0.011 75)", "$type": "color" },
-    "paper-3": { "$value": "oklch(19.5% 0.012 75)", "$type": "color" },
-    "ink": { "$value": "oklch(95% 0.008 75)", "$type": "color" },
-    "accent": { "$value": "oklch(72% 0.15 70)", "$type": "color" }
+    "paper": { "$value": "oklch(13% 0.008 260)", "$type": "color" },
+    "paper-2": { "$value": "oklch(16.5% 0.009 260)", "$type": "color" },
+    "paper-3": { "$value": "oklch(20% 0.010 260)", "$type": "color" },
+    "ink": { "$value": "oklch(96% 0.004 260)", "$type": "color" },
+    "accent": { "$value": "oklch(70% 0.14 277)", "$type": "color" }
   },
   "font": {
     "display": { "$value": "Bahnschrift, Segoe UI Variable Display, sans-serif", "$type": "fontFamily" },
@@ -152,19 +158,19 @@ desktop entry stylesheet.
 
 ```css
 :root {
-  --background: 12.5% 0.01 75;
-  --foreground: 95% 0.008 75;
-  --card: 15.5% 0.011 75;
-  --card-foreground: 95% 0.008 75;
-  --primary: 72% 0.15 70;
-  --primary-foreground: 16% 0.012 75;
-  --secondary: 19.5% 0.012 75;
-  --secondary-foreground: 82% 0.01 75;
-  --muted: 28% 0.01 75;
-  --muted-foreground: 68% 0.01 75;
-  --border: 28% 0.01 75;
-  --input: 34% 0.012 75;
-  --ring: 80% 0.18 75;
+  --background: 13% 0.008 260;
+  --foreground: 96% 0.004 260;
+  --card: 16.5% 0.009 260;
+  --card-foreground: 96% 0.004 260;
+  --primary: 70% 0.14 277;
+  --primary-foreground: 16% 0.012 277;
+  --secondary: 20% 0.010 260;
+  --secondary-foreground: 82% 0.010 260;
+  --muted: 26% 0.008 260;
+  --muted-foreground: 66% 0.012 260;
+  --border: 26% 0.008 260;
+  --input: 32% 0.010 260;
+  --ring: 72% 0.16 277;
   --radius: 10px;
 }
 ```
