@@ -423,6 +423,7 @@ mod tests {
                 source: Default::default(),
                 source_ref: None,
                 sensitivity: Default::default(),
+                expires: None,
                 relations: vec![],
                 tags: vec![],
             },

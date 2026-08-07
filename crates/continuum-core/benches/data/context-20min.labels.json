@@ -1,0 +1,80 @@
+[
+  {
+    "t_ms": 185000,
+    "expected": {
+      "project": "continuum",
+      "last_action": "modified raw_log.rs in the continuum core crate"
+    }
+  },
+  {
+    "t_ms": 425000,
+    "expected": {
+      "project": "continuum",
+      "goal": "get continuum building again after the mismatched types failure",
+      "task": "fix the mismatched types in the cargo build",
+      "blocker": "cargo build failing with mismatched types",
+      "last_action": "cargo build failed again with mismatched types"
+    }
+  },
+  {
+    "t_ms": 585000,
+    "expected": {
+      "project": "continuum",
+      "blocker": "cargo build failing with mismatched types",
+      "last_action": "cargo build finished with 0 errors"
+    }
+  },
+  {
+    "t_ms": 705000,
+    "expected": {
+      "project": "continuum",
+      "last_action": "cargo build finished with 0 errors"
+    }
+  },
+  {
+    "t_ms": 905000,
+    "expected": {
+      "project": "simcharts",
+      "last_action": "cargo build finished with 0 errors"
+    }
+  },
+  {
+    "t_ms": 1005000,
+    "expected": {
+      "project": "simcharts",
+      "blocker": "a TypeScript error on ChartProps"
+    }
+  },
+  {
+    "t_ms": 1045000,
+    "expected": {
+      "project": "simcharts",
+      "goal": "fix the ChartProps typing errors in simcharts",
+      "task": "fix the ChartProps TypeScript error in the dashboard",
+      "blocker": "a TypeScript error on ChartProps",
+      "last_action": "ga door met de dashboard tests"
+    }
+  },
+  {
+    "t_ms": 1095000,
+    "expected": {
+      "project": "simcharts",
+      "blocker": "a TypeScript error on ChartProps",
+      "last_action": "ga door met de dashboard tests"
+    }
+  },
+  {
+    "t_ms": 1145000,
+    "expected": {
+      "project": "continuum",
+      "last_action": "ga door met de dashboard tests"
+    }
+  },
+  {
+    "t_ms": 1195000,
+    "expected": {
+      "project": "continuum",
+      "last_action": "cargo test finished with 214 passed"
+    }
+  }
+]

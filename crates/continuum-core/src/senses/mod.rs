@@ -13,10 +13,18 @@
 //! configurable interval.
 //!
 //! [`types`] is always compiled because the dashboard crate needs the frame
-//! schema for its state store. The runtime watchers are only compiled with
-//! the `runtime` feature.
+//! schema for its state store. [`privacy`] is always compiled because it is
+//! the privacy choke point every process (runtime, MCP server, desktop)
+//! must link. [`cadence`] is always compiled (pure atomics — the spec §3
+//! sanctioned runtime-adjustable cadence pattern plus the idle state
+//! machine). The runtime watchers are only compiled with the `runtime`
+//! feature.
 
+pub mod cadence;
 pub mod live_context;
+pub mod privacy;
+pub mod screenshots;
+pub mod toggles;
 pub mod types;
 
 #[cfg(feature = "runtime")]
@@ -24,6 +32,10 @@ pub mod audio;
 #[cfg(feature = "runtime")]
 pub mod context;
 #[cfg(feature = "runtime")]
+pub mod file_watch;
+#[cfg(feature = "runtime")]
 pub mod frame;
+#[cfg(feature = "runtime")]
+pub mod git_watch;
 #[cfg(feature = "runtime")]
 pub mod vision;

@@ -160,9 +160,32 @@ Writes `<data_dir>/wipe-request.json` (atomic tmp+rename) with `{ requested_at, 
 
 Returns `{ iso8601, tz_offset_minutes, epoch_ms }`.
 
+> **Privacy: schema-stable but content-filtered.** `system_active_window`,
+> `system_clipboard_get`, and `system_live_context` are *observation* tools:
+> everything they return passes through the same `PrivacyFilter` the runtime's
+> own frame loop uses, built from the same `config.toml` (`[privacy]` zones +
+> scrubbers, and the legacy `[context]` sensitive lists synthesised into
+> zones). Filtering changes **content only** — the tool names, argument
+> schemas, response field names, and types are unchanged, so nothing published
+> in a release moves. What changes is what the values contain: a window in a
+> `never_observe` zone comes back as the `[excluded]` sentinel, `local_only`
+> content is replaced by `[redacted by local privacy policy]`, and secrets
+> (API keys, bearer tokens, card numbers, IBANs) are replaced by `[REDACTED]`
+> in every free-text field. A zone the user configures binds these tools
+> exactly as it binds the runtime — calling the MCP tool is not a way around
+> it.
+
 #### `system_active_window`
 
 Returns the foreground window's title + process name. Both empty if nothing focused.
+
+Zone behavior:
+
+| Zone of the foreground window | `process_name` | `title` |
+|---|---|---|
+| `never_observe` | `[excluded]` | `""` (never the real title, not even redacted) |
+| `local_only` | real process (scrubbed path) | `[redacted by local privacy policy]` |
+| `cloud_allowed` | real process (scrubbed path) | real title, secrets scrubbed |
 
 ```jsonc
 { "name": "mcp__continuum__system_active_window", "arguments": {} }
@@ -171,6 +194,18 @@ Returns the foreground window's title + process name. Both empty if nothing focu
 #### `system_clipboard_get`
 
 Best-effort Windows clipboard read. `text` is `null` for empty clipboard, non-text content, or if another app holds the lock.
+
+Two additional `null` cases come from the privacy layer:
+
+- **Kill-switch.** With `[context_tools] clipboard_tool_enabled = false` in
+  `config.toml` (default `true`), the clipboard is never opened at all and the
+  tool always answers `{"text": null}`. The tool stays registered and its
+  schema is unchanged — this is a content switch, not a surface change.
+- **Excluded foreground.** If the focused window is in a `never_observe` zone,
+  the read is skipped: the clipboard most likely holds what was just copied out
+  of the app the user excluded.
+
+Whatever does come back is scrubbed for secrets.
 
 ```jsonc
 { "name": "mcp__continuum__system_clipboard_get", "arguments": {} }
@@ -185,8 +220,296 @@ clipboard contents, and terminal text are not part of this contract. The tool
 is read-only and reports unavailable before the runtime publishes its first
 snapshot.
 
+**Both** returned fields are privacy-filtered — the structured `state` and the
+`compact` text, which is rendered *from* the filtered state so the two can
+never disagree. Per-field behavior: excluded monitors carry no caption at all,
+`local_only` monitors and window titles carry the redaction literal, project
+paths are home/username-scrubbed, commit *subjects* are scrubbed while commit
+*ids* and branch names (structured fields) survive verbatim, `local_only`
+inferred session goal/task generalize to "working in a private context", and
+every remaining free-text field is secret-scrubbed.
+
 ```jsonc
 { "name": "mcp__continuum__system_live_context", "arguments": {} }
+```
+
+### Context (published runtime state)
+
+The context engine's tool family (spec §5.2). The design rule is **every
+context source is also a tool**: whatever the runtime observes and publishes,
+the orchestrator can ask for on demand instead of waiting for it to be
+packaged into a wake.
+
+Four properties hold for every tool in this section:
+
+- **Read-only.** They read files the runtime already wrote
+  (`state.json`, `live-context.json`) and open the raw-log SQLite database
+  with `PRAGMA query_only = ON` and no schema migrations. The runtime stays
+  the single writer.
+- **Privacy-gated.** Every response passes the same `PrivacyFilter` cloud
+  gate as `system_live_context`: excluded windows/monitors return the
+  sentinel, `local_only` content returns the redaction literal or a
+  generalized phrase, paths are home/username-scrubbed, secrets are
+  scrubbed.
+- **They degrade; they never fail.** A cold runtime, a missing file, an
+  unparseable snapshot, or a database that does not exist yet all answer
+  `available: false` or `stale: true` with empty data. A context tool must
+  never kill a wake with an error.
+- **They are switchable.** `[context_tools] enabled = false` empties the
+  whole family (same schemas, empty content). The `[privacy.toggles]`
+  honest toggles empty the tools whose source was switched off: `mic` for
+  `context_audio`, `screen` for `context_screen`, and `pause_all` for
+  everything observational.
+
+**Freshness needs the runtime.** These tools read published state; if
+`continuum.exe` is not running, they report `available: false` (nothing was
+ever published) or `stale: true` (publishing stopped). Two thresholds,
+because the two files are written on different rules:
+
+| File | Written | `stale` after | Meaning |
+|---|---|---|---|
+| `live-context.json` | only when content changed (content-versioned) | 10 s | this snapshot is old — on a genuinely static screen that is normal |
+| `state.json` | every 2 s regardless of content | 30 s | the runtime is not publishing |
+
+**There is no `context_sessions` tool** and there does not need to be:
+past session summaries are vault notes, so
+`memory_vault_search` with `types: ["session"]` is the search for them. The
+`context_*` family covers what the runtime *observes*; the vault tools
+cover what it *remembers*.
+
+#### `context_session`
+
+Continuum's live session state: current project, inferred goal and task with
+a confidence, foreground app/window, recently-touched files, and the last
+observed error / success / user command. Read this first when the user says
+"continue" or "what was I doing".
+
+Source: `state.json` → `session_state`. That file carries the **raw** state
+by contract (each consumer applies its own gate), so this tool applies the
+cloud gate itself: a `local_only` session reports generalized goal/task
+("working in a private context") with `local_only: true` so the caller knows
+why, while the mechanical project id survives.
+
+```jsonc
+{ "name": "mcp__continuum__context_session", "arguments": {} }
+```
+
+#### `context_window`
+
+The foreground window right now — process, title, zone, pid, scrubbed exe
+path, monitor id, seconds focused — plus the most recent focus switches with
+their dwell times.
+
+`limit` caps the switch list (default 10, max 50). Switches come from the
+deduped `context_events` log opened read-only; a database that does not
+exist yet returns `recent_switches: []` with `stale: true`, never an error.
+A `never_observe` window comes back as the `[excluded]` sentinel with no
+pid, exe path, or monitor id — those are the identity and placement of an
+app the user excluded.
+
+```jsonc
+{ "name": "mcp__continuum__context_window", "arguments": { "limit": 5 } }
+```
+
+#### `context_screen`
+
+Every connected monitor with its latest local-vision caption and privacy
+zone, plus the same compact source-attributed world render
+`system_live_context` returns.
+
+Excluded monitors are still listed, with an **empty** caption (sentinel
+semantics: no caption at all, not even a redaction marker) and
+`zone: "never_observe"` — so the caller can see a screen exists and is
+deliberately not described. `local_only` monitors carry the redaction
+literal.
+
+```jsonc
+{ "name": "mcp__continuum__context_screen", "arguments": {} }
+```
+
+#### `context_audio`
+
+The voice pipeline's latest published transcript with its timestamp, whether
+the user appears to be in a call, and whether ambient mute is currently
+suppressing voice output. The transcript arrives scrubbed from the pipeline
+and is scrubbed again here.
+
+With `[privacy.toggles] mic = false` (or `pause_all = true`) this answers
+`available: false` with no transcript — an honest toggle silences the tool
+as well as the watcher.
+
+```jsonc
+{ "name": "mcp__continuum__context_audio", "arguments": {} }
+```
+
+#### `context_projects`
+
+Every project Continuum knows about: `configured` entries from
+`[[projects.known]]`, user-`confirmed` ones, and `discovered`
+auto-discovery proposals — which never participate in project resolution
+until confirmed. The active project sorts first, discovery proposals last.
+Root paths are home/username-scrubbed.
+
+Source: the `projects` table, opened read-only. `available: false` means the
+runtime has never booted against this data directory.
+
+```jsonc
+{ "name": "mcp__continuum__context_projects", "arguments": {} }
+```
+
+#### `context_timeline`
+
+Continuum's deduped event log, filtered. Arguments: `since` / `until`
+(RFC 3339), `types` (registry tokens), `project` (slug), `source`
+(`window` | `git` | `file` | `screen` | `audio` | `system` | `voice`),
+`limit` (default 50, max 200). Events come back oldest first.
+
+Rows are **collapsed**, not raw occurrences: one row with `count: 14`
+spanning `ts_first`…`ts_last` means the same thing happened fourteen times.
+That is a stronger signal than a single occurrence — read it that way.
+
+Two argument rules worth knowing:
+
+- An unparseable `since` / `until` is **ignored** (no filter) rather than
+  raising: a bad argument must not fail a tool call in the middle of a
+  wake.
+- An unrecognised `types` / `source` token **narrows to nothing**. It never
+  widens back to "everything" — the caller asked for something specific and
+  got the token wrong, and silently answering a broader question is the
+  worse failure.
+
+```jsonc
+{
+  "name": "mcp__continuum__context_timeline",
+  "arguments": { "types": ["error", "commit"], "limit": 20 }
+}
+```
+
+##### The privacy contract of the three event tools
+
+`context_timeline`, `context_search` and `context_files` share one response
+schema and one contract:
+
+- **`local_only` rows never leave.** Spec §4.1 strips `local_only` content
+  from everything cloud-bound, and a tool response is cloud-bound by
+  destination. Those rows are omitted **and counted** in `omitted_private`:
+  the orchestrator learns that something happened without learning what,
+  which is exactly the amount of information it should have.
+- **Live rules re-bind.** A row written before the user excluded an app is
+  re-resolved against the *current* zone rules; anything that no longer
+  resolves `cloud_allowed` joins `omitted_private` too.
+- **A switched-off source is not replayed.** With `[privacy.toggles] mic =
+  false`, audio/voice rows stop being returned — an honest toggle that only
+  stopped the watcher while a tool replayed the log would be a dishonest
+  mute. Those rows are *not* counted in `omitted_private`: they are silent,
+  not private.
+
+#### `context_search`
+
+Full-text search over event summaries and window titles, best match first.
+`limit` defaults to 20, capped at 50. Answers "when did I last see X"
+without walking the timeline.
+
+Query handling matches the vault search: punctuation is stripped and each
+word becomes a prefix term joined by an implicit AND, so `build fail`
+matches "build failed" and a query full of FTS syntax (`"`, `NEAR(`, `*`)
+is neutralized rather than raising a syntax error. A query that normalizes
+away to nothing returns no rows.
+
+```jsonc
+{
+  "name": "mcp__continuum__context_search",
+  "arguments": { "query": "cargo build failed", "limit": 10 }
+}
+```
+
+#### `context_files`
+
+Recent file-watcher events — created, modified, deleted, renamed, and the
+storm-collapsed `files_bulk_change` row. Optional `project` filter; `limit`
+defaults to 20, capped at 100. Paths are root-relative and scrubbed.
+
+`available: false` means `[privacy.toggles] files` is off, or the file
+watcher was never enabled (`[file_watcher] enabled` defaults to false).
+
+```jsonc
+{
+  "name": "mcp__continuum__context_files",
+  "arguments": { "project": "continuum", "limit": 15 }
+}
+```
+
+#### `context_git`
+
+Branch, dirty/staged/untracked counts, ahead/behind, conflicts, and the
+HEAD commit. Two paths:
+
+- **No arguments** — the *active* project's already-published state, read
+  out of `live-context.json`. No subprocess, no filesystem access,
+  `probed: false`.
+- **`project: "<slug>"`** — one timeout-bounded `git status --porcelain=v2`
+  plus `git log -1` against that project's root
+  (`[git_context] command_timeout_secs`, default 10 s), `probed: true`.
+
+**The consent rule.** A named probe runs only for a `configured` or
+`confirmed` project. A `discovered` row is a *proposal* the auto-discovery
+heuristic made from a window title, and Continuum never runs a command in a
+directory the user has not adopted. Such a request comes back
+`available: false` with a `reason` explaining it — not an error. The right
+response is to ask the user to confirm the project on the Context page, not
+to retry. The same refusal covers an unknown slug, a `never_observe`
+project, a missing root, and a failed probe; `reason` always says which.
+
+Root paths are home/username-scrubbed and the commit subject is scrubbed as
+free text. `last_commit_id` is returned **verbatim** — an OID is a
+structured identifier, not content (spec §4.1).
+
+```jsonc
+{ "name": "mcp__continuum__context_git", "arguments": {} }
+{ "name": "mcp__continuum__context_git", "arguments": { "project": "continuum" } }
+```
+
+#### `context_package`
+
+The whole picture in one call: Continuum's context package (spec §4.9)
+rendered as markdown — current moment, session state, what happened just
+before, relevant memories and vault notes, recent file/git changes, failed
+attempts, last success. `token_budget` defaults to `[context_package]
+token_budget` (1000) and is clamped to `[200, 8000]`; over budget, sections
+are dropped from the documented ladder (open files → recent changes →
+just-before tail → memories tail) and `dropped` reports which rungs ran.
+
+This is the **mcp-published profile** of the same struct the wake path
+renders, which is why two sections are structurally absent and always
+listed in `sections_omitted`:
+
+| Omitted | Why |
+|---|---|
+| `why_woken` | there is no wake to explain — you asked, nobody woke you |
+| `trigger_frame_moment` | there is no trigger frame; the live-context snapshot supplies the current moment instead |
+| `tools`, `recommended_next_step`, `pending_decisions`, `facts` | this process cannot know them (tool grant, continuation resolver) or has better dedicated tools for them (`memory_vault_search`, `memory_vault_resolve`, `memory_list_facts`) |
+
+`sections_present` is computed from the final rendered headings — after the
+privacy gate, per-section caps and token-budget drop ladder — rather than from
+the pre-render package. Together with `sections_omitted` it always covers the
+whole vocabulary, so filtered, dropped and genuinely empty sections are never
+misreported as present.
+`per_section_stale` reports the four sources independently — a stale screen
+with a fresh event log is a normal state:
+
+| Flag | Source |
+|---|---|
+| `current_moment` | `live-context.json` missing or older than 10 s |
+| `session` | `state.json` missing or older than 30 s |
+| `events` | the `context_events` database could not be read |
+| `memories` | this process's vault / episodic stores could not be opened |
+
+Memories come from the MCP server's **own** lazily-opened vault and
+episodic stores, queried with the compact live world render — so "relevant"
+means relevant to what is on screen right now.
+
+```jsonc
+{ "name": "mcp__continuum__context_package", "arguments": { "token_budget": 1500 } }
 ```
 
 ### Filesystem (read-only)

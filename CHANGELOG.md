@@ -77,6 +77,215 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+Completion defects found in the final context-engine review (fix wave 3b):
+
+- `context_package.sections_present` now describes the headings that actually
+  survived privacy filtering, section caps and the token-budget drop ladder,
+  instead of the pre-render package assembled by the MCP handler.
+- Session goal/task pins are restored on boot, survive ordinary app and project
+  updates, and are cleared only after a sufficiently confident real project
+  switch; project-pin guards no longer leak across that boundary.
+- Continuation candidate age now uses the timestamp of the last goal/task
+  inference rather than unrelated mechanical session updates, and completed
+  wake results without a `next_step` are no longer ranked as future work.
+- Session-note continuation reads the newest matching vault note directly,
+  including notes beyond the first graph page.
+- Desktop chat applies the same privacy egress filter as the wake and MCP
+  profiles, and records typed chat requests into `last_user_command` through
+  the cross-process context-intent bridge.
+- Curator project attribution now comes only from the post-hysteresis resolver;
+  raw frame hints can no longer reintroduce a project the resolver rejected.
+- Configured package budgets are clamped like request overrides, empty
+  privacy-gated session headings are omitted, project-zone changes count as
+  activity, and triage coalescer health is published to the Context page and
+  self-healing runbook.
+
+Integration-seam defects in the events → dedupe → distiller → episodic →
+wake path, found by the whole-branch review of the context engine (fix
+wave 3a):
+
+- **`local_only` was lost between the events table and the cloud-bound wake
+  prompt.** The events path gated correctly, but the *memories* section
+  hardcoded `local_only: false` on every line, and nothing upstream carried the
+  flag: `query_undistilled_events` had no sensitivity predicate,
+  `event_to_memory_event` never read `row.sensitivity`, and `EpisodicEvent` had
+  no sensitivity field at all. So text withheld from Anthropic as an event was
+  sent to Anthropic as a "relevant memory" one distillation pass later — the
+  package's `!(cloud && local_only)` memory filter could never fire.
+  `EpisodicEvent` now carries `sensitivity` (additive LanceDB column, migrated
+  in place like B6's `project`; legacy rows read `cloud_allowed`), both
+  distillation rungs set it — events from the row, raw frames from the frame's
+  own zone — and the wake packager maps it onto `MemoryLine::local_only`. The
+  vault timeline mirror carries the same tag (additive `events.local_only`
+  column, non-destructive ALTER).
+- **Every file event in a project collapsed onto one dedupe row.** Summary
+  normalization strips path-like tokens, and a file event's entire summary *is*
+  a root-relative path — so `"src/main.rs"` normalized to `""` and every file in
+  every subdirectory hashed to the same key. Touching 40 files produced one row
+  reading `src/first_file_you_touched.rs ×40`, which is what "Recent changes",
+  the Context page strip and `context_search` all reported; `file_renamed`
+  normalized to a bare `"→"`. Per-path file events now key on the raw summary.
+  The storm templates (`files_bulk_change`, resync) keep normalization, so
+  repeated bulk rows still collapse across flushes.
+- **Collapsed frames were recorded twice and the compression ladder inverted.**
+  A collapse bumps `count`/`ts_last` and records nothing about the collapsing
+  frame, and the deduped row keeps the *first* occurrence's `raw_reference` — so
+  only frame #1 of N was excluded by the fallback distiller's `NOT EXISTS`
+  predicate, and frames #2..N distilled again as raw frames on exactly the
+  condition (`screen_has_error = 1`) that caused the classification. Fourteen
+  build failures produced `"build failed (×14)"` **plus** thirteen raw-frame
+  memories of the same moment. The events writer now stamps
+  `perception_frames.context_event_at` for every occurrence, insert or collapse,
+  and the fallback skips stamped frames. The memory-precision bench now
+  exercises both rungs of the ladder, so this cannot regress unnoticed — it
+  reported a 0.000 duplicate rate throughout because it only ever ran the events
+  path.
+- **Collector events were never distillable under the default config.**
+  Deterministic collector events are emitted at importance `0.2`, the distiller
+  filtered at `distillation_min_salience = 0.35`, so every window/git/file/system
+  event was silently excluded from the "primary" input and the compression
+  ladder's top rung was empty by construction. Events now have their own
+  threshold, `[memory] distillation_min_event_importance` (default `0.15`),
+  documented alongside the frame threshold it was conflated with. Two adjacent
+  cliffs closed with it: a classification whose JSON omits `importance` now
+  defaults to `0.4` instead of `0.0` (an omitted score is not a claim of
+  worthlessness), and a blank-summary event no longer suppresses its own source
+  frame — blank rows are excluded from distillation forever, so that combination
+  erased the moment from memory entirely.
+- **The events writer undid the classifier's deliberate project drop.** The
+  flush-time project fill ran over the whole batch guarded only by
+  `project_id.is_some()`, so a classified event whose project the consumer had
+  deliberately resolved to `None` (unknown slug, no resolver value) was
+  re-stamped minutes later with whatever the resolver happened to hold — often
+  from a different window entirely. Only handle-less sources (`window`,
+  `system`, `voice`) are stamped now; `screen`/`audio` resolved their own
+  project at frame time and `git`/`file` always carry their watched root's. The
+  stamp also moved to the send seam, so the B5 observer tap sees the same
+  `project_id` the persisted row gets instead of always seeing `None`.
+
+Privacy and egress defects found by the whole-branch review of the context
+engine (fix wave 2):
+
+- **The continuation path laundered `local_only` session state into the cloud.**
+  The continuation resolver ranks `SessionState::current_task` *raw* (by design —
+  a rehydrated task must still rank), which bypasses `cloud_view`. Its output
+  then reached Opus through the two package sections that carried no zone tag at
+  all: "## Recommended next step" and "## Why you were woken", both rendered
+  verbatim, while the same package's "## Session state" correctly printed
+  "working in a private context". `NextStep` now carries `local_only` and is
+  cloud-gated like every other section, continuation candidates inherit the
+  session's zone (strictest wins when duplicate texts collapse), and spec §4.1
+  propagation rule (3) — *"a wake triggered by a `local_only` frame gets the
+  generic reason 'user activity in a private context'"*, previously implemented
+  nowhere — is now enforced by the renderer for both a `local_only` trigger frame
+  and a `local_only` session.
+- **A `local_only` frame was gated on a string literal a legacy knob could switch
+  off.** The cloud gate re-derived the zone by sniffing the redacted-window-title
+  literal, which the collector only produces when `[context]
+  redact_sensitive_titles` is true. With it false, a `local_only` window kept its
+  real title, the gate returned false, and "## Current moment" rendered the title
+  to the cloud (and session state seeded `open_files` from it). Perception frames
+  now carry the collector's own `PrivacyDisposition` — additive, serde-defaulted,
+  persisted in a new `context_privacy` column — and the gate reads that, keeping
+  the literal check only as a fallback for frames written by older builds.
+- **Explicit deletion was gated on a rotation knob.** `Forget` and `Delete range`
+  passed `[storage] delete_screenshots_with_rotation` straight into the raw log,
+  so a user who turned it off to keep screenshots through rotation and then hit
+  Forget got the row deleted, success reported, and the JPEG orphaned on disk —
+  unreachable by any later targeted delete. Explicit deletion now always removes
+  the referenced file; the knob governs rotation only, as the docs already said.
+- **`delete_range` did not sweep frame-derived vault candidates.** It purged
+  episodic memories, frames, events and screenshots but left the pending
+  decisions quoting frames the user had just erased. It now runs the same
+  candidate rung `forget` does, in one pass over the vault for the whole window.
+- **The project slug leaked from a `local_only` session.** Goal and task were
+  generalized while `Project: <slug>` still rendered, naming *which* private thing
+  was being worked on. It is now hidden with the rest.
+- **The base64 scrubber missed base64url and three vendor token shapes.** The
+  pattern used the standard alphabet only, so JWT segments, `ya29.` Google
+  tokens and modern PATs broke at their first `-`/`_` and each fragment often
+  fell under the 32-char floor. The alphabet now includes `-`/`_`, `=` is a valid
+  boundary (`export TOKEN=<payload>` was unmatchable), and Slack `xox?-`, GitLab
+  `glpat-`, Google `ya29.` and whole-JWT rules run ahead of it. The redaction
+  bench's corpus grew from 8 to 13 secrets and 4 to 6 survivors and still reports
+  zero leaks and zero false positives.
+
+Concurrency and liveness defects found by the whole-branch review of the context
+engine (fix wave 1):
+
+- **A panicking triage evaluation silently killed triage forever.** The
+  coalescer's busy flag was released only when a spawned evaluation reported
+  back, so one panic (or a cancelled task) parked every later frame with nothing
+  logged. Evaluation tasks now carry a drop guard that reports an empty result on
+  any abnormal exit, and the coalescer publishes a busy-since clock in the health
+  snapshot, so an evaluation wedged for more than a minute asks for a restart.
+- **A panicking wake latched the orchestrator busy flag forever.** Both wake
+  sites (the decision path and the daily maintenance ticker) now release the flag
+  from a drop guard instead of a store at the tail of the body, so Continuum
+  cannot stop waking because one wake unwound.
+- **Deleting context froze push-to-talk.** `forget` and `delete_range` ran inline
+  on the runtime's 250 ms select loop, awaiting LanceDB, two SQL deletes, one
+  `remove_file` per referenced screenshot and a full vault scan. They now run on
+  a serial worker task, so the voice ticker and the hotkey stay live during a
+  "delete the last hour" click. The other intent kinds still apply inline.
+- **Per-frame database writes could stall the whole loop.** The four bookkeeping
+  writes on the frame arm are spawned rather than awaited, and the raw-log pool
+  now sets an explicit 250 ms `busy_timeout` in place of sqlx's 5 s default, so a
+  frame write landing during the events writer's batch transaction or an hourly
+  rotation fails fast instead of blocking.
+- **Retention rotation blocked an async worker thread.** The screenshot deletion
+  loop and the recursive backstop sweep now run on `spawn_blocking`.
+- **Clean shutdown dropped up to 256 buffered events.** The events writer's final
+  flush raced the pool close; shutdown now waits (up to 5 s) for the writer task
+  to stop before closing the raw log.
+- **Two unbounded maps in project discovery.** Un-promoted dwell entries age out,
+  and the resolved-path set is capped at 2048 with oldest-first eviction.
+- **A dead hotkey listener spun the select loop.** A closed channel now logs at
+  error level and disarms the arm once instead of being re-polled forever.
+
+Defects the context engine work closed along the way:
+
+- **Project detection was hardcoded.** `infer_project_hint` matched a fixed
+  keyword list against the window title and nothing else. It is now a
+  backward-compat shim over the resolver's keyword tier, consulted only when no
+  project resolves; semantic-fact prefixes, the curator's activity signal,
+  curator sessions and skills matching all receive the resolver's
+  post-hysteresis output instead.
+- **`project_world_state` reported the daemon's own directory** as the user's
+  project — it read `current_dir()`, which is always Continuum's own working
+  directory. It now derives from the resolver.
+- **Triage's `Remember` decision was discarded** and the `triage_decision`
+  raw-log column was never written. Both are now consumed: a `Remember` (or a
+  `should_store` classification) creates a vault memory candidate with a
+  per-type TTL, and the column is populated per frame.
+- **Vault note expiry was unreachable.** `Vault::create` hardcoded
+  `expires: None`, so no caller could ever set a TTL and the existing
+  sweep-expired path could never fire for a new note. `NoteDraft` gained an
+  `expires` field that `create` now writes into frontmatter.
+- **Maintenance wakes got an empty history.** The maintenance ticker passed
+  `&[]` as recent frames; it now shares the same bounded frame ring as the
+  frame loop.
+- **`PrivacyDisposition::Excluded` was dead code** — nothing ever produced it.
+  It is now the `never_observe` sentinel disposition.
+- **The triage JSON extractor locked onto the wrong object.** It returned the
+  last balanced `{…}`, which with a nested classification block meant it
+  latched onto the nested object and silently lost the decision. It now returns
+  the last *top-level* balanced object, and a truncated or malformed
+  classification never burns a retry.
+- **`context_package` rendered unscrubbed database rows.** It correctly decided
+  *whether* a row could leave the machine but then rendered the survivor's
+  summary, title and application straight from SQLite, unlike the timeline,
+  search and files tools. A row written before a privacy rule existed could
+  walk out unredacted. Found by the redaction bench.
+- **One build-failure loop left 27 near-duplicate pending vault notes.**
+  Candidates were proposed per *frame* while the events writer collapses per
+  *row*. Candidates are now gated on the same dedupe key as the event, one per
+  collapsed row; the measured duplicate rate went from 0.55 to 0.00.
+- **Raw-log rotation had no production caller** despite the docs claiming it
+  ran nightly. It is now wired onto the distiller ticker at a one-hour floor.
+- **The MCP live-context round-trip test asserted a frozen schema version**
+  (`live-context/v1`) and failed on `main`; it now tracks the constant.
+
 - Fixed Tools & Skills server installation by adding validated local executable registration, in-product progress and errors, and next-run MCP configuration wiring.
 - Publish live voice volume, wake-word, queue, listening, and ambient-mute state
   from the runtime to the desktop without overwriting curator or live-context
@@ -91,6 +300,324 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   data or configuration.
 
 ### Added
+
+- **The context engine (Plans A + B + C, spec
+  `docs/superpowers/specs/2026-08-05-context-engine.md`)**: Continuum now
+  continuously knows *what you are doing* and hands the same accurate,
+  privacy-filtered picture to every AI that needs it — the orchestrator at
+  wake, the desktop chat, and any tool call. The pipeline is
+  `capture → dedupe → privacy filter → classification → project/goal →
+  session state → curator/memory → context package → Main AI`. User-visible
+  capabilities:
+
+  - **A privacy filter that lands first.** Three zones (`never_observe`,
+    `local_only`, `cloud_allowed`) configured as `[[privacy.zones]]` rules on
+    process name and/or window title. Secrets, cards, IBANs and (optionally)
+    emails are scrubbed from all free text; home directories and usernames are
+    scrubbed from every path. Existing `[context] sensitive_process_names` /
+    `sensitive_title_keywords` keep working — they are synthesized into zone
+    rules at load, union applied, stricter wins. Derived artifacts inherit the
+    strictest zone of their inputs. **Keyboard capture remains permanently out
+    of scope.**
+  - **Five honest toggles** — `mic`, `screen`, `files`, `git`, `pause_all` —
+    enforced at each collector within one loop iteration, flippable from the
+    Context page, persisted to config, and each writing a `toggle_change`
+    event. Three limitations are documented rather than hidden: `mic` off
+    leaves the OS microphone indicator lit until restart, a runtime that
+    *booted* paused needs a restart to unpause, and persisting a toggle
+    rewrites `config.toml` without its comments.
+  - **Project detection that actually works.** A single resolver, owned by the
+    frame loop, resolves per frame with hysteresis over five tiers (user
+    override rules → path in the window title → editor title pattern → git root
+    of the most recent file event → keyword match), plus auto-discovery of
+    candidates from title-derived paths. **Unconfirmed candidates are never
+    collected from.**
+  - **Git and file observation.** A git collector for the active *confirmed*
+    project (one consolidated `status --porcelain=v2 --branch` + `log -1` per
+    poll, timeout-bounded, no window) reporting branch, dirty/staged/untracked,
+    ahead/behind, conflicts and last commit. An opt-in `notify` file watcher
+    (`[file_watcher] enabled = false` by default) over confirmed roots with
+    debouncing, ignore globs, rename pairing, per-root rearm and storm
+    coalescing.
+  - **A deduped event stream.** New `context_events` table plus an FTS mirror,
+    fed by a dedicated writer task through a bounded queue that collectors
+    never block on. A build that fails fourteen times is **one row with
+    `count = 14`**, which is what makes "build failed ×14" reach memory instead
+    of fourteen near-identical notes.
+  - **Live session state.** Active project, app, window title, open files, last
+    error / success / user command update mechanically; goal and task are
+    inferred by a background LLM task that never runs while idle, never
+    preempts interactive triage, and is capped at 256 tokens. It rehydrates on
+    boot from the last published snapshot plus recent events.
+  - **"Ga door" resolves to something.** A pure, LLM-free continuation resolver
+    ranks five candidates by confidence × prior × recency decay; above
+    `[continuation] confidence_floor` the wake package renders a recommended
+    next step, below it the orchestrator is told to ask one short question.
+  - **Ten new read-only MCP tools** — `context_session`, `context_window`,
+    `context_screen`, `context_audio`, `context_projects`, `context_timeline`,
+    `context_search`, `context_files`, `context_git`, `context_package` — all
+    privacy-gated, all degrading to `available: false` / `stale: true` instead
+    of erroring, all emptied by `[context_tools] enabled = false`. Withheld
+    private rows are *counted* (`omitted_private`), not silently dropped, and
+    `context_git` refuses to probe a project the user has not confirmed.
+  - **A Context page** in the dashboard: session state with confidence bars,
+    per-source health with disabled reasons, the live toggles, a recent-events
+    strip, projects and discovery candidates, and an empty state with an
+    Add-project CTA. Corrections travel as intent files with **no expiry** —
+    a correction made while the runtime is down still applies at its next
+    boot. Actions: add/confirm project, correct project or goal, "not this
+    project", pin, forget (cascading across events, frame, screenshot,
+    episodic memory and the unconfirmed vault candidate), delete range, and
+    toggle changes. Every applied intent, every wake, and every automatic pin
+    expiry is appended to `<data_dir>/logs/actions.jsonl`.
+  - **Four evaluation harnesses**, all offline and deterministic in mock mode:
+    `continuum-context-bench` (recall of project/goal/task/blocker/last action,
+    `--live` for the real model), `continuum-dedupe-bench`,
+    `continuum-memory-precision-bench`, and `continuum-redaction-bench`, plus
+    `continuum-triage-bench --prompt-fit-only` as the no-GPU half of the triage
+    gate and `continuum-perception --record <path>` for capturing your own
+    (strictly local) session. The committed fixture is synthetic and generated;
+    real recordings never enter the repository.
+
+  New config sections: `[privacy]`, `[privacy.toggles]`, `[[privacy.zones]]`,
+  `[projects]`, `[[projects.known]]`, `[git_context]`, `[file_watcher]`,
+  `[events]`, `[session_state]`, `[context_package]`, `[continuation]`,
+  `[performance]`, `[context_tools]`, `[memory.candidate_ttl_days]`. New docs:
+  `docs/context-engine.md` (what is observed, zones, toggles, tools, the
+  Context page, the full config reference, how to run the benches, and the
+  honest limitations); `docs/mcp-tools.md` and `docs/self-healing.md` gained
+  context sections; `ARCHITECTURE.md` gained a context-engine section.
+
+  The per-task entries below carry the implementation detail for Plan B.
+
+- **Chat context profile + continuation resolver (context engine Plan B,
+  Task B8)**: two things land together.
+
+  **Chat profile (desktop, spec §4.9 matrix).** The chat system prompt
+  gains a "## Session state" section read from the runtime's published
+  `state.json` — active project, inferred goal/task (only above
+  `[session_state] confidence_floor`), and recently touched files —
+  rendered through the *same* ungated `ContextPackage` renderer the wake
+  profile uses, under `[context_package] chat_token_budget` (600 tokens)
+  and the same cloud gate (a `local_only` goal/task generalizes to
+  "working in a private context"). It is strictly **additive**: the
+  in-process vault search that feeds "## Memory context" is untouched, so
+  a desktop-only install with no background runtime behaves exactly as
+  before. When the runtime is not publishing, has published no
+  `session_state` yet, or its snapshot is older than an hour, **no
+  section is rendered at all** — the prompt's "## Live status" footer
+  already reports `Background runtime: not running`. New knob:
+  `[chat] include_session_context` (default `true`).
+
+  **Continuation resolver (`context::continuation`, spec §4.12).** When
+  the user says "ga door" — or presses the hotkey without saying anything
+  — Continuum now resolves *what* to continue instead of guessing. Pure
+  logic, **no LLM call**, ungated like the packager. Five candidates, all
+  with real producers: the session-state task (survives a restart via
+  §4.8 rehydration), the last wake's `wake_result.next_step`, the
+  curator's `open_task:` session-summary trailer, the last user command,
+  and the last error. Each is scored `base confidence × per-kind prior ×
+  recency decay` (flat for 30 min, halved per hour after, floored at
+  0.1); the priors put a *task* above an *error* on purpose — an error is
+  a symptom, a task is intent. At or above `[continuation]
+  confidence_floor` (0.6) the wake package renders "## Recommended next
+  step" and the wake reason says `Continue: <target>`; below it the wake
+  reason instructs the orchestrator to ask **one** short question naming
+  up to three candidates. Ordinary wakes short-circuit before any extra
+  read, so this costs nothing when it does not apply. New config section:
+  `[continuation]` (`confidence_floor`, `trigger_phrases`,
+  `wake_result_lookback_hours`).
+
+- **Unified context package + wake profile + post-wake record (context
+  engine Plan B, Task B7)**: everything Continuum knows about "right now"
+  is now assembled into **one struct with one renderer** —
+  `context::package::ContextPackage` (spec §4.9). The module is
+  deliberately **ungated** (pure owned types + string formatting), so the
+  runtime, the MCP server and the desktop app all link the same packager;
+  the `--no-default-features` build is the parity gate. Sections: current
+  moment (caption + **window title, finally rendered** + world-state blob
+  + audio), session state, just before, relevant memories, semantic
+  facts, vault notes, recent changes, failed attempts, last success,
+  available tools + permission mode, recommended next step, pending
+  memory decisions, why-woken. Three properties are enforced by the
+  renderer rather than by convention: the **cloud gate** (every section
+  item carries `local_only`; cloud-bound renders skip those items and
+  *generalize* — never silently leak — the current moment and session
+  state), the **order contract** (pending memory decisions stay the last
+  section before the wake reason), and the **budget** (`[context_package]
+  token_budget`, default 1000 for the wake profile / 600 for chat, with
+  per-section caps and a documented, tested drop ladder: open files →
+  recent changes → just-before tail → memories tail; why-woken, current
+  moment, session state and pending decisions are never dropped). The
+  wake message is now assembled from *all* of the runtime's sources:
+  session state, the deduped `context_events` table (count-aware "×14"
+  lines for just-before / recent changes / failed attempts / last
+  success), retrieval, the compact world state, and the composed wake
+  config's real tool list and permission mode. Every source is wrapped —
+  a failing one logs and leaves its section empty rather than failing the
+  wake. The frame loop's recent-frames buffer became a **shared ring**
+  (`Arc<Mutex<VecDeque<..>>>`, snapshot-cloned under a short guard, never
+  held across an await), so the daily memory-maintenance wake stops
+  passing an empty history and sees the same "just before" a triage wake
+  does. Finally, each completed wake writes a **post-wake structured
+  record**: a best-effort `{action, result, next_step}` trailer parsed off
+  the orchestrator's reply (case-insensitive, markdown-tolerant, Dutch
+  labels included, last occurrence wins, garbage yields nothing) becomes a
+  `wake_result` system event plus a vault timeline entry, and curator
+  session summaries now always end with a normalized `open_task:` line —
+  the two producers the continuation resolver reads without spending an
+  LLM call.
+- **Compression ladder + episodic project (context engine Plan B, Task
+  B6)**: memory distillation now reads **deduped context events** as its
+  primary source (spec §4.11) instead of raw frames. Fourteen identical
+  build failures collapse into a single episodic memory reading
+  `"build failed (×14)"` with a bounded importance boost (+0.05 per
+  doubling of the count, capped at +0.20) rather than fourteen
+  near-identical vectors crowding out everything else in a similarity
+  search. Raw frames that never produced a classified event still distil
+  through the original salience predicate as a documented fallback, and
+  frames that *did* produce an event are excluded so a moment is never
+  recorded twice. Every `EpisodicEvent` gained an optional `project`
+  (additive LanceDB migration: tables written by earlier builds are
+  migrated in place with `add_columns`, and if that is refused the store
+  degrades to writing the old column set rather than refusing to open).
+  Wake retrieval filters episodic recall on the resolved project
+  **softly** — other projects' memories are dropped, unattributed ones
+  always survive, so recall never gets worse than before the field
+  existed. The vault's `distilled` timeline events now carry the project
+  too. Screenshots gained a real retention story: rotation deletes the
+  file each expired frame row referenced *and* sweeps `screenshots_dir`
+  for images older than the new `[storage] screenshot_max_age_hours`
+  (default 720 h) — the mtime backstop that reclaims files orphaned by a
+  crash between "image saved" and "row written". Both deletions are
+  gated by `[storage] delete_screenshots_with_rotation` (default true),
+  and raw-log rotation is finally *wired*: it runs hourly on the memory
+  distiller's ticker, including when distillation is disabled, because
+  retention is a privacy promise rather than a distillation feature.
+- **Live session state (context engine Plan B, Task B5)**: Continuum now
+  keeps an explicit answer to "what is the user doing right now" in a new
+  `context::session_state` module (spec §4.8) — active project, app, window
+  title, best-effort open files, last error, last success, last user
+  command, plus an inferred goal and task with a confidence. The mechanical
+  fields update synchronously in the frame loop and off the context-event
+  stream (a new non-blocking observer tap on `EventSender` that runs
+  *before* the persistence queue, so a full queue costs a row but never a
+  state update). Goal/task inference runs in its **own spawned task** that
+  the frame loop never awaits: it fires only on a project switch, ≥ 8
+  significant events, or 10 minutes of staleness, never more than once per
+  2 minutes, never while the machine is idle, and always through the
+  background LLM tier introduced in Task B2 (behind interactive triage,
+  ≤ 256 tokens). A reply under `[session_state].confidence_floor` is
+  discarded rather than stored, and consumers render "unknown" — the honest
+  answer. Zone propagation per spec §4.1: an inference window containing a
+  `local_only` event tags its output `local_only`, and `cloud_view()`
+  collapses goal/task to "working in a private context" for cloud-bound
+  renders.
+- **Session state survives a restart**: on boot the hub rehydrates from the
+  last published `state.json` snapshot plus the last hour of
+  `context_events`, with confidence discounted by age (full within 30 min,
+  ×0.5 to 4 h, ×0.25 and capped at the confidence floor beyond). The
+  inferred text is kept even when the discounted confidence drops below the
+  floor — renderers hide it, but the §4.12 continuation resolver can still
+  rank it, which is what will make "ga door" work after a restart.
+- **Two long-standing hardwired blanks are now filled**: the triage layer's
+  `memory_summary` argument (`""` since the layer existed) is a compact,
+  600-char-capped session-state render, and the skills `MatchContext.task`
+  (hardwired `None`) is the inferred task when it clears the confidence
+  floor, with the session's project as the fallback when the resolver has
+  no opinion yet.
+- **Curator `SessionTracker`**: gained a public `snapshot()` accessor and a
+  **project-change session boundary**. Because `project_hint` is the
+  resolver's post-hysteresis output, a genuine project change ends the
+  session immediately with no extra dwell floor; first adoption
+  (`None` → `Some`) and hint loss are deliberately not boundaries.
+- New `[session_state]` config section (`infer_min_interval_secs=120`,
+  `infer_max_age_minutes=10`, `infer_min_new_events=8`,
+  `significant_importance=0.5`, `confidence_floor=0.4`,
+  `infer_max_tokens=256`) and a new `prompts/session-state.md`.
+
+- **Screen caption split from the world-state blob (context engine Plan B,
+  Task B4)**: `ScreenObservation.description` is a one-sentence vision
+  caption again, and the compact multi-monitor world-state text moved to a
+  new additive `ScreenObservation.world_compact` (spec §4.10). Since the
+  live-context work, `description` had been carrying
+  `compact_for_agents(1400)` — ~1.4 kB of monitor/window/project/health
+  lines — which meant every triage prompt paid ~400 tokens for it, the
+  dashboard's "last description" rendered as a wall of text, and episodic
+  memories and retrieval queries embedded machine boilerplate instead of a
+  sentence. The blob is persisted beside the caption in a new additive
+  `perception_frames.screen_world_compact` column and is the context
+  packager's input; the caption is what triage, the distiller, the
+  retrieval query builder, the wake "current moment" section and the
+  dashboard render. The triage user turn no longer serializes
+  `PerceptionFrame` at all: it renders a hand-maintained
+  `triage::prompts::TriagePromptFrame` projection (context/audio/screen/
+  salience only, matching the system prompt's few-shot shape), so future
+  frame fields cannot silently inflate the prompt. `continuum-triage-bench`
+  asserts both that the prompt fits `context_size − max_tokens` and that
+  the world-state blob is absent from it.
+- **Classification consumption — events, candidates, column (context engine
+  Plan B, Task B3)**: the classification block that rides every triage call
+  (Task B1) is finally *used* (spec §4.7 "Consumption"). Each classified
+  frame emits a `context_events` row on the Plan-A events channel — source
+  `screen`, or `audio` when the frame carried a transcript — carrying the
+  classifier's summary/importance/confidence and the frame's zone as its
+  sensitivity (§4.1 propagation rule: an excluded window produces no row at
+  all, a `local_only` window produces a `local_only` row). A classification
+  with `should_store`, or any `remember` decision, additionally proposes a
+  **vault memory candidate** (`status: candidate`, `source: observed`,
+  project from the resolver, tags `observed` + an epistemic label
+  `user_stated`/`system_inferred`) through the spec's mapping table
+  (`error→error`, `decision→decision`, `preference→preference`,
+  `task_progress→task`, `success→note` tagged `result`,
+  `communication`/`other→note`, `routine`→ no candidate), duplicate-checked
+  with the curator's own near-duplicate check. Candidates expire per type
+  from the new `[memory.candidate_ttl_days]` config (task 30, error 30,
+  note 90 days; decision and preference never) — `NoteDraft` gained an
+  additive `expires` field that `Vault::create` now writes into
+  frontmatter, so the existing expiry sweep archives unreviewed
+  observations instead of letting them pile up. The long-dead
+  `triage_decision` raw-log column is populated at last
+  (`<decision>` / `<decision>/<event_type>`) via a new
+  `RawLog::set_triage_decision`. The distiller's SQL predicate is
+  deliberately untouched and stays the fallback for frames with no
+  classification. Nothing blocks the main loop: the event send is
+  non-blocking and the vault/raw-log writes are spawned with contained
+  errors.
+- **Triage off the main loop + LLM priority gate (context engine Plan B,
+  Task B2)**: triage evaluation no longer runs inline in the runtime's main
+  select loop (spec §4.7 "Triage off the main loop", a Critical design
+  finding — a curator generation queued on the shared model mutex could
+  freeze the voice ticker and hotkey arms for 10–25 s). Gated frames are
+  now `tokio::spawn`ed through a new `triage::coalesce::TriageCoalescer`
+  (busy-CAS + one-deep latest-wins slot, mirroring the `do_wake` pattern):
+  a burst of frames coalesces to the newest, and results return over a
+  channel into their own select arm where decision consumption runs
+  unchanged in order and semantics (voice intents still outrank and
+  supersede same-frame triage wakes). A new ungated `llm_gate::LlmGate`
+  enforces two-priority access to the shared local model: interactive
+  triage acquires directly, background callers (curator extraction,
+  session summaries, conflict detection, future session-state inference)
+  try-acquire with 250 ms backoff behind any interactive waiter, time out
+  after 30 s, and are clamped to ≤ 256 tokens per call — curator
+  extraction (was 1024) and session summaries (was 700) got tighter
+  budgets accordingly.
+
+- **Triage classification output (context engine Plan B, Task B1)**: the
+  triage LLM call now doubles as the Context Model call (spec §4.7).
+  `TriageLayer::evaluate` returns a new `TriageOutput` wrapper —
+  `#[serde(flatten)]` decision plus an optional `classification` block
+  (`event_type` from the closed §4.6 registry, project slug, importance/
+  confidence clamped to [0,1], 200-char summary, `should_store`) — parsed
+  leniently: a malformed or truncated classification never costs a GPU
+  retry (the decision is salvaged, classification drops to `None`). The
+  JSON extractor now correctly returns the last *top-level* object instead
+  of locking onto a trailing nested block. `prompts/triage-system.md`
+  documents the classification key inside the single output object, triage
+  `context_size` default rose 2048 → 4096, and `continuum-triage-bench`
+  gained a prompt-fit gate (`prompt_tokens < n_ctx − max_tokens`, byte
+  heuristic). Classification consumption (events channel, vault
+  candidates) lands in Task B3.
 
 - **Chat memory tools**: the Chat tab's AI can now read and write the memory
   vault through an explicit, config-gated tool set, instead of chat being
@@ -316,6 +843,59 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   (prereqs only). Aliased as `pnpm dev:local` / `pnpm dev:app`.
 
 ### Changed
+
+Behavior changes from the context engine that reviewers should know about:
+
+- **The three existing observation tools are now content-filtered.**
+  `system_active_window`, `system_clipboard_get` and `system_live_context`
+  route through the privacy filter's scrub + cloud gate. **Names and schemas
+  are byte-identical** (asserted by a test) — this is a content change, not an
+  API change, and non-negotiable #7 is intact. `system_clipboard_get`
+  additionally gains the `[context_tools] clipboard_tool_enabled` kill-switch
+  and is skipped entirely while the foreground window sits in a
+  `never_observe` zone.
+- **`never_observe` now drops the observation to a sentinel** rather than only
+  redacting the title. The collector emits `process = "[excluded]"` with an
+  empty title; no screenshot file is written, no caption produced, no event row
+  stored, dwell resets, and switches involving the window collapse to a single
+  synthetic switch to/from the `[excluded]` bucket. Previously an excluded
+  process still produced a full frame with a redacted title.
+- **Triage runs off the main loop.** Evaluation is spawned per gated frame
+  behind a coalescer, so the 250 ms voice ticker and the global hotkey never
+  wait on the LLM lock. Wake precedence is preserved exactly: a voice or forced
+  wake on a frame with an in-flight evaluation still supersedes it, and the
+  triage result is dropped whole.
+- **Background LLM generations are capped at 256 tokens.** A new priority gate
+  serializes intent ahead of the llama.cpp context mutex: interactive triage
+  queues on a semaphore and holds its permit across retries; background callers
+  (curator, session-state inference) try-acquire with backoff, defer entirely
+  while an interactive caller is waiting, and have `max_tokens` clamped.
+  Curator extraction dropped 1024 → 256 and session summaries 700 → 256.
+- **`live-context.json` schema version 1 → 4** (project git fields, session
+  state, and window enrichment). All bumps are additive and serde-defaulted, so
+  older documents still parse. The publisher is also content-versioned now: it
+  writes only when something meaningful changed, so **a stale file mtime during
+  a quiet period is expected, not a stall** — judge freshness by the
+  `context_engine` health counters in `state.json`.
+- **The wake context package budget rose from 600 to 1000 tokens**
+  (`[context_package] token_budget`), because the section list roughly doubled
+  (session state, recent changes, failed attempts, last success, available
+  tools, recommended next step). The chat profile stays at 600.
+- **Triage `context_size` default 2048 → 4096** and the fallback `max_tokens`
+  128 → 256, to fit the classification block the same call now returns.
+- **`ScreenObservation.description` is the vision caption again.** The compact
+  world-state blob moved to a new `world_compact` field read only by the
+  packager, keeping ~1.4 kB per frame out of the triage prompt. Rows written
+  before this change keep the old blob in `description`.
+- **Raw-log rotation actually runs**, on the memory-distiller ticker at a
+  one-hour floor, and keeps ticking even when distillation is disabled —
+  retention is a privacy promise, not a distillation feature. It now also
+  deletes referenced screenshot files and age-sweeps the screenshots directory
+  (`[storage] delete_screenshots_with_rotation`, `screenshot_max_age_hours`).
+- **The distiller reads deduped events first**, falling back to the old SQL
+  frame predicate only for frames with no event. A frame whose classified event
+  scored below the distillation threshold is deliberately not rescued by its
+  raw salience — the classification is the better-informed judgement.
 
 - **Anthropic chat adapter refusal handling**: a `refusal` stop reason now
   surfaces as a chat error even when the connection closes before a

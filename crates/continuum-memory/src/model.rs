@@ -249,6 +249,13 @@ pub struct NoteDraft {
     pub source_ref: Option<String>,
     #[serde(default)]
     pub sensitivity: Sensitivity,
+    /// Optional expiry timestamp copied verbatim into the note's
+    /// frontmatter. `None` (the default) means the note never expires;
+    /// `Some(ts)` makes `Vault::sweep_expired` archive it once `ts` has
+    /// passed. Additive and serde-defaulted — drafts written by older
+    /// callers still deserialize.
+    #[serde(default)]
+    pub expires: Option<DateTime<Utc>>,
     #[serde(default)]
     pub relations: Vec<Relation>,
     #[serde(default)]
@@ -366,6 +373,13 @@ pub struct NewEvent {
     pub node_id: Option<String>,
     #[serde(default, rename = "ref")]
     pub reference: Option<String>,
+    /// Zone-derived sensitivity of `text` (context engine spec §4.1
+    /// propagation rule). `true` means the text came from a `local_only`
+    /// window/project and must never be rendered into a cloud-bound
+    /// context package. Defaults to `false` so existing producers and
+    /// deserialized payloads keep today's meaning.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 /// Stored timeline event.
@@ -379,6 +393,11 @@ pub struct Event {
     pub node_id: Option<String>,
     #[serde(rename = "ref")]
     pub reference: Option<String>,
+    /// Whether this timeline entry is `local_only` (see
+    /// [`NewEvent::local_only`]). Rows written before the flag existed
+    /// read `false`.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 /// Query range for events. `limit` defaults to 500.

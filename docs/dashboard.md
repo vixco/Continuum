@@ -181,6 +181,40 @@ pnpm tauri dev
 | `~/.continuum-dev/vault/**/*.md`             | shared, user-owned  | Memory vault notes — opened directly (in-process) by both the dashboard and the runtime; see `docs/memory.md` |
 | `~/.continuum-dev/vault/.continuum/index.db` | shared, derived     | Memory vault's SQLite index — always rebuildable from the markdown |
 | `~/.continuum-dev/wipe-request.json`         | dashboard/MCP → runtime | Pending derived-data wipe request; drained (and deleted) by the runtime's boot drain or daily hygiene tick — see `docs/memory.md`'s "The curator" section |
+| `~/.continuum-dev/voice-intents/*.json`      | dashboard → runtime | Push-to-talk intents; drained every 250 ms. Stale intents (>30 s) are dropped |
+| `~/.continuum-dev/context-intents/*.json`    | dashboard → runtime | Context-page actions (add/confirm project, correct, not-this-project, pin, forget, delete-range, set-toggle); drained every 250 ms. **No TTL** — a correction issued while the runtime is stopped still applies at its next boot. Unparseable files are renamed `.bad` |
+| `~/.continuum-dev/logs/actions.jsonl`        | runtime             | Append-only audit of wakes, toggle changes, corrections and deletions (one JSON object per line: `{ts, kind, actor, summary, details?}`); rotated at 4 MiB by dropping the oldest half |
+
+## The Context page
+
+The Context tab renders what Continuum currently believes about your work
+(session state, per-source health, recent events, projects) and is the
+place to correct it. It is a **read-only view of `state.json`** plus a
+**write-only intent queue**: the dashboard process links `continuum-core`
+with `default-features = false`, so it can never open the raw-log
+database, the vault index or the episodic store itself.
+
+That means two things in practice:
+
+- everything the page lists (projects and discovery candidates, override
+  rules, pins, the recent-events strip, the live toggle values,
+  continuation candidates) arrives in `RuntimeSnapshot.context_page`,
+  refreshed by the runtime every 5 s and published every 2 s;
+- every action is fire-and-forget. Clicking writes one intent file and
+  returns; the page updates when the runtime republishes, roughly a
+  second later. Nothing is optimistically mutated in the store.
+
+Honest-toggle caveats worth knowing (spec §4.1):
+
+- flipping `screen`, `git` or `files` off takes effect within one loop
+  iteration and genuinely stops the capture / subprocess / watch;
+- flipping `mic` off stops the data path immediately (nothing is
+  transcribed, persisted or sent), but the cpal input stream itself was
+  opened at start, so the OS "microphone in use" indicator stays lit
+  until the runtime restarts;
+- `pause_all` can be engaged live, but a runtime that *booted* with
+  `pause_all = true` never spawned its watchers at all — unpausing that
+  process requires a restart.
 
 ## Limitations
 

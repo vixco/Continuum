@@ -51,6 +51,586 @@ pub struct ContinuumConfig {
     /// Chat tab settings.
     #[serde(default)]
     pub chat: ChatConfig,
+    /// Privacy filter settings (context engine spec §4.1/§6): scrubber
+    /// toggles, zone rules, and honest per-source observation switches.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
+    /// Project resolver settings + known projects (context engine spec
+    /// §4.3/§6).
+    #[serde(default)]
+    pub projects: ProjectsConfig,
+    /// Git collector settings (context engine spec §4.4/§6).
+    #[serde(default)]
+    pub git_context: GitContextConfig,
+    /// Context-events writer settings (context engine spec §4.6/§6):
+    /// dedupe collapse window, caps, queue size, retention.
+    #[serde(default)]
+    pub events: EventsConfig,
+    /// File watcher settings (context engine spec §4.5/§6) — opt-in,
+    /// default OFF.
+    #[serde(default)]
+    pub file_watcher: FileWatcherConfig,
+    /// Idle-mode performance knobs (context engine spec §4.11/§6): when
+    /// the user goes idle, capture and vision cadences relax via the
+    /// shared [`crate::senses::cadence::CadenceControl`].
+    #[serde(default)]
+    pub performance: PerformanceConfig,
+    /// Session-state tracker knobs (context engine spec §4.8/§6): when
+    /// goal/task inference is allowed to spend a background LLM call.
+    #[serde(default)]
+    pub session_state: SessionStateConfig,
+    /// Context-package budgets and per-section caps (context engine spec
+    /// §4.9/§6): how much context each consumer profile may spend.
+    #[serde(default)]
+    pub context_package: ContextPackageConfig,
+    /// Continuation-resolver knobs (context engine spec §4.12/§6): which
+    /// utterances mean "continue", and how confident the resolver must be
+    /// before it recommends a target instead of asking.
+    #[serde(default)]
+    pub continuation: ContinuationConfig,
+    /// MCP context-tool switches (context engine spec §5/§6): the family
+    /// kill-switch plus the clipboard-tool kill-switch.
+    #[serde(default)]
+    pub context_tools: ContextToolsConfig,
+}
+
+/// MCP context-tool switches (`[context_tools]`, context engine spec
+/// §5.1/§5.2/§6).
+///
+/// These are read by the **MCP server process**, which loads the same
+/// `config.toml` the runtime does. They are kill-switches, not caps: per
+/// non-negotiable #3 every observation tool must be disableable without
+/// editing code, and per spec §5.1 the clipboard tool needs its own switch
+/// (it is the one observation tool that reads content the user never
+/// pointed a window at).
+///
+/// Turning a switch off never changes a tool's schema — the tool stays
+/// registered and answers with empty/sentinel content, so non-negotiable #7
+/// holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ContextToolsConfig {
+    /// Master switch for the MCP context tool family (spec §5.2). When
+    /// false the context tools answer as if nothing had been observed yet.
+    pub enabled: bool,
+    /// Kill-switch for `system_clipboard_get` (spec §5.1). When false the
+    /// tool always returns `text: null` — the clipboard is never read at
+    /// all, so nothing can leak even in scrubbed form.
+    pub clipboard_tool_enabled: bool,
+}
+
+impl Default for ContextToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            clipboard_tool_enabled: true,
+        }
+    }
+}
+
+/// Continuation-resolver knobs (`[continuation]`, context engine spec
+/// §4.12/§6).
+///
+/// The resolver answers "the user said *ga door* — continue **what**?" from
+/// ranked candidates with real producers (session task, the last wake's
+/// next step, the curator's `open_task:` trailer, the last user command,
+/// the last error). It is pure logic — no LLM call — and lives in
+/// [`crate::context::continuation`], where the ranking formula and the
+/// per-kind priors are documented.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContinuationConfig {
+    /// Score a candidate must reach for the packager to render it as
+    /// "## Recommended next step". Below it, the wake reason instructs the
+    /// orchestrator to ask one short disambiguation question instead.
+    pub confidence_floor: f32,
+    /// Utterances that mean "pick up where we left off". Matched
+    /// case-insensitively as a whole utterance or a word-boundary prefix
+    /// (see [`crate::context::continuation::is_continue_trigger`]). An
+    /// empty ask (bare hotkey press) counts as a trigger by itself.
+    pub trigger_phrases: Vec<String>,
+    /// How far back the runtime looks for the last `wake_result` event
+    /// when assembling continuation candidates. Longer than the packager's
+    /// `[context_package] events_window_minutes` on purpose: "continue"
+    /// after lunch must still find this morning's next step.
+    pub wake_result_lookback_hours: i64,
+}
+
+impl Default for ContinuationConfig {
+    fn default() -> Self {
+        Self {
+            confidence_floor: 0.6,
+            trigger_phrases: vec![
+                "ga door".to_string(),
+                "continue".to_string(),
+                "verder".to_string(),
+                "waar was ik".to_string(),
+                "pak weer op".to_string(),
+            ],
+            wake_result_lookback_hours: 12,
+        }
+    }
+}
+
+/// Context-package budgets + per-section caps (`[context_package]`,
+/// context engine spec §4.9/§6).
+///
+/// One package, three consumer profiles: the wake message (runtime),
+/// `context_package` (MCP) and the chat system prompt (desktop). The two
+/// budgets below are the whole-package token caps for the wake and chat
+/// profiles; everything else caps a single section so one runaway source
+/// can never starve the rest.
+///
+/// **Drop order under budget pressure** (spec §4.9, implemented in
+/// [`crate::context::package::DROP_ORDER`]): open files → recent changes →
+/// just-before tail → memories tail. Never dropped: why-woken, current
+/// moment, session state, pending memory decisions.
+///
+/// Token counts are estimated with the
+/// [`crate::context::package::BYTES_PER_TOKEN`] proxy (3.5 bytes/token),
+/// the same heuristic the triage prompt-fit gate uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextPackageConfig {
+    /// Whole-package token budget for the wake profile.
+    pub token_budget: usize,
+    /// Whole-package token budget for the desktop chat profile (Task B8).
+    pub chat_token_budget: usize,
+    /// How far back the packager reads deduped `context_events` for its
+    /// "just before" / "recent changes" / "failed attempts" sections.
+    pub events_window_minutes: i64,
+    /// Max deduped-event lines in "just before".
+    pub max_just_before: usize,
+    /// Max episodic memories.
+    pub max_memories: usize,
+    /// Max semantic facts.
+    pub max_facts: usize,
+    /// Max confirmed vault notes.
+    pub max_vault_notes: usize,
+    /// Max pending vault decisions.
+    pub max_pending_decisions: usize,
+    /// Max file/git change lines.
+    pub max_recent_changes: usize,
+    /// Max failed-attempt lines.
+    pub max_failed_attempts: usize,
+    /// Max open files listed in the session section.
+    pub max_open_files: usize,
+    /// Max tool names listed before collapsing into "+N more".
+    pub max_tools: usize,
+    /// Max characters of the `world_compact` blob (Task B4).
+    pub world_compact_max_chars: usize,
+}
+
+impl Default for ContextPackageConfig {
+    fn default() -> Self {
+        Self {
+            token_budget: 1_000,
+            chat_token_budget: 600,
+            events_window_minutes: 20,
+            max_just_before: 5,
+            max_memories: 3,
+            max_facts: 8,
+            max_vault_notes: 5,
+            max_pending_decisions: 5,
+            max_recent_changes: 5,
+            max_failed_attempts: 3,
+            max_open_files: 5,
+            max_tools: 12,
+            world_compact_max_chars: 1_200,
+        }
+    }
+}
+
+impl ContextPackageConfig {
+    /// The per-section caps as the packager's own type.
+    pub fn caps(&self) -> crate::context::package::SectionCaps {
+        crate::context::package::SectionCaps {
+            just_before: self.max_just_before,
+            memories: self.max_memories,
+            facts: self.max_facts,
+            vault_notes: self.max_vault_notes,
+            pending_decisions: self.max_pending_decisions,
+            recent_changes: self.max_recent_changes,
+            failed_attempts: self.max_failed_attempts,
+            open_files: self.max_open_files,
+            tools: self.max_tools,
+            world_compact_chars: self.world_compact_max_chars,
+        }
+    }
+
+    /// The cloud-bound budget for the wake profile.
+    pub fn wake_budget(&self) -> crate::context::package::PackageBudget {
+        crate::context::package::PackageBudget::cloud(self.token_budget).with_caps(self.caps())
+    }
+
+    /// The cloud-bound budget for the desktop chat profile (Task B8).
+    pub fn chat_budget(&self) -> crate::context::package::PackageBudget {
+        crate::context::package::PackageBudget::cloud(self.chat_token_budget).with_caps(self.caps())
+    }
+}
+
+/// Session-state inference knobs (`[session_state]`, context engine spec
+/// §4.8/§6). These govern the ONLY background LLM call session state ever
+/// makes: goal/task inference. Everything else in
+/// [`crate::context::session_state`] is mechanical and free.
+///
+/// The defaults are deliberately conservative — at most one call every
+/// `infer_min_interval_secs` (2 min) of at most `infer_max_tokens` (256)
+/// tokens, never while idle (spec §4.11), always behind interactive triage
+/// (Task B2's [`crate::llm_gate::LlmGate`] background tier).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionStateConfig {
+    /// Minimum seconds between two inference *attempts*, whatever fired
+    /// them. The hard rate limit on session state's GPU budget.
+    pub infer_min_interval_secs: u64,
+    /// Re-infer when the current goal/task are older than this many
+    /// minutes, even if nothing else happened.
+    pub infer_max_age_minutes: u64,
+    /// Re-infer once this many *significant* events accumulated since the
+    /// last attempt.
+    pub infer_min_new_events: usize,
+    /// Importance threshold an event must reach to count toward
+    /// `infer_min_new_events`.
+    pub significant_importance: f32,
+    /// Below this confidence, inferred goal/task are discarded and
+    /// consumers render `"unknown"` (spec §4.8). Also the cap applied to a
+    /// very stale rehydrated snapshot.
+    pub confidence_floor: f32,
+    /// `max_tokens` for one inference call. The background tier clamps
+    /// anything above [`crate::llm_gate::BACKGROUND_MAX_TOKENS`] anyway.
+    pub infer_max_tokens: u32,
+}
+
+impl Default for SessionStateConfig {
+    fn default() -> Self {
+        Self {
+            infer_min_interval_secs: 120,
+            infer_max_age_minutes: 10,
+            infer_min_new_events: 8,
+            significant_importance: 0.5,
+            confidence_floor: 0.4,
+            infer_max_tokens: 256,
+        }
+    }
+}
+
+/// Idle-mode performance knobs (`[performance]`, context engine spec
+/// §4.11/§6). When `idle_seconds` exceeds `idle_pause_after_secs`, the
+/// idle controller switches the shared cadence control to the idle
+/// values; any restore trigger (input activity, voice wake, hotkey, any
+/// orchestrator wake) switches back. Vision keeps running at a reduced
+/// cadence by default so **unattended-error detection stays alive** (a
+/// build failing while you're at lunch still produces events/wakes) —
+/// set `idle_vision_interval_ms = 0` to pause vision entirely instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceConfig {
+    /// Seconds of input inactivity before idle mode engages. `0`
+    /// disables idle mode entirely (cadences never change).
+    pub idle_pause_after_secs: u64,
+    /// Per-monitor capture cadence while idle (normal cadence comes from
+    /// `[screen].capture_interval_ms`).
+    pub idle_capture_interval_ms: u64,
+    /// Minimum delay between local vision calls per monitor while idle.
+    /// `0` pauses vision entirely during idle (documented trade-off:
+    /// unattended on-screen errors go undetected until activity resumes).
+    pub idle_vision_interval_ms: u64,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            idle_pause_after_secs: 300,
+            idle_capture_interval_ms: 2_000,
+            idle_vision_interval_ms: 15_000,
+        }
+    }
+}
+
+/// Configuration for the file watcher (`[file_watcher]`, context engine
+/// spec §4.5/§6). **Opt-in, default OFF.** Watches the root paths of every
+/// confirmed/configured project whose zone allows observation; also gated
+/// at runtime by `[privacy.toggles].files` (spec §4.1 honest toggles) —
+/// both must be on for any `notify` watch to be armed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileWatcherConfig {
+    /// Master switch for the file watcher. `false` by default — file
+    /// watching is opt-in (spec §4.5).
+    pub enabled: bool,
+    /// Per-path debounce window in milliseconds: rapid events on the same
+    /// path coalesce (last kind wins, except created+modified stays
+    /// created) and rename From/To halves pair within this window.
+    pub debounce_ms: u64,
+    /// Ignore patterns matched against every path component (and, for
+    /// wildcard patterns like `*.tmp`, the file name). Defaults skip
+    /// dependency/build trees and `.git` entirely — git facts are the git
+    /// collector's job (spec §4.4); duplicating them here would double
+    /// signals.
+    pub ignore_globs: Vec<String>,
+    /// Seconds between rearm attempts for unavailable roots — and the
+    /// cadence at which the confirmed-project set is re-read so projects
+    /// confirmed at runtime get watched without a restart.
+    pub rearm_secs: u64,
+    /// Storm threshold: more than this many pending events for one
+    /// project in a single debounce flush collapse into ONE
+    /// `files_bulk_change` event (branch switches touch thousands of
+    /// tracked files; debounce alone is per-path).
+    pub storm_threshold: usize,
+}
+
+/// Default `[file_watcher].ignore_globs` (spec §4.5).
+pub fn default_file_watcher_ignore_globs() -> Vec<String> {
+    [
+        "node_modules",
+        "target",
+        ".git",
+        ".next",
+        "dist",
+        "build",
+        "__pycache__",
+        "*.tmp",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+impl Default for FileWatcherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            debounce_ms: 1000,
+            ignore_globs: default_file_watcher_ignore_globs(),
+            rearm_secs: 60,
+            storm_threshold: 50,
+        }
+    }
+}
+
+/// Configuration for the context-events writer (`[events]`, context engine
+/// spec §4.6/§6). Governs the dedicated events-writer task that owns the
+/// `context_events` table: how long a dedupe row stays open, how large a
+/// collapsed row may grow, how big the producer channel is, and how long
+/// rows are retained.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventsConfig {
+    /// Dedupe collapse window in minutes, anchored on `ts_last` (spec
+    /// §4.6): an event matching an open dedupe row within this window of
+    /// the row's *last* occurrence bumps `count` instead of inserting, so
+    /// ongoing repetition keeps collapsing.
+    pub collapse_window_minutes: u64,
+    /// Days `context_events` rows are retained before rotation (rotated
+    /// with the raw log).
+    pub retention_days: u32,
+    /// Maximum `count` a collapsed row may reach; the next match starts a
+    /// fresh row.
+    pub count_cap: u32,
+    /// Maximum `ts_first` → `ts_last` span in hours for one collapsed
+    /// row; beyond it the next match starts a fresh row.
+    pub span_cap_hours: u64,
+    /// Bounded events-channel capacity. Producers never block: overflow
+    /// increments a per-source dropped counter that the writer coalesces
+    /// into `events_dropped` rows.
+    pub queue_cap: usize,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            collapse_window_minutes: 10,
+            retention_days: 30,
+            count_cap: 500,
+            span_cap_hours: 24,
+            queue_cap: 1024,
+        }
+    }
+}
+
+/// Configuration for the git collector (`[git_context]`, context engine
+/// spec §4.4/§6). The collector watches the **active, confirmed** project
+/// only (resolver output — never the daemon's CWD, never unconfirmed
+/// discovery candidates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitContextConfig {
+    /// Master switch for the git collector. Also gated at runtime by
+    /// `[privacy.toggles].git` (spec §4.1 honest toggles) — both must be
+    /// on for any `git` subprocess to spawn.
+    pub enabled: bool,
+    /// Seconds between status probes of the active project. Working-tree
+    /// dirtiness always polls at this cadence; ref-derived facts are
+    /// additionally mtime-gated (spec §4.4).
+    pub poll_secs: u64,
+    /// Hard timeout for one `git` subprocess invocation.
+    pub command_timeout_secs: u64,
+    /// Minimum seconds between two probe spawns — bounds the immediate
+    /// post-hysteresis project-switch probe (spec §4.4).
+    pub min_spawn_interval_secs: u64,
+}
+
+impl Default for GitContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_secs: 30,
+            command_timeout_secs: 10,
+            min_spawn_interval_secs: 5,
+        }
+    }
+}
+
+/// Configuration for the project resolver (`[projects]`, context engine
+/// spec §4.3/§6).
+///
+/// Known projects live in `known` (`[[projects.known]]` in TOML). The spec
+/// writes them as `[[projects]]`, but TOML cannot host an array-of-tables
+/// and a table of knobs under the same key, so the entries are nested one
+/// level down; boot reconciliation seeds them into the Projects table
+/// (raw-log DB), where config wins by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectsConfig {
+    /// Propose project candidates from title-derived paths (spec §4.3
+    /// auto-discovery). Unconfirmed candidates are never collected from.
+    pub auto_discover: bool,
+    /// Hysteresis: a *different* project must win resolution continuously
+    /// for this many seconds before the public current project flips.
+    pub switch_min_secs: u64,
+    /// Minimum accumulated seconds a title-derived folder must be observed
+    /// before it is validated and proposed as a candidate.
+    pub discover_min_secs: u64,
+    /// Known projects (`[[projects.known]]`), mirrored into the Projects
+    /// table at boot (config wins by id).
+    pub known: Vec<ProjectConfigEntry>,
+}
+
+impl Default for ProjectsConfig {
+    fn default() -> Self {
+        Self {
+            auto_discover: true,
+            switch_min_secs: 20,
+            discover_min_secs: 30,
+            known: Vec::new(),
+        }
+    }
+}
+
+/// One configured project (`[[projects.known]]`, context engine spec §4.3):
+/// `{ id, name, root_paths, repo?, keywords, zone? }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectConfigEntry {
+    /// Project id slug (`[a-z0-9-]{1,64}`, no dots). Invalid ids are
+    /// slugified at load with a warning.
+    pub id: String,
+    /// Human-readable name; defaults to the id when empty.
+    #[serde(default)]
+    pub name: String,
+    /// Absolute root directories of the project.
+    #[serde(default)]
+    pub root_paths: Vec<String>,
+    /// Optional remote repo URL (informational).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Title keywords for the resolver's keyword tier.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Optional per-project privacy zone (spec §4.3 project zones),
+    /// reusing the `[privacy]` zone vocabulary.
+    #[serde(default)]
+    pub zone: Option<crate::senses::privacy::Zone>,
+}
+
+/// Configuration for the privacy filter (`[privacy]`, context engine spec
+/// §4.1/§6).
+///
+/// The scrubber flags gate the pattern families applied by
+/// [`crate::senses::privacy::PrivacyFilter::scrub_text`] to **free-text
+/// fields only** (structured fields are exempt by construction — see the
+/// `senses::privacy` module docs). `zones` holds explicit zone rules; at
+/// load time they are unioned with rules synthesised from the legacy
+/// `[context].sensitive_process_names` / `sensitive_title_keywords` lists
+/// and the built-in private-browsing defaults, with the strictest matching
+/// zone winning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    /// Scrub API keys and bearer tokens (`sk-…`, GitHub `gh?_…`, `AKIA…`,
+    /// `Bearer …`) plus the generic high-entropy patterns (hex/base64
+    /// runs ≥ 32 chars, UUIDs) from free text.
+    pub scrub_api_keys: bool,
+    /// Scrub Luhn-valid card numbers from free text.
+    pub scrub_cards: bool,
+    /// Scrub mod-97-valid IBANs from free text.
+    pub scrub_iban: bool,
+    /// Scrub email addresses from free text. Default OFF — emails are
+    /// routinely part of legitimate context (window titles, commit
+    /// subjects) and rarely secret.
+    pub scrub_emails: bool,
+    /// Explicit zone rules (`[[privacy.zones]]`), each
+    /// `{match_process?, match_title_keyword?, zone}`. Unioned with the
+    /// legacy-list synthesis; stricter wins on overlap.
+    pub zones: Vec<crate::senses::privacy::ZoneRule>,
+    /// Honest per-source observation switches (spec §4.1): a disabled
+    /// source emits nothing; `pause_all` gates the whole frame loop.
+    /// Enforced at each collector (Task A2); every toggle change writes a
+    /// `system` event.
+    pub toggles: ObservationToggles,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            scrub_api_keys: true,
+            scrub_cards: true,
+            scrub_iban: true,
+            scrub_emails: false,
+            zones: Vec::new(),
+            toggles: ObservationToggles::default(),
+        }
+    }
+}
+
+/// Per-source observation switches (`[privacy.toggles]`, spec §4.1
+/// "honest toggles"). Toggles are independent — no dishonest mute where
+/// one switch silently disables another source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObservationToggles {
+    /// Microphone / audio observation. Enforced by `AudioWatcher::run`
+    /// (Task A2): the device is never opened when off.
+    pub mic: bool,
+    /// Screen capture + vision observation. Enforced by
+    /// `VisionWatcher::run` (Task A2): the capture scheduler never starts
+    /// when off.
+    pub screen: bool,
+    /// File watcher observation. Enforcement seam: checked via
+    /// `senses::privacy::source_enabled(ObservedSource::Files)` by the
+    /// file watcher (`senses/file_watch.rs`) when it lands (Task A5/A7).
+    pub files: bool,
+    /// Git collector observation. Enforced by `GitWatcher::run`
+    /// (`senses/git_watch.rs`, Task A5) via
+    /// `senses::privacy::source_enabled(ObservedSource::Git)`: no `git`
+    /// subprocess is ever spawned when off.
+    pub git: bool,
+    /// Master pause: gates the entire frame loop (no watchers or frame
+    /// builder are spawned; frames are neither built nor persisted) and
+    /// every individual source via `source_enabled`.
+    pub pause_all: bool,
+}
+
+impl Default for ObservationToggles {
+    fn default() -> Self {
+        Self {
+            mic: true,
+            screen: true,
+            files: true,
+            git: true,
+            pause_all: false,
+        }
+    }
 }
 
 /// Guardrails for Health-tab repair sessions.
@@ -244,14 +824,20 @@ pub struct ChatConfig {
     /// Whether `sensitivity: sensitive` vault notes are exposed to chat
     /// memory search results and prompt context.
     pub include_sensitive_memory: bool,
+    /// Whether the chat system prompt gains a "## Session state" section
+    /// read from the runtime's published `state.json` (context engine spec
+    /// §4.9 chat profile, Task B8).
+    ///
+    /// The section is *additive*: the in-process vault search that already
+    /// feeds "## Memory context" is untouched, so turning this off — or
+    /// running the desktop with no background runtime at all — leaves chat
+    /// exactly as it was. When the runtime is not publishing, or its
+    /// snapshot is stale, no section is rendered and the existing "Live
+    /// status" footer carries "Background runtime: not running".
+    pub include_session_context: bool,
     /// How many of the most recent messages to send to the model each turn.
-    /// The whole conversation is persisted on disk, but only this tail is
-    /// shipped in the request, so per-turn input tokens stay bounded as a
-    /// chat grows instead of growing linearly with its full history. 0 sends
-    /// the entire history (the pre-window behavior). After slicing, any
-    /// leading non-`user` messages are dropped so the first message the
-    /// provider sees is a user turn (Anthropic requires this), which also
-    /// keeps the kept context coherent.
+    /// The complete conversation remains persisted; only the request tail is
+    /// bounded. `0` preserves the legacy whole-history behavior.
     pub history_message_window: u32,
 }
 
@@ -269,6 +855,7 @@ impl Default for ChatConfig {
             memory_tool_max_rounds: 8,
             memory_context_notes_max: 6,
             include_sensitive_memory: false,
+            include_session_context: true,
             history_message_window: 20,
         }
     }
@@ -300,8 +887,10 @@ pub struct TriageSection {
     /// Path to the `.gguf` triage model. Empty string means "use default
     /// location" (`<dev_dir>/models/triage/<default_file>`).
     pub model_path: String,
-    /// llama.cpp context size in tokens. 2048 is generous for frame
-    /// descriptions; keep low to minimise KV cache pressure.
+    /// llama.cpp context size in tokens. 4096 per spec §4.7 — the triage
+    /// prompt (~2k tokens worst-case) plus the classification-bearing
+    /// output no longer fits 2048 with headroom; keep as low as fits to
+    /// minimise KV cache pressure.
     pub context_size: u32,
     /// Maximum tokens per triage response.
     pub max_tokens: u32,
@@ -440,6 +1029,22 @@ pub struct StorageConfig {
     pub screenshots_dir: String,
     /// Number of days to retain frames before rotation.
     pub retention_days: u32,
+    /// Delete screenshot files as part of raw-log rotation, and run the
+    /// mtime backstop sweep of [`Self::screenshots_dir`] (context engine
+    /// spec §4.11 / §6). Set to `false` to keep every screenshot on disk
+    /// (rows still rotate) — the escape hatch for anyone who wants to
+    /// manage the image cache themselves.
+    pub delete_screenshots_with_rotation: bool,
+    /// mtime backstop: screenshot files older than this many hours are
+    /// deleted by the sweep even when no `perception_frames` row ever
+    /// referenced them (a crash between "file written" and "row written"
+    /// otherwise leaks the file forever). `0` disables the age sweep
+    /// while still allowing row-driven deletes.
+    ///
+    /// Keep this **at or above** `retention_days * 24` — the sweep does
+    /// not consult the database, so a smaller value deletes images whose
+    /// frames are still live.
+    pub screenshot_max_age_hours: u64,
 }
 
 /// Configuration for vault storage (Obsidian-like markdown memory).
@@ -569,7 +1174,32 @@ pub struct MemoryConfig {
     /// How far back each pass looks for undistilled frames.
     pub distillation_lookback_minutes: u64,
     /// Minimum salience for a frame to be distilled without audio/error signals.
+    ///
+    /// Applies to the **fallback** (raw-frame) rung of the §4.11
+    /// compression ladder only. The primary (deduped `context_events`)
+    /// rung has its own threshold — see
+    /// [`Self::distillation_min_event_importance`].
     pub distillation_min_salience: f32,
+    /// Minimum importance for a deduped `context_events` row to be
+    /// distilled — the **primary** rung of the §4.11 compression ladder
+    /// (fixwave 3a, I2).
+    ///
+    /// Separate from [`Self::distillation_min_salience`] because the two
+    /// numbers measure different things and the frame threshold silently
+    /// disabled the whole primary rung. Deterministic collector events
+    /// (focus switches, commits, file changes, system events) are emitted
+    /// at [`crate::memory::events::COLLECTOR_EVENT_IMPORTANCE`] = 0.2 —
+    /// deliberately low, because individually they are bookkeeping — but
+    /// they are exactly the rows the ladder is supposed to compress into
+    /// "what happened today". With one shared threshold of 0.35 every one
+    /// of them was excluded and the "primary" source could only ever see
+    /// classifier output scored above 0.35.
+    ///
+    /// Default 0.15: below `COLLECTOR_EVENT_IMPORTANCE` so routine
+    /// collector events do reach the distiller, above 0.0 so a
+    /// classification that scored a frame as genuinely worthless still
+    /// drops out. Raise it toward 0.35 for a quieter episodic store.
+    pub distillation_min_event_importance: f32,
     /// Maximum frames to distill in one pass.
     pub distillation_batch_size: usize,
     /// Vault storage settings (Obsidian-like markdown memory).
@@ -579,6 +1209,70 @@ pub struct MemoryConfig {
     /// per non-negotiable #3).
     #[serde(default)]
     pub curator: CuratorConfig,
+    /// Per-type expiry for observation-derived vault candidates (context
+    /// engine spec §4.7/§6, Task B3).
+    #[serde(default)]
+    pub candidate_ttl_days: CandidateTtlDays,
+}
+
+/// Per-vault-type time-to-live, in days, for the memory candidates the
+/// triage classifier proposes (context engine spec §4.7 consumption, §6
+/// config surface).
+///
+/// A candidate that nobody confirms should not sit in the pending queue
+/// forever: `Vault::sweep_expired` archives candidates whose `expires`
+/// timestamp has passed, and this table is where that timestamp comes
+/// from. `None` (and `0`, treated identically — see
+/// [`CandidateTtlDays::for_node_type`]) means "never expires", which is
+/// the right default for decisions and preferences: they are statements
+/// about how the user works, not transient state.
+///
+/// Only the types the §4.7 mapping table can produce have knobs. Every
+/// other vault type routes through [`CandidateTtlDays::note`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CandidateTtlDays {
+    /// `task_progress` → `task` candidates (default 30 days).
+    pub task: Option<u32>,
+    /// `error` candidates (default 30 days).
+    pub error: Option<u32>,
+    /// `decision` candidates (default: never expires).
+    pub decision: Option<u32>,
+    /// `preference` candidates (default: never expires).
+    pub preference: Option<u32>,
+    /// `success`/`communication`/`other` → `note` candidates, and the
+    /// fallback for every other vault type (default 90 days).
+    pub note: Option<u32>,
+}
+
+impl Default for CandidateTtlDays {
+    fn default() -> Self {
+        Self {
+            task: Some(30),
+            error: Some(30),
+            decision: None,
+            preference: None,
+            note: Some(90),
+        }
+    }
+}
+
+impl CandidateTtlDays {
+    /// TTL in days for a vault node type, or `None` when candidates of
+    /// that type never expire. `Some(0)` in config is normalized to
+    /// `None` — a zero-day TTL would expire the candidate before a human
+    /// could ever review it, which is never what a user means by "0".
+    pub fn for_node_type(&self, node_type: continuum_memory::NodeType) -> Option<u32> {
+        use continuum_memory::NodeType;
+        let days = match node_type {
+            NodeType::Task => self.task,
+            NodeType::Error => self.error,
+            NodeType::Decision => self.decision,
+            NodeType::Preference => self.preference,
+            _ => self.note,
+        };
+        days.filter(|d| *d > 0)
+    }
 }
 
 /// Configuration for the realtime voice front-end selector.
@@ -906,6 +1600,8 @@ impl Default for ContinuumConfig {
                 db_path: base.join("raw_log.sqlite").to_string_lossy().into_owned(),
                 screenshots_dir: base.join("screenshots").to_string_lossy().into_owned(),
                 retention_days: 30,
+                delete_screenshots_with_rotation: true,
+                screenshot_max_age_hours: 720,
             },
             memory: MemoryConfig::default(),
             voice: VoiceConfig::default(),
@@ -916,6 +1612,16 @@ impl Default for ContinuumConfig {
             triage: TriageSection::default(),
             resources: ResourceConfig::default(),
             chat: ChatConfig::default(),
+            privacy: PrivacyConfig::default(),
+            projects: ProjectsConfig::default(),
+            git_context: GitContextConfig::default(),
+            events: EventsConfig::default(),
+            file_watcher: FileWatcherConfig::default(),
+            performance: PerformanceConfig::default(),
+            session_state: SessionStateConfig::default(),
+            context_package: ContextPackageConfig::default(),
+            continuation: ContinuationConfig::default(),
+            context_tools: ContextToolsConfig::default(),
         }
     }
 }
@@ -935,7 +1641,7 @@ impl Default for TriageSection {
         Self {
             // Empty means "derive from dev_dir" at load time.
             model_path: String::new(),
-            context_size: 2048,
+            context_size: 4096,
             max_tokens: 256,
             temperature: 0.0,
             gpu_layers: 999,
@@ -1090,6 +1796,8 @@ impl Default for StorageConfig {
             db_path: base.join("raw_log.sqlite").to_string_lossy().into_owned(),
             screenshots_dir: base.join("screenshots").to_string_lossy().into_owned(),
             retention_days: 30,
+            delete_screenshots_with_rotation: true,
+            screenshot_max_age_hours: 720,
         }
     }
 }
@@ -1101,9 +1809,11 @@ impl Default for MemoryConfig {
             distillation_interval_minutes: 15,
             distillation_lookback_minutes: 20,
             distillation_min_salience: 0.35,
+            distillation_min_event_importance: 0.15,
             distillation_batch_size: 100,
             vault: MemoryVaultConfig::default(),
             curator: CuratorConfig::default(),
+            candidate_ttl_days: CandidateTtlDays::default(),
         }
     }
 }
@@ -1291,6 +2001,15 @@ mod tests {
         assert_eq!(config.health.runtime_start_timeout_secs, 90);
         assert_eq!(config.frame.salience_threshold, 0.10);
         assert_eq!(config.storage.retention_days, 30);
+        // Task B6 (spec §6): screenshots are deleted with rotation, and
+        // the mtime backstop matches retention_days * 24.
+        assert!(config.storage.delete_screenshots_with_rotation);
+        assert_eq!(config.storage.screenshot_max_age_hours, 720);
+        assert_eq!(
+            config.storage.screenshot_max_age_hours,
+            config.storage.retention_days as u64 * 24,
+            "the backstop must not delete images whose frames are still live"
+        );
         assert!(config.memory.distillation_enabled);
         assert_eq!(config.memory.distillation_interval_minutes, 15);
         assert!(config.voice.enabled);
@@ -1365,6 +2084,37 @@ distillation_batch_size = 12
     }
 
     #[test]
+    fn storage_screenshot_policy_parses_from_toml_and_fills_defaults() {
+        // Both keys override…
+        let config: ContinuumConfig = toml::from_str(
+            r#"
+[storage]
+delete_screenshots_with_rotation = false
+screenshot_max_age_hours = 24
+"#,
+        )
+        .unwrap();
+        assert!(!config.storage.delete_screenshots_with_rotation);
+        assert_eq!(config.storage.screenshot_max_age_hours, 24);
+        assert_eq!(
+            config.storage.retention_days, 30,
+            "unset keys keep defaults"
+        );
+
+        // …and a `[storage]` section written before Task B6 still loads.
+        let legacy: ContinuumConfig = toml::from_str(
+            r#"
+[storage]
+retention_days = 7
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.storage.retention_days, 7);
+        assert!(legacy.storage.delete_screenshots_with_rotation);
+        assert_eq!(legacy.storage.screenshot_max_age_hours, 720);
+    }
+
+    #[test]
     fn test_load_missing_config_returns_defaults() {
         let config = load_config(Path::new("/nonexistent/config.toml")).unwrap();
         assert_eq!(config.screen.interval_secs, 3);
@@ -1430,6 +2180,167 @@ interval_secs = 5
     }
 
     #[test]
+    fn privacy_config_defaults_match_spec() {
+        // Spec §6 defaults are normative.
+        let cfg = ContinuumConfig::default();
+        assert!(cfg.privacy.scrub_api_keys);
+        assert!(cfg.privacy.scrub_cards);
+        assert!(cfg.privacy.scrub_iban);
+        assert!(!cfg.privacy.scrub_emails);
+        assert!(cfg.privacy.zones.is_empty());
+        assert!(cfg.privacy.toggles.mic);
+        assert!(cfg.privacy.toggles.screen);
+        assert!(cfg.privacy.toggles.files);
+        assert!(cfg.privacy.toggles.git);
+        assert!(!cfg.privacy.toggles.pause_all);
+        // Omitting [privacy] entirely parses to the same defaults.
+        let empty: ContinuumConfig = toml::from_str("").unwrap();
+        assert!(empty.privacy.scrub_api_keys);
+        assert!(!empty.privacy.toggles.pause_all);
+    }
+
+    #[test]
+    fn privacy_config_parses_from_toml() {
+        use crate::senses::privacy::Zone;
+        let toml_str = r#"
+[privacy]
+scrub_emails = true
+scrub_iban = false
+
+[privacy.toggles]
+screen = false
+pause_all = true
+
+[[privacy.zones]]
+match_process = "signal.exe"
+zone = "never_observe"
+
+[[privacy.zones]]
+match_title_keyword = "banking"
+zone = "local_only"
+"#;
+        let config: ContinuumConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.privacy.scrub_emails);
+        assert!(!config.privacy.scrub_iban);
+        assert!(config.privacy.scrub_api_keys); // default backfill
+        assert!(!config.privacy.toggles.screen);
+        assert!(config.privacy.toggles.pause_all);
+        assert!(config.privacy.toggles.mic); // default backfill
+        assert_eq!(config.privacy.zones.len(), 2);
+        assert_eq!(
+            config.privacy.zones[0].match_process.as_deref(),
+            Some("signal.exe")
+        );
+        assert_eq!(config.privacy.zones[0].zone, Zone::NeverObserve);
+        assert_eq!(
+            config.privacy.zones[1].match_title_keyword.as_deref(),
+            Some("banking")
+        );
+        assert_eq!(config.privacy.zones[1].zone, Zone::LocalOnly);
+        // Round-trips through TOML serialisation (dashboard writes config).
+        let serialised = toml::to_string(&config).unwrap();
+        let reparsed: ContinuumConfig = toml::from_str(&serialised).unwrap();
+        assert_eq!(reparsed.privacy.zones, config.privacy.zones);
+        assert!(reparsed.privacy.toggles.pause_all);
+    }
+
+    #[test]
+    fn projects_config_defaults_match_spec() {
+        // Spec §6 defaults are normative.
+        let cfg = ContinuumConfig::default();
+        assert!(cfg.projects.auto_discover);
+        assert_eq!(cfg.projects.switch_min_secs, 20);
+        assert_eq!(cfg.projects.discover_min_secs, 30);
+        assert!(cfg.projects.known.is_empty());
+        // Omitting [projects] entirely parses to the same defaults.
+        let empty: ContinuumConfig = toml::from_str("").unwrap();
+        assert!(empty.projects.auto_discover);
+        assert_eq!(empty.projects.switch_min_secs, 20);
+    }
+
+    #[test]
+    fn projects_config_parses_from_toml() {
+        use crate::senses::privacy::Zone;
+        let toml_str = r#"
+[projects]
+auto_discover = false
+switch_min_secs = 45
+
+[[projects.known]]
+id = "continuum"
+name = "Continuum"
+root_paths = ["D:\\Continuum\\Continuum-main"]
+repo = "https://github.com/x/continuum"
+keywords = ["continuum"]
+
+[[projects.known]]
+id = "finances"
+root_paths = ["D:\\Private\\finances"]
+zone = "local_only"
+"#;
+        let config: ContinuumConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.projects.auto_discover);
+        assert_eq!(config.projects.switch_min_secs, 45);
+        assert_eq!(config.projects.discover_min_secs, 30); // default backfill
+        assert_eq!(config.projects.known.len(), 2);
+        let first = &config.projects.known[0];
+        assert_eq!(first.id, "continuum");
+        assert_eq!(first.name, "Continuum");
+        assert_eq!(first.root_paths, ["D:\\Continuum\\Continuum-main"]);
+        assert_eq!(
+            first.repo.as_deref(),
+            Some("https://github.com/x/continuum")
+        );
+        assert_eq!(first.keywords, ["continuum"]);
+        assert_eq!(first.zone, None);
+        let second = &config.projects.known[1];
+        assert_eq!(second.id, "finances");
+        assert!(second.name.is_empty());
+        assert_eq!(second.zone, Some(Zone::LocalOnly));
+        // Round-trips through TOML serialisation (dashboard writes config).
+        let serialised = toml::to_string(&config).unwrap();
+        let reparsed: ContinuumConfig = toml::from_str(&serialised).unwrap();
+        assert_eq!(reparsed.projects.known, config.projects.known);
+        assert!(!reparsed.projects.auto_discover);
+    }
+
+    #[test]
+    fn events_config_defaults_and_partial_toml() {
+        // Spec §6 defaults for the `[events]` section.
+        let cfg = ContinuumConfig::default();
+        assert_eq!(cfg.events.collapse_window_minutes, 10);
+        assert_eq!(cfg.events.retention_days, 30);
+        assert_eq!(cfg.events.count_cap, 500);
+        assert_eq!(cfg.events.span_cap_hours, 24);
+        assert_eq!(cfg.events.queue_cap, 1024);
+
+        // Partial TOML backfills the rest with defaults.
+        let parsed: ContinuumConfig =
+            toml::from_str("[events]\ncollapse_window_minutes = 5\nqueue_cap = 64\n").unwrap();
+        assert_eq!(parsed.events.collapse_window_minutes, 5);
+        assert_eq!(parsed.events.queue_cap, 64);
+        assert_eq!(parsed.events.count_cap, 500);
+        assert_eq!(parsed.events.span_cap_hours, 24);
+    }
+
+    #[test]
+    fn performance_config_defaults_and_partial_toml() {
+        // Spec §6 defaults for the `[performance]` section (Task A8).
+        let cfg = ContinuumConfig::default();
+        assert_eq!(cfg.performance.idle_pause_after_secs, 300);
+        assert_eq!(cfg.performance.idle_capture_interval_ms, 2_000);
+        assert_eq!(cfg.performance.idle_vision_interval_ms, 15_000);
+
+        // Partial TOML backfills the rest with serde defaults; 0 is a
+        // meaningful value (vision fully paused during idle).
+        let parsed: ContinuumConfig =
+            toml::from_str("[performance]\nidle_vision_interval_ms = 0\n").unwrap();
+        assert_eq!(parsed.performance.idle_vision_interval_ms, 0);
+        assert_eq!(parsed.performance.idle_pause_after_secs, 300);
+        assert_eq!(parsed.performance.idle_capture_interval_ms, 2_000);
+    }
+
+    #[test]
     fn memory_vault_defaults_and_toml_nesting() {
         let cfg = ContinuumConfig::default();
         assert_eq!(cfg.memory.vault.watcher_debounce_ms, 500);
@@ -1471,5 +2382,108 @@ interval_secs = 5
                 .resolve_vault_dir(base),
             base.join("vault")
         );
+    }
+
+    #[test]
+    fn candidate_ttl_defaults_match_the_spec_table() {
+        use continuum_memory::NodeType;
+        let ttl = CandidateTtlDays::default();
+        assert_eq!(ttl.for_node_type(NodeType::Task), Some(30));
+        assert_eq!(ttl.for_node_type(NodeType::Error), Some(30));
+        assert_eq!(ttl.for_node_type(NodeType::Decision), None);
+        assert_eq!(ttl.for_node_type(NodeType::Preference), None);
+        assert_eq!(ttl.for_node_type(NodeType::Note), Some(90));
+        // Types outside the §4.7 mapping table fall back to the note TTL.
+        assert_eq!(ttl.for_node_type(NodeType::Fact), Some(90));
+        assert_eq!(ttl.for_node_type(NodeType::Session), Some(90));
+    }
+
+    #[test]
+    fn candidate_ttl_is_overridable_and_zero_means_never() {
+        use continuum_memory::NodeType;
+        let parsed: ContinuumConfig =
+            toml::from_str("[memory.candidate_ttl_days]\ntask = 7\nnote = 0\ndecision = 365\n")
+                .unwrap();
+        let ttl = parsed.memory.candidate_ttl_days;
+        assert_eq!(ttl.for_node_type(NodeType::Task), Some(7));
+        // 0 days would expire a candidate before anyone could review it.
+        assert_eq!(ttl.for_node_type(NodeType::Note), None);
+        assert_eq!(ttl.for_node_type(NodeType::Decision), Some(365));
+        // Unspecified keys keep their defaults.
+        assert_eq!(ttl.for_node_type(NodeType::Error), Some(30));
+    }
+
+    #[test]
+    fn context_package_defaults_match_the_spec() {
+        let cfg = ContinuumConfig::default().context_package;
+        // Spec §6: token_budget 1000 (wake) / chat_token_budget 600.
+        assert_eq!(cfg.token_budget, 1_000);
+        assert_eq!(cfg.chat_token_budget, 600);
+        let caps = cfg.caps();
+        assert_eq!(caps, crate::context::package::SectionCaps::default());
+        assert_eq!(cfg.wake_budget().token_budget, 1_000);
+        assert!(cfg.wake_budget().cloud_bound, "the wake leaves the machine");
+        assert_eq!(cfg.chat_budget().token_budget, 600);
+        assert!(cfg.chat_budget().cloud_bound);
+    }
+
+    #[test]
+    fn context_package_knobs_are_overridable_from_toml() {
+        let parsed: ContinuumConfig = toml::from_str(
+            "[context_package]\ntoken_budget = 1500\nmax_memories = 1\nmax_tools = 2\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.context_package.token_budget, 1_500);
+        assert_eq!(parsed.context_package.caps().memories, 1);
+        assert_eq!(parsed.context_package.caps().tools, 2);
+        // Unspecified keys keep their defaults (non-negotiable #3).
+        assert_eq!(parsed.context_package.chat_token_budget, 600);
+        assert_eq!(parsed.context_package.caps().just_before, 5);
+    }
+
+    #[test]
+    fn continuation_defaults_match_the_spec() {
+        let cfg = ContinuumConfig::default().continuation;
+        // Spec §6: `[continuation] confidence_floor=0.6, trigger_phrases`.
+        assert_eq!(cfg.confidence_floor, 0.6);
+        for phrase in [
+            "ga door",
+            "continue",
+            "verder",
+            "waar was ik",
+            "pak weer op",
+        ] {
+            assert!(
+                cfg.trigger_phrases.iter().any(|p| p == phrase),
+                "missing default trigger phrase {phrase}"
+            );
+        }
+        // The wake_result lookback must outlive the packager's event
+        // window — "continue" after lunch still needs this morning's step.
+        let package = ContinuumConfig::default().context_package;
+        assert!(cfg.wake_result_lookback_hours * 60 > package.events_window_minutes);
+    }
+
+    #[test]
+    fn continuation_knobs_are_overridable_from_toml() {
+        let parsed: ContinuumConfig = toml::from_str(
+            "[continuation]\nconfidence_floor = 0.9\ntrigger_phrases = [\"resume\"]\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.continuation.confidence_floor, 0.9);
+        assert_eq!(parsed.continuation.trigger_phrases, vec!["resume"]);
+        // Unspecified keys keep their defaults (non-negotiable #3).
+        assert_eq!(parsed.continuation.wake_result_lookback_hours, 12);
+    }
+
+    #[test]
+    fn chat_session_context_is_on_by_default_and_overridable() {
+        assert!(ContinuumConfig::default().chat.include_session_context);
+        let parsed: ContinuumConfig =
+            toml::from_str("[chat]\ninclude_session_context = false\n").unwrap();
+        assert!(!parsed.chat.include_session_context);
+        // The vault-backed memory context is a separate knob and unchanged
+        // — chat must keep working with no runtime at all (spec §4.9).
+        assert_eq!(parsed.chat.memory_context_notes_max, 6);
     }
 }

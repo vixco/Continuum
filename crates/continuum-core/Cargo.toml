@@ -24,6 +24,7 @@ runtime = [
     "dep:whisper-rs",
     "dep:rubato",
     "dep:futures",
+    "dep:notify",
 ]
 cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
 vulkan = ["runtime", "continuum-llm/vulkan"]
@@ -58,6 +59,11 @@ image = { workspace = true }
 dirs = "6"
 toml = "0.8"
 parking_lot = "0.12"
+# Privacy filter scrubbers (senses/privacy.rs). Deliberately NOT gated behind
+# `runtime` — the privacy module is the choke point for every process that
+# links continuum-core (runtime, MCP server, desktop), so it must compile
+# under `--no-default-features` too (spec §3, context engine).
+regex = "1"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Memory vault (Plan B): markdown + derived SQLite index. Deliberately NOT
@@ -76,6 +82,9 @@ fastembed = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 futures = { version = "0.3", optional = true }
+# File watcher (senses/file_watch.rs, context engine §4.5). Same version as
+# the vault watcher in continuum-memory — keep them in lockstep.
+notify = { version = "6.1", optional = true }
 cpal = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 rubato = { version = "2", optional = true }
@@ -94,6 +103,7 @@ opus = { version = "0.3", optional = true, default-features = false }
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
@@ -121,6 +131,25 @@ required-features = ["runtime"]
 [[bin]]
 name = "audio-probe"
 path = "src/bin/audio-probe.rs"
+required-features = ["runtime"]
+
+# Context-engine evaluation harnesses (spec §9, Task C6). The fourth one
+# (continuum-redaction-bench) lives in continuum-mcp: it must call the real
+# MCP tool handlers, and continuum-core cannot depend on continuum-mcp
+# without a dependency cycle.
+[[bin]]
+name = "continuum-context-bench"
+path = "src/bin/continuum-context-bench.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "continuum-dedupe-bench"
+path = "src/bin/continuum-dedupe-bench.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "continuum-memory-precision-bench"
+path = "src/bin/continuum-memory-precision-bench.rs"
 required-features = ["runtime"]
 
 [[test]]

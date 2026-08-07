@@ -942,10 +942,18 @@ impl Index {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS events(
               id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,
-              text TEXT NOT NULL, project TEXT, node_id TEXT, \"ref\" TEXT)",
+              text TEXT NOT NULL, project TEXT, node_id TEXT, \"ref\" TEXT,
+              local_only INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&self.pool)
         .await?;
+        // Additive migration for vaults written before the sensitivity flag
+        // existed (context engine §4.1 propagation, fixwave 3a C1). A full
+        // `reset_schema` would be a data-loss upgrade for the timeline, so
+        // the column is ALTERed in instead; every pre-existing row reads 0
+        // (`cloud_allowed`), which is what it was written as.
+        self.ensure_events_column("local_only", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS events_ts ON events(ts)")
             .execute(&self.pool)
             .await?;
@@ -957,6 +965,26 @@ impl Index {
         sqlx::query("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Adds an optional column to the `events` table when an older vault
+    /// predates it. Non-destructive: unlike [`Self::reset_schema`], the
+    /// timeline survives the upgrade.
+    async fn ensure_events_column(&self, column: &str, definition: &str) -> Result<()> {
+        let rows = sqlx::query("PRAGMA table_info(events)")
+            .fetch_all(&self.pool)
+            .await?;
+        let exists = rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column);
+        if !exists {
+            sqlx::query(&format!(
+                "ALTER TABLE events ADD COLUMN {column} {definition}"
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -1670,6 +1698,32 @@ impl Index {
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.iter().map(summary_from_row).collect())
+    }
+
+    /// The single most recently touched node of `node_type` with `status`,
+    /// or `None` when there is none.
+    ///
+    /// A targeted query rather than a scan of [`Self::graph`]: `graph`
+    /// orders by `importance DESC, id ASC` and caps the result, and every
+    /// curator session note carries the same `importance: 0.5`, so past
+    /// ~50 sessions "the newest one" was never in the returned page and
+    /// the continuation resolver kept recommending a months-old open task
+    /// (fixwave 3b, I6). `updated` is the empty string for a note that has
+    /// never been edited, so the ordering key coalesces to `created`.
+    pub async fn newest_node(
+        &self,
+        node_type: NodeType,
+        status: NodeStatus,
+    ) -> Result<Option<NodeSummary>> {
+        let row = sqlx::query(
+            "SELECT * FROM nodes WHERE type = ?1 AND status = ?2 \
+             ORDER BY COALESCE(NULLIF(updated, ''), created) DESC, id DESC LIMIT 1",
+        )
+        .bind(node_type.as_str())
+        .bind(status.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(summary_from_row))
     }
 
     /// Nodes with a resolved edge pointing at `id` (i.e. "what links here"),

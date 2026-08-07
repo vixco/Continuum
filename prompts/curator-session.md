@@ -20,3 +20,10 @@ Reply with markdown in exactly this shape (no preamble):
 <one line>
 ## Next step
 <one line>
+
+open_task: <the single unfinished task this session leaves behind, one line, or "none">
+
+The final `open_task:` line is a machine-read trailer, not prose: exactly one
+line, always present, always last. Write `open_task: none` when nothing was
+left unfinished. It is what Continuum resumes when the user later says
+"ga door" / "continue".

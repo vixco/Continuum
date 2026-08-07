@@ -46,6 +46,40 @@ system_live_context   = "auto"
 system_clipboard_get  = "session-approved"
 system_notification   = "auto"
 
+# --- Context tools (context engine spec §5.2) ---
+# The observation tier: every tool here is read-only, reads only state the
+# runtime has already published (state.json / live-context.json) or the
+# projects table (opened read-only), routes every response through the same
+# PrivacyFilter cloud gate the runtime uses, and degrades to empty/stale
+# answers instead of erroring. Nothing here can leak more than the wake
+# context the orchestrator already receives, so they are "auto" like the
+# other read-only observation tools (system_active_window,
+# system_live_context) — the one tool that reads content the user never
+# pointed a window at, system_clipboard_get, stays session-approved above.
+#
+# Kill-switches: `[context_tools] enabled = false` empties this whole
+# family, and `[privacy.toggles]` (mic / screen / pause_all) empties the
+# tools whose source was switched off.
+#
+# context_git is "auto" like the rest even though it can spawn a `git`
+# subprocess: the spawn is timeout-bounded, runs a single read-only
+# `git status` / `git log -1`, and is REFUSED outright for any project the
+# user has not confirmed (a `discovered` auto-discovery proposal is a guess
+# about a directory, and probing it would turn a guess into filesystem
+# access). That refusal is the consent boundary; the permission tier does
+# not need to duplicate it.
+[context]
+context_session  = "auto"
+context_window   = "auto"
+context_screen   = "auto"
+context_audio    = "auto"
+context_projects = "auto"
+context_timeline = "auto"
+context_search   = "auto"
+context_files    = "auto"
+context_git      = "auto"
+context_package  = "auto"
+
 # --- Filesystem tools (read-only, path-allowlisted) ---
 [fs]
 fs_read_file = "auto"

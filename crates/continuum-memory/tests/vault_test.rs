@@ -12,6 +12,7 @@ fn draft(ty: NodeType, title: &str, body: &str) -> NoteDraft {
         source: Default::default(),
         source_ref: None,
         sensitivity: Default::default(),
+        expires: None,
         relations: vec![],
         tags: vec![],
     }
@@ -344,6 +345,7 @@ async fn events_append_query_prune() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -355,6 +357,7 @@ async fn events_append_query_prune() {
             project: Some("sidelife".into()),
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -400,6 +403,7 @@ async fn events_since_id_watermark_is_id_based_not_ts_based() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -411,6 +415,7 @@ async fn events_since_id_watermark_is_id_based_not_ts_based() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -471,6 +476,7 @@ async fn events_since_id_orders_by_id_not_ts_under_limit() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -483,6 +489,7 @@ async fn events_since_id_orders_by_id_not_ts_under_limit() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -496,6 +503,7 @@ async fn events_since_id_orders_by_id_not_ts_under_limit() {
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .unwrap();
@@ -622,4 +630,70 @@ async fn reindex_paths_batch_matches_full_rebuild() {
 
     assert_eq!(batch_edges.len(), 3);
     assert_eq!(batch_edges, rebuilt_edges);
+}
+
+/// Fixwave 3b (I6). "The newest session note" must be found by a targeted
+/// query, not by paging `graph()`.
+///
+/// `graph()` orders by `importance DESC, id ASC` and caps at its limit, and
+/// every curator session note carries the same `importance: 0.5` — so the
+/// page is simply the N lowest-id (oldest) notes. Past that many sessions
+/// the newest note was never in it, and the §4.12 continuation resolver
+/// kept recommending a months-old open task forever.
+#[tokio::test]
+async fn newest_session_note_is_found_past_the_graph_page_size() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+
+    let mut last_id = String::new();
+    for i in 0..60 {
+        let note = vault
+            .create(draft(
+                NodeType::Session,
+                &format!("Session {i:03}"),
+                &format!("open_task: task {i}"),
+            ))
+            .await
+            .unwrap();
+        last_id = note.frontmatter.id;
+    }
+
+    let newest = vault
+        .newest_node(NodeType::Session, NodeStatus::Confirmed)
+        .await
+        .unwrap()
+        .expect("a session note exists");
+    assert_eq!(
+        newest.id, last_id,
+        "the newest note must be the last created"
+    );
+    assert_eq!(newest.title, "Session 059");
+
+    // The old path: a 50-node importance-ordered page cannot see it.
+    let page = vault
+        .graph(&continuum_memory::GraphFilter {
+            types: Some(vec![NodeType::Session]),
+            statuses: Some(vec![NodeStatus::Confirmed]),
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.nodes.len(), 50);
+    assert!(
+        !page.nodes.iter().any(|n| n.id == last_id),
+        "the regression: the newest note is not in the page at all"
+    );
+}
+
+/// An empty vault yields `None`, never an error.
+#[tokio::test]
+async fn newest_node_on_an_empty_vault_is_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).await.unwrap();
+    assert!(vault
+        .newest_node(NodeType::Session, NodeStatus::Confirmed)
+        .await
+        .unwrap()
+        .is_none());
 }

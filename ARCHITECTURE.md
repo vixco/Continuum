@@ -9,16 +9,17 @@ This document is the authoritative technical blueprint for Continuum. It describ
 3. [Data flow](#data-flow)
 4. [Layer 1 — Senses](#layer-1--senses)
 5. [Layer 2 — Triage](#layer-2--triage)
-6. [Layer 3 — Orchestrator](#layer-3--orchestrator)
-7. [Layer 4 — Workers](#layer-4--workers)
-8. [The MCP tool layer](#the-mcp-tool-layer)
-9. [Memory system](#memory-system)
-10. [Voice pipeline](#voice-pipeline)
-11. [Dashboard](#dashboard)
-12. [Self-healing subsystem](#self-healing-subsystem)
-13. [Security and permissions](#security-and-permissions)
-14. [Directory layout](#directory-layout)
-15. [Key design decisions](#key-design-decisions)
+6. [The context engine](#the-context-engine)
+7. [Layer 3 — Orchestrator](#layer-3--orchestrator)
+8. [Layer 4 — Workers](#layer-4--workers)
+9. [The MCP tool layer](#the-mcp-tool-layer)
+10. [Memory system](#memory-system)
+11. [Voice pipeline](#voice-pipeline)
+12. [Dashboard](#dashboard)
+13. [Self-healing subsystem](#self-healing-subsystem)
+14. [Security and permissions](#security-and-permissions)
+15. [Directory layout](#directory-layout)
+16. [Key design decisions](#key-design-decisions)
 
 ---
 
@@ -133,9 +134,12 @@ selected changes are downscaled and sent to the local vision model.
 
 Visual summaries join foreground-window, coarse idle/active input, and local
 terminal/project events in the shared `live-context.json` projection. The
-existing `ScreenObservation` carries a compact version of that projection into
-triage, while `system_live_context` makes the same source-attributed state
-available to agent roles that do not accept images. Sensitive foreground
+`ScreenObservation` carries both halves side by side: `description` is the
+one-sentence vision caption that triage, memory and the dashboard read, and
+`world_compact` is a compact version of that projection reserved for the
+context packager (context engine spec §4.10 — the blob is deliberately kept
+out of the triage prompt's token budget). `system_live_context` makes the same
+source-attributed state available to agent roles that do not accept images. Sensitive foreground
 applications/titles fail closed to redacted context, and screenshot persistence
 is disabled unless the user explicitly enables it.
 
@@ -208,15 +212,16 @@ pub struct PerceptionFrame {
 }
 ```
 
-The `salience_hint` is a rough pre-filter that prevents the triage LLM from being called for totally uninteresting frames (e.g. nothing changed since last frame, user is idle, no audio). This is a classical rule-based calculation, not an ML model. It uses heuristics like:
+The `salience_hint` is a rough pre-filter that prevents the triage LLM from being called for totally uninteresting frames. This is a classical rule-based calculation, not an ML model. The shipped rules (`senses/frame.rs::compute_salience`) are additive and clamped to `[0.0, 1.0]`:
 
-- Frame identical to previous? salience = 0.0, skip triage
-- New error visible on screen? salience += 0.3
-- User spoke within the last 5 seconds? salience += 0.4
-- New window focused? salience += 0.2
-- Calendar event within 15 minutes? salience += 0.3
+- First frame ever? salience = 0.5 (nothing to compare against, always look)
+- New error visible on screen? += 0.3
+- Error that was visible has disappeared? += 0.1
+- Frame carries a non-empty audio transcript? += 0.4
+- Foreground process or window title changed since the previous frame? += 0.2
+- A focus switch happened *between* frame ticks that the frame-to-frame comparison missed? += 0.2 (`accumulate_switch_salience`, never double-counted with the rule above)
 
-Only frames above a threshold (default 0.15) reach the triage layer. Everything else gets stored in the raw log for later retrieval and dropped.
+A frame in which none of these fire scores 0.0. Only frames at or above `[frame] salience_threshold` (default **0.10**) reach the triage layer; everything else is stored in the raw log and dropped. See `prompts/salience-heuristics.md`.
 
 ---
 
@@ -226,7 +231,7 @@ The triage layer is a small local LLM (3–4B parameters) that reads every salie
 
 **Default model:** Qwen 3 8B (Q4_K_M quantization, ~5 GB RAM, 15–20 tokens/sec CPU, 80+ GPU). Benchmarked at 95% accuracy on our perception-frame decision set; the 4B variant tops out around 82% on the same bench, and the extra RAM turned out to be worth it for the gatekeeper layer.
 
-Qwen 3 has a "thinking" mode that is intentionally **enabled** for triage — the short chain-of-thought is what lifts the 8B model to 95%. The triage grammar filters the thinking block out of the emitted JSON so the runtime only sees the final decision. Turning thinking off drops accuracy without saving meaningful latency at this size.
+Qwen 3 has a "thinking" mode, and triage runs with it **disabled**: `build_triage_prompt` wraps the call in ChatML precisely so the `/no_think` directive at the start of the user turn suppresses thinking tokens, and a GBNF grammar constrains the output to the decision JSON. The 95% figure above is the benchmark on that shipped configuration — `continuum-triage-bench` calls the same `build_triage_prompt` and the same grammar, so it measures what the runtime actually does. Thinking is off because triage is a latency-critical gate on every salient frame, not because it never helps; re-enabling it would mean removing `/no_think`, re-baselining the bench, and paying the decode cost per frame.
 
 **Low-RAM alternative:** Qwen 3 4B (Q4_K_M, ~2.5 GB) for systems with ≤6 GB available RAM; 30–35 tokens/sec on CPU but ~13 percentage points less accurate on the same triage benchmark. Qwen 2.5 3B Instruct is still loadable for legacy setups but not recommended.
 
@@ -281,11 +286,141 @@ Output (one JSON object, nothing else):
 
 The triage LLM must respond in under 500 ms. If it takes longer than 2 seconds, Continuum logs a warning and considers quantization adjustment.
 
+### Session state — what the user is doing
+
+`context::session_state` (context engine spec §4.8) holds Continuum's live
+answer to "what is the user doing right now": active project, app, window
+title, best-effort open files, last error, last success, last user command,
+plus an inferred goal and task with a confidence and a `local_only` zone tag.
+
+The two halves have very different costs and are built accordingly. The
+mechanical fields update **synchronously** — from the frame loop, and from a
+non-blocking observer tap on the context-events channel that runs *before*
+the persistence queue, so a full queue costs a persisted row but never a
+state update. Goal/task inference costs a local-LLM call and therefore runs
+in its **own spawned task** the frame loop never awaits: it fires only on a
+project switch, on ≥ `infer_min_new_events` significant events, or on
+staleness, never more than once per `infer_min_interval_secs`, never while
+the machine is idle (§4.11), and always through the background tier of
+`LlmGate` (behind interactive triage, `max_tokens ≤ 256`). A reply under
+`confidence_floor` is discarded rather than stored — consumers render
+"unknown", which is the honest answer.
+
+On boot the state rehydrates from the last published `state.json` snapshot
+plus the most recent `context_events`, with confidence discounted by age, so
+a restart does not erase what Continuum knew a minute ago.
+
+Session state is what feeds the triage prompt's `memory_summary`, the skills
+matcher's task/project, and (Plan B/C) the context packager, the continuation
+resolver and the dashboard's Context page. Cloud-bound renders must go
+through `cloud_view()`, which collapses goal/task to "working in a private
+context" whenever the inference window contained a `local_only` event
+(spec §4.1 zone propagation).
+
 ### Voice fast path
 
 When the user speaks directly to Continuum (wake word detected or in active conversation mode), the triage LLM also handles **fast conversational responses**. A simple question like "what time is it" or "turn off the music" gets answered or executed by triage itself without ever waking Opus. This is what keeps voice latency under 500 ms for routine interactions.
 
 Opus only gets called for voice input when the request involves reasoning, memory recall, or multi-step action.
+
+---
+
+## The context engine
+
+The context engine is not a fifth layer. It is the spine that runs *through*
+Layers 1–3: it takes what the senses produce, decides what it means, remembers
+the part that matters, and hands every AI — orchestrator wake, desktop chat, or
+tool call — the same privacy-filtered picture. The specification is
+`docs/superpowers/specs/2026-08-05-context-engine.md`; the user-facing guide is
+`docs/context-engine.md`.
+
+### The pipeline
+
+```
+capture → dedupe → privacy filter → classification → project/goal → session state
+        → curator/memory → context package → Main AI
+```
+
+| Stage | Where it lives | What it does |
+|---|---|---|
+| capture | `senses/{context,vision,audio}.rs`, `senses/git_watch.rs`, `senses/file_watch.rs` | Five collectors. The context watcher polls at 1 Hz and emits enriched observations (pid, exe path, monitor, dwell) plus focus-switch diffs; the git collector watches the active *confirmed* project only; the file watcher is opt-in and watches confirmed roots only. |
+| privacy | `senses/privacy.rs` | The choke point, applied **at collector emit** — before the hub, before persistence, before any model, before any tool response. Scrubbers on free text, path scrubbing everywhere, and three zones (`never_observe` → sentinel observation, `local_only` → stored but never cloud-bound, `cloud_allowed`). Derived artifacts inherit the strictest zone of their inputs. |
+| dedupe | `memory/events.rs` | Template sources key on `hash(source, event_type, project_id, normalized_summary)`; classified screen/audio events deliberately **exclude the summary** from the key so an LLM's varying phrasing still collapses; per-path file events key on the **raw** summary, because that summary *is* the path and normalization strips paths (the storm templates stay normalized). `count` is bumped, `ts_last` re-anchored, first summary kept as display text. |
+| classification | `triage/{mod,prompts,consume}.rs` | Rides the existing triage call — no second GPU pass. `TriageOutput` flattens the decision and carries an optional classification block; a malformed block never costs a retry. Consumption writes an event row, optionally a vault candidate with a per-type TTL, and the `triage_decision` raw-log column. |
+| project/goal | `context/project.rs` | One resolver, owned by the frame loop, resolved once per frame with hysteresis. Tiers: user override rules → path in the window title → editor title pattern → git root of the most recent file event → keyword match. Its single output feeds session state, the collectors and every event's `project_id`. |
+| session state | `context/session_state.rs` | Mechanical fields update synchronously; goal/task inference runs in its own spawned task, gated on idle and behind interactive triage. Rehydrates on boot from the last snapshot plus recent events, confidence discounted by age. |
+| memory | `memory/{distill,episodic}.rs` | The distiller reads deduped **events** first (count-aware: "build failed ×14", gated by `distillation_min_event_importance`) and falls back to the SQL frame predicate (gated by `distillation_min_salience`) for frames that produced no usable event — the writer stamps `perception_frames.context_event_at` on every occurrence, including collapses, so a moment is never recorded twice. Episodic memories carry a `project` **and** the §4.1 `sensitivity` of the text they summarize, so a `local_only` memory is withheld at every cloud egress. |
+| package | `context/package.rs` | One struct, one renderer, three assembler profiles. |
+| continuation | `context/continuation.rs` | Ranks what "ga door" should resume. Pure logic, no LLM call. |
+
+### Event transport
+
+One `mpsc::Sender<ContextEvent>` is cloned into every collector. A dedicated
+**events-writer task** owns the receiver, applies dedupe, and batch-inserts —
+not the frame loop, not per-collector writes. Collectors never block on SQLite.
+The queue is bounded (`[events] queue_cap`); because tokio's channel cannot pop
+the oldest, overflow policy is **drop-newest**, counted per source and coalesced
+by the writer into `"N events dropped from <source>"` system rows, so loss is
+visible in the events table itself. Switch events additionally ride the frame
+builder's accumulation path *for salience only*, never for persistence.
+
+Session state taps the same stream through a synchronous observer installed
+*after* the registry check but *before* the queue, so a full queue costs a
+persisted row but never a state update.
+
+### The three package profiles
+
+`context::package` is deliberately **ungated** (pure owned types plus string
+rendering, no `runtime` feature), which is what lets all three processes link
+the same renderer; the `--no-default-features` build is the parity gate.
+
+| Profile | Process | Sections | Sources |
+|---|---|---|---|
+| Wake | `continuum` runtime | all | in-process hubs, the shared frame ring, episodic + semantic retrieval |
+| `context_package` tool | `continuum-mcp` | all but why-woken, trigger-frame moment, tools, recommended next step, pending decisions and facts; adds per-section `stale` flags | `state.json`, `live-context.json`, `context_events` read-only, its own lazily-opened vault and episodic stores |
+| Chat | desktop (Tauri) | session state, plus the existing in-process vault search | `state.json`; episodic is explicitly unavailable |
+
+The renderer owns three guarantees: the **cloud gate** (every item carries a
+`local_only` flag; a cloud-bound render skips those items and *generalizes* the
+two sections that can never be empty), the **order contract** (pending decisions
+are last before why-woken), and the **budget** (per-section caps first, then a
+drop ladder — open files → recent changes → the tail of "just before" → the tail
+of memories — with why-woken, current moment, session state and pending
+decisions never dropped).
+
+### Storage
+
+All DDL for the raw-log database lives in `memory/raw_log.rs` and the runtime is
+the single writer. Every other process opens it through a read-only constructor
+that runs no migrations, sets `PRAGMA query_only = ON` and a 2 s busy timeout,
+and reports a typed "not yet created" for a cold database rather than an error.
+
+| Table | Holds |
+|---|---|
+| `perception_frames` | one row per frame, verbatim; gained `screen_world_compact`, a populated `triage_decision`, `context_privacy` (the collector's resolved zone, NULL for rows written before it existed) and `context_event_at` (when this frame first became a `context_events` row — the distiller's "already recorded" marker, which a collapse cannot express through `raw_reference`) |
+| `context_events` | the deduped event stream: `id, ts_first, ts_last, count, source, application, window_title, project_id, event_type, summary, importance, confidence, sensitivity, raw_reference, dedupe_key` |
+| `context_events_fts` | FTS5 external-content mirror over `summary, window_title`, maintained by triggers — never written directly |
+| Projects table | config mirror, discovered candidates, override rules, session pins, per-project stats and zone |
+
+The `event_type` registry is **closed and additive-only**, with the same
+stability policy as the MCP schemas: `window` emits `focus_switch` /
+`project_switch`; `git` emits `commit` / `branch_switch` / `conflict` /
+`dirty_change`; `file` emits the four file kinds plus `files_bulk_change`;
+`screen` and `audio` emit the eight classification types; `system` emits
+`idle_start`, `idle_end`, `wake`, `wake_result`, `voice_command`,
+`toggle_change`, `source_unavailable` and `events_dropped`.
+
+Published files: `state.json` (every 2 s regardless of content — it carries
+`session_state`, `context_engine` health and the Context page snapshot) and
+`live-context.json` (written **only when its content-version counter moved**, so
+a stale mtime during a quiet period is expected, not a stall).
+
+### Benchmarks
+
+`crates/continuum-core/benches/data/` holds the only committed fixture — a
+synthetic, generated 20-minute narrative plus a labels sidecar. Real recordings
+(`continuum-perception --record`) are post-privacy but are exactly the content
+the privacy work protects: they stay local and never enter the repository.
 
 ---
 
@@ -403,8 +538,23 @@ These are registered by `crates/continuum-mcp/src/server.rs` today; CI keeps the
 **System (`mcp__continuum__system_*`)**
 - `system_current_time()` — local wall-clock + tz + epoch ms
 - `system_active_window()` — foreground window title + process name
+- `system_live_context()` — the shared local live world-state (compact text + structured state)
 - `system_clipboard_get()` — best-effort clipboard read (text only)
 - `system_notification(title, body)` — Windows toast, rate-limited to 1 / 10 s per session
+
+**Context (`mcp__continuum__context_*`, context engine spec §5.2)** — read-only, privacy-gated, degrade to empty/`stale` answers instead of erroring, and emptied entirely by `[context_tools] enabled = false` or the matching `[privacy.toggles]` source toggle
+- `context_session()` — live session state (project, goal, task, confidence, last error/success/command) from `state.json`
+- `context_window(limit?)` — foreground window with pid / exe path / monitor / dwell, plus recent focus switches from `context_events`
+- `context_screen()` — per-monitor captions with zone markers + the compact world render, from `live-context.json`
+- `context_audio()` — latest published transcript + timestamp + in-call / ambient-mute state
+- `context_projects()` — configured, confirmed, and discovered projects from the Projects table (read-only), active first
+- `context_timeline(since?, until?, types?, project?, source?, limit?)` — deduped events with counts from `context_events` (limit clamped to 200); withheld private rows are reported as `omitted_private`, never silently dropped
+- `context_search(query, limit?)` — full-text search over event summaries and window titles (limit clamped to 50); the query is normalized in the store, so it can neither raise an FTS syntax error nor inject operators
+- `context_files(project?, limit?)` — recent file events (limit clamped to 100)
+- `context_git(project?)` — no argument reads the published project state with no subprocess; naming a project runs a timeout-bounded read-only probe, **refused with a reason (never an error) for any project the user has not confirmed**
+- `context_package(token_budget?)` — the mcp-published assembler profile, with `sections_present` / `sections_omitted`, four independent per-section staleness flags, and the drop-ladder rungs that ran
+
+The desktop chat provider lists all ten explicitly (adding a tool to the MCP server is deliberately not the same act as granting chat access to it). The orchestrator reaches them through its `mcp__continuum__*` wildcard. Workers do not get them under the default `[workers] default_allowed_tools`.
 
 **Filesystem (`mcp__continuum__fs_*`, read-only, path-allowlisted)**
 - `fs_read_file(path)` — up to 100 KB UTF-8 text; paths must fall inside Continuum data dir, `project.*.dir` facts, or `[mcp.fs].extra_paths`
@@ -460,7 +610,9 @@ The vault is described in full in `docs/memory.md`; this section covers how all 
 
 Everything the senses produce, stored verbatim. One row per perception frame. Includes screenshot thumbnails (base64 or filepaths), transcripts, and context. Used for forensic retrieval ("what was I doing at 14:23 yesterday").
 
-**Retention:** default 30 days, configurable 1–365. Rotated nightly.
+**Retention:** default 30 days (`[storage] retention_days`, configurable 1–365). Rotation runs on the memory-distiller ticker at a one-hour floor — and keeps ticking even when distillation is disabled, because retention is a privacy promise, not a distillation feature. Rotation deletes screenshot files referenced by the rows it removes and additionally sweeps `screenshots_dir` by file age (`[storage] screenshot_max_age_hours`, default 720), which is why that value must stay at or above `retention_days * 24`: the sweep never consults the database.
+
+The same database also holds `context_events`, its FTS mirror, and the Projects table — see "The context engine" above. All DDL lives in `memory/raw_log.rs`; the runtime is the single writer and every other process opens it read-only.
 
 **Schema (simplified):**
 
@@ -468,12 +620,14 @@ Everything the senses produce, stored verbatim. One row per perception frame. In
 CREATE TABLE perception_frames (
   id INTEGER PRIMARY KEY,
   ts TIMESTAMP NOT NULL,
-  screen_description TEXT,
+  screen_description TEXT,        -- the one-sentence vision caption
+  screen_world_compact TEXT,      -- the compact world-state render (packager only)
   screen_screenshot_path TEXT,
   audio_transcript TEXT,
   context_json TEXT,
   salience REAL,
-  triage_decision TEXT
+  triage_decision TEXT,
+  context_privacy TEXT            -- collector zone: visible / redacted / excluded
 );
 CREATE INDEX idx_frames_ts ON perception_frames(ts);
 ```
@@ -879,7 +1033,9 @@ The user configures which folders are read-write, read-only, or off-limits to th
 
 ### Audit log
 
-Every tool call is logged with timestamp, caller (orchestrator or specific worker id), arguments (redacted for sensitive fields), and result. The audit log is append-only and never automatically deleted.
+An append-only JSONL log at `<data_dir>/logs/actions.jsonl` records one object per line — `{ts, kind, actor, summary, details?}` — for **wakes and wake results** (`actor: agent`), **every applied Context-page intent including the ones that fail** (`actor: user`), and **automatic project-pin expiry** (`actor: agent`). It self-rotates at 4 MiB by dropping the oldest half, and writing to it can never return an error to a caller.
+
+**MCP tool calls are not in this log yet.** They execute inside the `continuum-mcp` process, which would need its own audit wiring; the target design is for every tool call to be recorded with timestamp, caller, redacted arguments and result. Until that lands, the tool-call trail is the MCP server's own structured logging.
 
 ### No telemetry
 
@@ -925,16 +1081,35 @@ continuum-ai/
 ├── crates/
 │   ├── continuum-core/               # Main orchestration runtime
 │   │   ├── Cargo.toml
+│   │   ├── benches/
+│   │   │   └── data/             # the ONLY committed fixture (synthetic, generated)
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── senses/           # Layer 1
 │   │       │   ├── vision.rs
-│   │       │   ├── audio.rs
-│   │       │   └── context.rs
+│   │       │   ├── audio/
+│   │       │   ├── context.rs
+│   │       │   ├── frame.rs
+│   │       │   ├── privacy.rs        # the scrub + zone choke point
+│   │       │   ├── git_watch.rs      # git collector (active confirmed project)
+│   │       │   ├── file_watch.rs     # opt-in file watcher
+│   │       │   ├── cadence.rs        # idle controller + shared-atomic cadences
+│   │       │   ├── toggles.rs        # live observation toggles
+│   │       │   ├── screenshots.rs    # age-based screenshot sweep
+│   │       │   └── live_context.rs
 │   │       ├── triage/           # Layer 2
 │   │       │   ├── mod.rs
 │   │       │   ├── llm.rs
-│   │       │   └── prompts.rs
+│   │       │   ├── prompts.rs
+│   │       │   ├── coalesce.rs       # off-loop triage submission
+│   │       │   └── consume.rs        # classification → events / candidates
+│   │       ├── context/          # the context engine (mostly UNGATED)
+│   │       │   ├── project.rs        # resolver, discovery, override rules
+│   │       │   ├── session_state.rs  # live "what is the user doing"
+│   │       │   ├── package.rs        # one struct, one renderer, three profiles
+│   │       │   ├── continuation.rs   # what "ga door" resumes
+│   │       │   ├── intents.rs        # Context-page intent files
+│   │       │   └── apply.rs          # applying them (incl. the Forget cascade)
 │   │       ├── orchestrator/     # Layer 3
 │   │       │   ├── mod.rs
 │   │       │   ├── spawn.rs
@@ -944,15 +1119,22 @@ continuum-ai/
 │   │       │   ├── pool.rs
 │   │       │   └── supervisor.rs
 │   │       ├── memory/
-│   │       │   ├── raw_log.rs
+│   │       │   ├── raw_log.rs        # ALL DDL for the raw-log DB lives here
+│   │       │   ├── events.rs         # events writer, dedupe, event registry
 │   │       │   ├── episodic.rs
+│   │       │   ├── distill.rs
 │   │       │   └── semantic.rs       # legacy — see "Memory system"; migrates into the vault
+│   │       ├── bench/            # replay + scoring for the four harnesses
 │   │       ├── voice/
 │   │       │   ├── wake.rs
 │   │       │   ├── stt.rs
 │   │       │   └── tts.rs
 │   │       ├── health/
 │   │       │   └── repair.rs
+│   │       ├── audit.rs          # append-only actions.jsonl
+│   │       ├── llm_gate.rs       # interactive-vs-background LLM priority
+│   │       ├── runtime_publish.rs
+│   │       ├── config_edit.rs
 │   │       └── config.rs
 │   │
 │   ├── continuum-memory/             # Memory vault: markdown source of truth + derived SQLite index
@@ -972,16 +1154,18 @@ continuum-ai/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs
+│   │       ├── server.rs
 │   │       ├── tools/
 │   │       │   ├── memory.rs
-│   │       │   ├── perception.rs
-│   │       │   ├── voice.rs
-│   │       │   ├── windows.rs
-│   │       │   ├── shell.rs
-│   │       │   ├── workers.rs
-│   │       │   ├── schedule.rs
-│   │       │   └── system.rs
-│   │       └── permissions.rs
+│   │       │   ├── system.rs         # incl. the three content-filtered tools
+│   │       │   ├── context.rs        # the ten context tools
+│   │       │   ├── fs.rs
+│   │       │   ├── web.rs
+│   │       │   ├── repair.rs
+│   │       │   └── workers.rs
+│   │       ├── redaction.rs      # safety-redaction bench harness
+│   │       ├── audit.rs
+│   │       └── allowlist.rs
 │   │
 │   ├── continuum-llm/                # Local LLM runtime (llama.cpp wrapper)
 │   │   ├── Cargo.toml
@@ -1008,6 +1192,8 @@ continuum-ai/
 │   ├── voice.md
 │   ├── memory.md
 │   ├── mcp-tools.md
+│   ├── context-engine.md         # what is observed, zones, toggles, tools, config
+│   ├── dashboard.md
 │   ├── skills.md
 │   ├── self-healing.md
 │   └── images/
@@ -1015,6 +1201,7 @@ continuum-ai/
 ├── prompts/                      # Orchestrator and triage prompts
 │   ├── orchestrator-system.md
 │   ├── triage-system.md
+│   ├── session-state.md
 │   ├── repair-agent-system.md
 │   └── salience-heuristics.md
 │

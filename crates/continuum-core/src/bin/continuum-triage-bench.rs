@@ -9,13 +9,22 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --bin continuum-triage-bench
+//! cargo run --bin continuum-triage-bench                     # accuracy + latency (needs the model)
+//! cargo run --bin continuum-triage-bench -- --prompt-fit-only # gate only, no model, no GPU
 //! ```
 //!
-//! Requires the triage model to be downloaded first:
+//! The accuracy/latency run requires the triage model to be downloaded
+//! first:
 //! ```bash
 //! powershell scripts/download-models.ps1
 //! ```
+//!
+//! `--prompt-fit-only` runs just the §4.7 prompt-fit gate and the §4.10
+//! blob-leak scan — over the hand-labeled benchmark frames **and** the
+//! Task C6 context fixture (`crates/continuum-core/benches/data/`), whose
+//! frames are longer and more varied than the benchmark's. That half needs
+//! no model, so it can gate a change; the accuracy and latency
+//! re-baseline still needs the GPU and stays a manual step.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -62,7 +71,7 @@ async fn main() -> Result<()> {
         continuum_core::hardware::resolve_resource_policy(&hardware_specs, &kcfg.resources);
     kcfg.triage.gpu_layers = resource_plan.triage_gpu_layers;
     let args: Vec<String> = std::env::args().collect();
-    let n_threads = args
+    let n_threads: u32 = args
         .iter()
         .position(|a| a == "--threads")
         .and_then(|i| args.get(i + 1))
@@ -78,13 +87,15 @@ async fn main() -> Result<()> {
         kcfg.triage.gpu_layers
     );
 
-    // Locate model.
+    // Locate model. `--prompt-fit-only` never touches it.
+    let prompt_fit_only = args.iter().any(|a| a == "--prompt-fit-only");
     let model_path = kcfg.triage.resolve_model_path(&dev_dir);
 
-    if !model_path.exists() {
+    if !model_path.exists() && !prompt_fit_only {
         eprintln!(
             "ERROR: Triage model not found at {}\n\
-             Run: powershell scripts/download-models.ps1",
+             Run: powershell scripts/download-models.ps1\n\
+             (or pass --prompt-fit-only to run just the §4.7 prompt-fit gate)",
             model_path.display()
         );
         std::process::exit(1);
@@ -115,6 +126,92 @@ async fn main() -> Result<()> {
 
     println!("Loaded {} benchmark frames", entries.len());
     println!("Model: {}\n", model_path.display());
+
+    // Prompt-fit gate (spec §4.7): prompt_tokens < n_ctx − max_tokens must
+    // hold for every frame or generation silently truncates. Bytes/3.5 is
+    // the accepted heuristic for Qwen-family tokenizers (bytes proxy).
+    //
+    // Task B4 tightens this: the prompt now renders the slim
+    // `TriagePromptFrame` projection, so the ~1.4 kB compact world-state
+    // blob (`screen.world_compact`, spec §4.10) is out of the budget. The
+    // gate below asserts BOTH that the budget holds and that the blob is
+    // genuinely absent — a regression that re-serialized the whole frame
+    // would still fit the budget on these small benchmark frames and
+    // silently pass an arithmetic-only check.
+    //
+    // Task C6 widens the corpus: the same gate also runs over the context
+    // fixture's frames, which carry real window titles, per-monitor
+    // captions and transcripts and are the closest thing to a recording
+    // that is committed. A regression that only shows up on longer frames
+    // would slip past the twenty hand-labeled benchmark ones.
+    let mut corpus: Vec<(String, PerceptionFrame)> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (format!("benchmark frame {}", i + 1), e.frame.clone()))
+        .collect();
+    match continuum_core::bench::fixture::load_fixture(
+        &continuum_core::bench::fixture::fixture_path(),
+    ) {
+        Ok(lines) => {
+            let before = corpus.len();
+            for (index, frame) in lines.iter().filter_map(|l| l.as_frame()).enumerate() {
+                corpus.push((format!("fixture frame {}", index + 1), frame.clone()));
+            }
+            println!(
+                "Prompt-fit corpus: {} benchmark frames + {} context-fixture frames",
+                before,
+                corpus.len() - before
+            );
+        }
+        Err(error) => println!("Prompt-fit corpus: benchmark frames only ({error})"),
+    }
+
+    let mut leaked_blob: Option<String> = None;
+    let mut worst = (0usize, String::new());
+    for (label, frame) in &corpus {
+        let prompt = continuum_core::triage::prompts::build_triage_prompt(frame, "");
+        if leaked_blob.is_none()
+            && (prompt.contains("world_compact") || prompt.contains("live-context/v"))
+        {
+            leaked_blob = Some(label.clone());
+        }
+        if prompt.len() > worst.0 {
+            worst = (prompt.len(), label.clone());
+        }
+    }
+    anyhow::ensure!(
+        leaked_blob.is_none(),
+        "Triage prompt leaked the compact world-state blob (spec §4.10) on {} \
+         — the slim TriagePromptFrame projection was bypassed",
+        leaked_blob.unwrap_or_default()
+    );
+    let max_prompt_bytes = worst.0;
+    let est_prompt_tokens = (max_prompt_bytes as f64 / 3.5).ceil() as u32;
+    let token_budget = kcfg
+        .triage
+        .context_size
+        .saturating_sub(kcfg.triage.max_tokens);
+    println!(
+        "Prompt fit: worst-case {} bytes ({}) ≈ {} tokens; budget {} (n_ctx {} − max_tokens {})\n",
+        max_prompt_bytes,
+        worst.1,
+        est_prompt_tokens,
+        token_budget,
+        kcfg.triage.context_size,
+        kcfg.triage.max_tokens
+    );
+    anyhow::ensure!(
+        est_prompt_tokens < token_budget,
+        "Triage prompt does not fit: ~{est_prompt_tokens} tokens >= budget {token_budget} \
+         (context_size {} − max_tokens {})",
+        kcfg.triage.context_size,
+        kcfg.triage.max_tokens
+    );
+
+    if prompt_fit_only {
+        println!("RESULT: PASS (prompt-fit gate only — accuracy and latency need the model)");
+        return Ok(());
+    }
 
     // Debug: dump grammar
     let grammar = continuum_core::triage::prompts::TRIAGE_GRAMMAR;
@@ -158,7 +255,7 @@ async fn main() -> Result<()> {
 
     for (i, entry) in entries.iter().enumerate() {
         let start = Instant::now();
-        let decision = triage.evaluate(&entry.frame, "").await;
+        let decision = triage.evaluate(&entry.frame, "").await.decision;
         let elapsed = start.elapsed();
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
         latencies.push(latency_ms);

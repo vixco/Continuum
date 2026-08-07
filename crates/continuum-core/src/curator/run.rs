@@ -15,12 +15,14 @@ use continuum_memory::{Event, EventRange, Vault};
 use tokio::sync::watch;
 
 use crate::config::{CuratorConfig, MemoryVaultConfig};
+use crate::context::project::CurrentProject;
 use crate::curator::conflict::detect_conflicts;
 use crate::curator::extract::{
     candidate_to_draft, is_duplicate, parse_candidates, route_candidate, CandidateJson,
 };
 use crate::curator::session::{write_session_summary, EndedSession, SessionTracker};
 use crate::curator::{CuratorLlm, SharedCuratorStatus};
+use crate::senses::types::PerceptionFrame;
 
 /// The extraction prompt template, loaded at compile time from the
 /// repo-root `prompts/curator-extract.md`. `{{MAX}}`, `{{EVENTS}}`, and
@@ -35,8 +37,24 @@ pub const EXTRACT_PROMPT: &str = include_str!("../../../../prompts/curator-extra
 /// now", not a full history of every frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ActivitySignal {
-    /// Best-effort project slug inferred from the foreground window/process
-    /// (see `crate::memory::retrieval::infer_project_hint`, wired in Task 9).
+    /// The project resolver's **post-hysteresis** project id, or `None`
+    /// when the resolver has not settled on one.
+    ///
+    /// Fixwave 3b (C4): this used to fall back to the legacy frame-only
+    /// keyword hint (`crate::memory::retrieval::infer_project_hint`), a
+    /// hardcoded title-substring match that consults no Projects table, no
+    /// [`crate::context::project::ProjectStatus`], and no override rules.
+    /// That value is durable —
+    /// it becomes a `confidence: 1.0` `belongs_to` relation, a
+    /// `NodeStatus::Confirmed` note `project`, and the timeline event's
+    /// project column — so an unvalidated guess wrote permanent, wrong
+    /// attribution into the vault, including for projects that are merely
+    /// `discovered` (spec §4.3: those must never resolve) or explicitly
+    /// excluded by a tier-0 rule. It also broke the boundary debounce: the
+    /// project-change case in [`crate::curator::session::SessionTracker`]
+    /// has no dwell floor *because* it assumes post-hysteresis input.
+    ///
+    /// Build it with [`activity_signal`] — never by hand.
     pub project_hint: Option<String>,
     /// Foreground process name at the time of the signal.
     pub process: String,
@@ -44,6 +62,24 @@ pub struct ActivitySignal {
     pub idle_seconds: u64,
     /// When this signal was captured. `None` before the first frame arrives.
     pub ts: Option<DateTime<Utc>>,
+}
+
+/// Builds the per-frame [`ActivitySignal`] the curator's session-boundary
+/// state machine consumes.
+///
+/// The **only** sanctioned producer of [`ActivitySignal::project_hint`]:
+/// the resolver's post-hysteresis id, or nothing. See that field's doc for
+/// why a frame-only keyword guess may not be substituted here.
+pub fn activity_signal(
+    frame: &PerceptionFrame,
+    current_project: Option<&CurrentProject>,
+) -> ActivitySignal {
+    ActivitySignal {
+        project_hint: current_project.map(|p| p.id.clone()),
+        process: frame.context.foreground_process_name.clone(),
+        idle_seconds: frame.context.idle_seconds,
+        ts: Some(frame.context.ts),
+    }
 }
 
 /// Renders vault events as `"HH:MM kind — text"` lines (oldest first) for
@@ -185,9 +221,10 @@ async fn write_candidate(vault: &Vault, c: &CandidateJson, cfg: &CuratorConfig) 
 
 /// Hard character ceiling on the assembled extraction prompt (I1 fix). A
 /// `char`-count proxy for token count (documented, not exact — good enough
-/// to keep a `context_size = 2048` / `max_tokens = 1024` local model from
-/// overflowing without pulling in a real tokenizer just to bound prompt
-/// size). See [`extract_pass`]'s budgeting loop.
+/// to keep a small-context local model from overflowing without pulling in
+/// a real tokenizer just to bound prompt size). See [`extract_pass`]'s
+/// budgeting loop. Generation output is separately capped at
+/// [`crate::llm_gate::BACKGROUND_MAX_TOKENS`] per call (Task B2).
 const PROMPT_CHAR_BUDGET: usize = 3500;
 
 /// Maximum number of (already-fetched) events folded into the extraction
@@ -329,7 +366,18 @@ pub async fn extract_pass(
         prompt = build_prompt(&capped, &related_block);
     }
 
-    let raw = match llm.complete(&prompt, 1024).await {
+    // Task B2 (spec §4.7): the curator is a BACKGROUND caller on the
+    // shared local model — max_tokens is capped at BACKGROUND_MAX_TOKENS
+    // per call so an interactive triage evaluation can slot in between
+    // background generations. Candidate lists therefore got tighter than
+    // the pre-B2 1024-token budget: the extraction prompt already asks for
+    // at most `max_candidates_per_pass` compact JSON objects, which fits;
+    // a pathological overrun truncates the array, costing the existing
+    // one-retry-then-skip path, never a hang.
+    let raw = match llm
+        .complete(&prompt, crate::llm_gate::BACKGROUND_MAX_TOKENS)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -347,7 +395,10 @@ pub async fn extract_pass(
             let retry_prompt = format!(
                 "{prompt}\n\nYour previous reply was invalid: {first_err}. Reply with ONLY the JSON array."
             );
-            let retry_raw = match llm.complete(&retry_prompt, 1024).await {
+            let retry_raw = match llm
+                .complete(&retry_prompt, crate::llm_gate::BACKGROUND_MAX_TOKENS)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(
@@ -1049,6 +1100,74 @@ mod tests {
     use crate::curator::MockLlm;
     use continuum_memory::NewEvent;
 
+    /// A frame whose window title contains a legacy hardcoded keyword
+    /// (`continuum`) — the exact input `infer_project_hint` matches on.
+    fn keyword_frame() -> PerceptionFrame {
+        let now = Utc::now();
+        PerceptionFrame {
+            id: uuid::Uuid::new_v4(),
+            ts: now,
+            screen: crate::senses::types::ScreenObservation {
+                description: "a browser".to_string(),
+                world_compact: None,
+                foreground_app: "chrome.exe".to_string(),
+                has_error_visible: false,
+                confidence: 0.9,
+                screenshot_path: None,
+                ts: now,
+            },
+            audio: None,
+            context: crate::senses::types::ContextObservation {
+                foreground_window_title: "GitHub - continuum-main: ambient assistant — Chrome"
+                    .to_string(),
+                foreground_process_name: "chrome.exe".to_string(),
+                idle_seconds: 3,
+                ts: now,
+                ..Default::default()
+            },
+            salience_hint: 0.4,
+        }
+    }
+
+    /// Fixwave 3b (C4). A title keyword alone must never become an
+    /// `ActivitySignal::project_hint`: the curator turns that value into a
+    /// `confidence: 1.0` `belongs_to` relation and a Confirmed note
+    /// `project`, so an unvalidated guess would be durable, wrong vault
+    /// attribution.
+    #[test]
+    fn a_title_keyword_alone_produces_no_project_hint() {
+        let frame = keyword_frame();
+        // The legacy hint DOES match this title — that is the whole point.
+        assert_eq!(
+            crate::context::project::legacy_keyword_hint(&frame.context.foreground_window_title),
+            Some("continuum".to_string())
+        );
+        let sig = activity_signal(&frame, None);
+        assert_eq!(sig.project_hint, None);
+        assert_eq!(sig.process, "chrome.exe");
+        assert_eq!(sig.idle_seconds, 3);
+        assert_eq!(sig.ts, Some(frame.context.ts));
+    }
+
+    /// The resolver's post-hysteresis id is the only accepted source.
+    #[test]
+    fn the_resolver_project_is_the_only_hint_source() {
+        let frame = keyword_frame();
+        let current = CurrentProject {
+            id: "simcharts".to_string(),
+            name: "SimCharts".to_string(),
+            root_path: None,
+            confidence: 0.9,
+            source_tier: 1,
+            zone: None,
+            status: crate::context::project::ProjectStatus::Confirmed,
+        };
+        assert_eq!(
+            activity_signal(&frame, Some(&current)).project_hint,
+            Some("simcharts".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn extract_pass_writes_routed_candidates() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1061,6 +1180,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();
@@ -1107,6 +1227,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();
@@ -1138,6 +1259,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();
@@ -1183,6 +1305,7 @@ mod tests {
                     project: None,
                     node_id: None,
                     reference: None,
+                    local_only: false,
                 })
                 .await
                 .unwrap();
@@ -1233,6 +1356,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();
@@ -1286,6 +1410,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();
@@ -1352,6 +1477,7 @@ mod tests {
                     project: None,
                     node_id: None,
                     reference: None,
+                    local_only: false,
                 })
                 .await
                 .unwrap();
@@ -1449,6 +1575,7 @@ mod tests {
                     project: None,
                     node_id: None,
                     reference: None,
+                    local_only: false,
                 })
                 .await
                 .unwrap();
@@ -1469,6 +1596,7 @@ mod tests {
                 ts: now,
                 screen: ScreenObservation {
                     description: "editor".to_string(),
+                    world_compact: None,
                     foreground_app: "Code.exe".to_string(),
                     has_error_visible: false,
                     confidence: 0.9,
@@ -1482,6 +1610,7 @@ mod tests {
                     idle_seconds: 0,
                     in_call: false,
                     ts: now,
+                    ..Default::default()
                 },
                 salience_hint: 0.5,
             })
@@ -1503,6 +1632,8 @@ mod tests {
                 importance: 0.5,
                 tags: vec![],
                 source_frame_id: None,
+                project: None,
+                sensitivity: crate::memory::events::EventSensitivity::CloudAllowed,
             })
             .await
             .unwrap();
@@ -1638,6 +1769,7 @@ mod tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();

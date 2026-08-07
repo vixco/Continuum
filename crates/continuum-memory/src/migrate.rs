@@ -136,6 +136,7 @@ pub async fn migrate_legacy_semantic(vault: &Vault, semantic_db: &Path) -> Resul
             source: map_source(&source),
             source_ref: Some(format!("legacy:semantic:{key}")),
             sensitivity: Default::default(),
+            expires: None,
             relations: vec![],
             tags: vec![tag_from_key(&key)],
         };

@@ -57,6 +57,18 @@ const EXPECTED_TOOLS: &[&str] = &[
     "memory_vault_resolve",
     "memory_vault_delete",
     "memory_wipe_all",
+    // Plan C, Task C3 — context tool family, part 1 (published state)
+    "context_session",
+    "context_window",
+    "context_screen",
+    "context_audio",
+    "context_projects",
+    // Plan C, Task C4 — context tool family, part 2 (events / git / package)
+    "context_timeline",
+    "context_search",
+    "context_files",
+    "context_git",
+    "context_package",
 ];
 
 fn mcp_bin() -> std::path::PathBuf {

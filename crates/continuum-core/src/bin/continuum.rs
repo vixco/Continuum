@@ -18,40 +18,78 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing_subscriber::EnvFilter;
 
 use continuum_vision::VisionModel;
 
+use continuum_core::audit::{Actor, AuditLog};
 use continuum_core::config::{
-    continuum_dev_dir, env_or_legacy, load_config, ContinuumConfig, CuratorConfig,
+    continuum_dev_dir, env_or_legacy, load_config, ContextPackageConfig, ContinuationConfig,
+    ContinuumConfig, CuratorConfig,
+};
+use continuum_core::context::apply::{
+    apply_deferred_intent, apply_intent, is_deferred, DeferredIntentContext, IntentContext,
+};
+use continuum_core::context::continuation::{
+    self, ContinuationInputs, ContinuationOutcome, MAX_ASK_CANDIDATES,
+};
+use continuum_core::context::intents::{self as context_intent, IntentDrainer, SessionField};
+use continuum_core::context::package::{parse_wake_trailer, NextStep, ToolsSection};
+use continuum_core::context::project::{
+    CurrentProject, CurrentProjectHandle, FrameInput, ProjectEntry, ProjectResolver, ProjectStatus,
+};
+use continuum_core::context::session_state::{
+    self, ProjectPinGuard, SessionState, SessionStateHub, StampedText,
 };
 use continuum_core::curator;
+use continuum_core::guard::FallbackGuard;
 use continuum_core::memory::distill::run_memory_distiller;
 use continuum_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
-use continuum_core::memory::raw_log::RawLog;
-use continuum_core::memory::retrieval::{
-    filter_pending, infer_project_hint, retrieve_context, retrieve_vault_context,
+use continuum_core::memory::events::{
+    event_enum_token, install_global_sender, project_switch_event, send_system_event,
+    spawn_event_writer, EventSensitivity, EventType,
 };
+use continuum_core::memory::raw_log::{ContextEventRow, RawLog};
+use continuum_core::memory::retrieval::{filter_pending, retrieve_context, retrieve_vault_context};
 use continuum_core::memory::semantic::SemanticStore;
 use continuum_core::orchestrator::spawn::{
     wake_orchestrator, OrchestratorConfig, OrchestratorEvent,
 };
-use continuum_core::orchestrator::wake_context::build_wake_message;
+use continuum_core::orchestrator::wake_context::{
+    self as wake_context, build_wake_package, FrameRing, WakeContextInputs,
+};
+use continuum_core::runtime_publish::{
+    ComponentHealthSummary, ContextEngineSnapshot, ContextEventView, ContextPageSnapshot,
+    ContinuationCandidateView, ObservationTogglesView, OverrideRuleView, ProjectSummaryView,
+    SessionPinView,
+};
 use continuum_core::senses::audio::AudioWatcher;
-use continuum_core::senses::context::ContextWatcher;
+use continuum_core::senses::cadence::{CadenceControl, IdleController, IdleTransition};
+use continuum_core::senses::context::{ContextWatcher, SharedContextWatchHealth};
+use continuum_core::senses::file_watch::{
+    FileWatcher, ProjectsProvider, RecentFileHandle, SharedFileWatchHealth,
+};
 use continuum_core::senses::frame::PerceptionFrameBuilder;
+use continuum_core::senses::git_watch::{GitWatcher, SharedGitWatchHealth};
 use continuum_core::senses::live_context::{self, LiveContextHub};
+use continuum_core::senses::privacy::{emit_system_event, strictest, PrivacyFilter, Zone};
+use continuum_core::senses::screenshots::ScreenshotPolicy;
+use continuum_core::senses::toggles::ToggleControl;
 use continuum_core::senses::types::{
     AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation,
 };
 use continuum_core::senses::vision::VisionWatcher;
 use continuum_core::skills::{MatchContext, SkillLoader, SkillMatcher};
+use continuum_core::triage::coalesce::{Submitted, TriageBusyHandle, TriageCoalescer};
+use continuum_core::triage::consume::ClassificationConsumer;
 use continuum_core::triage::handlers::handle_decision;
 use continuum_core::triage::llm::{TriageConfig, TriageLayer};
-use continuum_core::triage::TriageDecision;
+use continuum_core::triage::{Classification, TriageDecision, TriageOutput};
 use continuum_core::voice::intent::{self as voice_intent, VoiceIntent};
 use continuum_core::voice::playback::PlaybackStream;
+use continuum_core::voice::recv_hotkey;
 use continuum_core::voice::sounds::{FeedbackCue, FeedbackPlayer};
 use continuum_core::voice::streaming::SpeechController;
 use continuum_core::voice::stt::{EndpointDecision, SemanticEndpointDetector, VoiceSession};
@@ -155,6 +193,46 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to open raw log database")?;
 
+    // --- Project resolver (Task A4, spec §4.3) ---
+    // Boot reconciliation: [[projects.known]] config seeds/updates the
+    // Projects table (config wins by id); discovered/confirmed rows and
+    // persisted override rules survive restarts. A table failure degrades
+    // to config-only resolution — never blocks boot.
+    let config_projects: Vec<ProjectEntry> = config
+        .projects
+        .known
+        .iter()
+        .map(ProjectEntry::from_config)
+        .collect();
+    let table_projects = match raw_log.reconcile_projects(&config_projects).await {
+        Ok(rows) => rows.into_iter().map(|row| row.entry).collect(),
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "continuum",
+                error = %e,
+                "Projects-table reconciliation failed; resolver runs config-only"
+            );
+            config_projects.clone()
+        }
+    };
+    let project_rules = raw_log.list_project_rules().await.unwrap_or_else(|e| {
+        tracing::warn!(
+            layer = "context",
+            component = "continuum",
+            error = %e,
+            "Failed to load project override rules; resolver runs without them"
+        );
+        Vec::new()
+    });
+    let mut project_resolver =
+        ProjectResolver::new(table_projects, project_rules, &config.projects);
+    let project_handle: CurrentProjectHandle = project_resolver.handle();
+    // Task A7 seam (spec §4.3 tier 3): the file watcher writes its most
+    // recent non-ignored event path here; the frame loop reads it into
+    // `FrameInput.recent_file_path` to activate git-root resolution.
+    let recent_file_handle = RecentFileHandle::default();
+
     let semantic_path = dev_dir.join("semantic.sqlite");
     let semantic = Arc::new(
         SemanticStore::open(&semantic_path.to_string_lossy())
@@ -232,6 +310,57 @@ async fn main() -> Result<()> {
         );
         let _ = ctrl_c_shutdown.send(true);
     });
+
+    // --- Session state (Task B5, spec §4.8) ---
+    // Continuum's live "what is the user doing" state. Boot rehydration
+    // seeds it from the last published state.json snapshot (Plan C
+    // publishes it; absent today, which degrades to "start empty") plus
+    // the last hour of context_events, with confidence discounted by age
+    // — this is what lets the §4.12 continuation resolver answer "ga door"
+    // after a restart. Never fails: any read error degrades to empty.
+    let session_state = {
+        let (state, digests) = continuum_core::context::session_state::rehydrate_from_disk(
+            &dev_dir,
+            &raw_log,
+            &config.session_state,
+            Utc::now(),
+        )
+        .await;
+        let hub = SessionStateHub::with_state(state);
+        hub.seed_events(digests);
+        hub
+    };
+
+    // --- Events writer (Task A6, spec §3/§4.6) ---
+    // The dedicated writer task owns the context_events table: bounded
+    // mpsc channel, dedupe + batch inserts, overflow coalesce, retention
+    // rotation. One sender is cloned into every collector; the global
+    // install covers producers without an injection path
+    // (senses::privacy::emit_system_event). The writer stamps the
+    // resolver's current project onto events that arrive unattributed.
+    // Health (Task A8, spec §7): `event_writer_health` (queue depth +
+    // last-flush ts) is published into RuntimeSnapshot.context_engine by
+    // the state publisher below; should_restart() fires only if the
+    // writer dies unexpectedly.
+    let (event_sender, event_writer_health) = spawn_event_writer(
+        raw_log.clone(),
+        &config.events,
+        Some(project_handle.clone()),
+        shutdown_rx.clone(),
+    );
+    // Task B5 (spec §4.8): session state's mechanical fields
+    // (last_error/last_success/open_files) and its inference window read
+    // the SAME event stream the writer persists. The tap runs before the
+    // queue, so a full queue costs a row but never a state update. It must
+    // be attached BEFORE any clone — every clone below carries it.
+    let event_sender = event_sender.with_observer({
+        let hub = session_state.clone();
+        let cfg = config.session_state.clone();
+        std::sync::Arc::new(move |ev: &continuum_core::memory::events::ContextEvent| {
+            hub.apply_context_event(ev, &cfg);
+        })
+    });
+    install_global_sender(event_sender.clone());
 
     // --- Memory vault watcher ---
     // Drains the vault's debounced file-watcher so external edits (the
@@ -322,6 +451,8 @@ async fn main() -> Result<()> {
                         importance: 0.4,
                         tags: vec!["worker".into(), format!("worker:{id}"), name],
                         source_frame_id: None,
+                        project: None,
+                        sensitivity: continuum_core::memory::events::EventSensitivity::CloudAllowed,
                     };
                     if let Err(e) = ep.insert_event(&event).await {
                         tracing::debug!(
@@ -369,6 +500,8 @@ async fn main() -> Result<()> {
                     },
                     tags,
                     source_frame_id: None,
+                    project: None,
+                    sensitivity: continuum_core::memory::events::EventSensitivity::CloudAllowed,
                 };
                 let _ = ep.insert_event(&event).await;
             });
@@ -396,22 +529,66 @@ async fn main() -> Result<()> {
         "Worker pool ready"
     );
 
-    // Phase 3: background raw-log to episodic-memory distillation.
+    // Phase 3: background raw-log to episodic-memory distillation, plus
+    // raw-log retention rotation on the same ticker (Task B6).
     let distiller_shutdown = shutdown_rx.clone();
     let distiller_raw_log = raw_log.clone();
     let distiller_episodic = episodic.clone();
     let distiller_vault = vault.clone();
     let distiller_config = config.memory.clone();
+    let distiller_storage = config.storage.clone();
     tokio::spawn(async move {
         run_memory_distiller(
             distiller_raw_log,
             distiller_episodic,
             distiller_vault,
             distiller_config,
+            distiller_storage,
             distiller_shutdown,
         )
         .await;
     });
+
+    // --- Privacy filter (context engine spec §4.1) ---
+    // Constructed once at senses spawn and shared (Arc) into every watcher.
+    // Every observed byte — titles, captions, transcripts, paths — passes
+    // through it at collector emit, before the live-context hub, the frame
+    // channel, and persistence.
+    let privacy_filter = Arc::new(PrivacyFilter::from_config(&config.context, &config.privacy));
+    let observation_toggles = config.privacy.toggles.clone();
+    // --- Live observation toggles (Task C5, spec §4.1/§4.13) ---
+    // The shared-atomics control every watcher re-reads each iteration, so
+    // a Context-page switch takes effect without a restart. Seeded from the
+    // same boot config the watchers get; `set_toggle` intents store into
+    // it and persist the value to config.toml.
+    //
+    // Documented limitation: when `pause_all` is already set at boot no
+    // watcher is spawned at all (below), so *unpausing* from the page
+    // needs a restart. Pausing live works; unpausing a never-started
+    // pipeline cannot, and pretending otherwise would be the dishonest
+    // half of an honest toggle.
+    let toggle_control = ToggleControl::new(&observation_toggles);
+    // --- Action audit log (Task C5, spec §4.13) ---
+    // Append-only JSONL of wakes, toggle changes, corrections and
+    // deletions at `<data_dir>/logs/actions.jsonl`.
+    let audit = AuditLog::new(&dev_dir);
+
+    // --- Cadence control + idle controller (Task A8, spec §3/§4.11) ---
+    // The shared-AtomicU64 cadence handle is the sanctioned pattern for
+    // runtime-adjustable cadences: capture workers and the vision gate
+    // read it each iteration; the idle controller below adjusts it when
+    // `idle_seconds` crosses `[performance].idle_pause_after_secs` and
+    // restores it on input activity, voice wake, hotkey, or any
+    // orchestrator wake. Shared behind a std Mutex because the daily
+    // maintenance-wake ticker is a second wake producer (locks held for
+    // microseconds).
+    let cadence = CadenceControl::new(
+        config.screen.capture_interval_ms,
+        config.screen.vision_min_interval_ms,
+    );
+    let idle_controller: Arc<std::sync::Mutex<IdleController>> = Arc::new(std::sync::Mutex::new(
+        IdleController::new(&config.performance),
+    ));
 
     // --- Perception channels ---
     let live_context = LiveContextHub::new(config.screen.buffer_capacity.saturating_mul(4));
@@ -426,70 +603,157 @@ async fn main() -> Result<()> {
     let (ctx_tx, ctx_rx) = mpsc::channel::<ContextObservation>(64);
     let (frame_tx, mut frame_rx) = mpsc::channel::<PerceptionFrame>(32);
 
-    // --- Vision ---
-    let vision_model = init_vision_model(&config, &resource_plan).await;
-
-    let vision_watcher = VisionWatcher::new_with_live_context(
-        config.screen.clone(),
-        vision_model,
-        PathBuf::from(&config.storage.screenshots_dir),
-        live_context.clone(),
-    );
-    let vision_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        vision_watcher.run(screen_tx, vision_shutdown).await;
-    });
-
-    // --- Audio ---
-    let audio_watcher = AudioWatcher::new(config.audio.clone());
-    let audio_shutdown = shutdown_rx.clone();
-    // Moshi S2S front-end (feature = "moshi"): when `voice.frontend.mode =
-    // "moshi"`, the audio watcher forks 16 kHz mono PCM into a tap channel
-    // that the Moshi front-end consumes. The channel is created here (cheap,
-    // no runtime_state needed); the MoshiFrontend + its event consumer are
-    // wired later (`wire_moshi_voice`) once `runtime_state` is in scope, so
-    // the consumer can publish `partial_transcript` / `moshi_loaded`. The
-    // pipeline path (`mode = "pipeline"`) passes `None` and is unchanged.
+    // Optional Moshi S2S audio fork. The privacy/toggle-aware watcher remains
+    // the single capture path; Moshi only receives the same already-admitted
+    // 16 kHz mono samples through this in-process tap.
     #[cfg(feature = "moshi")]
-    let moshi_active: bool =
-        config.voice.frontend.mode == "moshi" && config.voice.frontend.moshi_tap_enabled;
+    let moshi_active = !observation_toggles.pause_all
+        && config.voice.frontend.mode == "moshi"
+        && config.voice.frontend.moshi_tap_enabled;
     #[cfg(not(feature = "moshi"))]
-    let moshi_active: bool = false;
+    let moshi_active = false;
     #[cfg(feature = "moshi")]
     #[allow(clippy::type_complexity)]
     let (moshi_tap, moshi_tap_rx): (
         Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>>,
         Option<tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>>,
     ) = if moshi_active {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
     #[cfg(not(feature = "moshi"))]
     let moshi_tap: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> = None;
-    tokio::spawn(async move {
-        audio_watcher.run(audio_tx, audio_shutdown, moshi_tap).await;
-    });
 
-    // --- Context ---
-    let context_watcher = ContextWatcher::new(config.context.clone());
-    let context_shutdown = shutdown_rx.clone();
-    let context_live_context = live_context.clone();
-    tokio::spawn(async move {
-        let _ = context_watcher
-            .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
-            .await;
-    });
+    // Health-snapshot registration (Task A8, spec §7): shared health
+    // handles grabbed before each watcher is moved into its task. `None`
+    // under pause_all, where no watcher spawns — the publisher reports
+    // those components as disabled-with-reason.
+    let mut context_watch_health: Option<SharedContextWatchHealth> = None;
+    let mut git_watch_health: Option<SharedGitWatchHealth> = None;
+    let mut file_watch_health: Option<SharedFileWatchHealth> = None;
 
-    // --- Frame builder ---
-    let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
-    let builder_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        frame_builder
-            .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
-            .await;
-    });
+    if observation_toggles.pause_all {
+        // pause_all gates the entire frame loop (spec §4.1): no watchers,
+        // no frame builder — frames are neither built nor persisted, and no
+        // source emits. Dropping the senders closes the frame channel, so
+        // the main loop's frame arm simply never fires. The paused flag is
+        // published into RuntimeSnapshot (Task A8, closing the A2 seam)
+        // and mirrored into the dashboard's SystemState by the bridge.
+        emit_system_event(
+            "toggle_change",
+            "pause_all set in [privacy.toggles]; observation fully paused — no frames will be built",
+        );
+        drop(screen_tx);
+        drop(audio_tx);
+        drop(ctx_tx);
+        drop(screen_rx);
+        drop(audio_rx);
+        drop(ctx_rx);
+        drop(frame_tx);
+    } else {
+        // --- Vision ---
+        let vision_model = init_vision_model(&config, &resource_plan).await;
+
+        let vision_watcher = VisionWatcher::new_with_live_context(
+            config.screen.clone(),
+            vision_model,
+            PathBuf::from(&config.storage.screenshots_dir),
+            live_context.clone(),
+        )
+        .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+        .with_toggle_control(toggle_control.clone())
+        .with_cadence(cadence.clone());
+        let vision_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            vision_watcher.run(screen_tx, vision_shutdown).await;
+        });
+
+        // --- Audio ---
+        let audio_watcher = AudioWatcher::new(config.audio.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_toggle_control(toggle_control.clone());
+        let audio_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            audio_watcher.run(audio_tx, audio_shutdown, moshi_tap).await;
+        });
+
+        // --- Context ---
+        let context_watcher = ContextWatcher::new(config.context.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_toggle_control(toggle_control.clone())
+            .with_project_handle(project_handle.clone())
+            .with_event_sender(event_sender.clone());
+        context_watch_health = Some(context_watcher.health_handle());
+        let context_shutdown = shutdown_rx.clone();
+        let context_live_context = live_context.clone();
+        tokio::spawn(async move {
+            let _ = context_watcher
+                .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
+                .await;
+        });
+
+        // --- Git collector (Task A5, spec §4.4) ---
+        // Watches the resolver's active confirmed project only; parks in
+        // disabled-with-reason when git is absent or the source is off.
+        let git_watcher = GitWatcher::new(config.git_context.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_toggle_control(toggle_control.clone())
+            .with_project_handle(project_handle.clone())
+            .with_event_sender(event_sender.clone());
+        git_watch_health = Some(git_watcher.health_handle());
+        let git_shutdown = shutdown_rx.clone();
+        let git_live_context = live_context.clone();
+        tokio::spawn(async move {
+            git_watcher.run(git_shutdown, Some(git_live_context)).await;
+        });
+
+        // --- File watcher (Task A7, spec §4.5) --- opt-in, default OFF.
+        // Watches every confirmed/configured project root whose zone
+        // allows; re-reads the Projects table each rearm tick so projects
+        // confirmed at runtime get watched without a restart. Parks in
+        // disabled-with-reason when [file_watcher].enabled or the files
+        // toggle is off — no notify watch is ever armed then.
+        let file_watch_log = raw_log.clone();
+        let projects_provider: ProjectsProvider = Arc::new(move || {
+            let raw_log = file_watch_log.clone();
+            Box::pin(async move {
+                match raw_log.list_projects().await {
+                    Ok(rows) => Some(rows.into_iter().map(|row| row.entry).collect()),
+                    Err(e) => {
+                        tracing::warn!(
+                            layer = "senses",
+                            component = "file_watch",
+                            error = %e,
+                            "Projects table read failed; keeping current watch set"
+                        );
+                        None
+                    }
+                }
+            })
+        });
+        let file_watcher = FileWatcher::new(config.file_watcher.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_toggle_control(toggle_control.clone())
+            .with_projects_provider(projects_provider)
+            .with_event_sender(event_sender.clone())
+            .with_recent_file(recent_file_handle.clone());
+        file_watch_health = Some(file_watcher.health_handle());
+        let file_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            file_watcher.run(file_shutdown).await;
+        });
+
+        // --- Frame builder ---
+        let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
+        let builder_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            frame_builder
+                .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
+                .await;
+        });
+    }
 
     // --- Triage ---
     let triage: Option<TriageLayer> = {
@@ -572,6 +836,19 @@ async fn main() -> Result<()> {
     {
         let status: curator::SharedCuratorStatus = Default::default();
         let llm: Arc<dyn curator::CuratorLlm> = Arc::new(triage);
+        // Task B5 (spec §4.8): goal/task inference runs in its OWN spawned
+        // task — never awaited by the frame loop. It goes through the
+        // background LLM tier (Task B2: try-acquire behind interactive
+        // triage, max_tokens clamped) and pauses entirely while idle
+        // (spec §4.11), so its whole cost is "≤ 1 call / 2 min, ≤ 256
+        // tokens, only when the user is actually here".
+        session_state::spawn_inference_task(
+            session_state.clone(),
+            llm.clone(),
+            config.session_state.clone(),
+            cadence.clone(),
+            shutdown_rx.clone(),
+        );
         // C1 fix: session-summary writes are delayed by
         // `distillation_interval_minutes + 1` past their boundary so the
         // memory distiller has time to land any tail events before
@@ -614,12 +891,27 @@ async fn main() -> Result<()> {
     // can share it.
     let orchestrator_busy: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Task 10: most recent perception frame, updated once per frame in the
-    // main loop below. The maintenance-wake ticker uses this as the trigger
-    // frame for its `do_wake` call instead of fabricating one — per
-    // non-negotiable design, a wake always carries a real observation.
-    let last_frame: Arc<std::sync::Mutex<Option<PerceptionFrame>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    // Task 10 / Task B7 (spec §4.9): the rolling recent-frames ring. The
+    // frame loop pushes every frame; every wake path snapshot-clones it
+    // under a short guard (never held across an await — see [`FrameRing`]).
+    //
+    // Pre-B7 this was a loop-local `Vec` plus a separate `last_frame`
+    // slot for the maintenance-wake ticker, which therefore had to pass
+    // `&[]` as history. One shared ring replaces both: the ticker's
+    // trigger frame is `latest()` and its history is
+    // `snapshot_excluding(trigger.id)` — a maintenance wake now sees the
+    // same "just before" the triage path does. It still never fabricates a
+    // frame: an empty ring skips the wake.
+    let recent_frames = FrameRing::new(wake_context::FRAME_RING_CAP);
+
+    // Busy CAS + one-deep latest-wins slot for off-loop triage (Task B2;
+    // mirrors the do_wake `try_claim_busy` pattern). Only the main loop's
+    // thread touches the coalescer itself; its cloneable health handle is
+    // read by the publish closure below (C1 stuck detection), which is why
+    // it is constructed here rather than next to the loop.
+    let triage_coalescer: TriageCoalescer<(PerceptionFrame, Option<CurrentProject>)> =
+        TriageCoalescer::new();
+    let triage_busy_health = triage_coalescer.health();
 
     // --- Runtime state publisher ---
     //
@@ -655,9 +947,14 @@ async fn main() -> Result<()> {
                 resource_plan: Some(resource_plan.clone()),
                 last_update: chrono::Utc::now().to_rfc3339(),
                 // Overwritten every tick by the publisher closure below
-                // (via `build_curator_snapshot`); `None` here is never
+                // (via `build_curator_snapshot` /
+                // `build_context_engine_snapshot`); `None` here is never
                 // actually published.
                 curator: None,
+                paused: None,
+                context_engine: None,
+                session_state: None,
+                context_page: None,
             },
         ));
     // Moshi S2S front-end (feature = "moshi"): now that `runtime_state` is in
@@ -705,6 +1002,65 @@ async fn main() -> Result<()> {
         let curator_status_for_publisher = curator_status.clone();
         let curator_enabled = config.memory.curator.enabled;
         let speech_clone = speech.clone();
+        // Task A8 (spec §7): the runtime has no HealthRegistry — this
+        // publish closure IS the context-engine health registration.
+        // Every tick it reads the shared health handles and folds them
+        // into `RuntimeSnapshot.context_engine` for the repair agent.
+        let paused = observation_toggles.pause_all;
+        let health_cadence = cadence.clone();
+        let health_hub = live_context.clone();
+        let health_context = context_watch_health.clone();
+        let health_git = git_watch_health.clone();
+        let health_file = file_watch_health.clone();
+        let health_writer = event_writer_health.clone();
+        let health_triage = triage_busy_health.clone();
+        let triage_enabled = triage.is_some();
+        let screen_capture_enabled = config.screen.enabled && !paused;
+        let context_poll_interval = Duration::from_secs(config.context.poll_interval_secs.max(1));
+        // Task C1 (spec §4.8 consumers): publish the live session state on
+        // every tick. Three consumers read this key straight out of
+        // `state.json` — boot rehydration (B5), the desktop chat profile
+        // (B8) and the `context_session` MCP tool (C3). The RAW state is
+        // published, never `cloud_view()`: each consumer owns its own
+        // cloud gate, and a local reader may see the real text (§4.1).
+        let session_for_publisher = session_state.clone();
+        // Task C5 (spec §4.13): the Context page's list data is refreshed
+        // on its own slower ticker — four SQLite reads are far too heavy
+        // for the 2 s publish tick — into a shared cell the publish
+        // closure clones.
+        let context_page: Arc<parking_lot::RwLock<ContextPageSnapshot>> =
+            Arc::new(parking_lot::RwLock::new(ContextPageSnapshot::default()));
+        {
+            let cell = context_page.clone();
+            let sources = ContextPageSources {
+                raw_log: raw_log.clone(),
+                session: session_state.clone(),
+                project_handle: project_handle.clone(),
+                toggles: toggle_control.clone(),
+                privacy: privacy_filter.clone(),
+                continuation: config.continuation.clone(),
+            };
+            let mut shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(Duration::from_secs(CONTEXT_PAGE_REFRESH_SECS));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            let snapshot = build_context_page_snapshot(&sources).await;
+                            *cell.write() = snapshot;
+                        }
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        let context_page_for_publisher = context_page.clone();
         continuum_core::runtime_publish::spawn_publisher(
             dev_dir.join("state.json"),
             2,
@@ -731,6 +1087,21 @@ async fn main() -> Result<()> {
                     curator_status_for_publisher.as_ref(),
                     curator_enabled,
                 ));
+                snap.paused = Some(paused);
+                snap.session_state = Some(session_for_publisher.snapshot());
+                snap.context_page = Some(context_page_for_publisher.read().clone());
+                snap.context_engine = Some(build_context_engine_snapshot(
+                    &health_cadence,
+                    &health_hub,
+                    health_context.as_ref(),
+                    health_git.as_ref(),
+                    health_file.as_ref(),
+                    &health_writer,
+                    &health_triage,
+                    triage_enabled,
+                    screen_capture_enabled,
+                    context_poll_interval,
+                ));
                 snap
             },
         );
@@ -752,12 +1123,24 @@ async fn main() -> Result<()> {
         dev_dir.clone(),
         speech.clone(),
         feedback.clone(),
-        last_frame.clone(),
+        recent_frames.clone(),
+        WakeSources {
+            raw_log: raw_log.clone(),
+            package: config.context_package.clone(),
+            continuation: config.continuation.clone(),
+        },
         followup_until.clone(),
         config.voice.conversation_followup_seconds,
         config.voice.ambient_mute_enabled,
         orchestrator_busy.clone(),
         runtime_state.clone(),
+        project_handle.clone(),
+        idle_controller.clone(),
+        cadence.clone(),
+        live_context.clone(),
+        session_state.clone(),
+        config.session_state.confidence_floor,
+        audit.clone(),
         shutdown_rx.clone(),
     );
 
@@ -787,54 +1170,374 @@ async fn main() -> Result<()> {
     // Skip the first immediate tick so we don't drain before the loop even starts.
     voice_intent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // --- Task B2 (spec §4.7): off-loop triage plumbing ---
+    // Decision consumption runs from two select arms (voice decisions in
+    // the frame arm, off-loop triage results in the triage arm), so its
+    // shared dependencies are bundled once here for `handle_triage_decision`
+    // instead of being cloned at two call sites.
+    // --- Task B3 (spec §4.7 consumption): classification consumer ---
+    // Turns each triage output's classification into a context event, a
+    // vault memory candidate, and the frame's `triage_decision` column.
+    // `known_projects` is the resolver's id set: a classifier-emitted
+    // project outside it is dropped to the resolver's value (spec §4.6).
+    let classification_consumer = ClassificationConsumer::new(
+        event_sender.clone(),
+        vault.clone(),
+        raw_log.clone(),
+        privacy_filter.clone(),
+        config.memory.candidate_ttl_days,
+        project_resolver
+            .projects()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect(),
+        // The candidate gate follows the events writer's collapse window:
+        // one memory candidate per collapsed row, not one per occurrence.
+        config.events.collapse_window_minutes,
+    );
+    // Task B7 (spec §4.9): the runtime-full packager's own sources —
+    // deduped `context_events` for the just-before/changes/failures
+    // sections, plus the `[context_package]` budget + caps.
+    let wake_sources = WakeSources {
+        raw_log: raw_log.clone(),
+        package: config.context_package.clone(),
+        continuation: config.continuation.clone(),
+    };
+    let decision_ctx = DecisionCtx {
+        classification: classification_consumer,
+        frames: recent_frames.clone(),
+        wake_sources: wake_sources.clone(),
+        orchestrator_busy: orchestrator_busy.clone(),
+        idle_controller: idle_controller.clone(),
+        cadence: cadence.clone(),
+        live_context: live_context.clone(),
+        speech: speech.clone(),
+        feedback: feedback.clone(),
+        followup_until: followup_until.clone(),
+        followup_secs: config.voice.conversation_followup_seconds,
+        ambient_mute_enabled: config.voice.ambient_mute_enabled,
+        orch_config: orch_config.clone(),
+        semantic: semantic.clone(),
+        episodic: episodic.clone(),
+        vault: vault.clone(),
+        curator_cfg: config.memory.curator.clone(),
+        runtime_state: runtime_state.clone(),
+        skill_loader: skill_loader.clone(),
+        skill_token_budget: config.skills.token_budget,
+        dev_dir: dev_dir.clone(),
+        session_state: session_state.clone(),
+        session_confidence_floor: config.session_state.confidence_floor,
+        audit: audit.clone(),
+        #[cfg(feature = "moshi")]
+        moshi_frontend: moshi_frontend.clone(),
+        shutdown_rx: shutdown_rx.clone(),
+    };
+    // Spawned evaluations send their TriageOutput back into the loop here.
+    // Unbounded is safe: the coalescer admits at most one evaluation at a
+    // time, so the channel never holds more than one message in practice
+    // (plus, at most, one fallback from a dead evaluation task — C1).
+    let (triage_result_tx, mut triage_result_rx) = mpsc::unbounded_channel::<TriageEvalResult>();
+    // Frame ids whose in-flight/parked triage evaluation was superseded by
+    // a voice or forced wake on the same frame — their results are dropped
+    // on arrival, preserving the pre-B2 `.or_else` discard semantics.
+    // Bounded by construction: at most one in-flight + one parked frame
+    // can hold live entries, and every path removes what it consumes.
+    let mut voice_superseded: Vec<uuid::Uuid> = Vec::new();
+
     // --- Main loop ---
+    // Task B2 invariant (spec §4.7): NO arm of this select loop ever
+    // awaits LLM work. Triage evaluations are tokio::spawn'ed (the frame
+    // arm submits, the triage arm consumes their results) and orchestrator
+    // wakes are spawned tasks, so the 250 ms voice-intent ticker and the
+    // hotkey arm are always serviced within a scheduler tick, whatever the
+    // GPU is doing. Keep it that way: any new arm that needs the local
+    // model must go through the same spawn-and-channel pattern.
     let mut frame_count: u64 = 0;
-    let mut recent_frames: Vec<PerceptionFrame> = Vec::new();
     let mut main_shutdown = shutdown_rx.clone();
     let wake_detector = TranscriptWakeDetector::new(config.voice.wake_keyword.clone());
     let mut voice_session: Option<VoiceSession> = None;
     let mut hotkey_pending: bool = false;
+    // Task C5 (spec §4.13): Context-page intents are drained on the same
+    // 250 ms ticker as the dashboard's push-to-talk intents. Both are
+    // dashboard→runtime filesystem messages, and neither may block the
+    // loop: intent handlers touch SQLite/LanceDB/the vault, never the LLM.
+    let mut context_intents = IntentDrainer::new();
+    let mut project_pin_guard = ProjectPinGuard::new();
+    if let Err(e) = context_intent::ensure_intents_dir(&dev_dir) {
+        tracing::warn!(
+            layer = "context",
+            component = "intent",
+            error = %e,
+            "Failed to create context-intents dir; Context page actions will be ignored"
+        );
+    }
+    // I1: deletion intents run on this single worker task instead of the
+    // select loop. One task (not one per intent) keeps them strictly in
+    // drain order — a `forget` queued before a `delete_range` still
+    // applies first — while the loop stays free to service voice. The
+    // worker ends when the loop drops the sender at shutdown.
+    let (deferred_intent_tx, mut deferred_intent_rx) =
+        mpsc::unbounded_channel::<continuum_core::context::intents::ContextIntent>();
+    {
+        let deferred_ctx = DeferredIntentContext {
+            raw_log: raw_log.clone(),
+            episodic: episodic.clone(),
+            vault: vault.clone(),
+            audit: audit.clone(),
+            screenshot_policy: ScreenshotPolicy::from(&config.storage),
+        };
+        tokio::spawn(async move {
+            while let Some(intent) = deferred_intent_rx.recv().await {
+                let _ = apply_deferred_intent(&deferred_ctx, &intent).await;
+            }
+            tracing::debug!(
+                layer = "context",
+                component = "intent",
+                "Deferred intent worker stopped"
+            );
+        });
+    }
+    // Boot rehydration of the persisted pins (spec §4.13 "all overrides and
+    // pins survive restart"). Override rules were already loaded into the
+    // resolver above; pins live on the session state.
+    match raw_log.list_session_pins().await {
+        Ok(pins) => {
+            for (field, value, _project) in pins {
+                if let Some(field) = SessionField::parse(&field) {
+                    session_state.set_pin(field, value.as_deref(), chrono::Utc::now());
+                }
+            }
+        }
+        Err(e) => tracing::warn!(
+            layer = "context",
+            component = "continuum",
+            error = %e,
+            "Failed to load session pins; starting unpinned"
+        ),
+    }
 
     loop {
         tokio::select! {
             Some(frame) = frame_rx.recv() => {
                 frame_count += 1;
+                // M2: read the four counters through the cheap accessors
+                // BEFORE taking the `runtime_state` mutex. `snapshot()`
+                // cloned every monitor, the whole event ring and the
+                // session state — under a mutex the publisher also takes —
+                // to fill four numbers.
+                let capture_health = live_context.health();
+                let monitor_count = live_context.monitor_count();
                 if let Ok(mut s) = runtime_state.lock() {
                     s.frame_count = frame_count;
-                    let world = live_context.snapshot();
-                    s.monitor_count = world.monitors.len();
-                    s.capture_event_count = world.health.capture_events;
-                    s.dropped_capture_event_count = world.health.dropped_capture_events;
-                    s.last_capture_at = world.health.last_capture_at;
+                    s.monitor_count = monitor_count;
+                    s.capture_event_count = capture_health.capture_events;
+                    s.dropped_capture_event_count = capture_health.dropped_capture_events;
+                    s.last_capture_at = capture_health.last_capture_at;
                     let ambient_active = config.voice.ambient_mute_enabled && frame.context.in_call;
                     s.ambient_mute_active = Some(ambient_active);
                     s.detected_call_app = ambient_active
                         .then(|| frame.context.foreground_process_name.clone());
                 }
 
-                // Task 10: publish the latest frame for the daily
-                // memory-maintenance ticker. It never fabricates a frame —
-                // it waits for this to be `Some` before it can fire at all.
+                // Idle controller (Task A8, spec §4.11): mechanical — the
+                // context watcher's idle_seconds either crosses the
+                // threshold (enter idle: relaxed cadences via the shared
+                // CadenceControl) or drops on input activity (exit).
+                // Voice wake / hotkey / do_wake restores are handled at
+                // their own trigger sites below.
                 {
-                    let mut lf = match last_frame.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
+                    let transition = {
+                        let mut ctrl = idle_controller
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        ctrl.on_frame(frame.context.idle_seconds, &cadence)
                     };
-                    *lf = Some(frame.clone());
+                    apply_idle_transition(transition, &live_context);
                 }
+
+                // Project resolver (Task A4, spec §4.3): resolve once per
+                // frame; every consumer below receives this single result.
+                // The file-event path (Task A7): the file watcher's most
+                // recent non-ignored event path activates tier-3 git-root
+                // resolution; None (watcher off/idle) skips tier 3.
+                let recent_file = recent_file_handle.read().clone();
+                let project_outcome = project_resolver.observe(&FrameInput {
+                    process_name: &frame.context.foreground_process_name,
+                    window_title: &frame.context.foreground_window_title,
+                    recent_file_path: recent_file.as_deref(),
+                    ts: frame.ts,
+                });
+                if let Some(switch) = &project_outcome.switched {
+                    // Events channel (Task A6): project_switch is emitted
+                    // pre-stamped with the new project id. Unattributed
+                    // producers are stamped by the events-writer from the
+                    // shared project handle — no per-frame buffer pass.
+                    event_sender.send(project_switch_event(
+                        switch.from.as_deref(),
+                        &switch.to,
+                        &frame.context.foreground_process_name,
+                        &frame.context.foreground_window_title,
+                        // Fixwave 3b (minor): the destination project's
+                        // zone decides the event's sensitivity, exactly as
+                        // it does for the git and file collectors.
+                        project_outcome.current.as_ref().and_then(|p| p.zone),
+                        switch.ts,
+                    ));
+                }
+                // I2: the per-frame SQLite writes below are fire-and-forget
+                // bookkeeping — nothing in this arm reads their result.
+                // Awaiting them inline put the whole select loop (voice
+                // ticker, hotkey) behind a pool that the events writer
+                // holds across `BEGIN IMMEDIATE` batches and hourly
+                // rotation. They are spawned instead; the pool's 250 ms
+                // busy_timeout keeps a spawned write from queueing behind
+                // a lock for long, and failures are logged exactly as
+                // before.
+                if let Some(current) = &project_outcome.current {
+                    let raw_log = raw_log.clone();
+                    let project_id = current.id.clone();
+                    let ts = frame.ts;
+                    tokio::spawn(async move {
+                        if let Err(e) = raw_log.bump_project_stats(&project_id, ts).await {
+                            tracing::debug!(
+                                layer = "context",
+                                component = "continuum",
+                                error = %e,
+                                "project stats bump failed"
+                            );
+                        }
+                    });
+                }
+                for candidate in &project_outcome.discovered {
+                    // Persist the proposal row (status discovered). Never
+                    // collected from until confirmed (spec §4.3).
+                    let entry = ProjectEntry {
+                        id: candidate.id.clone(),
+                        name: candidate.name.clone(),
+                        root_paths: vec![candidate.root_path.clone()],
+                        repo: None,
+                        keywords: Vec::new(),
+                        zone: None,
+                        status: ProjectStatus::Discovered,
+                    };
+                    let raw_log = raw_log.clone();
+                    let candidate_id = candidate.id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = raw_log.upsert_project(&entry).await {
+                            tracing::warn!(
+                                layer = "context",
+                                component = "continuum",
+                                id = %candidate_id,
+                                error = %e,
+                                "failed to persist discovered project candidate"
+                            );
+                        }
+                    });
+                }
+                let current_project = project_outcome.current.clone();
+
+                // Task B5 (spec §4.8): mechanical session-state update.
+                // Synchronous, lock-scoped, no I/O — project, app, window
+                // title and a best-effort open-file guess from the editor
+                // title. A project change here clears the inferred
+                // goal/task and arms the inference trigger.
+                session_state.apply_frame(&frame, current_project.as_ref());
+
+                // Task C5 (spec §4.13): a pinned project expires once the
+                // resolver has confidently disagreed for `switch_min_secs`
+                // — the rule that keeps a pin from deadlocking against
+                // reality. The pin never blocks resolution; only the
+                // session-state field it froze.
+                {
+                    let pinned_project = session_state
+                        .snapshot()
+                        .pinned
+                        .iter()
+                        .any(|f| f == SessionField::Project.as_str())
+                        .then(|| session_state.snapshot().active_project.clone())
+                        .flatten();
+                    if let Some(pinned) = pinned_project {
+                        let resolved = current_project
+                            .as_ref()
+                            .map(|p| (p.id.as_str(), p.confidence));
+                        if project_pin_guard.observe(
+                            &pinned,
+                            resolved,
+                            chrono::Duration::seconds(config.projects.switch_min_secs as i64),
+                            frame.ts,
+                        ) {
+                            tracing::info!(
+                                layer = "context",
+                                component = "continuum",
+                                pinned = %pinned,
+                                "Clearing the project pin — the resolver has disagreed for switch_min_secs"
+                            );
+                            session_state.set_pin(SessionField::Project, None, frame.ts);
+                            // I2: the live pin is already cleared above;
+                            // persisting that is best-effort and must not
+                            // hold the loop (see the comment on the stats
+                            // bump).
+                            {
+                                let raw_log = raw_log.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = raw_log
+                                        .clear_session_pin(SessionField::Project.as_str())
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            layer = "context",
+                                            component = "continuum",
+                                            error = %e,
+                                            "Failed to clear the persisted project pin"
+                                        );
+                                    }
+                                });
+                            }
+                            audit.record(
+                                "correction",
+                                Actor::Agent,
+                                format!(
+                                    "Cleared the project pin \"{pinned}\" — the resolver \
+                                     disagreed for {}s",
+                                    config.projects.switch_min_secs
+                                ),
+                                None,
+                            );
+                        }
+                    } else {
+                        // Fixwave 3b (I4): no pin this frame — forget any
+                        // divergence still being timed. Without this a
+                        // brand-new pin inherited a stale start timestamp
+                        // and could be cleared on its very first frame.
+                        project_pin_guard.reset();
+                    }
+                }
+
+                // Task C1: mirror the (just-updated) session state into the
+                // live-context hub so `live-context.json` and every
+                // in-process `compact_for_agents` blob carry it too. Taking
+                // the whole snapshot here also picks up event- and
+                // inference-driven changes since the previous frame; the
+                // hub bumps its content version only when something other
+                // than `updated` actually changed, so a static session
+                // causes no extra publish.
+                live_context.record_session_state(session_state.snapshot());
 
                 // Curator (Plan B): publish the latest activity signal so the
                 // curator's project-aware context (Task 9) has fresh data
                 // between ticks. Send is a no-op if the curator never spawned
                 // (no triage model) — nothing is listening, that's fine.
-                let _ = activity_tx.send(curator::run::ActivitySignal {
-                    project_hint: infer_project_hint(&frame),
-                    process: frame.context.foreground_process_name.clone(),
-                    idle_seconds: frame.context.idle_seconds,
-                    ts: Some(frame.context.ts),
-                });
+                //
+                // Fixwave 3b (C4): the hint is the resolver's
+                // post-hysteresis output or nothing. It used to fall back to
+                // the legacy frame-only keyword hint, which wrote durable,
+                // unvalidated project attribution into the vault — see
+                // `ActivitySignal::project_hint`.
+                let _ = activity_tx.send(curator::run::activity_signal(
+                    &frame,
+                    current_project.as_ref(),
+                ));
 
-                let audio_text = frame.audio.as_ref().map(|a| a.transcript.as_str()).unwrap_or("");
                 let ts = frame.ts.format("%H:%M:%S");
 
                 // Triage gate — skip the Qwen call when the frame carries
@@ -856,11 +1559,29 @@ async fn main() -> Result<()> {
                     .audio
                     .as_ref()
                     .is_some_and(|a| !a.transcript.trim().is_empty());
-                let skip_triage = frame.salience_hint < config.frame.salience_threshold
-                    && !has_audio
-                    && !frame.screen.has_error_visible;
+                // Idle triage gate (Task A8, spec §4.11): while idle,
+                // triage runs ONLY for frames with a visible error or
+                // audio — the same mechanical inputs the salience gate
+                // already uses, implemented as this skip predicate. No
+                // triage-layer code changes.
+                let idle_triage_gated =
+                    cadence.is_idle() && !has_audio && !frame.screen.has_error_visible;
+                let skip_triage = idle_triage_gated
+                    || (frame.salience_hint < config.frame.salience_threshold
+                        && !has_audio
+                        && !frame.screen.has_error_visible);
 
-                let decision: Option<TriageDecision> = if let Some(ref triage_layer) = triage {
+                // Task B2 (spec §4.7): triage runs OFF the main loop. A
+                // gated frame goes to the coalescer: if no evaluation is in
+                // flight, one is tokio::spawn'ed for it (mirroring the
+                // do_wake CAS pattern) and its `TriageOutput` returns
+                // through the `triage_result_rx` select arm below; if one
+                // IS in flight, the frame parks in a one-deep latest-wins
+                // slot, so a burst of gated frames coalesces to the newest.
+                // This arm never awaits the LLM.
+                let mut inline_decision: Option<TriageDecision> = None;
+                let mut submitted_for_triage = false;
+                if let Some(ref triage_layer) = triage {
                     if skip_triage {
                         tracing::trace!(
                             layer = "triage",
@@ -869,29 +1590,35 @@ async fn main() -> Result<()> {
                             salience = frame.salience_hint,
                             "Skipped triage — low-salience idle frame"
                         );
-                        Some(TriageDecision::Ignore)
+                        inline_decision = Some(TriageDecision::Ignore);
                     } else {
-                        let triage_start = Instant::now();
-                        let d = triage_layer.evaluate(&frame, "").await;
-                        let triage_ms = triage_start.elapsed().as_millis();
-
-                        tracing::debug!(
-                            layer = "triage",
-                            component = "continuum",
-                            decision = d.variant_name(),
-                            latency_ms = triage_ms as u64,
-                            "Triage decision"
-                        );
-
-                        println!(
-                            "[{ts}] {app} | \"{desc}\" | audio=\"{audio}\" | triage={decision}",
-                            app = frame.context.foreground_process_name,
-                            desc = truncate(&frame.screen.description, 50),
-                            audio = truncate(audio_text, 30),
-                            decision = d.variant_name(),
-                        );
-
-                        Some(d)
+                        match triage_coalescer.submit((frame.clone(), current_project.clone())) {
+                            Submitted::Evaluate((eval_frame, eval_project)) => {
+                                spawn_triage_eval(
+                                    triage_layer.clone(),
+                                    eval_frame,
+                                    eval_project,
+                                    session_state.clone(),
+                                    config.session_state.confidence_floor,
+                                    triage_result_tx.clone(),
+                                );
+                            }
+                            Submitted::Coalesced { replaced } => {
+                                if let Some((old, _)) = replaced {
+                                    // The displaced frame will never produce
+                                    // a triage result — drop any supersede
+                                    // bookkeeping keyed on it.
+                                    voice_superseded.retain(|id| *id != old.id);
+                                }
+                                tracing::trace!(
+                                    layer = "triage",
+                                    component = "continuum",
+                                    frame_id = %frame.id,
+                                    "Triage busy — frame parked (latest-wins)"
+                                );
+                            }
+                        }
+                        submitted_for_triage = true;
                     }
                 } else {
                     println!(
@@ -900,30 +1627,41 @@ async fn main() -> Result<()> {
                         desc = truncate(&frame.screen.description, 50),
                         sal = frame.salience_hint,
                     );
-                    None
-                };
-
-                // Write to raw log.
-                if let Err(e) = raw_log.write_frame(&frame).await {
-                    tracing::error!(
-                        layer = "senses",
-                        component = "continuum",
-                        error = %e,
-                        "Raw log write failed"
-                    );
                 }
 
-                // Keep recent frames for wake context.
+                // Write to raw log. Privacy contract (spec §4.1): every
+                // free-text field in the frame — window title, vision
+                // captions inside the compact description, audio
+                // transcript — was scrubbed at collector emit, and
+                // never_observe windows arrive as the sentinel
+                // observation, so the raw log never stores unfiltered
+                // content by construction.
+                //
+                // I2: spawned, not awaited. Frames are independent rows
+                // keyed on their own `ts`, and every reader orders by `ts`,
+                // so a best-effort out-of-order INSERT is harmless — while
+                // an inline await parked the voice ticker behind whatever
+                // the events writer was holding.
+                {
+                    let raw_log = raw_log.clone();
+                    let frame_for_log = frame.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = raw_log.write_frame(&frame_for_log).await {
+                            tracing::error!(
+                                layer = "senses",
+                                component = "continuum",
+                                error = %e,
+                                "Raw log write failed"
+                            );
+                        }
+                    });
+                }
+
+                // Keep recent frames for wake context (Task B7: the shared
+                // ring, also read by the maintenance-wake ticker).
                 recent_frames.push(frame.clone());
-                if recent_frames.len() > 10 {
-                    recent_frames.remove(0);
-                }
 
-                // In Moshi S2S mode the front-end is always-listening — skip
-                // the wake-word / pipeline voice-session machinery. Triage
-                // still runs on the whisper user transcript (above) and
-                // drives escalation via the `WakeOrchestrator` arm, which
-                // `interrupt()`s Moshi while the orchestrator speaks.
+                let session_was_open = voice_session.is_some();
                 #[cfg(feature = "moshi")]
                 let voice_decision = if moshi_frontend.is_some() {
                     None
@@ -937,6 +1675,7 @@ async fn main() -> Result<()> {
                         &mut hotkey_pending,
                         speech.as_ref(),
                         &feedback,
+                        &session_state,
                     )
                 };
                 #[cfg(not(feature = "moshi"))]
@@ -949,7 +1688,16 @@ async fn main() -> Result<()> {
                     &mut hotkey_pending,
                     speech.as_ref(),
                     &feedback,
+                    &session_state,
                 );
+                // Idle restore trigger (Task A8, spec §4.11): a voice
+                // session just opened — wake phrase, hotkey-armed
+                // transcript, or follow-up window — so the user is
+                // audibly present even though idle_seconds may still be
+                // high (speaking produces no keyboard/mouse input).
+                if !session_was_open && voice_session.is_some() {
+                    idle_wake_restore(&idle_controller, &cadence, &live_context);
+                }
                 if !moshi_active
                     && !orchestrator_busy.load(std::sync::atomic::Ordering::Acquire)
                 {
@@ -972,225 +1720,132 @@ async fn main() -> Result<()> {
                         suggested_skill: None,
                     })
                 } else {
-                    voice_decision.or_else(|| decision.clone())
+                    // Voice intents outrank triage (pre-B2 shape:
+                    // `voice_decision.or_else(|| decision)`; triage results
+                    // now arrive asynchronously in the triage arm below, so
+                    // only the skip-path Ignore is still inline here).
+                    voice_decision.or(inline_decision)
                 };
 
-                // Handle decision.
+                // Handle voice / forced / skip-path decisions. Task B2
+                // precedence preservation: pre-B2, `.or_else` discarded the
+                // same-frame triage decision whenever a voice decision (or
+                // the forced wake) won — so a frame whose evaluation is
+                // still in flight or parked is marked superseded here and
+                // its off-loop result is dropped on arrival in the triage
+                // arm below.
                 if let Some(ref decision) = effective_decision {
-                    match decision {
-                        TriageDecision::WakeOrchestrator { reason, suggested_skill } => {
-                            // If we're already inside a wake (orchestrator still
-                            // streaming from a previous trigger), don't stack — log
-                            // and skip. The user's latest utterance still landed in
-                            // the raw log; they can ask again.
-                            if !try_claim_busy(&orchestrator_busy) {
-                                tracing::warn!(
-                                    layer = "orchestrator",
-                                    component = "continuum",
-                                    reason = %reason,
-                                    "Orchestrator already busy — skipping new wake"
-                                );
-                            } else {
-                                let history = recent_frames[..recent_frames.len().saturating_sub(1)].to_vec();
-                                let wake_speech_opt = if config.voice.ambient_mute_enabled && frame.context.in_call {
-                                    tracing::info!(
-                                        layer = "voice",
-                                        component = "continuum",
-                                        "Quiet mode active during call; orchestrator response will not be spoken"
-                                    );
-                                    None
-                                } else {
-                                    speech.clone()
-                                };
-
-                                // Phase 3 tier-split: mute Moshi's assistant
-                                // output + send EndTurn so the orchestrator +
-                                // Kokoros speak unobstructed. `resume()` runs in
-                                // the spawned task once the wake finishes.
-                                #[cfg(feature = "moshi")]
-                                if let Some(fe) = moshi_frontend.as_ref() {
-                                    fe.interrupt();
-                                    tracing::info!(
-                                        layer = "voice",
-                                        component = "moshi",
-                                        "Moshi interrupted for orchestrator escalation"
-                                    );
-                                }
-
-                                // Spawn the wake as a tokio task so the main loop
-                                // keeps draining frame_rx. If we awaited here,
-                                // triage would queue up 5–15 stale frames while
-                                // Opus streams for 5–10 s, and every subsequent
-                                // response would be that many seconds behind reality.
-                                // (Busy flag already claimed above by try_claim_busy.)
-                                if let Ok(mut s) = runtime_state.lock() {
-                                    s.wake_count += 1;
-                                    s.voice_mode = Some("thinking".to_string());
-                                }
-                                let busy_flag = orchestrator_busy.clone();
-                                let followup_shared = followup_until.clone();
-                                let orch_cfg_clone = orch_config.clone();
-                                let semantic_clone = semantic.clone();
-                                let episodic_clone = episodic.clone();
-                                let vault_clone = vault.clone();
-                                let curator_cfg_clone = config.memory.curator.clone();
-                                let feedback_clone = feedback.clone();
-                                let frame_clone = frame.clone();
-                                let reason_clone = reason.clone();
-                                let followup_secs = config.voice.conversation_followup_seconds;
-                                let runtime_state_clone = runtime_state.clone();
-                                let skill_loader_clone = skill_loader.clone();
-                                let suggested_skill_clone = suggested_skill.clone();
-                                let skill_budget = config.skills.token_budget;
-                                let dev_dir_clone = dev_dir.clone();
-                                let mut wake_shutdown = shutdown_rx.clone();
-                                #[cfg(feature = "moshi")]
-                                let moshi_frontend_clone = moshi_frontend.clone();
-
-                                tokio::spawn(async move {
-                                    // Race the wake against the runtime's shutdown
-                                    // signal: on Ctrl-C we abort the in-flight
-                                    // wake so the claude subprocess is killed
-                                    // (via kill_on_drop on the tokio Command)
-                                    // rather than orphaned.
-                                    let result = tokio::select! {
-                                        r = do_wake(
-                                            &frame_clone,
-                                            &history,
-                                            &reason_clone,
-                                            &orch_cfg_clone,
-                                            &semantic_clone,
-                                            &episodic_clone,
-                                            &vault_clone,
-                                            &curator_cfg_clone,
-                                            wake_speech_opt.as_ref(),
-                                            &skill_loader_clone,
-                                            suggested_skill_clone.as_deref(),
-                                            skill_budget,
-                                            &dev_dir_clone,
-                                        ) => r,
-                                        _ = wake_shutdown.changed() => {
-                                            if *wake_shutdown.borrow() {
-                                                tracing::info!(
-                                                    layer = "orchestrator",
-                                                    component = "continuum",
-                                                    "Shutdown received — aborting in-flight wake"
-                                                );
-                                                Ok(())
-                                            } else {
-                                                // Spurious change (sender still 'false') — continue waiting.
-                                                do_wake(
-                                                    &frame_clone,
-                                                    &history,
-                                                    &reason_clone,
-                                                    &orch_cfg_clone,
-                                                    &semantic_clone,
-                                                    &episodic_clone,
-                                                    &vault_clone,
-                                                    &curator_cfg_clone,
-                                                    wake_speech_opt.as_ref(),
-                                                    &skill_loader_clone,
-                                                    suggested_skill_clone.as_deref(),
-                                                    skill_budget,
-                                                    &dev_dir_clone,
-                                                )
-                                                .await
-                                            }
-                                        }
-                                    };
-
-                                    match result {
-                                        Ok(()) => {
-                                            if followup_secs > 0 {
-                                                if let Ok(mut slot) = followup_shared.lock() {
-                                                    *slot = Some(
-                                                        Instant::now()
-                                                            + Duration::from_secs(followup_secs),
-                                                    );
-                                                }
-                                                tracing::debug!(
-                                                    layer = "voice",
-                                                    component = "continuum",
-                                                    seconds = followup_secs,
-                                                    "Follow-up window open"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                layer = "orchestrator",
-                                                component = "continuum",
-                                                error = %e,
-                                                "Orchestrator wake failed"
-                                            );
-                                            println!("[ORCHESTRATOR ERROR: {e}]");
-                                            feedback_clone.play(FeedbackCue::Error);
-                                        }
-                                    }
-
-                                    busy_flag.store(false, std::sync::atomic::Ordering::Release);
-                                    if let Ok(mut s) = runtime_state_clone.lock() {
-                                        s.voice_mode = Some("idle".to_string());
-                                    }
-                                    // Phase 3 tier-split: hand the conversation back
-                                    // to Moshi — unmute its assistant output so
-                                    // the S2S front-end resumes natural turn-taking.
-                                    #[cfg(feature = "moshi")]
-                                    if let Some(fe) = moshi_frontend_clone.as_ref() {
-                                        fe.resume();
-                                        tracing::info!(
-                                            layer = "voice",
-                                            component = "moshi",
-                                            "Moshi resumed after orchestrator turn"
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                        TriageDecision::Whisper { text } => {
-                            // Don't step on the orchestrator's speech — if a wake
-                            // is already streaming through TTS, a concurrent
-                            // whisper would either queue behind it (adding delay)
-                            // or race with it (interrupt noise). Silently drop.
-                            if orchestrator_busy.load(std::sync::atomic::Ordering::Acquire) {
-                                tracing::debug!(
-                                    layer = "triage",
-                                    component = "continuum",
-                                    decision = "whisper",
-                                    text = %text,
-                                    "Suppressed whisper — orchestrator already speaking"
-                                );
-                            } else {
-                            // Phase 5.1: triage-driven local speech, no orchestrator wake.
-                            tracing::info!(
-                                layer = "triage",
-                                component = "continuum",
-                                decision = "whisper",
-                                text = %text,
-                                "Whispering via TTS"
-                            );
-                            if config.voice.ambient_mute_enabled && frame.context.in_call {
-                                println!("[quiet mode: would say via TTS: {text}]");
-                            } else if let Some(ref sc) = speech {
-                                let language = frame.audio.as_ref().map(|a| a.language.as_str());
-                                sc.say_with_language(text, language);
-                            } else {
-                                println!("[would say via TTS: {text}]");
-                            }
-                            }
-                        }
-                        _ => {
-                            if let Err(e) = handle_decision(decision) {
-                                tracing::warn!(
-                                    layer = "triage",
-                                    component = "continuum",
-                                    error = %e,
-                                    "Handler failed"
-                                );
-                            }
-                        }
+                    if submitted_for_triage {
+                        voice_superseded.push(frame.id);
                     }
+                    // No classification on this path: voice/forced/skip
+                    // decisions never came from the model (Task B3).
+                    handle_triage_decision(
+                        decision,
+                        &frame,
+                        current_project.as_ref(),
+                        None,
+                        &decision_ctx,
+                    );
                 }
+            }
+            Some(eval) = triage_result_rx.recv() => {
+                // Task B2 (spec §4.7): off-loop triage result arrives.
+                // Decision consumption is identical in order and semantics
+                // to the pre-B2 inline path — the frame's own log line
+                // prints, then the decision routes through the same
+                // handler the voice path uses.
+                let TriageEvalResult { frame_id, outcome } = eval;
+                let Some(TriageEvalOutcome {
+                    frame: eval_frame,
+                    current_project: eval_project,
+                    output,
+                    latency_ms,
+                }) = outcome
+                else {
+                    // C1: the evaluation task died (panic / cancellation)
+                    // and its drop guard reported instead. Nothing to
+                    // consume — drop this frame's bookkeeping and fall
+                    // through to the chain below, which releases the
+                    // coalescer (or starts the parked frame).
+                    voice_superseded.retain(|id| *id != frame_id);
+                    tracing::warn!(
+                        layer = "triage",
+                        component = "continuum",
+                        frame_id = %frame_id,
+                        "Triage evaluation produced no result; frame dropped"
+                    );
+                    chain_next_triage_eval(
+                        &triage_coalescer,
+                        &mut voice_superseded,
+                        triage.as_ref(),
+                        &session_state,
+                        config.session_state.confidence_floor,
+                        &triage_result_tx,
+                    );
+                    continue;
+                };
+                if let Some(pos) = voice_superseded.iter().position(|id| *id == eval_frame.id) {
+                    voice_superseded.remove(pos);
+                    tracing::debug!(
+                        layer = "triage",
+                        component = "continuum",
+                        frame_id = %eval_frame.id,
+                        decision = output.decision.variant_name(),
+                        "Dropping triage result — superseded by a voice/forced wake on the same frame"
+                    );
+                } else {
+                    tracing::debug!(
+                        layer = "triage",
+                        component = "continuum",
+                        decision = output.decision.variant_name(),
+                        classification = output.classification.is_some(),
+                        latency_ms = latency_ms,
+                        "Triage decision"
+                    );
+
+                    // Task B3 (spec §4.7): the classification rides into
+                    // `handle_triage_decision`, which consumes it (event +
+                    // vault candidate + `triage_decision` column) before
+                    // acting on the decision. Superseded results return
+                    // above without consuming — pre-B2 semantics dropped
+                    // the whole result, and one lost observation beats
+                    // double-recording a frame the voice path already
+                    // handled.
+                    let d = output.decision;
+                    let classification = output.classification;
+
+                    let audio_text = eval_frame
+                        .audio
+                        .as_ref()
+                        .map(|a| a.transcript.as_str())
+                        .unwrap_or("");
+                    println!(
+                        "[{ts}] {app} | \"{desc}\" | audio=\"{audio}\" | triage={decision}",
+                        ts = eval_frame.ts.format("%H:%M:%S"),
+                        app = eval_frame.context.foreground_process_name,
+                        desc = truncate(&eval_frame.screen.description, 50),
+                        audio = truncate(audio_text, 30),
+                        decision = d.variant_name(),
+                    );
+
+                    handle_triage_decision(
+                        &d,
+                        &eval_frame,
+                        eval_project.as_ref(),
+                        classification.as_ref(),
+                        &decision_ctx,
+                    );
+                }
+
+                chain_next_triage_eval(
+                    &triage_coalescer,
+                    &mut voice_superseded,
+                    triage.as_ref(),
+                    &session_state,
+                    config.session_state.confidence_floor,
+                    &triage_result_tx,
+                );
             }
             Some(()) = recv_hotkey(&mut hotkey_rx) => {
                 tracing::info!(
@@ -1200,9 +1855,62 @@ async fn main() -> Result<()> {
                 );
                 hotkey_pending = true;
                 feedback.play(FeedbackCue::Listen);
+                // Idle restore trigger (Task A8, spec §4.11): hotkey.
+                idle_wake_restore(&idle_controller, &cadence, &live_context);
             }
             _ = voice_intent_tick.tick() => {
+                let was_pending = hotkey_pending;
                 drain_voice_intents_tick(&dev_dir, &mut hotkey_pending, &feedback);
+                // Idle restore trigger (Task A8, spec §4.11): dashboard
+                // push-to-talk equals a hotkey press. Only a *newly*
+                // drained intent restores — an unconsumed pending flag
+                // from an earlier tick must not re-exit idle every 250 ms.
+                if hotkey_pending && !was_pending {
+                    idle_wake_restore(&idle_controller, &cadence, &live_context);
+                }
+
+                // Task C5 (spec §4.13): drain Context-page intents on the
+                // same tick. Each handler is contained — it logs and moves
+                // on rather than propagating — so one bad project id can
+                // never stop the loop or the intents behind it.
+                let drained = context_intents.drain(&dev_dir);
+                if !drained.is_empty() {
+                    let mut intent_ctx = IntentContext {
+                        raw_log: &raw_log,
+                        episodic: &episodic,
+                        vault: &vault,
+                        session: &session_state,
+                        resolver: &mut project_resolver,
+                        toggles: &toggle_control,
+                        audit: &audit,
+                        config_path: config_path.clone(),
+                        screenshot_policy: ScreenshotPolicy::from(&config.storage),
+                    };
+                    for intent in &drained {
+                        // I1: deletion intents (forget / delete_range)
+                        // await LanceDB, two SQLite DELETEs, a screenshot
+                        // remove_file per row and a full vault.pending()
+                        // scan. Applied here they would freeze
+                        // push-to-talk and the hotkey for the length of a
+                        // "delete the last hour" click, so they go to the
+                        // serial deferred worker instead — which preserves
+                        // their order relative to each other. Everything
+                        // else is small, touches the loop-owned resolver,
+                        // and stays inline.
+                        if is_deferred(&intent.action) {
+                            if deferred_intent_tx.send(intent.clone()).is_err() {
+                                tracing::error!(
+                                    layer = "context",
+                                    component = "intent",
+                                    intent_id = %intent.id,
+                                    "Deferred intent worker is gone; deletion dropped"
+                                );
+                            }
+                            continue;
+                        }
+                        let _ = apply_intent(&mut intent_ctx, intent).await;
+                    }
+                }
             }
             _ = main_shutdown.changed() => {
                 if *main_shutdown.borrow() {
@@ -1220,6 +1928,22 @@ async fn main() -> Result<()> {
         "Shutting down..."
     );
 
+    // I5: the events writer flushes its pending batch (up to 256 rows)
+    // when it sees the shutdown signal, and that flush needs a pooled
+    // connection. Closing the raw-log pool first made the flush fail and
+    // drop the batch silently on every clean exit — so wait for the writer
+    // task to actually stop, then close.
+    if !event_writer_health
+        .wait_for_stop(EVENT_WRITER_SHUTDOWN_TIMEOUT)
+        .await
+    {
+        tracing::warn!(
+            layer = "memory",
+            component = "continuum",
+            "Events writer did not confirm its final flush before shutdown"
+        );
+    }
+
     raw_log.close().await;
     semantic.close().await;
 
@@ -1231,7 +1955,311 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// The packager's runtime-only sources (Task B7, spec §4.9).
+///
+/// Everything the ungated [`ContextPackage`] assembler needs that lives in
+/// this process: the raw log (for deduped `context_events`) and the
+/// `[context_package]` budget + caps. Cheap to clone — `RawLog` is a
+/// pooled handle and the config is a handful of numbers.
+#[derive(Clone)]
+struct WakeSources {
+    raw_log: RawLog,
+    package: ContextPackageConfig,
+    /// Task B8 (spec §4.12): the continuation resolver's floor + trigger
+    /// phrases. Only read on continue-class wakes.
+    continuation: ContinuationConfig,
+}
+
+/// Reads the deduped `context_events` rows the packager renders as "just
+/// before" / "recent changes" / "failed attempts" / "last success"
+/// (Task B6 seam, spec §4.9).
+///
+/// **Never fails the wake**: any DB error logs and yields an empty slice,
+/// which makes the packager fall back to raw history frames.
+async fn read_package_events(sources: &WakeSources) -> Vec<ContextEventRow> {
+    let window = chrono::Duration::minutes(sources.package.events_window_minutes.max(1));
+    // Over-fetch: the split routes one row into several sections, so the
+    // per-section caps need more candidates than any single cap.
+    let limit = (sources.package.max_just_before
+        + sources.package.max_recent_changes
+        + sources.package.max_failed_attempts)
+        .max(20)
+        * 2;
+    match sources
+        .raw_log
+        .recent_context_events(Utc::now() - window, limit)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "packager",
+                error = %e,
+                "context_events read failed; wake continues without event sections"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Reads the most recent `wake_result` event's next step (Task B7's
+/// post-wake record), one of the continuation resolver's five candidate
+/// producers (spec §4.12).
+///
+/// Looks back `[continuation] wake_result_lookback_hours` — deliberately
+/// much further than the packager's event window: "ga door" after lunch
+/// still has to find this morning's next step. **Never fails the wake**: a
+/// DB error logs and yields `None`, which simply removes one candidate.
+async fn read_last_wake_next_step(sources: &WakeSources) -> Option<StampedText> {
+    let window = chrono::Duration::hours(sources.continuation.wake_result_lookback_hours.max(1));
+    let rows = match sources
+        .raw_log
+        .recent_context_events(Utc::now() - window, 500)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "continuation",
+                error = %e,
+                "wake_result read failed; that candidate is skipped"
+            );
+            return None;
+        }
+    };
+    // `recent_context_events` returns oldest-first, so the last matching
+    // row is the newest wake_result.
+    rows.iter()
+        .rev()
+        .find(|row| row.event_type == EventType::WakeResult && !row.summary.trim().is_empty())
+        .map(|row| StampedText::new(row.summary.clone(), row.ts_last))
+}
+
+/// Reads the `open_task:` trailer off the **last** curator session summary
+/// (spec §4.9 structured trailer → §4.12 candidate).
+///
+/// Task B7 guarantees every session note body ends with exactly one
+/// well-formed `open_task:` line, so this is a plain read — no LLM call.
+/// Only the newest session note is consulted: "the open task from the last
+/// session" is exactly that, and a `none` trailer genuinely means the
+/// session closed with nothing open.
+///
+/// **Never fails the wake**: any vault error logs and yields `None`.
+async fn read_last_open_task(vault: &continuum_memory::Vault) -> Option<StampedText> {
+    // Fixwave 3b (I6): a targeted "newest session note" query. This used
+    // to page `vault.graph()`, which orders by `importance DESC, id ASC`
+    // and caps at 50 — and every curator session note carries the same
+    // `importance: 0.5`, so the page was simply the 50 lowest-id notes.
+    // Past ~50 sessions the newest note was never in it and a months-old
+    // open task scored 0.64 (over the 0.6 floor) forever.
+    let newest = match vault
+        .newest_node(
+            continuum_memory::NodeType::Session,
+            continuum_memory::NodeStatus::Confirmed,
+        )
+        .await
+    {
+        Ok(Some(node)) => node,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "continuation",
+                error = %e.user_message(),
+                "session-summary read failed; open_task candidate is skipped"
+            );
+            return None;
+        }
+    };
+    let note = vault.get(&newest.id).await.ok()?;
+    let open_task = continuum_core::context::package::read_open_task(&note.body)?;
+    let at = note.frontmatter.updated.unwrap_or(note.frontmatter.created);
+    Some(StampedText::new(open_task, at))
+}
+
+/// Runs the continuation resolver for a continue-class wake (spec §4.12).
+///
+/// Returns `None` for every ordinary wake — the trigger check is the first
+/// thing that happens, so a normal wake pays nothing for this feature (no
+/// extra DB read, no extra vault read).
+///
+/// Continue-class means the user's own words matched
+/// `[continuation] trigger_phrases`, or there were no words at all (a bare
+/// hotkey press / empty ask, which spec §4.12 counts as a trigger).
+async fn resolve_continuation(
+    reason: &str,
+    session: Option<&SessionState>,
+    sources: &WakeSources,
+    vault: &continuum_memory::Vault,
+) -> Option<ContinuationOutcome> {
+    let cfg = &sources.continuation;
+    let utterance = continuation::utterance_from_wake_reason(reason);
+    if !continuation::is_continue_class(Some(utterance), cfg) {
+        return None;
+    }
+
+    let inputs = session
+        .map(ContinuationInputs::from_session)
+        .unwrap_or_default()
+        .with_wake_next_step(read_last_wake_next_step(sources).await)
+        .with_open_task(read_last_open_task(vault).await);
+    let outcome = continuation::rank(&inputs, Utc::now(), cfg);
+    tracing::info!(
+        layer = "context",
+        component = "continuation",
+        outcome = outcome.variant_name(),
+        candidate = outcome.best().map(|c| c.text.as_str()).unwrap_or(""),
+        confidence = outcome.best().map(|c| c.confidence).unwrap_or(0.0),
+        "Continue-class wake resolved"
+    );
+    Some(outcome)
+}
+
+/// Turns a resolver outcome into the wake reason + the packager's
+/// "## Recommended next step" section (spec §4.12 routing).
+///
+/// `Recommend` enriches the reason with `Continue: <text>` and fills the
+/// section; `Ask` enriches the reason with a one-question disambiguation
+/// instruction and fills nothing (there is no confident next step to
+/// recommend); `Nothing`/not-continue-class leaves today's behavior.
+fn apply_continuation(
+    reason: &str,
+    outcome: Option<&ContinuationOutcome>,
+) -> (String, Option<NextStep>) {
+    match outcome {
+        Some(ContinuationOutcome::Recommend(candidate)) => (
+            continuation::recommend_reason(reason, candidate),
+            Some(NextStep {
+                text: candidate.text.clone(),
+                confidence: candidate.confidence,
+                // Fixwave 2 (C1): the resolver ranks the *raw* session
+                // task, so the zone rides along and the packager drops
+                // this section at the cloud egress point.
+                local_only: candidate.local_only,
+            }),
+        ),
+        Some(ContinuationOutcome::Ask(candidates)) => (
+            continuation::ask_reason(
+                reason,
+                &candidates[..candidates.len().min(MAX_ASK_CANDIDATES)],
+            ),
+            None,
+        ),
+        Some(ContinuationOutcome::Nothing) | None => (reason.to_string(), None),
+    }
+}
+
+/// Summarizes the tools + permission mode this wake runs under, straight
+/// off the composed wake config (spec §4.9 "available tools + permission
+/// mode"). Mirrors what `orchestrator::spawn` actually passes to the CLI:
+/// with MCP enabled that is `mcp__continuum__*` plus one wildcard per
+/// installed external server, at `--permission-mode default`; without MCP
+/// it is no tools at all, in `plan` mode.
+///
+/// Registry read failures degrade to the Continuum wildcard alone — a
+/// wake never fails over a tool list.
+fn summarize_tools(config: &OrchestratorConfig, dev_dir: &std::path::Path) -> ToolsSection {
+    if !config.mcp_enabled {
+        return ToolsSection {
+            names: Vec::new(),
+            permission_mode: "plan".to_string(),
+        };
+    }
+    let registry_dir = config
+        .mcp_data_dir
+        .clone()
+        .unwrap_or_else(|| dev_dir.to_path_buf());
+    let mut names = vec!["mcp__continuum__*".to_string()];
+    match continuum_core::mcp_registry::list_servers(&registry_dir) {
+        Ok(servers) => names.extend(servers.iter().map(|s| format!("mcp__{}__*", s.name))),
+        Err(e) => tracing::debug!(
+            layer = "context",
+            component = "packager",
+            error = %e,
+            "MCP registry read failed; tools section lists the Continuum server only"
+        ),
+    }
+    ToolsSection {
+        names,
+        permission_mode: "default".to_string(),
+    }
+}
+
+/// Writes the post-wake structured record (spec §4.9): a best-effort
+/// `{action, result, next_step}` trailer parsed off the orchestrator's
+/// final text becomes a `wake_result` system event (summary = next step,
+/// else result, else action) plus a matching vault timeline entry, which
+/// is what the continuation resolver (Task B8, spec §4.12) ranks.
+///
+/// Absent or unparseable trailer → nothing is written and nothing is
+/// logged as an error. A wake that answers in prose is normal.
+async fn record_wake_result(vault: &continuum_memory::Vault, response: &str, reason: &str) {
+    let Some(trailer) = parse_wake_trailer(response) else {
+        return;
+    };
+    if trailer.is_empty() {
+        return;
+    }
+
+    // System event — the continuation resolver's queryable producer.
+    // Goes straight to the events channel rather than through
+    // `privacy::emit_system_event`: this is an orchestrator record, not a
+    // privacy notice, and the summary is already the model's own text.
+    //
+    // Fixwave 3b (minor): only `next_step` is written here. A trailer with
+    // just `action`/`result` describes *finished* work and must not become
+    // a continuation candidate — but it still earns its timeline entry
+    // below.
+    if let Some(summary) = trailer.summary() {
+        send_system_event("wake_result", summary);
+    }
+
+    // Vault timeline — `NewEvent` has no structured slots, so the fields
+    // ride the text in a stable `key: value | …` shape (additive: no
+    // schema change, no migration).
+    let _ = vault
+        .append_event(continuum_memory::NewEvent {
+            ts: None,
+            kind: "wake_result".to_string(),
+            text: trailer.render_line(),
+            project: None,
+            node_id: None,
+            reference: None,
+            local_only: false,
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                layer = "memory",
+                component = "continuum",
+                error = %e.user_message(),
+                "Failed to append wake_result event to vault timeline"
+            );
+        });
+
+    tracing::info!(
+        layer = "orchestrator",
+        component = "continuum",
+        reason = %reason,
+        next_step = trailer.next_step.is_some(),
+        "Post-wake structured record written"
+    );
+}
+
 /// Performs a full orchestrator wake cycle.
+///
+/// `current_project` is the project resolver's post-hysteresis output at
+/// wake time (Task A4) — it drives the semantic-fact project prefix and
+/// skills matching.
+///
+/// Task B7 (spec §4.9): the user message is now the **runtime-full context
+/// package** — every section, assembled here from the in-process hubs, the
+/// shared frame ring, retrieval, deduped `context_events` and the composed
+/// wake config, then rendered by the ungated packager under the
+/// `[context_package]` budget. Every source is wrapped: a failure logs and
+/// leaves its section empty (never-fail-the-wake).
 #[allow(clippy::too_many_arguments)]
 async fn do_wake(
     trigger_frame: &PerceptionFrame,
@@ -1247,8 +2275,26 @@ async fn do_wake(
     suggested_skill: Option<&str>,
     skill_token_budget: usize,
     dev_dir: &std::path::Path,
+    current_project: Option<&CurrentProject>,
+    session: Option<&SessionState>,
+    confidence_floor: f32,
+    sources: &WakeSources,
+    audit: &AuditLog,
 ) -> Result<()> {
     let wake_start = Instant::now();
+
+    // Audit (Task C5, spec §4.13): a wake is Continuum acting on its own —
+    // the single most important thing an ambient assistant owes the user a
+    // record of. The reason text is already privacy-gated by the packager.
+    audit.record(
+        "wake_start",
+        Actor::Agent,
+        format!("Woke the orchestrator: {reason}"),
+        Some(serde_json::json!({
+            "model": config.model,
+            "project": current_project.map(|p| p.id.clone()),
+        })),
+    );
 
     println!("\n--- CONTINUUM WAKING ---");
 
@@ -1259,7 +2305,13 @@ async fn do_wake(
     // `retrieve_vault_context` swallows and logs its own errors.
     let mut memory_context = {
         let mut ep = episodic.lock().await;
-        retrieve_context(trigger_frame, &mut ep, semantic).await?
+        retrieve_context(
+            trigger_frame,
+            &mut ep,
+            semantic,
+            current_project.map(|p| p.id.as_str()),
+        )
+        .await?
     };
     let (vault_notes, pending_decisions) =
         retrieve_vault_context(vault, trigger_frame, curator_cfg).await;
@@ -1275,8 +2327,63 @@ async fn do_wake(
         "Memory retrieved"
     );
 
-    // 2. Wake message.
-    let user_message = build_wake_message(trigger_frame, history_frames, &memory_context, reason);
+    // 2. Compose a dynamic system prompt — base file + matched skills +
+    // any `suggested_skill` hint from the triage layer. Runs before the
+    // wake message (Task B7) because the package's "available tools"
+    // section is summarized from the *composed* config.
+    let wake_config = compose_wake_config(
+        config,
+        skill_loader,
+        reason,
+        trigger_frame,
+        suggested_skill,
+        skill_token_budget,
+        dev_dir,
+        current_project,
+        session,
+        confidence_floor,
+    )
+    .unwrap_or_else(|| config.clone());
+
+    // 3. Wake message — the runtime-full context package (spec §4.9).
+    // Deduped events are read best-effort; everything else is already in
+    // hand. Rendering applies the cloud gate, the per-section caps and the
+    // documented drop ladder under `[context_package] token_budget`.
+    let events = read_package_events(sources).await;
+    // Task B8 (spec §4.12): a continue-class trigger ("ga door", or a
+    // hotkey with no words) resolves what "continue" refers to before the
+    // package is assembled — either a confident recommendation, or an
+    // instruction to ask one short disambiguation question. Ordinary wakes
+    // short-circuit inside `resolve_continuation` and pay nothing.
+    let continuation_outcome = resolve_continuation(reason, session, sources, vault).await;
+    let (wake_reason, recommended_next_step) =
+        apply_continuation(reason, continuation_outcome.as_ref());
+    let budget = sources.package.wake_budget();
+    let package = build_wake_package(WakeContextInputs {
+        trigger_frame,
+        history_frames,
+        memory_context: &memory_context,
+        wake_reason: &wake_reason,
+        session,
+        session_confidence_floor: confidence_floor,
+        events: &events,
+        tools: Some(summarize_tools(&wake_config, dev_dir)),
+        recommended_next_step,
+        now: Utc::now(),
+        caps: budget.caps.clone(),
+    });
+    let render = package.render_with_report(&budget);
+    let user_message = render.text;
+    tracing::debug!(
+        layer = "context",
+        component = "packager",
+        tokens = render.tokens,
+        budget = budget.token_budget,
+        dropped = ?render.dropped,
+        events = events.len(),
+        over_budget = render.over_budget,
+        "Wake package rendered"
+    );
 
     // Spec-gap 1 (cheap timeline win): record the wake itself on the
     // vault's own event timeline so the Memory tab's timeline strip shows
@@ -1290,6 +2397,7 @@ async fn do_wake(
             project: None,
             node_id: None,
             reference: None,
+            local_only: false,
         })
         .await
         .map_err(|e| {
@@ -1322,19 +2430,6 @@ async fn do_wake(
             }
         });
     }
-
-    // 3. Compose a dynamic system prompt — base file + matched skills +
-    // any `suggested_skill` hint from the triage layer.
-    let wake_config = compose_wake_config(
-        config,
-        skill_loader,
-        reason,
-        trigger_frame,
-        suggested_skill,
-        skill_token_budget,
-        dev_dir,
-    )
-    .unwrap_or_else(|| config.clone());
 
     // 4. Spawn orchestrator + stream.
     print!("CONTINUUM: ");
@@ -1418,6 +2513,8 @@ async fn do_wake(
             importance: 0.8,
             tags: vec!["wake".to_string()],
             source_frame_id: Some(trigger_frame.id.to_string()),
+            project: None,
+            sensitivity: continuum_core::memory::events::EventSensitivity::CloudAllowed,
         };
         if let Err(e) = ep.insert_event(&wake_event).await {
             tracing::warn!(
@@ -1436,6 +2533,8 @@ async fn do_wake(
             importance: 0.7,
             tags: vec!["response".to_string()],
             source_frame_id: Some(trigger_frame.id.to_string()),
+            project: None,
+            sensitivity: continuum_core::memory::events::EventSensitivity::CloudAllowed,
         };
         if let Err(e) = ep.insert_event(&response_event).await {
             tracing::warn!(
@@ -1447,10 +2546,31 @@ async fn do_wake(
         }
     }
 
+    // Post-wake structured record (Task B7, spec §4.9). Runs on every
+    // completed wake, including one whose response was empty enough to
+    // skip the episodic writes above — `record_wake_result` no-ops when
+    // there is no parseable trailer.
+    record_wake_result(vault, &full_response, reason).await;
+
+    let total_ms = wake_start.elapsed().as_millis() as u64;
+    audit.record(
+        "wake_result",
+        Actor::Agent,
+        format!(
+            "Wake finished in {total_ms} ms ({})",
+            if result.success { "ok" } else { "failed" }
+        ),
+        Some(serde_json::json!({
+            "duration_ms": total_ms,
+            "cost_usd": result.cost_usd,
+            "success": result.success,
+        })),
+    );
+
     tracing::info!(
         layer = "orchestrator",
         component = "continuum",
-        total_ms = wake_start.elapsed().as_millis() as u64,
+        total_ms = total_ms,
         cost_usd = result.cost_usd,
         success = result.success,
         "Wake cycle complete"
@@ -1495,6 +2615,857 @@ fn build_curator_snapshot(
     }
 }
 
+/// Maps an idle-controller transition (Task A8, spec §4.11) onto its
+/// side effects: the live-context hub's idle flag (suppresses unchanged
+/// ring events) and the `idle_start` / `idle_end` system events (already
+/// registered EventTypes — routed through the A6 global sender).
+fn apply_idle_transition(transition: Option<IdleTransition>, hub: &LiveContextHub) {
+    match transition {
+        Some(IdleTransition::EnteredIdle) => {
+            hub.set_idle(true);
+            tracing::info!(
+                layer = "senses",
+                component = "idle",
+                "Idle threshold crossed — capture/vision cadences relaxed, triage gated to error/audio"
+            );
+            emit_system_event(
+                "idle_start",
+                "user idle; capture and vision cadences relaxed, triage gated to error/audio only",
+            );
+        }
+        Some(IdleTransition::ExitedIdle) => {
+            hub.set_idle(false);
+            tracing::info!(
+                layer = "senses",
+                component = "idle",
+                "Idle ended — normal cadences restored"
+            );
+            emit_system_event("idle_end", "activity resumed; normal cadences restored");
+        }
+        None => {}
+    }
+}
+
+/// Applies an explicit idle restore trigger (voice wake, hotkey,
+/// push-to-talk intent, any `do_wake` entry — Task A8, spec §4.11).
+/// Shared between the frame loop and the maintenance-wake ticker, hence
+/// the mutex-wrapped controller; locks are held for microseconds.
+fn idle_wake_restore(
+    idle_controller: &Arc<std::sync::Mutex<IdleController>>,
+    cadence: &CadenceControl,
+    hub: &LiveContextHub,
+) {
+    let transition = {
+        let mut ctrl = idle_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ctrl.on_wake(cadence)
+    };
+    apply_idle_transition(transition, hub);
+}
+
+/// How long shutdown waits for the events writer's final flush before
+/// closing the raw-log pool (I5). Generous: the flush is one batched
+/// transaction of at most 256 rows.
+const EVENT_WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a single triage evaluation may be in flight before the health
+/// snapshot calls triage wedged (C1).
+///
+/// A Qwen pass is ~1 s; a minute is two orders of magnitude past that, so
+/// this only fires when an evaluation genuinely never reported back — the
+/// state that used to park every later frame silently.
+const TRIAGE_STUCK_SECS: i64 = 60;
+
+/// How many recent context events the Context page's strip shows.
+const CONTEXT_PAGE_EVENT_LIMIT: usize = 40;
+
+/// How far back the recent-events strip looks.
+const CONTEXT_PAGE_EVENT_WINDOW_MINUTES: i64 = 180;
+
+/// How often the Context page's list data is refreshed from the database
+/// (Task C5). Deliberately slower than the 2 s publish tick: these are
+/// four SQLite reads plus a vault-free continuation rank, and the page is
+/// a human-latency surface.
+const CONTEXT_PAGE_REFRESH_SECS: u64 = 5;
+
+/// Everything the Context-page refresher needs, bundled so the spawn site
+/// stays readable.
+struct ContextPageSources {
+    raw_log: RawLog,
+    session: SessionStateHub,
+    project_handle: CurrentProjectHandle,
+    toggles: ToggleControl,
+    privacy: Arc<PrivacyFilter>,
+    continuation: ContinuationConfig,
+}
+
+/// Builds one [`ContextPageSnapshot`] (Task C5, spec §4.13).
+///
+/// Never fails: every read degrades to an empty list with a warning, so a
+/// locked database costs the page a section, not the runtime a tick.
+///
+/// **Privacy:** the recent-events strip is a *published* surface —
+/// `state.json` is a file on disk that backups and support bundles copy —
+/// so rows tagged `local_only` are withheld and the survivors' free-text
+/// fields are re-scrubbed through the live filter, exactly like the MCP
+/// tools' `event_views` gate (Task C4).
+async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPageSnapshot {
+    let current = sources.project_handle.read().clone();
+    let active_id = current.as_ref().map(|p| p.id.clone());
+
+    let projects = match sources.raw_log.list_projects().await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| ProjectSummaryView {
+                active: Some(&row.entry.id) == active_id.as_ref(),
+                id: row.entry.id,
+                name: row.entry.name,
+                status: row.entry.status.as_str().to_string(),
+                root_paths: row
+                    .entry
+                    .root_paths
+                    .iter()
+                    .map(|p| sources.privacy.scrub_path(p))
+                    .collect(),
+                last_active: row.last_active_ts,
+                frames_count: row.frames_count,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "page",
+                error = %e,
+                "Projects read failed; Context page shows no projects this tick"
+            );
+            Vec::new()
+        }
+    };
+
+    let rules = sources
+        .raw_log
+        .list_project_rules()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rule| OverrideRuleView {
+            match_process: rule.match_process,
+            match_title_substring: rule.match_title_substring,
+            action: rule.action.as_str().to_string(),
+            project_id: rule.project_id,
+        })
+        .collect();
+
+    let pins = sources
+        .raw_log
+        .list_session_pins()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(field, value, _project)| SessionPinView { field, value })
+        .collect();
+
+    let since = chrono::Utc::now() - chrono::Duration::minutes(CONTEXT_PAGE_EVENT_WINDOW_MINUTES);
+    let rows = sources
+        .raw_log
+        .recent_context_events(since, CONTEXT_PAGE_EVENT_LIMIT)
+        .await
+        .unwrap_or_default();
+    let mut recent_events: Vec<ContextEventView> = rows
+        .into_iter()
+        .filter(|row| {
+            // Recorded sensitivity first, then the LIVE zone rules over the
+            // row's own text (a rule added after the row was written still
+            // binds — the Task C2 fail-closed trick).
+            if matches!(row.sensitivity, EventSensitivity::LocalOnly) {
+                return false;
+            }
+            let zone = strictest([
+                sources
+                    .privacy
+                    .resolve_zone(&row.application, &row.window_title),
+                sources.privacy.resolve_zone("", &row.summary),
+            ]);
+            zone == Zone::CloudAllowed
+        })
+        .map(|row| ContextEventView {
+            id: row.id,
+            ts: row.ts_last.to_rfc3339(),
+            source: event_enum_token(&row.source),
+            event_type: event_enum_token(&row.event_type),
+            application: sources.privacy.scrub_path(&row.application),
+            summary: sources.privacy.scrub_text(&row.summary),
+            count: row.count,
+            project_id: row.project_id,
+            raw_reference: row.raw_reference,
+        })
+        .collect();
+    // `recent_context_events` returns oldest-first; the strip reads newest
+    // first.
+    recent_events.reverse();
+
+    let state = sources.session.snapshot();
+    // The page ranks the same candidates `resolve_continuation` does, minus
+    // the two reads that need the vault/DB (`open_task`, `wake_next_step`)
+    // — those are wake-time work, and the page is a live view, not a wake.
+    let ranked = match continuation::rank(
+        &ContinuationInputs::from_session(&state),
+        chrono::Utc::now(),
+        &sources.continuation,
+    ) {
+        ContinuationOutcome::Recommend(c) => vec![c],
+        ContinuationOutcome::Ask(list) => list,
+        ContinuationOutcome::Nothing => Vec::new(),
+    };
+    let continuation = ranked
+        .into_iter()
+        .map(|c| ContinuationCandidateView {
+            kind: c.kind.token().to_string(),
+            label: c.kind.label().to_string(),
+            text: c.text,
+            confidence: c.confidence,
+        })
+        .collect();
+
+    ContextPageSnapshot {
+        projects,
+        rules,
+        pins,
+        recent_events,
+        toggles: ObservationTogglesView::from(&sources.toggles.snapshot()),
+        continuation,
+    }
+}
+
+/// Builds the [`ContextEngineSnapshot`] published into `state.json` every
+/// tick (Task A8, spec §7). The runtime process has no `HealthRegistry`
+/// (see `docs/self-healing.md`) — this snapshot IS its health surface:
+/// each context-engine component's shared health handle is read and
+/// folded into a uniform [`ComponentHealthSummary`]. Handles that are
+/// `None` (pause_all — no watcher ever spawned) report as
+/// disabled-with-reason, which is a healthy state (spec §7).
+#[allow(clippy::too_many_arguments)]
+fn build_context_engine_snapshot(
+    cadence: &CadenceControl,
+    hub: &LiveContextHub,
+    context_watch: Option<&SharedContextWatchHealth>,
+    git_watch: Option<&SharedGitWatchHealth>,
+    file_watch: Option<&SharedFileWatchHealth>,
+    event_writer: &continuum_core::memory::events::EventWriterHandle,
+    triage_busy: &TriageBusyHandle,
+    triage_enabled: bool,
+    screen_capture_enabled: bool,
+    context_poll_interval: Duration,
+) -> ContextEngineSnapshot {
+    let now = chrono::Utc::now();
+
+    let not_running = || ComponentHealthSummary {
+        healthy: true,
+        enabled: false,
+        should_restart: false,
+        detail: Some("not running (pause_all set in [privacy.toggles])".to_string()),
+    };
+
+    let context_watcher = context_watch
+        .map(|handle| {
+            let health = handle.read().clone();
+            ComponentHealthSummary {
+                healthy: health.is_healthy(now, context_poll_interval),
+                enabled: health.enabled,
+                should_restart: health.should_restart(now, context_poll_interval),
+                detail: health.disabled_reason.clone().or_else(|| {
+                    Some(format!(
+                        "polls={} last_poll_at={}",
+                        health.polls,
+                        health
+                            .last_poll_at
+                            .map(|ts| ts.to_rfc3339())
+                            .unwrap_or_else(|| "never".to_string()),
+                    ))
+                }),
+            }
+        })
+        .unwrap_or_else(not_running);
+
+    let live_context = {
+        let health = hub.health();
+        let interval = Duration::from_millis(cadence.capture_interval_ms().max(50));
+        let should_restart = health.should_restart(now, screen_capture_enabled, interval);
+        ComponentHealthSummary {
+            healthy: !should_restart,
+            enabled: screen_capture_enabled,
+            should_restart,
+            detail: Some(format!(
+                "captures={} vision_updates={} dropped={} failures={} last_capture_at={}",
+                health.capture_events,
+                health.vision_updates,
+                health.dropped_capture_events,
+                health.capture_failures,
+                health
+                    .last_capture_at
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string()),
+            )),
+        }
+    };
+
+    let git_watcher = git_watch
+        .map(|handle| {
+            let health = handle.read().clone();
+            ComponentHealthSummary {
+                // Spec §4.4: disabled-with-reason and probe failures are
+                // healthy states; a restart can never fix a missing git.
+                healthy: true,
+                enabled: health.enabled,
+                should_restart: false,
+                detail: health.disabled_reason.clone().or_else(|| {
+                    Some(format!(
+                        "probes={} consecutive_failures={} events={} last_probe_at={}",
+                        health.probes,
+                        health.consecutive_failures,
+                        health.events_emitted,
+                        health
+                            .last_probe_at
+                            .map(|ts| ts.to_rfc3339())
+                            .unwrap_or_else(|| "never".to_string()),
+                    ))
+                }),
+            }
+        })
+        .unwrap_or_else(not_running);
+
+    let file_watcher = file_watch
+        .map(|handle| {
+            let health = handle.read().clone();
+            ComponentHealthSummary {
+                // Spec §4.5: per-root unavailability rearms on backoff
+                // and stays healthy; only notify channel death is a
+                // genuine break (and the ONLY restart state).
+                healthy: !health.channel_dead,
+                enabled: health.enabled,
+                should_restart: health.channel_dead,
+                detail: health.disabled_reason.clone().or_else(|| {
+                    Some(format!(
+                        "roots_active={} roots_unavailable={} events={}",
+                        health.roots_active,
+                        health.roots_unavailable.len(),
+                        health.events_emitted,
+                    ))
+                }),
+            }
+        })
+        .unwrap_or_else(not_running);
+
+    let events_writer = ComponentHealthSummary {
+        healthy: event_writer.is_healthy(),
+        enabled: true,
+        should_restart: event_writer.should_restart(),
+        detail: Some(format!(
+            "queue_depth={} rows_written={} last_flush_at={}",
+            event_writer.queue_depth(),
+            event_writer.rows_written(),
+            event_writer
+                .last_flush_at()
+                .map(|ts| ts.to_rfc3339())
+                .unwrap_or_else(|| "never".to_string()),
+        )),
+    };
+
+    // C1: the coalescer's busy flag is claimed by the frame arm and
+    // released by the result arm. If an evaluation ever fails to report
+    // (the drop guard is the first line of defence), every later frame is
+    // parked silently — so the busy-since clock is a health surface: an
+    // evaluation "in flight" for a minute means triage is wedged and a
+    // restart is the only cure.
+    let triage = {
+        let stuck = triage_busy.is_stuck(now, chrono::Duration::seconds(TRIAGE_STUCK_SECS));
+        ComponentHealthSummary {
+            healthy: !stuck,
+            enabled: triage_enabled,
+            should_restart: stuck,
+            detail: Some(match triage_busy.busy_since() {
+                Some(since) if stuck => format!(
+                    "evaluation stuck since {} ({}s)",
+                    since.to_rfc3339(),
+                    (now - since).num_seconds()
+                ),
+                Some(since) => format!("evaluating since {}", since.to_rfc3339()),
+                None => "idle".to_string(),
+            }),
+        }
+    };
+
+    ContextEngineSnapshot {
+        idle: cadence.is_idle(),
+        context_watcher: Some(context_watcher),
+        live_context: Some(live_context),
+        git_watcher: Some(git_watcher),
+        file_watcher: Some(file_watcher),
+        events_writer: Some(events_writer),
+        triage: Some(triage),
+    }
+}
+
+/// Shared dependencies of [`handle_triage_decision`] (Task B2, spec §4.7).
+///
+/// Decision consumption used to live inline in `main`'s frame arm with all
+/// of these in lexical scope; with triage off the main loop the same code
+/// runs from two select arms, so the dependencies are bundled once (all
+/// cheap clones — `Arc` handles, small configs, flags) into this struct
+/// built right before the loop.
+struct DecisionCtx {
+    /// Task B3 (spec §4.7): classification consumption — events, vault
+    /// candidates, `triage_decision` column. Lives here because both
+    /// consumption sites go through [`handle_triage_decision`].
+    classification: ClassificationConsumer,
+    /// Task B7 (spec §4.9): the shared recent-frames ring — the wake's
+    /// "just before" fallback and the maintenance ticker's history.
+    frames: FrameRing,
+    /// Task B7 (spec §4.9): packager sources (deduped events + budget).
+    wake_sources: WakeSources,
+    orchestrator_busy: Arc<std::sync::atomic::AtomicBool>,
+    idle_controller: Arc<std::sync::Mutex<IdleController>>,
+    cadence: CadenceControl,
+    live_context: LiveContextHub,
+    speech: Option<Arc<SpeechController>>,
+    feedback: FeedbackPlayer,
+    followup_until: Arc<std::sync::Mutex<Option<Instant>>>,
+    followup_secs: u64,
+    ambient_mute_enabled: bool,
+    orch_config: OrchestratorConfig,
+    semantic: Arc<SemanticStore>,
+    episodic: Arc<Mutex<EpisodicStore>>,
+    vault: Arc<continuum_memory::Vault>,
+    curator_cfg: CuratorConfig,
+    runtime_state: Arc<std::sync::Mutex<continuum_core::runtime_publish::RuntimeSnapshot>>,
+    skill_loader: SkillLoader,
+    skill_token_budget: usize,
+    dev_dir: PathBuf,
+    /// Task B5 (spec §4.8): live session state, snapshotted at wake time
+    /// for the skills `MatchContext`.
+    session_state: SessionStateHub,
+    /// `[session_state].confidence_floor` — below it, an inferred task is
+    /// treated as unknown rather than fed to consumers.
+    session_confidence_floor: f32,
+    /// Task C5 (spec §4.13): the action audit log — every wake writes a
+    /// `wake_start` and a `wake_result` line.
+    audit: AuditLog,
+    /// Moshi tier-split bridge: interrupt before an orchestrator wake and
+    /// resume on every exit path, including panic/cancellation.
+    #[cfg(feature = "moshi")]
+    moshi_frontend: Option<std::sync::Arc<continuum_core::voice::moshi::MoshiFrontend>>,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+/// One off-loop triage evaluation result, sent from the spawned evaluation
+/// task back into `main`'s select loop (Task B2, spec §4.7).
+///
+/// `outcome` is `None` when the evaluation task died without producing one
+/// (panic, or the task being dropped). That message exists purely so the
+/// coalescer's busy flag is still released: without it a single panicking
+/// evaluation would park every later frame forever, silently (C1).
+struct TriageEvalResult {
+    /// The frame the evaluation was for — always present, so the result
+    /// arm can clean up its supersede bookkeeping either way.
+    frame_id: uuid::Uuid,
+    outcome: Option<TriageEvalOutcome>,
+}
+
+/// A successful triage evaluation. Carries the originating frame and its
+/// resolver output so decision consumption sees exactly what the pre-B2
+/// inline path saw.
+struct TriageEvalOutcome {
+    frame: PerceptionFrame,
+    current_project: Option<CurrentProject>,
+    output: TriageOutput,
+    latency_ms: u64,
+}
+
+/// Spawns one triage evaluation as a tokio task (Task B2, spec §4.7 —
+/// mirrors the do_wake spawn pattern). The result comes back over `tx`
+/// into the main loop's triage arm; a send failure means the loop is
+/// shutting down and is deliberately ignored.
+///
+/// Task B5 (spec §4.7/§4.8): the `memory_summary` argument — hardwired to
+/// `""` since the triage layer existed — is now the session-state render,
+/// char-capped at [`session_state::MEMORY_SUMMARY_MAX_CHARS`] (600) to
+/// respect the prompt's token budget. It is rendered inside the spawned
+/// task so it reflects the state at evaluation time, not submit time. The
+/// local triage model is allowed to see `local_only` content (spec §4.1),
+/// so this render is deliberately NOT the `cloud_view`.
+fn spawn_triage_eval(
+    triage_layer: TriageLayer,
+    frame: PerceptionFrame,
+    current_project: Option<CurrentProject>,
+    session_state: SessionStateHub,
+    confidence_floor: f32,
+    tx: mpsc::UnboundedSender<TriageEvalResult>,
+) {
+    tokio::spawn(async move {
+        let frame_id = frame.id;
+        // C1: the coalescer's busy flag is released ONLY by the result
+        // arm, i.e. only if this task reports back. A panic inside
+        // `evaluate` (or a cancelled task) would otherwise latch the flag
+        // and park every later frame forever, with nothing logged. The
+        // guard turns any abnormal exit into an empty result, which the
+        // result arm treats as "release and move on".
+        let guard = {
+            let tx = tx.clone();
+            FallbackGuard::new(move || {
+                tracing::error!(
+                    layer = "triage",
+                    component = "continuum",
+                    frame_id = %frame_id,
+                    "Triage evaluation task ended without a result; releasing the coalescer"
+                );
+                let _ = tx.send(TriageEvalResult {
+                    frame_id,
+                    outcome: None,
+                });
+            })
+        };
+        let start = Instant::now();
+        let memory_summary = session_state.snapshot().render_memory_summary(
+            Utc::now(),
+            session_state::MEMORY_SUMMARY_MAX_CHARS,
+            confidence_floor,
+        );
+        let output = triage_layer.evaluate(&frame, &memory_summary).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        guard.disarm();
+        let _ = tx.send(TriageEvalResult {
+            frame_id,
+            outcome: Some(TriageEvalOutcome {
+                frame,
+                current_project,
+                output,
+                latency_ms,
+            }),
+        });
+    });
+}
+
+/// Releases the coalescer for the evaluation that just reported and starts
+/// the parked frame, if any (Task B2, spec §4.7).
+///
+/// Called from BOTH exits of the triage-result arm — the normal one and
+/// the C1 "evaluation died" one — because forgetting it on either path is
+/// exactly the latch this fix is about. Parked frames a voice wake
+/// superseded while they waited are skipped rather than evaluated (no
+/// point burning a GPU pass on a result we would drop).
+fn chain_next_triage_eval(
+    coalescer: &TriageCoalescer<(PerceptionFrame, Option<CurrentProject>)>,
+    voice_superseded: &mut Vec<uuid::Uuid>,
+    triage: Option<&TriageLayer>,
+    session_state: &SessionStateHub,
+    confidence_floor: f32,
+    tx: &mpsc::UnboundedSender<TriageEvalResult>,
+) {
+    while let Some((next_frame, next_project)) = coalescer.complete() {
+        if let Some(pos) = voice_superseded.iter().position(|id| *id == next_frame.id) {
+            voice_superseded.remove(pos);
+            tracing::debug!(
+                layer = "triage",
+                component = "continuum",
+                frame_id = %next_frame.id,
+                "Skipping parked frame — superseded by a voice/forced wake"
+            );
+            continue;
+        }
+        if let Some(triage_layer) = triage {
+            spawn_triage_eval(
+                triage_layer.clone(),
+                next_frame,
+                next_project,
+                session_state.clone(),
+                confidence_floor,
+                tx.clone(),
+            );
+        }
+        break;
+    }
+}
+
+/// Consumes one effective triage-class decision — from the voice/forced
+/// path in the frame arm or an off-loop triage result in the triage arm
+/// (Task B2, spec §4.7). Body moved from the pre-B2 inline `match` in
+/// `main`'s frame arm, unchanged in order and semantics; only the
+/// dependency plumbing goes through [`DecisionCtx`] now.
+///
+/// `classification` is the same output's classification block (Task B3):
+/// `Some` on the off-loop triage path, `None` on the voice/forced/skip
+/// paths, which produce a decision without ever calling the model. It is
+/// consumed first, before the decision is acted on, so an observation is
+/// recorded even when the decision itself is dropped downstream (e.g. a
+/// wake suppressed because the orchestrator is busy).
+fn handle_triage_decision(
+    decision: &TriageDecision,
+    frame: &PerceptionFrame,
+    current_project: Option<&CurrentProject>,
+    classification: Option<&Classification>,
+    ctx: &DecisionCtx,
+) {
+    // Task B3 (spec §4.7 consumption): events + vault candidate +
+    // `triage_decision` column. Never blocks — the vault/raw-log writes
+    // are spawned inside.
+    ctx.classification
+        .consume(frame, decision, classification, current_project);
+
+    match decision {
+        TriageDecision::WakeOrchestrator {
+            reason,
+            suggested_skill,
+        } => {
+            // If we're already inside a wake (orchestrator still
+            // streaming from a previous trigger), don't stack — log
+            // and skip. The user's latest utterance still landed in
+            // the raw log; they can ask again.
+            if !try_claim_busy(&ctx.orchestrator_busy) {
+                tracing::warn!(
+                    layer = "orchestrator",
+                    component = "continuum",
+                    reason = %reason,
+                    "Orchestrator already busy — skipping new wake"
+                );
+            } else {
+                // Idle restore trigger (Task A8, spec §4.11): ANY do_wake
+                // entry exits idle; the cadence nudge forces one fresh
+                // capture+vision pass for the wake.
+                idle_wake_restore(&ctx.idle_controller, &ctx.cadence, &ctx.live_context);
+                // History excludes the trigger frame itself. Pre-B2 this
+                // was `recent_frames[..len-1]` (the trigger was always
+                // the newest frame); with triage off the loop the trigger
+                // may no longer be newest, so filter by id — frames newer
+                // than the trigger stay in, which only adds context.
+                // Task B7: the filter moved onto the shared ring, which
+                // snapshot-clones under a short guard.
+                let history = ctx.frames.snapshot_excluding(frame.id);
+                let wake_speech_opt = if ctx.ambient_mute_enabled && frame.context.in_call {
+                    tracing::info!(
+                        layer = "voice",
+                        component = "continuum",
+                        "Quiet mode active during call; orchestrator response will not be spoken"
+                    );
+                    None
+                } else {
+                    ctx.speech.clone()
+                };
+
+                #[cfg(feature = "moshi")]
+                if let Some(frontend) = ctx.moshi_frontend.as_ref() {
+                    frontend.interrupt();
+                    tracing::info!(
+                        layer = "voice",
+                        component = "moshi",
+                        "Moshi interrupted for orchestrator escalation"
+                    );
+                }
+
+                // Spawn the wake as a tokio task so the main loop
+                // keeps draining frame_rx. If we awaited here,
+                // triage would queue up 5–15 stale frames while
+                // Opus streams for 5–10 s, and every subsequent
+                // response would be that many seconds behind reality.
+                // (Busy flag already claimed above by try_claim_busy.)
+                if let Ok(mut s) = ctx.runtime_state.lock() {
+                    s.wake_count += 1;
+                    s.voice_mode = Some("thinking".to_string());
+                }
+                let busy_flag = ctx.orchestrator_busy.clone();
+                let followup_shared = ctx.followup_until.clone();
+                let orch_cfg_clone = ctx.orch_config.clone();
+                let semantic_clone = ctx.semantic.clone();
+                let episodic_clone = ctx.episodic.clone();
+                let vault_clone = ctx.vault.clone();
+                let curator_cfg_clone = ctx.curator_cfg.clone();
+                let feedback_clone = ctx.feedback.clone();
+                let frame_clone = frame.clone();
+                let reason_clone = reason.clone();
+                let followup_secs = ctx.followup_secs;
+                let runtime_state_clone = ctx.runtime_state.clone();
+                let skill_loader_clone = ctx.skill_loader.clone();
+                let suggested_skill_clone = suggested_skill.clone();
+                let skill_budget = ctx.skill_token_budget;
+                let dev_dir_clone = ctx.dev_dir.clone();
+                let wake_project = current_project.cloned();
+                // Task B5 (spec §4.8): snapshot session state at wake
+                // time — the skills matcher reads its inferred task and
+                // (when the resolver has none) its project.
+                let wake_session = Some(ctx.session_state.snapshot());
+                let wake_confidence_floor = ctx.session_confidence_floor;
+                // Task B7 (spec §4.9): the packager's own sources.
+                let wake_sources = ctx.wake_sources.clone();
+                let wake_audit = ctx.audit.clone();
+                let mut wake_shutdown = ctx.shutdown_rx.clone();
+                #[cfg(feature = "moshi")]
+                let moshi_frontend_clone = ctx.moshi_frontend.clone();
+
+                tokio::spawn(async move {
+                    // I4: releasing `orchestrator_busy` must survive an
+                    // abnormal exit. `do_wake` parses subprocess output,
+                    // touches the vault and drives TTS; a panic anywhere
+                    // in there used to skip the store below and latch the
+                    // flag, after which Continuum never woke again — with
+                    // nothing logged. The guard runs on every exit path,
+                    // including an unwind, so it replaces the tail store
+                    // entirely rather than duplicating it.
+                    let _busy_guard = FallbackGuard::new(move || {
+                        busy_flag.store(false, std::sync::atomic::Ordering::Release);
+                        if let Ok(mut s) = runtime_state_clone.lock() {
+                            s.voice_mode = Some("idle".to_string());
+                        }
+                        #[cfg(feature = "moshi")]
+                        if let Some(frontend) = moshi_frontend_clone.as_ref() {
+                            frontend.resume();
+                            tracing::info!(
+                                layer = "voice",
+                                component = "moshi",
+                                "Moshi resumed after orchestrator turn"
+                            );
+                        }
+                    });
+                    // Race the wake against the runtime's shutdown
+                    // signal: on Ctrl-C we abort the in-flight
+                    // wake so the claude subprocess is killed
+                    // (via kill_on_drop on the tokio Command)
+                    // rather than orphaned.
+                    let result = tokio::select! {
+                        r = do_wake(
+                            &frame_clone,
+                            &history,
+                            &reason_clone,
+                            &orch_cfg_clone,
+                            &semantic_clone,
+                            &episodic_clone,
+                            &vault_clone,
+                            &curator_cfg_clone,
+                            wake_speech_opt.as_ref(),
+                            &skill_loader_clone,
+                            suggested_skill_clone.as_deref(),
+                            skill_budget,
+                            &dev_dir_clone,
+                            wake_project.as_ref(),
+                            wake_session.as_ref(),
+                            wake_confidence_floor,
+                            &wake_sources,
+                            &wake_audit,
+                        ) => r,
+                        _ = wake_shutdown.changed() => {
+                            if *wake_shutdown.borrow() {
+                                tracing::info!(
+                                    layer = "orchestrator",
+                                    component = "continuum",
+                                    "Shutdown received — aborting in-flight wake"
+                                );
+                                Ok(())
+                            } else {
+                                // Spurious change (sender still 'false') — continue waiting.
+                                do_wake(
+                                    &frame_clone,
+                                    &history,
+                                    &reason_clone,
+                                    &orch_cfg_clone,
+                                    &semantic_clone,
+                                    &episodic_clone,
+                                    &vault_clone,
+                                    &curator_cfg_clone,
+                                    wake_speech_opt.as_ref(),
+                                    &skill_loader_clone,
+                                    suggested_skill_clone.as_deref(),
+                                    skill_budget,
+                                    &dev_dir_clone,
+                                    wake_project.as_ref(),
+                                    wake_session.as_ref(),
+                                    wake_confidence_floor,
+                                    &wake_sources,
+                                    &wake_audit,
+                                )
+                                .await
+                            }
+                        }
+                    };
+
+                    match result {
+                        Ok(()) => {
+                            if followup_secs > 0 {
+                                if let Ok(mut slot) = followup_shared.lock() {
+                                    *slot =
+                                        Some(Instant::now() + Duration::from_secs(followup_secs));
+                                }
+                                tracing::debug!(
+                                    layer = "voice",
+                                    component = "continuum",
+                                    seconds = followup_secs,
+                                    "Follow-up window open"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                layer = "orchestrator",
+                                component = "continuum",
+                                error = %e,
+                                "Orchestrator wake failed"
+                            );
+                            println!("[ORCHESTRATOR ERROR: {e}]");
+                            feedback_clone.play(FeedbackCue::Error);
+                        }
+                    }
+
+                    // `_busy_guard` clears the busy flag and the voice mode
+                    // here, on the way out of this scope.
+                });
+            }
+        }
+        TriageDecision::Whisper { text } => {
+            // Don't step on the orchestrator's speech — if a wake
+            // is already streaming through TTS, a concurrent
+            // whisper would either queue behind it (adding delay)
+            // or race with it (interrupt noise). Silently drop.
+            if ctx
+                .orchestrator_busy
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                tracing::debug!(
+                    layer = "triage",
+                    component = "continuum",
+                    decision = "whisper",
+                    text = %text,
+                    "Suppressed whisper — orchestrator already speaking"
+                );
+            } else {
+                // Phase 5.1: triage-driven local speech, no orchestrator wake.
+                tracing::info!(
+                    layer = "triage",
+                    component = "continuum",
+                    decision = "whisper",
+                    text = %text,
+                    "Whispering via TTS"
+                );
+                if ctx.ambient_mute_enabled && frame.context.in_call {
+                    println!("[quiet mode: would say via TTS: {text}]");
+                } else if let Some(sc) = ctx.speech.as_ref() {
+                    let language = frame.audio.as_ref().map(|a| a.language.as_str());
+                    sc.say_with_language(text, language);
+                } else {
+                    println!("[would say via TTS: {text}]");
+                }
+            }
+        }
+        _ => {
+            if let Err(e) = handle_decision(decision) {
+                tracing::warn!(
+                    layer = "triage",
+                    component = "continuum",
+                    error = %e,
+                    "Handler failed"
+                );
+            }
+        }
+    }
+}
+
 /// Atomically claims `orchestrator_busy`, returning `true` only if this
 /// call was the one that flipped it from `false` to `true`.
 ///
@@ -1529,16 +3500,17 @@ fn try_claim_busy(busy: &std::sync::atomic::AtomicBool) -> bool {
 ///
 /// Disabled entirely when `maintenance_wake_hour < 0`. Values >= 24 clamp
 /// to 23 with a `warn` logged once at spawn time. Never fabricates a
-/// [`PerceptionFrame`]: skips (debug log) until `last_frame` has observed
-/// at least one real frame from the main loop. Also skips when the curator
+/// [`PerceptionFrame`]: skips (debug log) until the shared
+/// [`FrameRing`] has observed at least one real frame from the main loop.
+/// Also skips when the curator
 /// is disabled, when the vault has no pending decisions, or when
 /// [`try_claim_busy`] can't claim the orchestrator — shared with the
 /// `WakeOrchestrator` arm precisely to avoid a double-wake race between
 /// the two (see that function's doc comment).
 ///
-/// `history_frames` is passed as `&[]` to `do_wake` — this ticker only
-/// tracks the single most recent frame, not the frame loop's rolling
-/// history, so there is no synthetic history to hand the orchestrator.
+/// Task B7 (spec §4.9): the `&[]` history is gone — the ticker shares the
+/// frame loop's [`FrameRing`], so a maintenance wake carries the same
+/// "just before" context a triage wake does.
 #[allow(clippy::too_many_arguments)]
 fn spawn_maintenance_wake_ticker(
     curator_cfg: CuratorConfig,
@@ -1551,12 +3523,20 @@ fn spawn_maintenance_wake_ticker(
     dev_dir: PathBuf,
     speech: Option<Arc<SpeechController>>,
     feedback: FeedbackPlayer,
-    last_frame: Arc<std::sync::Mutex<Option<PerceptionFrame>>>,
+    recent_frames: FrameRing,
+    wake_sources: WakeSources,
     followup_until: Arc<std::sync::Mutex<Option<Instant>>>,
     followup_secs: u64,
     ambient_mute_enabled: bool,
     orchestrator_busy: Arc<std::sync::atomic::AtomicBool>,
     runtime_state: Arc<std::sync::Mutex<continuum_core::runtime_publish::RuntimeSnapshot>>,
+    project_handle: CurrentProjectHandle,
+    idle_controller: Arc<std::sync::Mutex<IdleController>>,
+    cadence: CadenceControl,
+    live_context: LiveContextHub,
+    session_state: SessionStateHub,
+    confidence_floor: f32,
+    audit: AuditLog,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let configured_hour = curator_cfg.maintenance_wake_hour;
@@ -1630,14 +3610,10 @@ fn spawn_maintenance_wake_ticker(
                 continue;
             }
 
-            let frame = {
-                let guard = match last_frame.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                guard.clone()
-            };
-            let Some(frame) = frame else {
+            // Task B7 (spec §4.9): the shared ring replaces the old
+            // single-frame slot — the trigger is the newest frame and the
+            // history is everything else the loop has seen.
+            let Some(frame) = recent_frames.latest() else {
                 tracing::debug!(
                     layer = "memory",
                     component = "maintenance_wake",
@@ -1660,6 +3636,20 @@ fn spawn_maintenance_wake_ticker(
                 continue;
             }
 
+            // I4 (same shape as the WakeOrchestrator arm): the claim above
+            // is released by a drop guard, so a panic inside `do_wake`
+            // cannot latch `orchestrator_busy` and block every later wake.
+            let _busy_guard = {
+                let busy = orchestrator_busy.clone();
+                let state = runtime_state.clone();
+                FallbackGuard::new(move || {
+                    busy.store(false, std::sync::atomic::Ordering::Release);
+                    if let Ok(mut s) = state.lock() {
+                        s.voice_mode = Some("idle".to_string());
+                    }
+                })
+            };
+
             let reason = format!(
                 "daily memory maintenance: {} pending memory decisions",
                 pending.len()
@@ -1676,6 +3666,13 @@ fn spawn_maintenance_wake_ticker(
                 s.voice_mode = Some("thinking".to_string());
             }
 
+            // Task A8 (spec §4.11): ANY do_wake entry is an idle restore
+            // trigger — a maintenance wake during pause exits idle and
+            // the cadence nudge forces one fresh capture+vision pass so
+            // the wake doesn't reason over a stale frame. The controller
+            // may re-enter idle on the next frame (user still away).
+            idle_wake_restore(&idle_controller, &cadence, &live_context);
+
             // Mirrors the WakeOrchestrator arm's ambient-mute check: a live
             // call suppresses spoken output, but the wake itself still runs.
             let wake_speech_opt = if ambient_mute_enabled && frame.context.in_call {
@@ -1688,9 +3685,13 @@ fn spawn_maintenance_wake_ticker(
             // `shutdown` via tokio::select! — an in-flight maintenance wake
             // is simply reaped at process exit, which is acceptable for a
             // once-daily best-effort job (not worth the extra branching).
+            // Task A4: read the resolver's current project at fire time
+            // (the shared handle stays fresh via the frame loop).
+            let wake_project = project_handle.read().clone();
+            let history = recent_frames.snapshot_excluding(frame.id);
             let result = do_wake(
                 &frame,
-                &[],
+                &history,
                 &reason,
                 &orch_config,
                 &semantic,
@@ -1702,6 +3703,11 @@ fn spawn_maintenance_wake_ticker(
                 None,
                 skill_token_budget,
                 &dev_dir,
+                wake_project.as_ref(),
+                Some(&session_state.snapshot()),
+                confidence_floor,
+                &wake_sources,
+                &audit,
             )
             .await;
 
@@ -1724,10 +3730,8 @@ fn spawn_maintenance_wake_ticker(
                 }
             }
 
-            orchestrator_busy.store(false, std::sync::atomic::Ordering::Release);
-            if let Ok(mut s) = runtime_state.lock() {
-                s.voice_mode = Some("idle".to_string());
-            }
+            // `_busy_guard` releases the claim and resets the voice mode
+            // as this iteration's scope ends.
         }
     });
 }
@@ -1844,6 +3848,7 @@ fn update_voice_session(
     hotkey_pending: &mut bool,
     speech: Option<&Arc<SpeechController>>,
     feedback: &FeedbackPlayer,
+    session_state: &SessionStateHub,
 ) -> Option<TriageDecision> {
     if !config.voice.enabled {
         return None;
@@ -1970,6 +3975,14 @@ fn update_voice_session(
                 text_len = text.len(),
                 "Voice command endpoint detected"
             );
+            // Task B5 (spec §4.8): `last_user_command` + ts. This is the
+            // only text-carrying user-command path *inside* the runtime —
+            // the hotkey and the dashboard's TalkNow intent carry no words
+            // (they arm listening; the transcript arrives here). The
+            // desktop chat is a separate process; fixwave 3b (I9) gave it
+            // the `record_user_command` context intent, drained by the
+            // same 250 ms tick as every other Context-page intent.
+            session_state.note_user_command(&text, "voice", Utc::now());
             return Some(TriageDecision::WakeOrchestrator {
                 reason: format!("Voice command ({language}): {text}"),
                 suggested_skill: None,
@@ -2000,6 +4013,7 @@ fn resolve_skills_root(cfg: &ContinuumConfig) -> std::path::PathBuf {
 /// the base system prompt with matched skill content and return a config
 /// clone that points at it. Returns `None` (falling back to the base
 /// config) when nothing matches.
+#[allow(clippy::too_many_arguments)]
 fn compose_wake_config(
     base: &OrchestratorConfig,
     skill_loader: &SkillLoader,
@@ -2008,6 +4022,9 @@ fn compose_wake_config(
     suggested_skill: Option<&str>,
     token_budget: usize,
     dev_dir: &std::path::Path,
+    current_project: Option<&CurrentProject>,
+    session: Option<&SessionState>,
+    confidence_floor: f32,
 ) -> Option<OrchestratorConfig> {
     let skills = skill_loader.enabled();
     if skills.is_empty() {
@@ -2020,8 +4037,21 @@ fn compose_wake_config(
         .unwrap_or_default();
     let ctx = MatchContext {
         wake_reason: Some(reason.to_string()),
-        task: None,
-        project: None,
+        // Task B5 (spec §4.8): the hardwired `None` dies — skills now
+        // match against the inferred session-state task, but only when it
+        // clears `confidence_floor` (a low-confidence guess must not
+        // silently steer which skill loads).
+        task: session
+            .and_then(|s| s.task_if_confident(confidence_floor))
+            .map(str::to_string),
+        // Task A4: skills match against the resolver's current project
+        // (name — human-readable, what skill triggers cite). Task B5: when
+        // the resolver has no current project, session state's own
+        // (possibly rehydrated) project id is the fallback.
+        project: session_state::match_context_project(
+            current_project.map(|p| p.name.as_str()),
+            session,
+        ),
         audio_transcript: if audio_text.is_empty() {
             None
         } else {
@@ -2096,16 +4126,6 @@ fn spawn_hotkey(
             );
             None
         }
-    }
-}
-
-/// Poll an optional hotkey channel inside a `tokio::select!` arm. Returning
-/// `None` makes the select branch effectively pend forever, which is what
-/// we want when hotkey is disabled.
-async fn recv_hotkey(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Option<()> {
-    match rx.as_mut() {
-        Some(ch) => ch.recv().await,
-        None => std::future::pending().await,
     }
 }
 

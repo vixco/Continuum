@@ -33,6 +33,16 @@ pub trait CuratorLlm: Send + Sync {
     /// One-shot completion. Implementations serialize internally (e.g. via
     /// a mutex around the underlying model context) so concurrent callers
     /// queue rather than race.
+    ///
+    /// Task B2 (spec §4.7): callers of this trait are BACKGROUND consumers
+    /// of the shared local model and must pass `max_tokens` ≤
+    /// [`crate::llm_gate::BACKGROUND_MAX_TOKENS`] per call (chunk longer
+    /// outputs across calls). The production implementation
+    /// ([`crate::triage::llm::TriageLayer::complete`]) enforces both the
+    /// clamp and the two-priority acquisition (try-acquire/backoff behind
+    /// interactive triage); an `Err` can therefore also mean "gate stayed
+    /// busy with interactive work" — treat it like any completion failure
+    /// and retry on the next scheduled pass.
     async fn complete(&self, prompt: &str, max_tokens: u32) -> anyhow::Result<String>;
 }
 

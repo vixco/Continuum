@@ -35,6 +35,12 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Duration, Utc};
+use continuum_core::config::{ChatConfig, ContextPackageConfig};
+use continuum_core::context::package::{ContextPackage, SessionSection};
+use continuum_core::context::session_state::{read_persisted_state, SessionState};
+use continuum_core::senses::live_context::gate_session_state;
+use continuum_core::senses::privacy::PrivacyFilter;
 use continuum_gateway::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, ProviderKind, ToolExecutor,
 };
@@ -166,6 +172,138 @@ fn memory_tools_section(kind: ProviderKind) -> String {
          memory when the user asks you to forget it.\n\
          - Keep memory titles short and stable.\n"
     )
+}
+
+/// How old the runtime's published session state may be before the chat
+/// prompt stops rendering it (Task B8, context engine spec §4.9 chat
+/// profile).
+///
+/// Generous on purpose: `state.json` is rewritten every couple of seconds
+/// while the runtime lives, but `SessionState::updated` only moves when a
+/// field actually *changes* — a user reading a long document produces no
+/// change for minutes at a time, and that state is still true. The
+/// separate `runtime_alive` freshness check (state.json mtime < 10 s) is
+/// what catches "the runtime died"; this catches "the runtime is up but
+/// the snapshot it published is from an old sitting".
+const CHAT_SESSION_MAX_AGE_MINUTES: i64 = 60;
+
+/// Builds the chat profile's "## Session state" system-prompt section from
+/// the runtime's published snapshot (context engine spec §4.9, Task B8).
+///
+/// The chat row of the §4.9 per-consumer matrix is deliberately narrow:
+/// chat **keeps** its in-process vault search as the memory section (see
+/// `chat_send_message`'s "## Memory context" injection — that must keep
+/// working with no runtime at all, which is the common desktop-only mode)
+/// and **adds** this one section on top. Episodic recall stays explicitly
+/// unavailable to chat.
+///
+/// Returns an empty string — i.e. **no section at all** — whenever the
+/// state is unavailable:
+///
+/// - `[chat] include_session_context = false`;
+/// - the runtime is not publishing (`runtime_alive` is false);
+/// - `state.json` has no `session_state` key (the pre-Plan-C state of the
+///   world: Task C1 is what starts publishing it);
+/// - the snapshot is older than [`CHAT_SESSION_MAX_AGE_MINUTES`];
+/// - the snapshot has nothing worth rendering.
+///
+/// Rendering nothing (rather than a "runtime not running" line) is a
+/// deliberate choice: the system prompt already ends with a "## Live
+/// status" footer carrying `Background runtime: running/not running`, so a
+/// second sentence saying the same thing would only spend tokens and give
+/// the model two places to look.
+///
+/// Rendering itself goes through the ungated [`ContextPackage`] renderer
+/// so the chat profile is byte-identical in shape to the wake profile's
+/// session section — same headings, same confidence gate, same cloud gate
+/// (a `local_only` goal/task generalizes to "working in a private
+/// context"), same `[context_package] chat_token_budget` cap.
+///
+/// Fixwave 3b (I8): the raw state read out of `state.json` is now run
+/// through [`gate_session_state`] first — the same §5.1 egress filter the
+/// MCP `context_package` profile applies. Chat was the only cloud egress
+/// that relied on the renderer's `local_only` generalization alone, which
+/// says nothing about a secret-bearing path in `open_files` on a state
+/// that is *not* tagged `local_only`.
+fn session_context_section(
+    chat_cfg: &ChatConfig,
+    package_cfg: &ContextPackageConfig,
+    filter: &PrivacyFilter,
+    state: Option<&SessionState>,
+    runtime_running: bool,
+    confidence_floor: f32,
+    now: DateTime<Utc>,
+) -> String {
+    if !chat_cfg.include_session_context || !runtime_running {
+        return String::new();
+    }
+    let Some(state) = state else {
+        return String::new();
+    };
+    if now - state.updated > Duration::minutes(CHAT_SESSION_MAX_AGE_MINUTES) {
+        return String::new();
+    }
+
+    let state = gate_session_state(filter, state);
+    let section = SessionSection {
+        project: state.active_project.clone(),
+        goal: state.goal_if_confident(confidence_floor).map(str::to_owned),
+        task: state.task_if_confident(confidence_floor).map(str::to_owned),
+        confidence: state.confidence,
+        open_files: state.open_files.clone(),
+        local_only: state.local_only,
+    };
+    let package = ContextPackage {
+        session: Some(section),
+        ..Default::default()
+    };
+    // `render` emits a leading blank line before every section but the
+    // first; the caller joins sections itself, so trim it off here.
+    package
+        .render(&package_cfg.chat_budget())
+        .trim()
+        .to_string()
+}
+
+/// Queues a `record_user_command` context intent so the runtime's session
+/// state learns what the user just typed (spec §4.8 `last_user_command`).
+///
+/// Fixwave 3b (I9): before this, §4.8's "voice/chat/hotkey" was voice-only
+/// — the desktop chat runs in its own process and had no path to
+/// `SessionStateHub::note_user_command`, while a comment in the runtime
+/// claimed the intent bridge already carried it.
+///
+/// Never fails a chat turn: an unwritable intent directory (no runtime has
+/// ever run, read-only disk) logs at debug and is dropped. The file has no
+/// TTL, matching every other context intent — a command typed while the
+/// runtime is stopped applies at its next boot, which is exactly right for
+/// "the last thing the user asked for".
+fn record_user_command_intent(dev_dir: &std::path::Path, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let envelope = continuum_core::context::intents::ContextIntent::new(
+        continuum_core::context::intents::ContextAction::RecordUserCommand {
+            text: text.to_string(),
+        },
+    );
+    if let Err(e) = continuum_core::context::intents::write_intent(dev_dir, &envelope) {
+        tracing::debug!(
+            layer = "desktop",
+            component = "chat",
+            error = %e,
+            "could not queue the last-user-command intent; session state keeps its previous value"
+        );
+    }
+}
+
+/// Reads the runtime's published session state for the chat profile.
+///
+/// Split from [`session_context_section`] so the rendering rules stay pure
+/// and unit-testable while the I/O stays in one never-fails place: a
+/// missing, unreadable or unparseable `state.json` is simply "no section".
+fn read_session_state(dev_dir: &std::path::Path) -> Option<SessionState> {
+    read_persisted_state(dev_dir)
 }
 
 /// Whether an assistant turn that terminated WITHOUT a clean `Done` (error
@@ -387,6 +525,13 @@ pub async fn chat_send_message(
     // re-acquire it via `unwind_pending_user_message`.
     drop(guard);
 
+    // Fixwave 3b (I9): §4.8 says `last_user_command` comes from
+    // "voice/chat/hotkey". Voice records in-process; chat is a separate
+    // process, so it records through the context-intent bridge. Strictly
+    // fire-and-forget — the runtime may not even be running, and a chat
+    // turn must never fail because of this.
+    record_user_command_intent(&dev_dir, text.trim());
+
     let chat_cfg = state.runtime.config_snapshot().chat.clone();
     // No std lock is held across this call — `build_adapter` itself does
     // not await, and the `.lock()`s above have already been dropped.
@@ -481,6 +626,24 @@ pub async fn chat_send_message(
     }
 
     let runtime_running = crate::components::runtime_alive(&dev_dir);
+    // Task B8 (spec §4.9 chat profile): the session-state section, read
+    // from the runtime's published state.json. Purely additive — the
+    // vault-backed "## Memory context" above is untouched, so a
+    // desktop-only install (no runtime) behaves exactly as before.
+    let full_cfg = state.runtime.config_snapshot();
+    // I8: the §5.1 egress filter, built from the same config the runtime
+    // uses. Chat is a cloud egress point like any other.
+    let privacy_filter = PrivacyFilter::from_config(&full_cfg.context, &full_cfg.privacy);
+    let session_context = session_context_section(
+        &chat_cfg,
+        &full_cfg.context_package,
+        &privacy_filter,
+        read_session_state(&dev_dir).as_ref(),
+        runtime_running,
+        full_cfg.session_state.confidence_floor,
+        chrono::Utc::now(),
+    );
+
     let mut system = system_prompt(
         &chat_cfg,
         runtime_running,
@@ -496,6 +659,11 @@ pub async fn chat_send_message(
     if !memory_context.is_empty() {
         system.push('\n');
         system.push_str(&memory_context);
+    }
+    if !session_context.is_empty() {
+        system.push('\n');
+        system.push_str(&session_context);
+        system.push('\n');
     }
 
     let req = ChatRequest {
@@ -882,6 +1050,382 @@ mod tests {
             2,
             "a text match that isn't the trailing message must not be popped"
         );
+    }
+
+    // --- Task B8: chat session-state section (spec §4.9 chat profile) ----
+
+    fn package_cfg() -> ContextPackageConfig {
+        ContextPackageConfig::default()
+    }
+
+    /// The §5.1 egress filter the chat path now applies (fixwave 3b, I8),
+    /// with a fixed home/username so `scrub_path` is deterministic.
+    fn test_filter() -> PrivacyFilter {
+        PrivacyFilter::from_config(
+            &continuum_core::config::ContextConfig::default(),
+            &continuum_core::config::PrivacyConfig::default(),
+        )
+        .with_environment(Some("C:/Users/arda".to_string()), Some("arda".to_string()))
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_770_000_000, 0).expect("fixed clock")
+    }
+
+    fn live_state(updated_minutes_ago: i64) -> SessionState {
+        SessionState {
+            active_project: Some("continuum".into()),
+            current_goal: Some("ship the context engine".into()),
+            current_task: Some("wire the chat profile".into()),
+            active_app: Some("Code.exe".into()),
+            window_title: Some("chat.rs - continuum".into()),
+            open_files: vec!["apps/desktop/src-tauri/src/chat.rs".into()],
+            last_error: None,
+            last_success: None,
+            last_user_command: None,
+            confidence: 0.8,
+            local_only: false,
+            pinned: Vec::new(),
+            user_confirmed: Vec::new(),
+            since: fixed_now() - Duration::hours(2),
+            updated: fixed_now() - Duration::minutes(updated_minutes_ago),
+            inferred_at: Some(fixed_now() - Duration::minutes(updated_minutes_ago)),
+        }
+    }
+
+    #[test]
+    fn session_section_renders_a_fresh_published_state() {
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&live_state(2)),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.starts_with("## Session state"), "{section}");
+        assert!(section.contains("Project: continuum"));
+        assert!(section.contains("Goal: ship the context engine"));
+        assert!(section.contains("Task: wire the chat profile"));
+        assert!(section.contains("Open files: apps/desktop/src-tauri/src/chat.rs"));
+    }
+
+    #[test]
+    fn session_section_is_absent_when_the_runtime_is_not_publishing() {
+        // The "## Live status" footer already says the runtime is not
+        // running; a second sentence would just spend tokens.
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&live_state(2)),
+            false,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.is_empty(), "{section}");
+    }
+
+    /// Today's reality (and the pre-Task-C1 world in general): `state.json`
+    /// has no `session_state` key at all. Chat must not care.
+    #[test]
+    fn session_section_is_absent_when_state_is_missing() {
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            None,
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.is_empty());
+    }
+
+    #[test]
+    fn session_section_is_absent_when_the_snapshot_is_stale() {
+        let stale = live_state(CHAT_SESSION_MAX_AGE_MINUTES + 1);
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&stale),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.is_empty(), "{section}");
+
+        // Exactly at the boundary it still renders.
+        let edge = live_state(CHAT_SESSION_MAX_AGE_MINUTES);
+        assert!(!session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&edge),
+            true,
+            0.4,
+            fixed_now(),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn session_section_respects_the_include_knob() {
+        let cfg = ChatConfig {
+            include_session_context: false,
+            ..ChatConfig::default()
+        };
+        let section = session_context_section(
+            &cfg,
+            &package_cfg(),
+            &test_filter(),
+            Some(&live_state(2)),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.is_empty());
+    }
+
+    #[test]
+    fn session_section_hides_goal_and_task_below_the_confidence_floor() {
+        let mut unsure = live_state(2);
+        unsure.confidence = 0.2;
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&unsure),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.contains("Project: continuum"));
+        assert!(!section.contains("Goal:"), "{section}");
+        assert!(!section.contains("Task:"), "{section}");
+    }
+
+    /// The chat prompt leaves the machine, so the §4.1 propagation rule
+    /// applies: a `local_only` goal/task generalizes rather than leaking.
+    #[test]
+    fn session_section_is_cloud_gated() {
+        let mut private = live_state(2);
+        private.local_only = true;
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&private),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.contains("## Session state"));
+        assert!(!section.contains("ship the context engine"), "{section}");
+        assert!(!section.contains("wire the chat profile"), "{section}");
+        assert!(section.contains("working in a private context"));
+        assert!(!section.contains("Open files:"));
+    }
+
+    #[test]
+    fn session_section_is_absent_for_an_empty_state() {
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&SessionState {
+                updated: fixed_now(),
+                ..SessionState::default()
+            }),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.is_empty(), "{section}");
+    }
+
+    #[test]
+    fn session_section_stays_inside_the_chat_token_budget() {
+        let mut fat = live_state(1);
+        fat.current_goal = Some("g".repeat(4_000));
+        fat.current_task = Some("t".repeat(4_000));
+        fat.open_files = (0..50).map(|i| format!("src/file_{i}.rs")).collect();
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&fat),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        // Session state is in the packager's never-drop set, so it can
+        // exceed the budget — but only by what the never-drop set costs:
+        // open files (the first drop rung) must be gone.
+        assert!(!section.contains("Open files:"), "{section}");
+    }
+
+    #[test]
+    fn read_session_state_tolerates_every_shape_of_missing() {
+        let dir = tempfile::tempdir().expect("tmp");
+        // No state.json at all.
+        assert!(read_session_state(dir.path()).is_none());
+        // Present but no session_state key (today's runtime, pre-C1).
+        std::fs::write(dir.path().join("state.json"), r#"{"wake_count": 3}"#).expect("write");
+        assert!(read_session_state(dir.path()).is_none());
+        // Present but not even JSON.
+        std::fs::write(dir.path().join("state.json"), "not json").expect("write");
+        assert!(read_session_state(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_session_state_parses_a_published_snapshot() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let payload = serde_json::json!({
+            "wake_count": 1,
+            "session_state": {
+                "active_project": "continuum",
+                "current_task": "wire the chat profile",
+                "confidence": 0.7,
+                "updated": fixed_now(),
+            }
+        });
+        std::fs::write(
+            dir.path().join("state.json"),
+            serde_json::to_string(&payload).expect("json"),
+        )
+        .expect("write");
+
+        let state = read_session_state(dir.path()).expect("parsed");
+        assert_eq!(state.active_project.as_deref(), Some("continuum"));
+        assert_eq!(state.current_task.as_deref(), Some("wire the chat profile"));
+
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&state),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.contains("Task: wire the chat profile"), "{section}");
+    }
+
+    /// Fixwave 3b (I8). Chat was the only cloud egress that skipped the
+    /// §5.1 filter: it projected `goal`/`task`/`open_files` straight out of
+    /// `read_persisted_state` into a cloud-bound prompt, relying on the
+    /// renderer's `local_only` generalization alone. That says nothing
+    /// about a secret in a path on a state that is *not* `local_only`.
+    #[test]
+    fn the_chat_session_section_runs_the_egress_filter() {
+        let mut state = live_state(2);
+        state.current_task =
+            Some("rotate the key sk-ant-api03-AbCdEf0123456789AbCdEf0123456789".into());
+        state.open_files = vec!["C:/Users/arda/work/secrets.rs".into()];
+
+        // Ungated (the old behaviour) the raw text is right there.
+        assert!(state
+            .current_task
+            .as_deref()
+            .unwrap()
+            .contains("sk-ant-api03"));
+
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&state),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.contains("## Session state"), "{section}");
+        assert!(
+            !section.contains("sk-ant-api03-AbCdEf0123456789AbCdEf0123456789"),
+            "the secret must not reach the prompt: {section}"
+        );
+        assert!(
+            !section.contains("C:/Users/arda"),
+            "the home directory must be scrubbed: {section}"
+        );
+    }
+
+    /// Task C1: the chat reader against the exact bytes the runtime
+    /// publisher writes (`RuntimeSnapshot` → `write_snapshot`), not a
+    /// hand-written approximation. This is the seam B8 was waiting on —
+    /// with the field published, the "## Session state" section renders
+    /// with no further desktop change.
+    #[test]
+    fn read_session_state_parses_the_real_published_runtime_snapshot() {
+        use continuum_core::runtime_publish::{write_snapshot, RuntimeSnapshot};
+
+        let dir = tempfile::tempdir().expect("tmp");
+        write_snapshot(
+            &dir.path().join("state.json"),
+            &RuntimeSnapshot {
+                session_state: Some(live_state(1)),
+                last_update: fixed_now().to_rfc3339(),
+                ..RuntimeSnapshot::default()
+            },
+        )
+        .expect("publish");
+
+        let state = read_session_state(dir.path()).expect("published state parses");
+        assert_eq!(state, live_state(1));
+
+        let section = session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            Some(&state),
+            true,
+            0.4,
+            fixed_now(),
+        );
+        assert!(section.contains("## Session state"), "{section}");
+        assert!(section.contains("wire the chat profile"), "{section}");
+    }
+
+    /// Regression guard for the §4.9 chat row's hard requirement: the
+    /// in-process vault search that feeds "## Memory context" is completely
+    /// independent of the runtime's session state. With no runtime at all
+    /// (no session section), memory context must still be produced.
+    #[test]
+    fn vault_memory_context_is_independent_of_the_session_section() {
+        let note = continuum_memory::NodeSummary {
+            id: "mem_1".into(),
+            slug: "prefers-dark-mode".into(),
+            title: "Prefers dark mode".into(),
+            node_type: continuum_memory::NodeType::Preference,
+            status: continuum_memory::NodeStatus::Confirmed,
+            project: None,
+            confidence: 0.9,
+            importance: 0.8,
+            source: continuum_memory::Source::UserStatement,
+            sensitivity: continuum_memory::Sensitivity::Internal,
+            created: "2026-08-05T10:00:00Z".into(),
+            updated: "2026-08-05T10:00:00Z".into(),
+            tags: vec![],
+            snippet: Some("asked for a dark theme".into()),
+        };
+        let memory_context = chat_tools::memory_context_section(std::slice::from_ref(&note));
+        assert!(memory_context.contains("## Memory context"));
+        assert!(memory_context.contains("Prefers dark mode"));
+
+        // Runtime off => no session section, memory context unaffected.
+        assert!(session_context_section(
+            &ChatConfig::default(),
+            &package_cfg(),
+            &test_filter(),
+            None,
+            false,
+            0.4,
+            fixed_now(),
+        )
+        .is_empty());
     }
 
     #[tokio::test]

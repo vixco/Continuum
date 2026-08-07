@@ -32,13 +32,37 @@ pub const SESSION_PROMPT: &str = include_str!("../../../../prompts/curator-sessi
 /// several noise-sized ones. See [`SessionTracker::observe`].
 const DEFAULT_SESSION_MIN_MINUTES: u64 = 5;
 
-/// In-progress session state tracked by [`SessionTracker`].
+/// In-progress session tracked by [`SessionTracker`].
+///
+/// Named `ActiveSession` (not `SessionState`) to keep it distinct from
+/// [`crate::context::session_state::SessionState`], the context engine's
+/// live "what is the user doing" state — they are different things at
+/// different layers.
 #[derive(Debug, Clone)]
-struct SessionState {
+struct ActiveSession {
     started: DateTime<Utc>,
     last_activity: DateTime<Utc>,
     project_hint: Option<String>,
     process: String,
+}
+
+/// Public read-only view of the session in progress (Task B5, spec §4.8:
+/// "`SessionTracker` gains a public snapshot accessor").
+///
+/// Consumers: the context package (B7) renders "this session started at
+/// …", and the continuation resolver (B8) uses `project_hint`/`process` to
+/// rank candidates. Returned by [`SessionTracker::snapshot`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSnapshot {
+    /// When the session in progress started.
+    pub started: DateTime<Utc>,
+    /// Timestamp of the most recent activity signal folded in.
+    pub last_activity: DateTime<Utc>,
+    /// Project the session is attributed to — post-A4 this is the
+    /// resolver's post-hysteresis project id, not a keyword guess.
+    pub project_hint: Option<String>,
+    /// Foreground process the session is named after.
+    pub process: String,
 }
 
 /// A session that just ended, ready for [`write_session_summary`].
@@ -57,7 +81,7 @@ pub struct EndedSession {
 /// real signals off a watch channel on every tick and every signal change.
 #[derive(Debug)]
 pub struct SessionTracker {
-    current: Option<SessionState>,
+    current: Option<ActiveSession>,
     /// M1 fix: configurable replacement for the old hardcoded
     /// `MIN_SESSION_MINUTES` constant — see [`SessionTracker::observe`]'s
     /// case 4 and `CuratorConfig::session_min_minutes`.
@@ -104,6 +128,16 @@ impl SessionTracker {
     /// 3. `sig.ts - last_activity > idle_limit_min`: the user went idle.
     ///    Ends the session at `last_activity` (the last moment there was
     ///    actually activity, not the idle-detecting signal's own time).
+    ///    3b. **The project changed** (Task B5, spec §4.8: "a
+    ///    project-change boundary (post-hysteresis)"). Both the old and new
+    ///    `project_hint` must be `Some` and different. No minimum session
+    ///    length applies, unlike case 4: post-A4 `project_hint` is the
+    ///    resolver's *post-hysteresis* output, which already required the
+    ///    new project to win continuously for `switch_min_secs` — adding
+    ///    another dwell floor here would double-debounce the same signal.
+    ///    Ends the session at `last_activity`, like the other cases.
+    ///    First adoption (`None` → `Some`) is deliberately not a boundary:
+    ///    the session simply gains attribution it always had.
     /// 4. The foreground process changed *and* the session so far
     ///    (`last_activity - started`) is at least `self.session_min_minutes`
     ///    (M1 fix — configurable, default [`DEFAULT_SESSION_MIN_MINUTES`]):
@@ -123,7 +157,10 @@ impl SessionTracker {
     /// process change can't both look at the *same* prior `last_activity`
     /// without the idle check firing first), but if a caller somehow feeds
     /// a signal that satisfies both, the idle check (case 3) is evaluated
-    /// first and wins.
+    /// first and wins. Case 3b sits between them for the same reason: an
+    /// idle gap that *also* changed project is an idle boundary, and a
+    /// project change that also changed process is a project boundary
+    /// (the stronger, unconditional signal).
     ///
     /// Whenever a boundary fires, the tracker immediately starts a fresh
     /// session from `sig` (case 1's logic) — the signal that closed the old
@@ -132,7 +169,7 @@ impl SessionTracker {
         let ts = sig.ts?;
 
         let Some(state) = &mut self.current else {
-            self.current = Some(SessionState {
+            self.current = Some(ActiveSession {
                 started: ts,
                 last_activity: ts,
                 project_hint: sig.project_hint.clone(),
@@ -159,43 +196,75 @@ impl SessionTracker {
 
         let idle_limit = Duration::minutes(idle_limit_min as i64);
         if ts - state.last_activity > idle_limit {
-            let ended = EndedSession {
-                started: state.started,
-                ended: state.last_activity,
-                project_hint: state.project_hint.clone(),
-                process: state.process.clone(),
-            };
-            self.current = Some(SessionState {
-                started: ts,
-                last_activity: ts,
-                project_hint: sig.project_hint.clone(),
-                process: sig.process.clone(),
-            });
-            return Some(ended);
+            return Some(Self::roll(&mut self.current, sig, ts));
+        }
+
+        // Case 3b (Task B5, spec §4.8): project-change boundary. The hint
+        // is the resolver's post-hysteresis project id, so a genuine
+        // change here already survived `switch_min_secs` of continuous
+        // winning — it needs no further dwell floor.
+        let project_changed = match (&state.project_hint, &sig.project_hint) {
+            (Some(old), Some(new)) => old != new,
+            _ => false,
+        };
+        if project_changed {
+            return Some(Self::roll(&mut self.current, sig, ts));
         }
 
         let session_len = state.last_activity - state.started;
         if sig.process != state.process
             && session_len >= Duration::minutes(self.session_min_minutes as i64)
         {
-            let ended = EndedSession {
-                started: state.started,
-                ended: state.last_activity,
-                project_hint: state.project_hint.clone(),
-                process: state.process.clone(),
-            };
-            self.current = Some(SessionState {
-                started: ts,
-                last_activity: ts,
-                project_hint: sig.project_hint.clone(),
-                process: sig.process.clone(),
-            });
-            return Some(ended);
+            return Some(Self::roll(&mut self.current, sig, ts));
         }
 
         state.last_activity = ts;
         state.project_hint = sig.project_hint.clone();
         None
+    }
+
+    /// Closes the session in progress at its `last_activity` and starts a
+    /// fresh one from `sig`/`ts`. Shared by every boundary case so they
+    /// cannot drift apart. Panics-free: only called with `current`
+    /// already `Some`, and falls back to `sig`'s own facts otherwise.
+    fn roll(
+        current: &mut Option<ActiveSession>,
+        sig: &ActivitySignal,
+        ts: DateTime<Utc>,
+    ) -> EndedSession {
+        let ended = current
+            .as_ref()
+            .map(|s| EndedSession {
+                started: s.started,
+                ended: s.last_activity,
+                project_hint: s.project_hint.clone(),
+                process: s.process.clone(),
+            })
+            .unwrap_or_else(|| EndedSession {
+                started: ts,
+                ended: ts,
+                project_hint: sig.project_hint.clone(),
+                process: sig.process.clone(),
+            });
+        *current = Some(ActiveSession {
+            started: ts,
+            last_activity: ts,
+            project_hint: sig.project_hint.clone(),
+            process: sig.process.clone(),
+        });
+        ended
+    }
+
+    /// Read-only view of the session in progress (Task B5, spec §4.8
+    /// "public snapshot accessor"). `None` before the first timestamped
+    /// activity signal.
+    pub fn snapshot(&self) -> Option<SessionSnapshot> {
+        self.current.as_ref().map(|s| SessionSnapshot {
+            started: s.started,
+            last_activity: s.last_activity,
+            project_hint: s.project_hint.clone(),
+            process: s.process.clone(),
+        })
     }
 }
 
@@ -269,7 +338,13 @@ pub async fn write_session_summary(
         )
         .replace("{{EVENTS}}", &events_block);
 
-    let raw = llm.complete(&prompt, 700).await?;
+    // Task B2 (spec §4.7): background-caller token budget — capped at
+    // BACKGROUND_MAX_TOKENS per call (was 700 pre-B2), so session
+    // summaries got tighter. The prompt already asks for a compact
+    // markdown summary; ~256 tokens comfortably covers it.
+    let raw = llm
+        .complete(&prompt, crate::llm_gate::BACKGROUND_MAX_TOKENS)
+        .await?;
     let trimmed = raw.trim();
     if trimmed == "SKIP" {
         tracing::debug!(
@@ -289,6 +364,14 @@ pub async fn write_session_summary(
         });
     }
 
+    // Task B7 (spec §4.9): the session-summary contract gains a structured
+    // `open_task:` trailer the continuation resolver (Task B8, spec §4.12)
+    // reads without an LLM call. The prompt asks for it; this normalizes
+    // what actually came back so the line is ALWAYS present, always last,
+    // and always well-formed — including when the model omitted it (the
+    // "## Next step" section is then used) or emitted it twice.
+    let body = crate::context::package::normalize_open_task_trailer(trimmed);
+
     let draft = NoteDraft {
         node_type: NodeType::Session,
         title: format!(
@@ -296,7 +379,7 @@ pub async fn write_session_summary(
             ended.process,
             ended.ended.format("%Y-%m-%d %H:%M")
         ),
-        body: trimmed.to_string(),
+        body,
         project: ended.project_hint.clone(),
         // The session genuinely happened — this isn't a probabilistic
         // extraction over ambiguous signals, it's a compression of events
@@ -307,6 +390,7 @@ pub async fn write_session_summary(
         source: Source::Observed,
         source_ref: Some("curator:session".to_string()),
         sensitivity: Default::default(),
+        expires: None,
         relations,
         tags: vec![],
     };
@@ -326,6 +410,7 @@ pub async fn write_session_summary(
             project: ended.project_hint.clone(),
             node_id: Some(note.frontmatter.id.clone()),
             reference: None,
+            local_only: false,
         })
         .await
         .map_err(|e| {
@@ -434,9 +519,12 @@ mod tests {
             None
         );
 
+        // Task B5: the project hint stays put so this test isolates the
+        // *process*-change rule — a changed hint would fire the
+        // unconditional project boundary (case 3b) first.
         let t2 = t1 + Duration::seconds(10);
         let ended = tracker
-            .observe(&mk_sig(t2, "chrome", Some("web")), 20)
+            .observe(&mk_sig(t2, "chrome", Some("continuum")), 20)
             .expect("process change after >=5min session should emit a boundary");
         assert_eq!(ended.started, t0);
         assert_eq!(ended.ended, t1); // previous ts, not the process-change ts
@@ -447,7 +535,7 @@ mod tests {
         // boundary.
         let t3 = t2 + Duration::seconds(5);
         assert_eq!(
-            tracker.observe(&mk_sig(t3, "chrome", Some("web")), 20),
+            tracker.observe(&mk_sig(t3, "chrome", Some("continuum")), 20),
             None
         );
     }
@@ -478,7 +566,7 @@ mod tests {
         // below), but clears this tracker's configured 1-minute floor.
         let t2 = t1 + Duration::seconds(10);
         let ended = tracker
-            .observe(&mk_sig(t2, "chrome", Some("web")), 20)
+            .observe(&mk_sig(t2, "chrome", Some("continuum")), 20)
             .expect("process change after >=1min session should emit a boundary");
         assert_eq!(ended.started, t0);
         assert_eq!(ended.process, "vscode");
@@ -494,10 +582,13 @@ mod tests {
         );
 
         // Flick to notepad for 1 minute -- session so far is 0 min old,
-        // well under the 5 min floor: absorbed, not a boundary.
+        // well under the 5 min floor: absorbed, not a boundary. Task B5:
+        // the project hint is unchanged (a notepad window inside the same
+        // project); a changed hint is case 3b's job, tested separately in
+        // `observe_emits_boundary_on_project_change_without_dwell_floor`.
         let t1 = t0 + Duration::minutes(1);
         assert_eq!(
-            tracker.observe(&mk_sig(t1, "notepad", Some("scratch")), 20),
+            tracker.observe(&mk_sig(t1, "notepad", Some("continuum")), 20),
             None
         );
 
@@ -649,6 +740,103 @@ mod tests {
         );
     }
 
+    /// Task B5 (spec §4.8): a project change is its own boundary, with no
+    /// minimum-dwell floor — `project_hint` is the resolver's
+    /// post-hysteresis output, which already debounced the switch.
+    #[test]
+    fn observe_emits_boundary_on_project_change_without_dwell_floor() {
+        let mut tracker = SessionTracker::new();
+        let t0 = base_ts();
+        assert_eq!(
+            tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), 20),
+            None
+        );
+
+        // Only 1 minute in — far under the 5 min process-change floor, so
+        // case 4 could not fire here. The project change still ends it.
+        let t1 = t0 + Duration::minutes(1);
+        let ended = tracker
+            .observe(&mk_sig(t1, "vscode", Some("simcharts")), 20)
+            .expect("a project change should emit a boundary regardless of session length");
+        assert_eq!(ended.started, t0);
+        assert_eq!(ended.ended, t0); // last_activity before the change
+        assert_eq!(ended.project_hint.as_deref(), Some("continuum"));
+        assert_eq!(ended.process, "vscode");
+
+        // The new session is attributed to the new project.
+        let snap = tracker.snapshot().expect("a session is in progress");
+        assert_eq!(snap.project_hint.as_deref(), Some("simcharts"));
+        assert_eq!(snap.started, t1);
+    }
+
+    /// First adoption (`None` → `Some`) must NOT be a boundary: the
+    /// session simply gains attribution it always had. Same for a hint
+    /// that disappears (`Some` → `None`), which happens when the resolver
+    /// loses confidence — that is not a new session.
+    #[test]
+    fn observe_does_not_emit_on_project_hint_adoption_or_loss() {
+        let mut tracker = SessionTracker::new();
+        let t0 = base_ts();
+        assert_eq!(tracker.observe(&mk_sig(t0, "vscode", None), 20), None);
+
+        let t1 = t0 + Duration::minutes(1);
+        assert_eq!(
+            tracker.observe(&mk_sig(t1, "vscode", Some("continuum")), 20),
+            None
+        );
+        assert_eq!(
+            tracker.snapshot().unwrap().project_hint.as_deref(),
+            Some("continuum")
+        );
+
+        let t2 = t1 + Duration::minutes(1);
+        assert_eq!(tracker.observe(&mk_sig(t2, "vscode", None), 20), None);
+        assert_eq!(tracker.snapshot().unwrap().project_hint, None);
+        // Still the original session.
+        assert_eq!(tracker.snapshot().unwrap().started, t0);
+    }
+
+    /// An idle gap that *also* changes project is an idle boundary — the
+    /// idle check is evaluated first (documented precedence).
+    #[test]
+    fn observe_prefers_idle_boundary_over_a_coincident_project_change() {
+        let mut tracker = SessionTracker::new();
+        let t0 = base_ts();
+        tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), 5);
+
+        let t1 = t0 + Duration::minutes(30);
+        let ended = tracker
+            .observe(&mk_sig(t1, "vscode", Some("simcharts")), 5)
+            .expect("a boundary should fire");
+        // Idle semantics: ends at last_activity (t0), not at t1.
+        assert_eq!(ended.ended, t0);
+        assert_eq!(ended.project_hint.as_deref(), Some("continuum"));
+    }
+
+    #[test]
+    fn snapshot_is_none_before_the_first_timestamped_signal() {
+        let mut tracker = SessionTracker::new();
+        assert_eq!(tracker.snapshot(), None);
+        tracker.observe(&ActivitySignal::default(), 20);
+        assert_eq!(tracker.snapshot(), None);
+    }
+
+    #[test]
+    fn snapshot_tracks_last_activity_without_a_boundary() {
+        let mut tracker = SessionTracker::new();
+        let t0 = base_ts();
+        tracker.observe(&mk_sig(t0, "vscode", Some("continuum")), 20);
+        let t1 = t0 + Duration::minutes(2);
+        assert_eq!(
+            tracker.observe(&mk_sig(t1, "vscode", Some("continuum")), 20),
+            None
+        );
+        let snap = tracker.snapshot().unwrap();
+        assert_eq!(snap.started, t0);
+        assert_eq!(snap.last_activity, t1);
+        assert_eq!(snap.process, "vscode");
+    }
+
     // --- write_session_summary tests -----------------------------------
 
     async fn append_events(vault: &Vault, started: DateTime<Utc>, texts: &[&str]) {
@@ -661,6 +849,7 @@ mod tests {
                     project: None,
                     node_id: None,
                     reference: None,
+                    local_only: false,
                 })
                 .await
                 .unwrap();
@@ -709,7 +898,12 @@ mod tests {
             note.frontmatter.title,
             "Session: Code.exe — 2026-01-01 09:30"
         );
-        assert_eq!(note.body, summary_md);
+        // Task B7 (spec §4.9): the body is the model's summary PLUS the
+        // normalized `open_task:` trailer the continuation resolver reads.
+        // The model omitted the line here, so it is derived from the
+        // "## Next step" section.
+        assert!(note.body.starts_with(summary_md), "{}", note.body);
+        assert!(note.body.ends_with("open_task: Ship it"), "{}", note.body);
         assert_eq!(note.frontmatter.project.as_deref(), Some("continuum"));
         assert!(note
             .frontmatter
@@ -816,6 +1010,62 @@ mod tests {
         assert!(result.is_none());
         assert_eq!(llm.calls(), 1);
         assert_eq!(vault.info().await.unwrap().note_count, 0);
+    }
+
+    /// Task B7 (spec §4.9): whatever the model returns, the stored body
+    /// ends with exactly one well-formed `open_task:` line — the
+    /// continuation resolver reads it without an LLM.
+    #[tokio::test]
+    async fn write_session_summary_normalizes_the_open_task_trailer() {
+        for (reply, expected_tail) in [
+            // Model emitted the trailer where it was asked to.
+            (
+                "## Goal\nX\n## Next step\nrun the gates\n\nopen_task: finish the packager",
+                "open_task: finish the packager",
+            ),
+            // Model emitted it mid-body and wrapped in markdown.
+            (
+                "## Goal\nX\n- **open_task:** finish the packager\n## Result\nok",
+                "open_task: finish the packager",
+            ),
+            // Model omitted it — derived from "## Next step".
+            (
+                "## Goal\nX\n## Next step\nrun the gates",
+                "open_task: run the gates",
+            ),
+            // Nothing left open.
+            ("## Goal\nX\n## Next step\nnone", "open_task: none"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let vault = Vault::open(tmp.path()).await.unwrap();
+            let started = base_ts();
+            append_events(&vault, started, &["one", "two", "three"]).await;
+            let ended = EndedSession {
+                started,
+                ended: started + Duration::minutes(20),
+                project_hint: None,
+                process: "Code.exe".to_string(),
+            };
+            let llm = MockLlm::scripted(vec![reply.to_string()]);
+
+            let id = write_session_summary(&vault, &llm, &ended)
+                .await
+                .unwrap()
+                .expect("should create a note");
+            let note = vault.get(&id).await.unwrap();
+
+            assert!(
+                note.body.trim_end().ends_with(expected_tail),
+                "reply {reply:?} produced body {:?}",
+                note.body
+            );
+            assert_eq!(
+                note.body.matches("open_task:").count(),
+                1,
+                "exactly one trailer line, body {:?}",
+                note.body
+            );
+        }
     }
 
     #[tokio::test]

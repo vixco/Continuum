@@ -19,11 +19,16 @@
 
 // Always available — these modules power the desktop dashboard and don't
 // need llama-cpp / whisper / lancedb.
+pub mod audit;
 pub mod automations;
 pub mod config;
+pub mod config_edit;
+pub mod context;
 pub mod curator;
+pub mod guard;
 pub mod hardware;
 pub mod health;
+pub mod llm_gate;
 pub mod logs;
 pub mod mcp_registry;
 pub mod runtime;
@@ -36,6 +41,12 @@ pub mod workers;
 
 // Heavy runtime modules — gated on the `runtime` feature so the desktop
 // crate can depend on continuum-core without pulling C++ build deps.
+/// Evaluation harness for the context-engine benches (spec §9): the
+/// `--record` JSONL format, the committed synthetic fixture, the fake-clock
+/// replay, and the shared metrics. Gated with `runtime` because it drives
+/// the events writer and the raw log.
+#[cfg(feature = "runtime")]
+pub mod bench;
 #[cfg(feature = "runtime")]
 pub mod memory;
 #[cfg(feature = "runtime")]

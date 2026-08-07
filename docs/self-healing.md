@@ -98,6 +98,201 @@ displays and is not established by unit tests alone.
 
 ---
 
+## Context Engine Components
+
+The `continuum` runtime process has **no `HealthRegistry`** — its health
+surface is `RuntimeSnapshot.context_engine` in `~/.continuum-dev/state.json`,
+refreshed on the same 2 s publish loop as every other runtime counter (the
+curator precedent). Each entry is a uniform summary:
+`{ healthy, enabled, should_restart, detail }`. Per spec §7,
+disabled-with-reason states report `healthy: true, enabled: false` with the
+reason in `detail` and never request a restart. `RuntimeSnapshot.paused`
+mirrors `[privacy.toggles].pause_all`; when the runtime *booted* paused, the
+three watcher entries (`context_watcher`, `git_watcher`, `file_watcher`) report
+`"not running (pause_all set in [privacy.toggles])"` because those tasks were
+never spawned — that is deliberate, not a failure. `live_context` and
+`events_writer` always have a real handle.
+
+The seven published keys are `idle` (a plain bool from the cadence
+controller), `context_watcher`, `live_context`, `git_watcher`,
+`file_watcher`, `events_writer` and `triage`. Components without a key —
+the privacy filter, the project resolver, session-state inference and the
+intent drainer — are covered below with the reason each has nothing to
+probe.
+
+### Context watcher (`context_watcher`)
+
+- Logs: `layer = "senses"`, `component = "context"`.
+- Health: the 1 Hz poll loop stamps `last_poll_at` every tick. Healthy while
+  the last poll is within 3 poll intervals (min 5 s); `should_restart` only
+  after a sustained stall of 10 intervals (min 30 s) of an *enabled* loop.
+- Recovery: restart the `continuum` runtime (the poller is stateless). A
+  stall almost always means the tokio runtime itself is wedged — check the
+  log tail for a panic in another senses task first. `pause_all` parks the
+  poller disabled-with-reason; clear the toggle and restart.
+
+### Project resolver
+
+- Logs: `layer = "context"`, `component = "project"`.
+- Health: no entry, and deliberately so — it is a pure in-frame-loop
+  computation over the Projects table with no task, channel or subprocess.
+  It cannot stall independently of the frame loop, and every failure mode
+  is a *wrong answer*, not a dead component. A resolution it is unsure of
+  simply returns a low confidence.
+- Recovery: the Projects table (raw-log DB) is authoritative and
+  `config.toml`'s `[[projects.known]]` entries are only the boot seed, so
+  the fixes are data fixes, not restarts. Wrong project: use **Correct**
+  or **Not this project** on the Context page — both write a persistent
+  override rule at the highest resolver tier. Flapping between two
+  projects: raise `[projects] switch_min_secs` (the hysteresis window).
+  Nothing being resolved at all: check that at least one project is
+  **confirmed** — a `discovered` candidate is never collected from, by
+  design. Auto-discovery can be switched off with
+  `[projects] auto_discover = false`.
+
+### Cadence controller / idle mode (`context_engine.idle`)
+
+- Logs: `layer = "senses"`, `component = "idle"`; `idle_start` / `idle_end`
+  system events in `context_events`.
+- Health: no probe of its own — it is pure shared atomics
+  (`senses/cadence.rs`, the spec §3 sanctioned pattern). `idle: true` in the
+  snapshot plus relaxed cadences is normal after
+  `[performance].idle_pause_after_secs` of no input.
+- Recovery: if capture seems stuck at the idle cadence while the user is
+  active, any restore trigger fixes it (input activity, voice wake, hotkey,
+  any wake); persistent wrong state means the frame loop stopped delivering
+  frames — see the context watcher / live context entries above. Set
+  `[performance].idle_pause_after_secs = 0` to disable idle mode entirely.
+
+### Session-state inference (`session_state`)
+
+- Logs: `layer = "context"`, `component = "session_state"`.
+- Health: no probe of its own, and deliberately so — it is a *best-effort
+  enrichment*, not a collector. Every failure mode is already a healthy
+  state: no triage model loaded means the task is never spawned (mechanical
+  fields still update); a gate timeout, a model error, or a reply that is
+  not JSON all leave the previous goal/task in place and log at
+  `debug`/`warn`. Nothing downstream blocks on it — consumers render
+  `"unknown"`.
+- Recovery: nothing to restart in isolation. If goal/task stay `unknown`
+  while the user is clearly working, check in order: (1) is a triage model
+  loaded (no model → no curator, no inference); (2) is the machine idle
+  (`context_engine.idle: true` pauses inference by design, spec §4.11);
+  (3) is `[session_state].confidence_floor` set too high — the model may be
+  answering with a low confidence that is being discarded correctly;
+  (4) grep the log for `"Session-state inference reply was not JSON"`,
+  which means the local model is ignoring the JSON instruction in
+  `prompts/session-state.md`. Lowering `infer_min_interval_secs` makes it
+  try more often at a proportional GPU cost; it will never preempt
+  interactive triage regardless.
+- Rehydration: a wrong-looking project/task right after a restart is the
+  boot rehydration (spec §4.8) surfacing the *previous* session,
+  staleness-discounted. It is corrected by the first inference pass. Delete
+  `~/.continuum-dev/state.json` to start from a blank state.
+
+### Git collector (`git_watcher`)
+
+- Logs: `layer = "senses"`, `component = "git_watch"`.
+- Health: always `healthy: true` — a missing `git` binary, config-off, or
+  toggle-off parks it disabled-with-reason; transient probe failures keep
+  the last known state (`consecutive_failures` in `detail`).
+  `should_restart` is always `false`: a restart cannot install git.
+- Recovery: install git (or fix `PATH`) and restart the runtime — the
+  binary is probed once at collector start. Confirm `[git_context].enabled`
+  and `[privacy.toggles].git`. Repeated probe timeouts on a healthy repo:
+  raise `[git_context].command_timeout_secs`.
+
+### File watcher (`file_watcher`)
+
+- Logs: `layer = "senses"`, `component = "file_watch"`.
+- Health: disabled-with-reason by default (`[file_watcher].enabled = false`
+  — opt-in). Per-root unavailability (deleted/unmounted root) is healthy:
+  the root is retried every `[file_watcher].rearm_secs` and listed in
+  `detail`; other roots are unaffected. `should_restart` is `true` ONLY
+  when the notify event channel itself died.
+- Recovery: for `channel_dead`, restart the runtime — watches are re-armed
+  from the Projects table, nothing is lost. For an unavailable root,
+  restore the directory (or remove the project root from config) and wait
+  one rearm tick; no restart needed.
+
+### Events writer (`events_writer`)
+
+- Logs: `layer = "memory"`, `component = "events"`.
+- Health: `queue_depth`, `rows_written`, and `last_flush_at` in `detail`.
+  `should_restart` is `true` only when the writer task died without a
+  shutdown signal; clean shutdown never restarts. A persistently growing
+  `queue_depth` means SQLite writes are stalling (disk full, DB locked by
+  another process) — producers never block; overflow drops are coalesced
+  into `events_dropped` rows, so data loss is visible in the events table
+  itself.
+- Recovery: restart the runtime to respawn the writer. If flushes keep
+  failing, inspect `~/.continuum-dev/raw_log.sqlite` (disk space, WAL
+  lock); the dedupe LRU is in-memory and rebuilds itself, and rows are
+  only ever inserted transactionally, so a crash loses nothing committed.
+
+### Triage evaluation (`triage`)
+
+- Logs: `layer = "triage"`, `component = "coalesce"`.
+- Health: `enabled` follows whether a triage model loaded (no model is a
+  healthy, disabled-with-reason state). `should_restart` is `true` when a
+  single evaluation has been "in flight" far longer than any plausible
+  model latency — the signature of an evaluation task that died without
+  releasing the coalescer, which silently parks every subsequent frame.
+- Recovery: restart the runtime. Nothing is lost — frames skipped while
+  the coalescer was wedged were, by definition, never evaluated, and the
+  session state, event log and vault are all written by other tasks.
+
+### Live-context publisher (content-versioned)
+
+- The `live-context.json` publisher writes only when the hub's
+  content-version counter moved (spec §4.11) — a stale file mtime during
+  a quiet/idle period is **expected**, not a stall. Judge freshness by the
+  `live_context` health entry (capture counters) instead of the file's
+  mtime. Recovery for genuine capture stalls: see "Continuous Live
+  Context" above.
+
+### Context-intent drainer
+
+- Logs: `layer = "context"`, `component = "intent"`.
+- Health: no entry of its own — it is a directory scan that runs inside the
+  same 250 ms ticker arm as push-to-talk voice intents, so if it stopped the
+  whole main loop stopped and every other entry above would already be
+  alarming. It never returns an error to the loop: an absent directory is an
+  empty result, and each handler's failure is logged and audited while the
+  next intent still runs.
+- **The failure signal is a pile of `.bad` files.** Intent files live in
+  `<data_dir>/context-intents/*.json`. An unparseable file or an unknown
+  `kind` is renamed to `.bad` with a warning and never retried; a file that
+  cannot be *read* is left in place for the next tick. Intents have no TTL
+  by design (a correction made while the runtime was down is a durable
+  decision, not a stale push-to-talk), so a stopped runtime accumulating
+  `.json` files is normal and they all apply at the next boot.
+- Recovery: `ls ~/.continuum-dev/context-intents/*.bad`. A few mean a
+  dashboard/runtime version mismatch — the writer is emitting a shape this
+  runtime does not know; upgrade whichever half is behind. They are inert
+  and safe to delete. If actions appear to do nothing while no `.bad` files
+  appear, confirm the runtime is publishing at all (`state.json` mtime) —
+  the Context page is fire-and-forget and does not report delivery.
+  Duplicate deliveries cannot happen: the drainer de-dupes by intent id over
+  a bounded seen-set of 512.
+- Verifying an action landed: `<data_dir>/logs/actions.jsonl` gets one line
+  per applied intent **including failures**, with `actor: user`.
+
+### Privacy filter
+
+- No health entry: it is a pure in-process function (`senses/privacy.rs`)
+  with no task, channel, or external dependency — there is nothing to
+  restart. Misconfiguration surfaces as scrubbed/sentinel output, which is
+  the filter working as designed.
+- The one operational failure mode is a rule that is too broad: a
+  `never_observe` process pattern matching your editor makes Continuum go
+  silent about your actual work while every component still reports healthy.
+  If session state is permanently `[private]`, read `[privacy.zones]` (and
+  the legacy `[context] sensitive_process_names` list, which is synthesized
+  into the same rule set) before suspecting a collector.
+
+---
+
 ## Memory Distiller
 
 Component: `memory/distiller`

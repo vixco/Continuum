@@ -119,6 +119,7 @@ async fn tick_once(path: &PathBuf, state: &StateHandle) -> anyhow::Result<()> {
 /// Shared by the file-tail and the named-pipe paths so both produce
 /// identical on-screen behaviour.
 async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
+    let paused = snap.paused;
     state
         .set_system_flag(|s| {
             s.triage_model_loaded = snap.triage_model_loaded;
@@ -126,6 +127,12 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
             s.tts_loaded = snap.tts_loaded;
             s.stt_loaded = snap.stt_loaded;
             s.orchestrator_ready = snap.orchestrator_ready;
+            // Task A8 (closing the A2 seam): mirror the runtime's
+            // pause_all flag. `None` = pre-A8 state.json — leave the
+            // stored value untouched rather than inventing one.
+            if let Some(paused) = paused {
+                s.paused = paused;
+            }
         })
         .await;
     // Task 11: mirror the runtime's curator (Plan B memory-vault) status
@@ -136,6 +143,24 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
     // hasn't spawned), which the dashboard needs to tell apart from
     // "haven't heard from the runtime at all yet".
     state.set_curator_snapshot(snap.curator.clone()).await;
+    // Task C1 (spec §4.8 consumers, §7): mirror the runtime's published
+    // session state and per-source context-engine health into the
+    // dashboard store, which is what the Context page renders. The A8
+    // `context_engine` section was published-but-ignored until now; it
+    // rides the same setter so both always come from one snapshot.
+    // Both are stored verbatim including `None` — see
+    // `StateHandle::set_context_snapshot`.
+    // Task C5 adds the third section: the Context page's list data
+    // (projects, override rules, pins, recent events, live toggles,
+    // continuation candidates). This process cannot open the raw-log
+    // database, so `state.json` is the only path those lists take.
+    state
+        .set_context_snapshot(
+            snap.session_state.clone(),
+            snap.context_engine.clone(),
+            snap.context_page.clone(),
+        )
+        .await;
     if let Some(mode) = snap.voice_mode.as_deref() {
         let parsed = match mode {
             "idle" => VoiceMode::Idle,
@@ -204,6 +229,259 @@ mod tests {
             Some("Teams.exe")
         );
         assert!(applied.voice.wake_word_enabled);
+    }
+
+    /// Task A8 (A2 seam closed): the runtime's pause_all flag reaches
+    /// `SystemState.paused`; a pre-A8 snapshot (`paused: None`) leaves
+    /// the stored value untouched.
+    #[tokio::test]
+    async fn applies_paused_flag_from_runtime_snapshot() {
+        let state = StateHandle::new();
+        apply_snapshot(
+            &RuntimeSnapshot {
+                paused: Some(true),
+                ..RuntimeSnapshot::default()
+            },
+            &state,
+        )
+        .await;
+        assert!(state.snapshot().await.system.paused);
+
+        // None (old state.json) must not reset it.
+        apply_snapshot(&RuntimeSnapshot::default(), &state).await;
+        assert!(state.snapshot().await.system.paused);
+
+        apply_snapshot(
+            &RuntimeSnapshot {
+                paused: Some(false),
+                ..RuntimeSnapshot::default()
+            },
+            &state,
+        )
+        .await;
+        assert!(!state.snapshot().await.system.paused);
+    }
+
+    /// Task C1: the published session state and the (until now ignored)
+    /// A8 context-engine health both reach the dashboard store.
+    #[tokio::test]
+    async fn applies_session_state_and_context_engine_from_runtime_snapshot() {
+        use continuum_core::context::session_state::{SessionState, StampedText};
+        use continuum_core::runtime_publish::{ComponentHealthSummary, ContextEngineSnapshot};
+
+        let state = StateHandle::new();
+        let now = chrono::Utc::now();
+        apply_snapshot(
+            &RuntimeSnapshot {
+                session_state: Some(SessionState {
+                    active_project: Some("continuum".into()),
+                    current_goal: Some("ship the context engine".into()),
+                    current_task: Some("publish session state".into()),
+                    active_app: Some("Code.exe".into()),
+                    open_files: vec!["runtime_bridge.rs".into()],
+                    last_error: Some(StampedText::new("cargo build failed", now)),
+                    confidence: 0.7,
+                    ..SessionState::default()
+                }),
+                context_engine: Some(ContextEngineSnapshot {
+                    idle: false,
+                    file_watcher: Some(ComponentHealthSummary {
+                        healthy: true,
+                        enabled: false,
+                        should_restart: false,
+                        detail: Some("disabled by [file_watcher].enabled".into()),
+                    }),
+                    ..ContextEngineSnapshot::default()
+                }),
+                ..RuntimeSnapshot::default()
+            },
+            &state,
+        )
+        .await;
+
+        let applied = state.snapshot().await;
+        let session = applied.context.session.expect("session state applied");
+        assert_eq!(session.active_project.as_deref(), Some("continuum"));
+        assert_eq!(
+            session.current_task.as_deref(),
+            Some("publish session state")
+        );
+        assert_eq!(session.open_files, vec!["runtime_bridge.rs".to_string()]);
+        assert_eq!(
+            session.last_error.map(|e| e.text).as_deref(),
+            Some("cargo build failed")
+        );
+        let engine = applied.context.engine.expect("context engine applied");
+        let file_watcher = engine.file_watcher.expect("file watcher summary");
+        assert!(file_watcher.healthy && !file_watcher.enabled);
+    }
+
+    /// Task C5: the Context page's list data (projects, rules, pins, the
+    /// recent-events strip, live toggles, continuation candidates) reaches
+    /// the dashboard store. This process cannot open the raw-log database,
+    /// so a regression here silently empties the whole page.
+    #[tokio::test]
+    async fn applies_context_page_from_runtime_snapshot() {
+        use continuum_core::runtime_publish::{
+            ContextEventView, ContextPageSnapshot, ContinuationCandidateView,
+            ObservationTogglesView, OverrideRuleView, ProjectSummaryView, SessionPinView,
+        };
+
+        let state = StateHandle::new();
+        apply_snapshot(
+            &RuntimeSnapshot {
+                context_page: Some(ContextPageSnapshot {
+                    projects: vec![
+                        ProjectSummaryView {
+                            id: "continuum".into(),
+                            name: "Continuum".into(),
+                            status: "configured".into(),
+                            root_paths: vec!["~/code/continuum".into()],
+                            frames_count: 42,
+                            active: true,
+                            ..ProjectSummaryView::default()
+                        },
+                        ProjectSummaryView {
+                            id: "simcharts".into(),
+                            name: "SimCharts".into(),
+                            status: "discovered".into(),
+                            ..ProjectSummaryView::default()
+                        },
+                    ],
+                    rules: vec![OverrideRuleView {
+                        match_process: Some("Code.exe".into()),
+                        match_title_substring: None,
+                        action: "force_project".into(),
+                        project_id: "continuum".into(),
+                    }],
+                    pins: vec![SessionPinView {
+                        field: "project".into(),
+                        value: Some("continuum".into()),
+                    }],
+                    recent_events: vec![ContextEventView {
+                        id: 7,
+                        ts: "2026-08-05T10:00:00Z".into(),
+                        source: "screen".into(),
+                        event_type: "error".into(),
+                        application: "Code.exe".into(),
+                        summary: "build failed".into(),
+                        count: 14,
+                        project_id: Some("continuum".into()),
+                        raw_reference: Some("frame-1".into()),
+                    }],
+                    toggles: ObservationTogglesView {
+                        mic: false,
+                        ..ObservationTogglesView::default()
+                    },
+                    continuation: vec![ContinuationCandidateView {
+                        kind: "session_task".into(),
+                        label: "current task".into(),
+                        text: "finish C5".into(),
+                        confidence: 0.8,
+                    }],
+                }),
+                ..RuntimeSnapshot::default()
+            },
+            &state,
+        )
+        .await;
+
+        let page = state
+            .snapshot()
+            .await
+            .context
+            .page
+            .expect("context page applied");
+        assert_eq!(page.projects.len(), 2);
+        assert!(page.projects[0].active);
+        assert_eq!(page.projects[1].status, "discovered");
+        assert_eq!(page.rules[0].action, "force_project");
+        assert_eq!(page.pins[0].field, "project");
+        assert_eq!(page.recent_events[0].count, 14);
+        assert_eq!(page.recent_events[0].id, 7);
+        assert!(!page.toggles.mic, "the live toggle value survives");
+        assert!(page.toggles.screen);
+        assert_eq!(page.continuation[0].kind, "session_task");
+
+        // A runtime that stops reporting must clear the page rather than
+        // leave a stale ghost (the C1 verbatim-store contract).
+        apply_snapshot(&RuntimeSnapshot::default(), &state).await;
+        assert!(state.snapshot().await.context.page.is_none());
+    }
+
+    /// Task C1 legacy compat: a `state.json` written by a pre-C1 runtime
+    /// (no `session_state`, no `context_engine`) still parses and applies
+    /// through the real file-tail path — the dashboard just shows nothing
+    /// for the Context page instead of failing to read the file at all.
+    #[tokio::test]
+    async fn legacy_state_json_without_context_fields_still_applies() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "triage_model_loaded": true,
+                "frame_count": 7,
+                "wake_count": 1,
+                "last_update": "2026-04-14T10:00:00Z"
+            }"#,
+        )
+        .expect("write");
+
+        let state = StateHandle::new();
+        tick_once(&path, &state)
+            .await
+            .expect("legacy snapshot reads");
+
+        let applied = state.snapshot().await;
+        assert!(applied.system.triage_model_loaded);
+        assert!(applied.context.session.is_none());
+        assert!(applied.context.engine.is_none());
+        assert!(applied.context.page.is_none());
+    }
+
+    /// Task C1 end-to-end: the bytes the runtime publisher actually writes
+    /// (`runtime_publish::write_snapshot`) are read back by the bridge's
+    /// own file-tail. This is the contract C3's `context_session` tool and
+    /// B5's rehydration reader also depend on.
+    #[tokio::test]
+    async fn published_state_json_round_trips_through_the_file_tail() {
+        use continuum_core::context::session_state::{read_persisted_state, SessionState};
+        use continuum_core::runtime_publish::write_snapshot;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("state.json");
+        let session = SessionState {
+            active_project: Some("continuum".into()),
+            current_task: Some("close the C1 seam".into()),
+            confidence: 0.65,
+            ..SessionState::default()
+        };
+        write_snapshot(
+            &path,
+            &RuntimeSnapshot {
+                session_state: Some(session.clone()),
+                ..RuntimeSnapshot::default()
+            },
+        )
+        .expect("publish");
+
+        let state = StateHandle::new();
+        tick_once(&path, &state)
+            .await
+            .expect("published snapshot reads");
+        assert_eq!(
+            state
+                .snapshot()
+                .await
+                .context
+                .session
+                .and_then(|s| s.current_task)
+                .as_deref(),
+            Some("close the C1 seam")
+        );
+        // Same file, the core-side rehydration reader.
+        assert_eq!(read_persisted_state(dir.path()), Some(session));
     }
 }
 

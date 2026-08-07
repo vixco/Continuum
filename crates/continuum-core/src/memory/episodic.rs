@@ -15,18 +15,163 @@ use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringAr
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, Utc};
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::NewColumnTransform;
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::config::{continuum_data_dir, continuum_dev_dir, env_or_legacy};
+use crate::memory::events::{event_enum_token, parse_event_enum, EventSensitivity};
 
 /// Embedding dimension for BGESmallENV15Q model.
 pub const EMBEDDING_DIM: usize = 384;
 
 /// Table name in LanceDB.
 const TABLE_NAME: &str = "episodic_events";
+
+/// The additive column introduced by Task B6 (spec §4.11).
+const PROJECT_COLUMN: &str = "project";
+
+/// The additive column introduced by fixwave 3a (C1): the §4.1 zone
+/// sensitivity of the source event, carried so the cloud egress gate can
+/// see it on a *distilled* memory and not only on the raw event.
+const SENSITIVITY_COLUMN: &str = "sensitivity";
+
+/// Additive columns, in the order a freshly created table gets them.
+/// Every one of these is migrated onto an older table by
+/// [`EpisodicStore::migrate_additive_columns`].
+const ADDITIVE_COLUMNS: [&str; 2] = [PROJECT_COLUMN, SENSITIVITY_COLUMN];
+
+/// The column layout a freshly created episodic table gets, in order.
+fn canonical_column_names() -> Vec<String> {
+    [
+        "id",
+        "ts",
+        "kind",
+        "summary",
+        "importance",
+        "tags",
+        "source_frame_id",
+        PROJECT_COLUMN,
+        SENSITIVITY_COLUMN,
+        "vector",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// How many rows to over-fetch per requested result when a project
+/// filter is active (the filter runs after the vector search).
+const FILTER_OVERFETCH: usize = 4;
+
+/// Floor for the over-fetch, so a `limit: 1` query still has something to
+/// filter over.
+const FILTER_OVERFETCH_MIN: usize = 20;
+
+/// The soft project filter (Task B6, spec §4.11): no filter passes
+/// everything, and an unattributed memory (`None`) passes every filter —
+/// only a memory belonging to a *different* project is dropped.
+fn project_matches(filter: Option<&str>, event_project: Option<&str>) -> bool {
+    match (filter, event_project) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(want), Some(have)) => want == have,
+    }
+}
+
+/// Decodes one Arrow batch into episodic events, or `None` when a
+/// required column is missing (a corrupt/foreign table — never invent
+/// values). `project` is optional on purpose: tables written before Task
+/// B6 have no such column and read as unattributed.
+fn events_from_batch(batch: &RecordBatch) -> Option<Vec<EpisodicEvent>> {
+    let string_col = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+    };
+    let ids = string_col("id")?;
+    let timestamps = string_col("ts")?;
+    let kinds = string_col("kind")?;
+    let summaries = string_col("summary")?;
+    let importances = batch
+        .column_by_name("importance")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())?;
+    let tags_col = string_col("tags");
+    let frame_ids = string_col("source_frame_id");
+    let projects = string_col(PROJECT_COLUMN);
+    let sensitivities = string_col(SENSITIVITY_COLUMN);
+
+    let nullable_at = |col: Option<&StringArray>, i: usize| {
+        col.and_then(|c| {
+            if c.is_null(i) {
+                None
+            } else {
+                Some(c.value(i).to_string())
+            }
+        })
+    };
+
+    let mut events = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let ts = DateTime::parse_from_rfc3339(timestamps.value(i))
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let tags: Vec<String> = tags_col
+            .and_then(|t| serde_json::from_str(t.value(i)).ok())
+            .unwrap_or_default();
+        events.push(EpisodicEvent {
+            id: ids.value(i).to_string(),
+            ts,
+            kind: EventKind::from_str_lossy(kinds.value(i)),
+            summary: summaries.value(i).to_string(),
+            importance: importances.value(i),
+            tags,
+            source_frame_id: nullable_at(frame_ids, i),
+            project: nullable_at(projects, i),
+            // A row written before the column existed (or by a build whose
+            // migration was refused) reads `cloud_allowed`: that is what it
+            // was written as, and defaulting the other way would silently
+            // hide every pre-existing memory from every cloud-bound render.
+            sensitivity: nullable_at(sensitivities, i)
+                .and_then(|token| parse_event_enum::<EventSensitivity>(&token))
+                .unwrap_or(EventSensitivity::CloudAllowed),
+        });
+    }
+    Some(events)
+}
+
+/// The Arrow field definition for one episodic column, or `None` for a
+/// name Continuum does not own (a column added by some other tool — read
+/// around, never written).
+///
+/// Single source of truth: both the create-table schema and every written
+/// batch are built from this, so a table created by an older build and a
+/// batch written by a newer one cannot disagree about types.
+fn canonical_field(name: &str) -> Option<Field> {
+    Some(match name {
+        "id" => Field::new("id", DataType::Utf8, false),
+        "ts" => Field::new("ts", DataType::Utf8, false),
+        "kind" => Field::new("kind", DataType::Utf8, false),
+        "summary" => Field::new("summary", DataType::Utf8, false),
+        "importance" => Field::new("importance", DataType::Float32, false),
+        // JSON array as string.
+        "tags" => Field::new("tags", DataType::Utf8, false),
+        "source_frame_id" => Field::new("source_frame_id", DataType::Utf8, true),
+        PROJECT_COLUMN => Field::new(PROJECT_COLUMN, DataType::Utf8, true),
+        SENSITIVITY_COLUMN => Field::new(SENSITIVITY_COLUMN, DataType::Utf8, true),
+        "vector" => Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                EMBEDDING_DIM as i32,
+            ),
+            true,
+        ),
+        _ => return None,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,6 +235,38 @@ pub struct EpisodicEvent {
     pub tags: Vec<String>,
     /// The perception frame that triggered this event (if applicable).
     pub source_frame_id: Option<String>,
+    /// The project this memory belongs to (context engine spec §4.11,
+    /// Task B6), taken from the source `context_events` row's resolved
+    /// project. `None` for memories with no project attribution — either
+    /// because nothing resolved, or because the row predates B6 (legacy
+    /// LanceDB tables have no `project` column at all and always read as
+    /// `None`; see [`EpisodicStore::open`]'s additive migration).
+    ///
+    /// Retrieval filters on it *softly*: unattributed memories are never
+    /// hidden, only cross-project ones (see
+    /// [`EpisodicStore::search_similar`]).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The §4.1 zone sensitivity inherited from whatever this memory was
+    /// distilled from (fixwave 3a, C1).
+    ///
+    /// A distilled memory is a *summary of the same text* the source event
+    /// carried, so it inherits the source's sensitivity — otherwise text
+    /// withheld from the cloud as an event would be sent to Anthropic as a
+    /// memory one distillation pass later. The wake packager maps it onto
+    /// `MemoryLine::local_only`, which the renderer's cloud gate enforces.
+    ///
+    /// Defaults to [`EventSensitivity::CloudAllowed`]: legacy rows (and
+    /// tables whose additive migration was refused) have no column to read,
+    /// and hiding every pre-existing memory would be a silent recall
+    /// regression.
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: EventSensitivity,
+}
+
+/// Serde/legacy default for [`EpisodicEvent::sensitivity`].
+fn default_sensitivity() -> EventSensitivity {
+    EventSensitivity::CloudAllowed
 }
 
 /// A search result from episodic memory, including the similarity score.
@@ -331,6 +508,16 @@ pub struct EpisodicStore {
     db: Connection,
     table: Option<Table>,
     embedder: Embedder,
+    /// Column names of the open table, in the table's own order.
+    ///
+    /// Written rows must match the table's physical layout, and a table
+    /// created before Task B6 has `project` appended at the *end* by
+    /// [`Self::migrate_project_column`] rather than in the canonical
+    /// position — so batches are built against this list, not blindly
+    /// against [`Self::table_schema`]. It is also the graceful-degradation
+    /// path: if the migration fails, `project` is simply absent here and
+    /// inserts keep working without it.
+    columns: Vec<String>,
 }
 
 impl EpisodicStore {
@@ -357,15 +544,18 @@ impl EpisodicStore {
             db,
             table: None,
             embedder,
+            columns: canonical_column_names(),
         };
 
         // Try to open existing table, or leave as None (created on first insert).
         store.table = store.db.open_table(TABLE_NAME).execute().await.ok();
 
         if store.table.is_some() {
+            store.migrate_additive_columns().await;
             info!(
                 layer = "memory",
                 component = "episodic",
+                columns = store.columns.join(","),
                 "Opened existing episodic memory table"
             );
         } else {
@@ -389,61 +579,147 @@ impl EpisodicStore {
         Self::open_with_embedder(db_dir, Embedder::deterministic()).await
     }
 
-    /// Returns the Arrow schema for the episodic events table.
+    /// Returns the canonical Arrow schema for the episodic events table —
+    /// the layout a *freshly created* table gets. Tables created before
+    /// Task B6 differ (no `project`, or `project` appended last after
+    /// migration); write paths go through [`Self::columns`].
     fn table_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("ts", DataType::Utf8, false),
-            Field::new("kind", DataType::Utf8, false),
-            Field::new("summary", DataType::Utf8, false),
-            Field::new("importance", DataType::Float32, false),
-            Field::new("tags", DataType::Utf8, false), // JSON array as string
-            Field::new("source_frame_id", DataType::Utf8, true),
-            Field::new(
-                "vector",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    EMBEDDING_DIM as i32,
-                ),
-                true,
-            ),
-        ]))
+        Arc::new(Schema::new(
+            canonical_column_names()
+                .iter()
+                .map(|name| canonical_field(name).expect("canonical name has a canonical field"))
+                .collect::<Vec<_>>(),
+        ))
     }
 
-    /// Creates a RecordBatch from a single event and its embedding.
-    fn event_to_batch(event: &EpisodicEvent, embedding: &[f32]) -> Result<RecordBatch> {
-        let schema = Self::table_schema();
+    /// Additive LanceDB schema migration for [`ADDITIVE_COLUMNS`]
+    /// (`project` — Task B6, spec §4.11; `sensitivity` — fixwave 3a C1):
+    /// an existing table that predates a column gets it added, all-null,
+    /// in place. Also refreshes [`Self::columns`] from whatever the table
+    /// actually has afterwards.
+    ///
+    /// Never fails the open. If `add_columns` is refused (older Lance
+    /// format, read-only directory, concurrent writer), the store simply
+    /// keeps writing the columns the table does have: old memories stay
+    /// readable, new ones just carry no project / no sensitivity (which
+    /// reads back as `cloud_allowed`, i.e. exactly today's behaviour).
+    /// Losing an attribute is much cheaper than refusing to open episodic
+    /// memory at all.
+    async fn migrate_additive_columns(&mut self) {
+        let Some(table) = &self.table else {
+            self.columns = canonical_column_names();
+            return;
+        };
 
-        let id_arr = StringArray::from(vec![event.id.as_str()]);
-        let ts_arr = StringArray::from(vec![event.ts.to_rfc3339()]);
-        let kind_arr = StringArray::from(vec![event.kind.as_str()]);
-        let summary_arr = StringArray::from(vec![event.summary.as_str()]);
-        let importance_arr = Float32Array::from(vec![event.importance]);
-        let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
-        let tags_arr = StringArray::from(vec![tags_json.as_str()]);
-        let frame_id_arr = StringArray::from(vec![event.source_frame_id.as_deref()]);
+        let existing = match table.schema().await {
+            Ok(schema) => schema,
+            Err(error) => {
+                warn!(
+                    layer = "memory",
+                    component = "episodic",
+                    error = %error,
+                    "Could not read episodic table schema; assuming the canonical layout"
+                );
+                self.columns = canonical_column_names();
+                return;
+            }
+        };
 
-        // Build the fixed-size list for the vector column using from_iter_primitive.
-        // Wraps the embedding as a single row with EMBEDDING_DIM elements.
-        let vector_arr = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            vec![Some(embedding.iter().map(|&v| Some(v)))],
-            EMBEDDING_DIM as i32,
-        );
+        let mut missing = Vec::new();
+        for column in ADDITIVE_COLUMNS {
+            if existing.field_with_name(column).is_err() {
+                missing.push(column);
+            }
+        }
+        for column in &missing {
+            let added = Arc::new(Schema::new(vec![
+                canonical_field(column).expect("additive column has a canonical field")
+            ]));
+            match table
+                .add_columns(NewColumnTransform::AllNulls(added), None)
+                .await
+            {
+                Ok(_) => info!(
+                    layer = "memory",
+                    component = "episodic",
+                    column = column,
+                    "Migrated episodic table: added additive column (all null)"
+                ),
+                Err(error) => warn!(
+                    layer = "memory",
+                    component = "episodic",
+                    column = column,
+                    error = %error,
+                    "Could not add the column to the existing episodic table; \
+                     continuing without that attribute on new memories"
+                ),
+            }
+        }
 
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(id_arr),
-                Arc::new(ts_arr),
-                Arc::new(kind_arr),
-                Arc::new(summary_arr),
-                Arc::new(importance_arr),
-                Arc::new(tags_arr),
-                Arc::new(frame_id_arr),
-                Arc::new(vector_arr),
-            ],
-        )
-        .context("Failed to create RecordBatch")
+        self.columns = match table.schema().await {
+            Ok(schema) => schema
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|name| canonical_field(name).is_some())
+                .collect(),
+            // Schema unreadable after the attempt: assume the columns that
+            // were already there survived and the ones we tried to add did
+            // not, so writes stay compatible with the pre-migration table.
+            Err(_) => canonical_column_names()
+                .into_iter()
+                .filter(|name| !missing.iter().any(|m| m == name))
+                .collect(),
+        };
+    }
+
+    /// Creates a RecordBatch from a single event and its embedding,
+    /// laid out to match `columns` (the open table's own column order).
+    fn event_to_batch(
+        event: &EpisodicEvent,
+        embedding: &[f32],
+        columns: &[String],
+    ) -> Result<RecordBatch> {
+        let mut fields = Vec::with_capacity(columns.len());
+        let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(columns.len());
+
+        for name in columns {
+            let field = canonical_field(name)
+                .with_context(|| format!("Unknown episodic column in table layout: {name}"))?;
+            let array: Arc<dyn Array> = match name.as_str() {
+                "id" => Arc::new(StringArray::from(vec![event.id.as_str()])),
+                "ts" => Arc::new(StringArray::from(vec![event.ts.to_rfc3339()])),
+                "kind" => Arc::new(StringArray::from(vec![event.kind.as_str()])),
+                "summary" => Arc::new(StringArray::from(vec![event.summary.as_str()])),
+                "importance" => Arc::new(Float32Array::from(vec![event.importance])),
+                "tags" => {
+                    let tags_json =
+                        serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
+                    Arc::new(StringArray::from(vec![tags_json]))
+                }
+                "source_frame_id" => {
+                    Arc::new(StringArray::from(vec![event.source_frame_id.as_deref()]))
+                }
+                PROJECT_COLUMN => Arc::new(StringArray::from(vec![event.project.as_deref()])),
+                SENSITIVITY_COLUMN => Arc::new(StringArray::from(vec![event_enum_token(
+                    &event.sensitivity,
+                )])),
+                // Build the fixed-size list for the vector column using
+                // from_iter_primitive: one row of EMBEDDING_DIM elements.
+                "vector" => Arc::new(
+                    FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                        vec![Some(embedding.iter().map(|&v| Some(v)))],
+                        EMBEDDING_DIM as i32,
+                    ),
+                ),
+                other => anyhow::bail!("Unhandled episodic column: {other}"),
+            };
+            fields.push(field);
+            arrays.push(array);
+        }
+
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .context("Failed to create RecordBatch")
     }
 
     /// Inserts an episodic event into the store.
@@ -459,7 +735,7 @@ impl EpisodicStore {
             );
         }
 
-        let batch = Self::event_to_batch(event, &embedding)?;
+        let batch = Self::event_to_batch(event, &embedding, &self.columns)?;
 
         match &self.table {
             Some(table) => {
@@ -470,7 +746,8 @@ impl EpisodicStore {
                     .context("Failed to add event to episodic table")?;
             }
             None => {
-                // First insert — create the table.
+                // First insert — create the table with the canonical
+                // layout (`self.columns` already holds it).
                 let table = self
                     .db
                     .create_table(TABLE_NAME, vec![batch])
@@ -500,10 +777,28 @@ impl EpisodicStore {
     /// Searches for events similar to the query text.
     ///
     /// Returns up to `limit` results, ordered by similarity (most similar first).
+    ///
+    /// `project` is the optional project filter (Task B6, spec §4.11).
+    /// Two deliberate properties:
+    ///
+    /// - **Soft.** A memory with no project (`None`) always survives the
+    ///   filter. Every memory written before B6 is unattributed, and so is
+    ///   anything observed while no project resolved — hard-filtering
+    ///   would silently empty episodic recall on existing installs.
+    ///   Only memories belonging to a *different* project are dropped.
+    /// - **Post-search, not pushed down.** Lance predicate pushdown over a
+    ///   column that legacy tables may not have is a footgun (the
+    ///   migration is best-effort), so the filter runs in Rust over an
+    ///   over-fetched result set — `limit * OVERFETCH` rows, floored at
+    ///   [`FILTER_OVERFETCH_MIN`], then truncated back to `limit`. The
+    ///   cost is one wider vector scan; the benefit is that a table
+    ///   without the column behaves exactly like one where every row is
+    ///   unattributed.
     pub async fn search_similar(
         &mut self,
         query_text: &str,
         limit: usize,
+        project: Option<&str>,
     ) -> Result<Vec<EpisodicSearchResult>> {
         let table = match &self.table {
             Some(t) => t,
@@ -512,10 +807,15 @@ impl EpisodicStore {
 
         let query_embedding = self.embedder.embed_one(query_text)?;
 
+        let fetch = match project {
+            Some(_) => (limit.saturating_mul(FILTER_OVERFETCH)).max(FILTER_OVERFETCH_MIN),
+            None => limit,
+        };
+
         let results = table
             .vector_search(query_embedding)
             .context("Failed to build vector search query")?
-            .limit(limit)
+            .limit(fetch)
             .execute()
             .await
             .context("Failed to execute vector search")?;
@@ -527,34 +827,10 @@ impl EpisodicStore {
             .context("Failed to collect search results")?;
 
         for batch in &batches {
-            let ids = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let timestamps = batch
-                .column_by_name("ts")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let kinds = batch
-                .column_by_name("kind")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let summaries = batch
-                .column_by_name("summary")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let importances = batch
-                .column_by_name("importance")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
-            let tags_col = batch
-                .column_by_name("tags")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let frame_ids = batch
-                .column_by_name("source_frame_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let distances = batch
                 .column_by_name("_distance")
                 .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
-
-            let (Some(ids), Some(timestamps), Some(kinds), Some(summaries), Some(importances)) =
-                (ids, timestamps, kinds, summaries, importances)
-            else {
+            let Some(rows) = events_from_batch(batch) else {
                 warn!(
                     layer = "memory",
                     component = "episodic",
@@ -562,42 +838,18 @@ impl EpisodicStore {
                 );
                 continue;
             };
-
-            for i in 0..batch.num_rows() {
-                let ts_str = timestamps.value(i);
-                let ts = DateTime::parse_from_rfc3339(ts_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-
-                let tags: Vec<String> = tags_col
-                    .and_then(|t| serde_json::from_str(t.value(i)).ok())
-                    .unwrap_or_default();
-
-                let source_frame_id = frame_ids.and_then(|f| {
-                    if f.is_null(i) {
-                        None
-                    } else {
-                        Some(f.value(i).to_string())
-                    }
-                });
-
-                let distance = distances.map(|d| d.value(i)).unwrap_or(0.0);
-
+            for (i, event) in rows.into_iter().enumerate() {
+                if !project_matches(project, event.project.as_deref()) {
+                    continue;
+                }
                 events.push(EpisodicSearchResult {
-                    event: EpisodicEvent {
-                        id: ids.value(i).to_string(),
-                        ts,
-                        kind: EventKind::from_str_lossy(kinds.value(i)),
-                        summary: summaries.value(i).to_string(),
-                        importance: importances.value(i),
-                        tags,
-                        source_frame_id,
-                    },
-                    distance,
+                    event,
+                    distance: distances.map(|d| d.value(i)).unwrap_or(0.0),
                 });
             }
         }
 
+        events.truncate(limit);
         Ok(events)
     }
 
@@ -622,62 +874,10 @@ impl EpisodicStore {
 
         let mut events = Vec::new();
         for batch in &batches {
-            let ids = batch
-                .column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let timestamps = batch
-                .column_by_name("ts")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let kinds = batch
-                .column_by_name("kind")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let summaries = batch
-                .column_by_name("summary")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let importances = batch
-                .column_by_name("importance")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
-            let tags_col = batch
-                .column_by_name("tags")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let frame_ids = batch
-                .column_by_name("source_frame_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-
-            let (Some(ids), Some(timestamps), Some(kinds), Some(summaries), Some(importances)) =
-                (ids, timestamps, kinds, summaries, importances)
-            else {
+            let Some(rows) = events_from_batch(batch) else {
                 continue;
             };
-
-            for i in 0..batch.num_rows() {
-                let ts_str = timestamps.value(i);
-                let ts = DateTime::parse_from_rfc3339(ts_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-
-                let tags: Vec<String> = tags_col
-                    .and_then(|t| serde_json::from_str(t.value(i)).ok())
-                    .unwrap_or_default();
-
-                let source_frame_id = frame_ids.and_then(|f| {
-                    if f.is_null(i) {
-                        None
-                    } else {
-                        Some(f.value(i).to_string())
-                    }
-                });
-
-                events.push(EpisodicEvent {
-                    id: ids.value(i).to_string(),
-                    ts,
-                    kind: EventKind::from_str_lossy(kinds.value(i)),
-                    summary: summaries.value(i).to_string(),
-                    importance: importances.value(i),
-                    tags,
-                    source_frame_id,
-                });
-            }
+            events.extend(rows);
         }
 
         // Sort by timestamp descending (LanceDB doesn't guarantee order without explicit sort).
@@ -714,6 +914,8 @@ impl EpisodicStore {
             .await
             .context("Failed to recreate episodic table")?;
         self.table = Some(table);
+        // The recreated table is canonical, whatever the wiped one was.
+        self.columns = canonical_column_names();
 
         info!(
             layer = "memory",
@@ -722,6 +924,99 @@ impl EpisodicStore {
         );
 
         Ok(())
+    }
+
+    /// Deletes every memory derived from the given perception frames — the
+    /// episodic rung of the Context page's Forget cascade (spec §4.13).
+    ///
+    /// Matches on `source_frame_id`, which the distiller writes for
+    /// frame-derived and event-derived memories alike (Task B6 keeps it
+    /// only when the `raw_reference` parses as a uuid, so a git sha never
+    /// masquerades as a frame pointer). Memories with no source frame —
+    /// wakes, tool calls, chat turns — are never touched by this call.
+    ///
+    /// Returns the number of rows deleted. An empty input, or a store with
+    /// no table yet, deletes nothing and is not an error.
+    pub async fn delete_by_source_frames(&self, frame_ids: &[String]) -> Result<u64> {
+        let Some(table) = &self.table else {
+            return Ok(0);
+        };
+        // Frame ids are uuids by construction (they come from
+        // `perception_frames.id`), so the only characters that can appear
+        // are hex digits and dashes. Anything else is rejected rather than
+        // escaped: a predicate is a query language, and this is the one
+        // place a caller-supplied string reaches it.
+        let quoted: Vec<String> = frame_ids
+            .iter()
+            .filter(|id| {
+                let ok = !id.is_empty()
+                    && id.len() <= 64
+                    && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+                if !ok {
+                    warn!(
+                        layer = "memory",
+                        component = "episodic",
+                        source_frame_id = id.as_str(),
+                        "Refusing a non-uuid frame id in an episodic delete predicate"
+                    );
+                }
+                ok
+            })
+            .map(|id| format!("'{id}'"))
+            .collect();
+        if quoted.is_empty() {
+            return Ok(0);
+        }
+        let predicate = format!("source_frame_id IN ({})", quoted.join(", "));
+        let result = table
+            .delete(&predicate)
+            .await
+            .context("Failed to delete episodic events by source frame")?;
+        if result.num_deleted_rows > 0 {
+            info!(
+                layer = "memory",
+                component = "episodic",
+                deleted = result.num_deleted_rows,
+                frames = quoted.len(),
+                "Deleted episodic memories derived from forgotten frames"
+            );
+        }
+        Ok(result.num_deleted_rows)
+    }
+
+    /// Deletes every memory whose timestamp falls inside `[from, to]` —
+    /// the episodic rung of the Context page's delete-range action
+    /// (spec §4.13).
+    ///
+    /// `ts` is stored as an RFC 3339 string (see [`canonical_field`]), and
+    /// chrono renders it with a fixed `YYYY-MM-DDTHH:MM:SS[.f]+00:00`
+    /// layout, so lexicographic comparison is chronological comparison for
+    /// every value this store has ever written.
+    pub async fn delete_ts_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<u64> {
+        let Some(table) = &self.table else {
+            return Ok(0);
+        };
+        if to < from {
+            return Ok(0);
+        }
+        let predicate = format!(
+            "ts >= '{}' AND ts <= '{}'",
+            from.to_rfc3339(),
+            to.to_rfc3339()
+        );
+        let result = table
+            .delete(&predicate)
+            .await
+            .context("Failed to delete episodic events in range")?;
+        if result.num_deleted_rows > 0 {
+            info!(
+                layer = "memory",
+                component = "episodic",
+                deleted = result.num_deleted_rows,
+                "Purged episodic memories in a user-requested time range"
+            );
+        }
+        Ok(result.num_deleted_rows)
     }
 
     /// Returns the total number of events in the store.
@@ -760,6 +1055,8 @@ mod tests {
             importance: 0.7,
             tags: vec!["test".to_string()],
             source_frame_id: None,
+            project: None,
+            sensitivity: EventSensitivity::CloudAllowed,
         }
     }
 
@@ -816,7 +1113,7 @@ mod tests {
 
         // Search for something related to debugging.
         let results = store
-            .search_similar("triage debugging error", 2)
+            .search_similar("triage debugging error", 2, None)
             .await
             .unwrap();
 
@@ -859,7 +1156,7 @@ mod tests {
         let db_path = tmp.path().to_str().unwrap();
 
         let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
-        let results = store.search_similar("anything", 5).await.unwrap();
+        let results = store.search_similar("anything", 5, None).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -889,6 +1186,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.event_count().await.unwrap(), 1);
+    }
+
+    // -- Task B6: additive `project` column + soft retrieval filter ----
+
+    /// Creates an `episodic_events` table the way a build *before* Task
+    /// B6 would have: every canonical column except `project`.
+    async fn create_legacy_table(db_dir: &str, summary: &str) {
+        let db = connect(db_dir).execute().await.unwrap();
+        let legacy_columns: Vec<String> = canonical_column_names()
+            .into_iter()
+            .filter(|name| name != PROJECT_COLUMN)
+            .collect();
+        let event = make_event(summary, EventKind::Remember);
+        let embedding = Embedder::deterministic().embed_one(&event.summary).unwrap();
+        let batch = EpisodicStore::event_to_batch(&event, &embedding, &legacy_columns).unwrap();
+        db.create_table(TABLE_NAME, vec![batch])
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_table_without_project_opens_reads_and_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().to_str().unwrap();
+        create_legacy_table(db_path, "a memory from before the migration").await;
+
+        // Opening with the B6 code must not fail and must not lose rows.
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 1);
+        let legacy = store.recent_events(10).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].summary, "a memory from before the migration");
+        assert_eq!(legacy[0].project, None, "legacy rows read as unattributed");
+
+        // The migration ran, so new inserts carry their project.
+        assert!(
+            store.columns.iter().any(|c| c == PROJECT_COLUMN),
+            "project column should exist after migration, got {:?}",
+            store.columns
+        );
+        let mut fresh = make_event("a memory from after the migration", EventKind::Remember);
+        fresh.project = Some("continuum".to_string());
+        store.insert_event(&fresh).await.unwrap();
+
+        let all = store.recent_events(10).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let written = all
+            .iter()
+            .find(|e| e.summary == "a memory from after the migration")
+            .expect("new memory present");
+        assert_eq!(written.project.as_deref(), Some("continuum"));
+    }
+
+    #[tokio::test]
+    async fn legacy_table_reopens_idempotently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().to_str().unwrap();
+        create_legacy_table(db_path, "legacy").await;
+
+        // Migrating twice must be a no-op, not an error or a duplicate
+        // column: the runtime reopens the store on every boot.
+        let store = EpisodicStore::open_for_test(db_path).await.unwrap();
+        drop(store);
+        let mut store = EpisodicStore::open_for_test(db_path).await.unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 1);
+        store
+            .insert_event(&make_event("after second open", EventKind::Remember))
+            .await
+            .unwrap();
+        assert_eq!(store.event_count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_project_filter_keeps_matching_and_unattributed_memories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = EpisodicStore::open_for_test(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        for (summary, project) in [
+            ("alpha work", Some("alpha")),
+            ("beta work", Some("beta")),
+            ("unattributed work", None),
+        ] {
+            let mut event = make_event(summary, EventKind::Remember);
+            event.project = project.map(str::to_string);
+            store.insert_event(&event).await.unwrap();
+        }
+
+        let unfiltered = store.search_similar("work", 10, None).await.unwrap();
+        assert_eq!(unfiltered.len(), 3, "no filter returns everything");
+
+        let filtered = store
+            .search_similar("work", 10, Some("alpha"))
+            .await
+            .unwrap();
+        let summaries: Vec<&str> = filtered.iter().map(|r| r.event.summary.as_str()).collect();
+        assert!(summaries.contains(&"alpha work"));
+        assert!(
+            summaries.contains(&"unattributed work"),
+            "the filter is soft: unattributed memories survive"
+        );
+        assert!(
+            !summaries.contains(&"beta work"),
+            "another project's memories are dropped, got {summaries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_project_filter_still_honours_the_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = EpisodicStore::open_for_test(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        for i in 0..8 {
+            let mut event = make_event(&format!("alpha work {i}"), EventKind::Remember);
+            event.project = Some("alpha".to_string());
+            store.insert_event(&event).await.unwrap();
+        }
+
+        let filtered = store
+            .search_similar("work", 3, Some("alpha"))
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 3, "over-fetch must be truncated to limit");
+    }
+
+    #[test]
+    fn project_filter_matrix() {
+        assert!(project_matches(None, None));
+        assert!(project_matches(None, Some("alpha")));
+        assert!(project_matches(Some("alpha"), None));
+        assert!(project_matches(Some("alpha"), Some("alpha")));
+        assert!(!project_matches(Some("alpha"), Some("beta")));
+    }
+
+    #[test]
+    fn canonical_schema_covers_every_canonical_name() {
+        let names = canonical_column_names();
+        assert!(names.iter().any(|n| n == PROJECT_COLUMN));
+        for name in &names {
+            assert!(
+                canonical_field(name).is_some(),
+                "no field definition for {name}"
+            );
+        }
+        let schema = EpisodicStore::table_schema();
+        assert_eq!(schema.fields().len(), names.len());
+        for (field, name) in schema.fields().iter().zip(names.iter()) {
+            assert_eq!(field.name(), name, "schema order must match column order");
+        }
+        assert!(canonical_field("not_a_continuum_column").is_none());
     }
 
     #[tokio::test]
