@@ -58,7 +58,7 @@ cargo run --bin continuum-triage-bench
 5. **Inspect raw output**: Set `RUST_LOG=continuum_core::triage=debug` to see raw model output on fallback attempts
 6. **Common issues**:
    - Model keeps choosing `ignore`: Temperature may be too low, or the perception frame lacks distinguishing information
-   - Model produces thinking tokens: Ensure `/no_think` is at the start of the system prompt
+   - Model produces thinking tokens: ensure the prompt is ChatML-wrapped with `/no_think` at the start of the **user** turn (`triage::prompts::build_triage_prompt`), not in the system block
    - Grammar compilation fails: Verify the GBNF syntax with a llama.cpp grammar validator
 
 ## Signal reliability

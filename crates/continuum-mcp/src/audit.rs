@@ -50,6 +50,8 @@ pub(crate) fn record_tool_call(
             importance: 0.3,
             tags: vec!["tool_call".to_string(), tool.clone()],
             source_frame_id: None,
+            project: None,
+            sensitivity: continuum_core::memory::events::EventSensitivity::CloudAllowed,
         };
 
         match server.episodic().await {

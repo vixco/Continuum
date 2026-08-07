@@ -15,6 +15,7 @@
 
 pub mod distill;
 pub mod episodic;
+pub mod events;
 pub mod raw_log;
 pub mod retrieval;
 pub mod semantic;

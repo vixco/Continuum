@@ -166,14 +166,20 @@ fn build_conflict_prompt(old: &Note, new: &Note) -> String {
 /// survives the retry, is returned as `Err` for the caller to log and skip
 /// (this one pair never blocks the rest of the batch).
 async fn evaluate_pair(llm: &dyn CuratorLlm, prompt: &str) -> anyhow::Result<Verdict> {
-    let raw = llm.complete(prompt, 256).await?;
+    // Task B2 (spec §4.7): already within the background per-call token
+    // cap — expressed via the shared const so it can't silently drift.
+    let raw = llm
+        .complete(prompt, crate::llm_gate::BACKGROUND_MAX_TOKENS)
+        .await?;
     match parse_verdict(&raw) {
         Ok(v) => Ok(v),
         Err(first_err) => {
             let retry_prompt = format!(
                 "{prompt}\n\nYour previous reply was invalid: {first_err}. Reply with ONLY the JSON object."
             );
-            let retry_raw = llm.complete(&retry_prompt, 256).await?;
+            let retry_raw = llm
+                .complete(&retry_prompt, crate::llm_gate::BACKGROUND_MAX_TOKENS)
+                .await?;
             parse_verdict(&retry_raw)
         }
     }
@@ -339,6 +345,7 @@ mod tests {
             source: Source::default(),
             source_ref: None,
             sensitivity: Default::default(),
+            expires: None,
             relations: vec![],
             tags: vec![],
         }

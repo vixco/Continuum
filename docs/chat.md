@@ -65,6 +65,47 @@ state, or anything else.
   **confirmed** notes as a "## Memory context" system-prompt section, so
   the model doesn't have to call a tool just to recall a well-matched fact.
 
+### Session context
+
+Separate from the vault-backed "## Memory context" above, the chat prompt
+can carry one extra section describing **what the background runtime
+believes you are doing right now** — active project, inferred goal and
+task, and recently touched files. This is the desktop row of the context
+engine's per-consumer matrix (context engine spec §4.9).
+
+Two things about it are deliberate:
+
+- **It is purely additive.** The in-process vault search that produces
+  "## Memory context" is untouched. Running the desktop app with no
+  background runtime at all — the common install — behaves exactly as it
+  did before this section existed.
+- **It renders nothing rather than an excuse.** If the runtime is not
+  publishing, has not published a `session_state` snapshot yet, or the
+  snapshot is older than an hour, no section appears. The prompt's
+  "## Live status" footer already says `Background runtime: not running`,
+  so a second sentence saying the same thing would only cost tokens.
+
+What it renders, when it renders:
+
+```
+## Session state
+Project: continuum
+Goal: ship the context engine
+Task: wire the chat profile (confidence 0.8)
+Open files: apps/desktop/src-tauri/src/chat.rs
+```
+
+Goal and task only appear once the runtime's own inference clears
+`[session_state] confidence_floor`; below it Continuum says nothing rather
+than guessing. The whole section is capped by
+`[context_package] chat_token_budget` (600 tokens) and passes through the
+same cloud gate as every other context package: a goal or task observed in
+a `never_observe`/`local_only` zone generalizes to "working in a private
+context" instead of leaving the machine.
+
+Turn the section off entirely with `[chat] include_session_context =
+false`.
+
 ### Tool names
 
 The tool names differ by provider kind: OpenAI-compatible and Anthropic
@@ -121,6 +162,7 @@ documented below:
 | `memory_tool_max_rounds` | `8` | Cap on tool-call rounds within one chat turn, to bound a runaway tool-calling loop. |
 | `memory_context_notes_max` | `6` | Max notes injected as "## Memory context" per turn. `0` disables context injection (tools, if enabled, keep working). |
 | `include_sensitive_memory` | `false` | Let `sensitive`-tagged notes appear in `memory_search` results and the injected context — see the sensitivity gate above for what this does and does not cover. |
+| `include_session_context` | `true` | Add a "## Session state" section read from the background runtime's published `state.json` (see [Session context](#session-context) below). |
 
 ### Claude CLI provider needs `continuum-mcp.exe`
 
@@ -224,6 +266,7 @@ All knobs live under `[chat]` in `~/.continuum-dev/config.toml`
 | `memory_tool_max_rounds` | `8` | Cap on tool-call rounds within one chat turn. |
 | `memory_context_notes_max` | `6` | Max notes injected as "## Memory context" per turn; `0` disables injection. |
 | `include_sensitive_memory` | `false` | Let `sensitive`-tagged notes into `memory_search` results and injected context (with the Claude CLI MCP-tool exception noted in [Memory access](#memory-access)). |
+| `include_session_context` | `true` | Add the "## Session state" section described in [Session context](#session-context). |
 
 Example override:
 

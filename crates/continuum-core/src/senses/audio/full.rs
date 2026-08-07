@@ -22,7 +22,9 @@ use rubato::{
 use tokio::sync::mpsc as tokio_mpsc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use crate::config::AudioConfig;
+use crate::config::{AudioConfig, ContextConfig, ObservationToggles, PrivacyConfig};
+use crate::senses::privacy::{emit_system_event, source_enabled, ObservedSource, PrivacyFilter};
+use crate::senses::toggles::ToggleControl;
 use crate::senses::types::AudioObservation;
 
 // ---------------------------------------------------------------------------
@@ -393,6 +395,17 @@ pub struct AudioWatcher {
     /// Loaded whisper context, wrapped in `Arc` so it can be sent to blocking
     /// tasks. `None` if the model failed to load (degraded mode).
     whisper_ctx: Option<Arc<WhisperContext>>,
+    /// Privacy choke point (spec §4.1): transcripts are scrubbed through
+    /// this filter at collector emit, before the frame channel.
+    privacy: Arc<PrivacyFilter>,
+    /// Honest per-source toggles; `mic` (and `pause_all`) gate this watcher.
+    toggles: ObservationToggles,
+    /// Live toggle control (Task C5): re-read before every emitted
+    /// transcript. Documented limitation (see `senses::toggles`): the cpal
+    /// input stream itself is opened once at start, so flipping `mic` off
+    /// stops the data path but leaves the OS microphone indicator lit
+    /// until the runtime restarts.
+    toggle_control: Option<ToggleControl>,
 }
 
 impl AudioWatcher {
@@ -406,6 +419,12 @@ impl AudioWatcher {
     ///
     /// * `config` - Audio pipeline settings (thresholds, model path, etc.).
     pub fn new(config: AudioConfig) -> Self {
+        // Standalone construction synthesizes a default privacy filter; the
+        // runtime shares its boot-time filter via [`AudioWatcher::with_privacy`].
+        let privacy = Arc::new(PrivacyFilter::from_config(
+            &ContextConfig::default(),
+            &PrivacyConfig::default(),
+        ));
         if !config.enabled {
             tracing::info!(
                 layer = "senses",
@@ -415,6 +434,9 @@ impl AudioWatcher {
             return Self {
                 config,
                 whisper_ctx: None,
+                privacy,
+                toggles: ObservationToggles::default(),
+                toggle_control: None,
             };
         }
 
@@ -444,6 +466,37 @@ impl AudioWatcher {
         Self {
             config,
             whisper_ctx,
+            privacy,
+            toggles: ObservationToggles::default(),
+            toggle_control: None,
+        }
+    }
+
+    /// Attaches the shared boot-time privacy filter and observation
+    /// toggles (spec §4.1). Called once at senses spawn.
+    pub fn with_privacy(mut self, filter: Arc<PrivacyFilter>, toggles: ObservationToggles) -> Self {
+        self.privacy = filter;
+        self.toggles = toggles;
+        self
+    }
+
+    /// Attaches the shared **live** toggle control (Task C5, spec §4.13).
+    ///
+    /// Without it the watcher honours the boot-time [`ObservationToggles`]
+    /// copy it was given; with it, every loop iteration re-reads the
+    /// current value, so a Context-page switch takes effect without a
+    /// restart.
+    pub fn with_toggle_control(mut self, control: ToggleControl) -> Self {
+        self.toggle_control = Some(control);
+        self
+    }
+
+    /// The toggle values to honour right now: the live control when one is
+    /// attached, else the boot-time copy.
+    fn live_toggles(&self) -> ObservationToggles {
+        match &self.toggle_control {
+            Some(control) => control.snapshot(),
+            None => self.toggles.clone(),
         }
     }
 
@@ -490,6 +543,18 @@ impl AudioWatcher {
                 "Audio watcher is disabled, exiting run loop"
             );
             // Park until shutdown so the task does not busy-loop.
+            let _ = shutdown.changed().await;
+            return;
+        }
+
+        // Honest toggles (spec §4.1): a disabled mic source emits nothing —
+        // the audio device is never opened, so no samples exist to leak.
+        // Toggles are read at spawn time (no config hot-reload yet).
+        if !source_enabled(&self.live_toggles(), ObservedSource::Mic) {
+            emit_system_event(
+                "toggle_change",
+                "mic observation disabled by [privacy.toggles]; audio watcher emits nothing",
+            );
             let _ = shutdown.changed().await;
             return;
         }
@@ -719,9 +784,22 @@ impl AudioWatcher {
                             "Speech segment ended"
                         );
 
+                        // Honest toggle, live (spec §4.1, Task C5): a
+                        // switched-off microphone transcribes nothing and
+                        // emits nothing. The cpal input stream itself was
+                        // opened at start and stays open until restart —
+                        // stated on the Context page rather than hidden
+                        // (see `senses::toggles`).
+                        if !source_enabled(&self.live_toggles(), ObservedSource::Mic) {
+                            continue;
+                        }
                         // Transcribe the segment.
                         match self.transcribe_segment(segment, duration_ms).await {
-                            Ok(obs) => {
+                            Ok(mut obs) => {
+                                // Transcripts are free text: scrub at
+                                // collector emit (spec §4.1), before the
+                                // frame channel and any model.
+                                obs.transcript = self.privacy.scrub_text(&obs.transcript);
                                 if tx.send(obs).await.is_err() {
                                     tracing::warn!(
                                         layer = "senses",
@@ -1521,6 +1599,44 @@ mod tests {
         assert!(
             result.is_ok(),
             "Disabled audio watcher should exit within 5 seconds of shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn mic_toggle_off_stops_all_emission() {
+        // Honest toggles (spec §4.1): with `[privacy.toggles].mic = false`
+        // the watcher must emit nothing even though audio is enabled in
+        // config — the device is never opened.
+        let config = AudioConfig {
+            enabled: true,
+            whisper_model_path: "/nonexistent/whisper-model.bin".to_string(),
+            ..AudioConfig::default()
+        };
+        let filter = Arc::new(crate::senses::privacy::PrivacyFilter::from_config(
+            &ContextConfig::default(),
+            &PrivacyConfig::default(),
+        ));
+        let toggles = ObservationToggles {
+            mic: false,
+            ..ObservationToggles::default()
+        };
+        let watcher = AudioWatcher::new(config).with_privacy(filter, toggles);
+        let (tx, mut rx) = tokio_mpsc::channel::<AudioObservation>(8);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = tokio::spawn(async move {
+            watcher.run(tx, shutdown_rx).await;
+        });
+
+        let _ = shutdown_tx.send(true);
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            result.is_ok(),
+            "Mic-toggled-off watcher should exit promptly on shutdown"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Mic-toggled-off watcher must emit no observations"
         );
     }
 

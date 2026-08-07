@@ -14,10 +14,26 @@
 //! ```bash
 //! cargo run --bin continuum-perception
 //! cargo run --bin continuum-perception -- --triage   # with triage decisions
+//! cargo run --bin continuum-perception -- --record ~/.continuum-dev/recordings/today.jsonl
 //! ```
 //!
 //! Configuration is loaded from `~/.continuum-dev/config.toml`. If no config
 //! file exists, sensible defaults are used.
+//!
+//! # Record mode (context engine spec §9, Task C6)
+//!
+//! `--record <path>` writes every **post-privacy** perception frame and
+//! every collector event to newline-delimited JSON with a relative `t_ms`
+//! offset, so the [`continuum_core::bench::replay`] harness can drive the
+//! pipeline over a real session without any watcher running.
+//!
+//! **A recording is LOCAL-ONLY.** It contains exactly the content the
+//! privacy work protects — real window titles, captions, transcripts,
+//! project paths, commit subjects. Keep recordings outside the repository
+//! (`~/.continuum-dev/recordings/` is the suggested home); never commit
+//! one, never attach one to an issue, never hand one to a cloud model. The
+//! only JSONL under version control is the hand-authored synthetic fixture
+//! in `crates/continuum-core/benches/data/`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,12 +44,17 @@ use continuum_vision::VisionModel;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
+use continuum_core::bench::record::Recorder;
 use continuum_core::config::{continuum_dev_dir, load_config, ContinuumConfig};
+use continuum_core::context::project::{FrameInput, ProjectResolver};
+use continuum_core::memory::events::{project_switch_event, ContextEvent, EventSender};
 use continuum_core::memory::raw_log::RawLog;
 use continuum_core::senses::audio::AudioWatcher;
 use continuum_core::senses::context::ContextWatcher;
 use continuum_core::senses::frame::PerceptionFrameBuilder;
+use continuum_core::senses::git_watch::GitWatcher;
 use continuum_core::senses::live_context::{self, LiveContextHub};
+use continuum_core::senses::privacy::{emit_system_event, PrivacyFilter};
 use continuum_core::senses::types::{AudioObservation, ContextObservation, ScreenObservation};
 use continuum_core::senses::vision::VisionWatcher;
 use continuum_core::triage::handlers::handle_decision;
@@ -41,7 +62,15 @@ use continuum_core::triage::llm::{TriageConfig, TriageLayer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let triage_enabled = std::env::args().any(|a| a == "--triage");
+    let args: Vec<String> = std::env::args().collect();
+    let triage_enabled = args.iter().any(|a| a == "--triage");
+    // `--record <path>`: post-privacy frames + collector events → JSONL
+    // (spec §9). See the module docs — recordings are local-only.
+    let record_path = args
+        .iter()
+        .position(|a| a == "--record")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
 
     // Initialize structured logging.
     let default_filter = if triage_enabled {
@@ -121,6 +150,65 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx_ctrlc.send(true);
     });
 
+    // Privacy filter (context engine spec §4.1): constructed once at senses
+    // spawn and shared into every watcher — same wiring as the runtime bin.
+    let privacy_filter = Arc::new(PrivacyFilter::from_config(&config.context, &config.privacy));
+    let observation_toggles = config.privacy.toggles.clone();
+
+    // Project resolver (Task A4, spec §4.3): same wiring as the runtime
+    // bin, but purely in-memory — this bin never persists the Projects
+    // table (discovery proposals live only for the process lifetime).
+    let mut project_resolver = ProjectResolver::from_config(&config.projects);
+    let project_handle = project_resolver.handle();
+
+    // Record mode (spec §9, Task C6): everything below the privacy choke
+    // point can be serialized to JSONL for the replay harness. Created
+    // before the watchers so the very first frame lands in the file, and
+    // timestamped relative to *now* so `t_ms` starts at zero.
+    let recorder: Option<Arc<Recorder>> = match &record_path {
+        Some(path) => match Recorder::create(path, chrono::Utc::now()) {
+            Ok(recorder) => {
+                tracing::info!(
+                    layer = "senses",
+                    component = "recorder",
+                    path = %path.display(),
+                    "Recording post-privacy frames and events (LOCAL-ONLY — never commit a recording)"
+                );
+                Some(Arc::new(recorder))
+            }
+            Err(e) => {
+                tracing::error!(
+                    layer = "senses",
+                    component = "recorder",
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to open the recording; continuing without it"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Events sink (Task A6): the perception bin runs NO events-writer —
+    // context_events belongs to the runtime binary (single-writer). All
+    // collector events land in a log-only sink here; system events fall
+    // back to log-only automatically because no global sender is
+    // installed in this process.
+    //
+    // Record mode taps the same observer seam session state uses (Task
+    // B5): synchronous, after the registry check, before the (absent)
+    // queue — so a recording sees exactly the events a runtime would
+    // persist.
+    let event_sender = match recorder.clone() {
+        Some(recorder) => {
+            EventSender::log_only().with_observer(Arc::new(move |event: &ContextEvent| {
+                recorder.record_event(event)
+            }))
+        }
+        None => EventSender::log_only(),
+    };
+
     // Create the shared agent-facing projection and observation channels.
     let live_context = LiveContextHub::new(config.screen.buffer_capacity.saturating_mul(4));
     live_context::spawn_publisher(
@@ -134,44 +222,77 @@ async fn main() -> Result<()> {
     let (ctx_tx, ctx_rx) = mpsc::channel::<ContextObservation>(64);
     let (frame_tx, mut frame_rx) = mpsc::channel(32);
 
-    // Initialize the vision model.
-    let vision_model = init_vision_model(&config, &resource_plan).await;
+    if observation_toggles.pause_all {
+        // pause_all gates the entire frame loop (spec §4.1): no watchers,
+        // no frame builder, no frames built or persisted.
+        emit_system_event(
+            "toggle_change",
+            "pause_all set in [privacy.toggles]; observation fully paused — no frames will be built",
+        );
+        drop(screen_tx);
+        drop(audio_tx);
+        drop(ctx_tx);
+        drop(screen_rx);
+        drop(audio_rx);
+        drop(ctx_rx);
+        drop(frame_tx);
+    } else {
+        // Initialize the vision model.
+        let vision_model = init_vision_model(&config, &resource_plan).await;
 
-    // Spawn the three senses watchers.
-    let vision_watcher = VisionWatcher::new_with_live_context(
-        config.screen.clone(),
-        vision_model,
-        PathBuf::from(&config.storage.screenshots_dir),
-        live_context.clone(),
-    );
-    let vision_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        vision_watcher.run(screen_tx, vision_shutdown).await;
-    });
+        // Spawn the three senses watchers.
+        let vision_watcher = VisionWatcher::new_with_live_context(
+            config.screen.clone(),
+            vision_model,
+            PathBuf::from(&config.storage.screenshots_dir),
+            live_context.clone(),
+        )
+        .with_privacy(privacy_filter.clone(), observation_toggles.clone());
+        let vision_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            vision_watcher.run(screen_tx, vision_shutdown).await;
+        });
 
-    let audio_watcher = AudioWatcher::new(config.audio.clone());
-    let audio_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        audio_watcher.run(audio_tx, audio_shutdown, None).await;
-    });
+        let audio_watcher = AudioWatcher::new(config.audio.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone());
+        let audio_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            audio_watcher.run(audio_tx, audio_shutdown, None).await;
+        });
 
-    let context_watcher = ContextWatcher::new(config.context.clone());
-    let context_shutdown = shutdown_rx.clone();
-    let context_live_context = live_context.clone();
-    tokio::spawn(async move {
-        let _ = context_watcher
-            .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
-            .await;
-    });
+        let context_watcher = ContextWatcher::new(config.context.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_project_handle(project_handle.clone())
+            .with_event_sender(event_sender.clone());
+        let context_shutdown = shutdown_rx.clone();
+        let context_live_context = live_context.clone();
+        tokio::spawn(async move {
+            let _ = context_watcher
+                .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
+                .await;
+        });
 
-    // Spawn the frame builder.
-    let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
-    let builder_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        frame_builder
-            .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
-            .await;
-    });
+        // Git collector (Task A5, spec §4.4): same wiring as the runtime
+        // bin — active confirmed project only, disabled-with-reason parks.
+        let git_watcher = GitWatcher::new(config.git_context.clone())
+            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
+            .with_project_handle(project_handle.clone())
+            .with_event_sender(event_sender.clone());
+        let git_shutdown = shutdown_rx.clone();
+        let git_live_context = live_context.clone();
+        tokio::spawn(async move {
+            git_watcher.run(git_shutdown, Some(git_live_context)).await;
+        });
+
+        // Spawn the frame builder.
+        let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
+        let builder_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            frame_builder
+                .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
+                .await;
+        });
+    }
 
     // Optionally initialize the triage layer.
     let triage: Option<TriageLayer> = if triage_enabled {
@@ -251,6 +372,33 @@ async fn main() -> Result<()> {
             Some(frame) = frame_rx.recv() => {
                 frame_count += 1;
 
+                // Record mode (spec §9): the frame is already post-privacy
+                // — the frame builder receives observations the watchers
+                // emitted through the §4.1 choke point.
+                if let Some(recorder) = &recorder {
+                    recorder.record_frame(&frame);
+                }
+
+                // Project resolver (Task A4): resolve once per frame and
+                // emit project_switch events, same as the runtime bin —
+                // but into this bin's log-only sink (no events DB here).
+                let project_outcome = project_resolver.observe(&FrameInput {
+                    process_name: &frame.context.foreground_process_name,
+                    window_title: &frame.context.foreground_window_title,
+                    recent_file_path: None,
+                    ts: frame.ts,
+                });
+                if let Some(switch) = &project_outcome.switched {
+                    event_sender.send(project_switch_event(
+                        switch.from.as_deref(),
+                        &switch.to,
+                        &frame.context.foreground_process_name,
+                        &frame.context.foreground_window_title,
+                        project_outcome.current.as_ref().and_then(|p| p.zone),
+                        switch.ts,
+                    ));
+                }
+
                 // Print one-line summary.
                 let audio_text = frame.audio
                     .as_ref()
@@ -261,14 +409,18 @@ async fn main() -> Result<()> {
                 // Run triage if enabled.
                 let triage_str = if let Some(ref triage_layer) = triage {
                     let triage_start = Instant::now();
-                    let decision = triage_layer.evaluate(&frame, "").await;
+                    let output = triage_layer.evaluate(&frame, "").await;
                     let triage_ms = triage_start.elapsed().as_millis();
+                    // Perception bin only exercises the decision; the §4.7
+                    // classification block is consumed by the runtime (B3).
+                    let decision = output.decision;
 
                     tracing::debug!(
                         layer = "triage",
                         component = "main",
                         frame_id = %frame.id,
                         decision = decision.variant_name(),
+                        classification = output.classification.is_some(),
                         latency_ms = triage_ms as u64,
                         "Triage decision"
                     );
@@ -324,6 +476,17 @@ async fn main() -> Result<()> {
     );
 
     raw_log.close().await;
+
+    if let (Some(recorder), Some(path)) = (&recorder, &record_path) {
+        tracing::info!(
+            layer = "senses",
+            component = "recorder",
+            path = %path.display(),
+            lines = recorder.written(),
+            failed = recorder.failed(),
+            "Recording closed — keep it local, never commit it"
+        );
+    }
 
     tracing::info!(
         layer = "senses",

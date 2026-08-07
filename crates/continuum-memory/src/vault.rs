@@ -336,7 +336,7 @@ impl Vault {
             created: now,
             updated: None,
             last_used: None,
-            expires: None,
+            expires: draft.expires,
             supersedes: None,
             superseded_by: None,
             relations: draft.relations.clone(),
@@ -461,6 +461,19 @@ impl Vault {
     /// `opts.graph_max_nodes` when `f.limit` is unset.
     pub async fn graph(&self, f: &GraphFilter) -> Result<GraphData> {
         self.index.graph(f, self.opts.graph_max_nodes).await
+    }
+
+    /// The single most recently touched node of `node_type` with `status`.
+    ///
+    /// Exists so "the last session summary" is one indexed row read rather
+    /// than a scan of [`Self::graph`], which orders by importance and caps
+    /// its result (fixwave 3b, I6).
+    pub async fn newest_node(
+        &self,
+        node_type: NodeType,
+        status: NodeStatus,
+    ) -> Result<Option<NodeSummary>> {
+        self.index.newest_node(node_type, status).await
     }
 
     /// BFS neighborhood of `id` up to `depth` hops (capped at 2).
@@ -663,8 +676,8 @@ impl Vault {
     pub async fn append_event(&self, event: NewEvent) -> Result<()> {
         let ts = event.ts.unwrap_or_else(Utc::now).to_rfc3339();
         sqlx::query(
-            "INSERT INTO events(ts, kind, text, project, node_id, \"ref\")
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events(ts, kind, text, project, node_id, \"ref\", local_only)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&ts)
         .bind(&event.kind)
@@ -672,6 +685,7 @@ impl Vault {
         .bind(&event.project)
         .bind(&event.node_id)
         .bind(&event.reference)
+        .bind(i64::from(event.local_only))
         .execute(self.index.pool())
         .await?;
 
@@ -691,7 +705,7 @@ impl Vault {
     pub async fn events(&self, range: &EventRange) -> Result<Vec<Event>> {
         let limit = range.limit.unwrap_or(500);
         let mut query =
-            "SELECT id, ts, kind, text, project, node_id, \"ref\" FROM events WHERE 1=1"
+            "SELECT id, ts, kind, text, project, node_id, \"ref\", local_only FROM events WHERE 1=1"
                 .to_string();
 
         if range.since.is_some() {
@@ -720,6 +734,7 @@ impl Vault {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                i64,
             ),
         >(&query);
         if let Some(since) = range.since {
@@ -736,15 +751,18 @@ impl Vault {
         let rows = qry.fetch_all(self.index.pool()).await?;
         Ok(rows
             .into_iter()
-            .map(|(id, ts, kind, text, project, node_id, reference)| Event {
-                id,
-                ts,
-                kind,
-                text,
-                project,
-                node_id,
-                reference,
-            })
+            .map(
+                |(id, ts, kind, text, project, node_id, reference, local_only)| Event {
+                    id,
+                    ts,
+                    kind,
+                    text,
+                    project,
+                    node_id,
+                    reference,
+                    local_only: local_only != 0,
+                },
+            )
             .collect())
     }
 

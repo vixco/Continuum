@@ -207,6 +207,49 @@ frontmatter (directly, or by opening the vault folder in any editor) and it
 rejoins the index on the next reindex — no restart required, the file
 watcher picks up the edit.
 
+## Observation-derived candidates (triage classification)
+
+The curator is not the only producer of candidates. Since the context
+engine's Task B3 the triage call also classifies the frame it judges
+(spec §4.7), and that classification is consumed in
+`crates/continuum-core/src/triage/consume.rs`:
+
+- every classified frame becomes a `context_events` row (source `screen`,
+  or `audio` when the frame carried a transcript), tagged with the
+  frame's privacy zone;
+- a classification with `should_store`, or any `remember` decision,
+  additionally proposes a **vault candidate** — `status: candidate`,
+  `source: observed`, project from the resolver (a project the classifier
+  names is only trusted when the Projects table knows it), tagged
+  `observed` plus an epistemic label: `user_stated` when the belief came
+  from speech, `system_inferred` when it came from the screen;
+- the frame's `triage_decision` raw-log column records what triage did
+  (`ignore`, `wake_orchestrator/error`, …).
+
+Mapping from classification type to vault type:
+
+| classification | vault type |
+|---|---|
+| `error` | `error` |
+| `decision` | `decision` |
+| `preference` | `preference` |
+| `task_progress` | `task` |
+| `success` | `note` (tagged `result`) |
+| `communication`, `other` | `note` |
+| `routine` | *no candidate* |
+
+These candidates expire unless someone confirms them. The TTL is per type,
+from `[memory.candidate_ttl_days]` (defaults: task 30, error 30, note 90,
+decision and preference never) and lands in the note's `expires`
+frontmatter, which the vault's expiry sweep already archives on.
+
+Windows in a `never_observe` zone produce neither an event nor a
+candidate; `local_only` windows produce both, with the event tagged
+`local_only` and the note written `sensitivity: sensitive` so the cloud
+gate strips it (spec §4.1 propagation rule). Duplicate suppression reuses
+the curator's near-duplicate check, so the same observation repeated does
+not stack up pending notes.
+
 ## The curator
 
 The curator is a background pipeline, owned by the headless `continuum`
@@ -223,9 +266,20 @@ Every stage below is implemented in `crates/continuum-core/src/curator/`.
 1. **Vault feed.** At boot the runtime opens the vault (same directory the
    dashboard uses) and spawns a watcher-drain task that reindexes any file
    changed outside the process (a hand edit, Obsidian, the dashboard). The
-   existing memory distiller (raw log → episodic) additionally appends a
-   `kind: "distilled"` event into the vault's event timeline for every frame
-   it distills, so the curator's extraction pass has something to read.
+   existing memory distiller additionally appends a `kind: "distilled"`
+   event into the vault's event timeline (carrying the memory's `project`)
+   for everything it distils, so the curator's extraction pass has something
+   to read. Since the context engine's §4.11 compression ladder the
+   distiller's primary input is **deduped `context_events` rows**, not raw
+   frames: one collapsed row becomes one episodic memory whose summary shows
+   the repeat count (`"build failed (×14)"`) and whose importance gets a
+   bounded boost (+0.05 per doubling of the count, capped at +0.20). Raw
+   frames that never produced a classified event still distil through the
+   original salience predicate as a fallback; frames that *did* produce an
+   event are excluded so a moment is never recorded twice. Every episodic
+   memory carries an optional `project`, and wake retrieval filters on it
+   *softly* — memories of other projects are dropped, unattributed ones
+   (everything written before the field existed) always survive.
 2. **Extraction.** Every `interval_minutes` (default 10), `extract_pass`
    reads vault events since the previous pass, asks the triage LLM (via the
    `CuratorLlm` trait) to propose up to `max_candidates_per_pass` candidate

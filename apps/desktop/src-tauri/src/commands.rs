@@ -961,6 +961,42 @@ pub async fn talk_now(app: State<'_, Arc<AppState>>) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+// --- Context page (Task C5, spec §4.13) ---
+
+/// Writes one Context-page intent file for the runtime to drain.
+///
+/// The dashboard links `continuum-core` without the `runtime` feature, so
+/// it cannot open the raw-log database, the vault index or the episodic
+/// store — every Context-page action (confirm a project, correct the
+/// project/goal/task, pin, forget, delete a range, flip an honest toggle)
+/// travels to the runtime as a file under
+/// `<dev_dir>/context-intents/`, the same pattern
+/// [`continuum_core::voice::intent`] uses for push-to-talk.
+///
+/// Fire-and-forget by design: this returns as soon as the file is on disk.
+/// The runtime drains it on its next 250 ms tick and republishes
+/// `state.json`, which is what actually updates the page. There is
+/// deliberately **no** TTL on the file — a correction made while the
+/// runtime is stopped applies at its next boot.
+#[tauri::command]
+pub async fn context_write_intent(
+    app: State<'_, Arc<AppState>>,
+    intent: continuum_core::context::intents::ContextAction,
+) -> Result<(), String> {
+    let dev_dir = app.runtime.dev_dir();
+    let envelope = continuum_core::context::intents::ContextIntent::new(intent);
+    tracing::info!(
+        layer = "context",
+        component = "dashboard",
+        intent = envelope.action.kind_label(),
+        intent_id = %envelope.id,
+        "Context page intent queued for the runtime"
+    );
+    continuum_core::context::intents::write_intent(&dev_dir, &envelope)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 // --- Voice: settings that persist to config (require daemon restart) ---
 
 #[tauri::command]
@@ -1774,6 +1810,7 @@ mod health_repair_tests {
                 project: None,
                 node_id: None,
                 reference: None,
+                local_only: false,
             })
             .await
             .unwrap();

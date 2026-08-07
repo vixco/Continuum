@@ -9,6 +9,14 @@ description = "MCP server exposing Windows-specific tools to Claude Code for Con
 name = "continuum-mcp"
 path = "src/main.rs"
 
+# The safety-redaction harness (context engine spec §9, Task C6). It lives
+# here rather than beside its three siblings in continuum-core because it
+# must call the real MCP tool handlers, and continuum-core cannot depend on
+# continuum-mcp without a dependency cycle.
+[[bin]]
+name = "continuum-redaction-bench"
+path = "src/bin/continuum-redaction-bench.rs"
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }

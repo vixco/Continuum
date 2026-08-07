@@ -207,11 +207,29 @@ impl HealthCheck for LiveContextCheck {
                 Ok(state) => state,
                 Err(error) => return HealthResult::error(error.to_string(), 1),
             };
-        let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(50));
-        if state
-            .health
-            .should_restart(chrono::Utc::now(), true, interval)
-        {
+        // Task A8: live-context.json is content-versioned (spec §4.11) —
+        // its timestamps legitimately go stale on a quiet/idle screen
+        // because unchanged ticks skip the write. The runtime evaluates
+        // its own capture-stall check every 2 s at the CURRENT cadence
+        // (idle mode relaxes it) and publishes it in state.json; prefer
+        // that verdict and only fall back to the file-based check for
+        // pre-A8 runtimes that don't publish `context_engine`.
+        let runtime_stalled = std::fs::read_to_string(self.dev_dir.join("state.json"))
+            .ok()
+            .and_then(|contents| {
+                serde_json::from_str::<continuum_core::runtime_publish::RuntimeSnapshot>(&contents)
+                    .ok()
+            })
+            .and_then(|snap| snap.context_engine)
+            .and_then(|engine| engine.live_context)
+            .map(|live| live.should_restart);
+        let stalled = runtime_stalled.unwrap_or_else(|| {
+            let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(50));
+            state
+                .health
+                .should_restart(chrono::Utc::now(), true, interval)
+        });
+        if stalled {
             return HealthResult::error("multi-monitor capture stalled", 1);
         }
         if state.monitors.is_empty() {

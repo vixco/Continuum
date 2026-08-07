@@ -11,6 +11,24 @@
 //! (posts a toast + consults an in-process rate limiter). Errors are swallowed
 //! into `None`/empty values — the MCP layer decides how to surface them, and
 //! per CLAUDE.md these tools must never crash.
+//!
+//! ## Privacy boundary (context engine spec §5.1, Task C2)
+//!
+//! The three **observation** tools — [`active_window`], [`clipboard_get`],
+//! and [`live_context`] — used to read Windows state directly and hand it
+//! to the orchestrator, which meant a zone the user configured
+//! (`never_observe` on their password manager, `local_only` on private
+//! browsing) was enforced only on the runtime's own frame loop and could be
+//! side-stepped by calling the MCP tool instead. They now route every byte
+//! they return through the same
+//! [`PrivacyFilter`](continuum_core::senses::privacy::PrivacyFilter) the
+//! runtime uses, built from the same `config.toml`.
+//!
+//! **This is content filtering, not a schema change.** Every request and
+//! response type in this module is byte-identical to before: same tool
+//! names, same field names, same types, same optionality. Non-negotiable #7
+//! (never break the published MCP API) holds — a caller sees the same shape,
+//! with private content replaced by the §4.1 sentinel/redaction literals.
 
 use std::fs;
 use std::path::Path;
@@ -18,6 +36,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{Local, Offset};
+use continuum_core::senses::live_context::REDACTED_LOCAL_ONLY;
+use continuum_core::senses::privacy::{PrivacyFilter, Zone, EXCLUDED_PROCESS, EXCLUDED_TITLE};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -82,16 +102,60 @@ pub fn current_time() -> CurrentTimeResponse {
 // active_window
 // ---------------------------------------------------------------------------
 
-pub fn active_window() -> ActiveWindowResponse {
+/// Foreground window title + process name, **zone-gated** (spec §5.1).
+///
+/// - `never_observe` → the §4.1 sentinel ([`EXCLUDED_PROCESS`] / empty
+///   title). The real title is never returned, not even redacted: titles of
+///   excluded windows are content.
+/// - `local_only` → the process name survives (it is not window content)
+///   and the title collapses to the redaction literal — this response is
+///   cloud-bound, and `local_only` content never leaves the machine.
+/// - `cloud_allowed` → the title is scrubbed as free text, the process name
+///   as a path (an exe path can carry the username).
+pub fn active_window(filter: &PrivacyFilter) -> ActiveWindowResponse {
     let (title, process_name) = continuum_core::senses::context::foreground_window();
-    ActiveWindowResponse {
-        title,
-        process_name,
+    gate_active_window(filter, &process_name, &title)
+}
+
+/// The pure gating decision behind [`active_window`], split out so it can
+/// be tested without a desktop session.
+///
+/// `pub` since Task C6: the safety-redaction harness
+/// (`continuum-redaction-bench`) must push its secret corpus through this
+/// exact decision, and the live foreground window of the machine running
+/// the bench is not a corpus anyone can control.
+pub fn gate_active_window(
+    filter: &PrivacyFilter,
+    process_name: &str,
+    title: &str,
+) -> ActiveWindowResponse {
+    match filter.resolve_zone(process_name, title) {
+        Zone::NeverObserve => ActiveWindowResponse {
+            title: EXCLUDED_TITLE.to_string(),
+            process_name: EXCLUDED_PROCESS.to_string(),
+        },
+        Zone::LocalOnly => ActiveWindowResponse {
+            title: REDACTED_LOCAL_ONLY.to_string(),
+            process_name: filter.scrub_path(process_name),
+        },
+        Zone::CloudAllowed => ActiveWindowResponse {
+            title: filter.scrub_text(title),
+            process_name: filter.scrub_path(process_name),
+        },
     }
 }
 
 /// Read the runtime's atomically-published shared live world-state.
-pub fn live_context(data_dir: &Path) -> Result<LiveContextResponse, String> {
+///
+/// Both returned fields are privacy-gated (spec §5.1): the structured
+/// `state` goes through
+/// [`LiveWorldState::cloud_view`](continuum_core::senses::live_context::LiveWorldState::cloud_view)
+/// — the egress-point cloud gate — and `compact` is rendered **from the
+/// gated state**, so the two can never disagree. Schema unchanged.
+pub fn live_context(
+    data_dir: &Path,
+    filter: &PrivacyFilter,
+) -> Result<LiveContextResponse, String> {
     let path = data_dir.join("live-context.json");
     if !path.exists() {
         return Ok(LiveContextResponse {
@@ -112,6 +176,7 @@ pub fn live_context(data_dir: &Path) -> Result<LiveContextResponse, String> {
         .signed_duration_since(state.generated_at)
         .num_seconds()
         > 10;
+    let state = state.cloud_view(filter);
     let compact = Some(state.compact_for_agents(4_000));
     Ok(LiveContextResponse {
         available: true,
@@ -125,16 +190,46 @@ pub fn live_context(data_dir: &Path) -> Result<LiveContextResponse, String> {
 // clipboard_get
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
-pub fn clipboard_get() -> ClipboardResponse {
+/// Best-effort clipboard read, gated three ways (spec §5.1):
+///
+/// 1. `enabled` is the `[context_tools] clipboard_tool_enabled` kill-switch.
+///    When false the clipboard is **never opened** — nothing can leak even
+///    in scrubbed form — and the tool answers `text: None`, which is
+///    already its documented "nothing to return" answer.
+/// 2. The foreground zone gates it. Reading the clipboard while a
+///    `never_observe` window is focused is the exact zone bypass §5.1
+///    exists to close: the user excluded that app, and the clipboard is
+///    very likely holding what they just copied out of it.
+/// 3. Whatever survives is scrubbed as free text, always.
+pub fn clipboard_get(filter: &PrivacyFilter, enabled: bool) -> ClipboardResponse {
+    if !enabled {
+        return ClipboardResponse { text: None };
+    }
+    let (title, process_name) = continuum_core::senses::context::foreground_window();
+    let zone = filter.resolve_zone(&process_name, &title);
+    if zone == Zone::NeverObserve {
+        return ClipboardResponse { text: None };
+    }
+    gate_clipboard(filter, read_clipboard_text())
+}
+
+/// The pure scrub behind [`clipboard_get`], split out so it can be tested
+/// without touching the Windows clipboard — and, since Task C6, so the
+/// safety-redaction harness can feed it the secret corpus.
+pub fn gate_clipboard(filter: &PrivacyFilter, text: Option<String>) -> ClipboardResponse {
     ClipboardResponse {
-        text: clipboard_win::get_text(),
+        text: text.map(|text| filter.scrub_text(&text)),
     }
 }
 
+#[cfg(windows)]
+fn read_clipboard_text() -> Option<String> {
+    clipboard_win::get_text()
+}
+
 #[cfg(not(windows))]
-pub fn clipboard_get() -> ClipboardResponse {
-    ClipboardResponse { text: None }
+fn read_clipboard_text() -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -293,6 +388,16 @@ mod toast_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use continuum_core::config::{ContextConfig, PrivacyConfig};
+    use continuum_core::senses::privacy::{ZoneRule, REDACTED};
+
+    fn test_filter() -> PrivacyFilter {
+        PrivacyFilter::from_config(&ContextConfig::default(), &PrivacyConfig::default())
+            .with_environment(
+                Some("C:\\Users\\testuser".to_string()),
+                Some("testuser".to_string()),
+            )
+    }
 
     #[test]
     fn current_time_populates_fields() {
@@ -304,7 +409,7 @@ mod tests {
     #[test]
     fn active_window_does_not_panic() {
         // On CI there may be no desktop session; empty strings are OK.
-        let _ = active_window();
+        let _ = active_window(&test_filter());
     }
 
     #[test]
@@ -322,7 +427,7 @@ mod tests {
     #[test]
     fn live_context_is_unavailable_before_runtime_publish() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let response = live_context(dir.path()).expect("unavailable response");
+        let response = live_context(dir.path(), &test_filter()).expect("unavailable response");
         assert!(!response.available);
         assert!(response.state.is_none());
     }
@@ -336,12 +441,234 @@ mod tests {
             &hub.snapshot(),
         )
         .expect("publish live context");
-        let response = live_context(dir.path()).expect("read live context");
+        let response = live_context(dir.path(), &test_filter()).expect("read live context");
         assert!(response.available);
         assert!(!response.stale);
-        assert!(response
-            .compact
-            .as_deref()
-            .is_some_and(|text| text.starts_with("live-context/v1")));
+        assert!(response.compact.as_deref().is_some_and(|text| {
+            text.starts_with(&format!(
+                "live-context/v{}",
+                continuum_core::senses::live_context::LIVE_CONTEXT_SCHEMA_VERSION
+            ))
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // §5.1 privacy retrofit (Task C2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn active_window_returns_the_sentinel_for_a_never_observe_zone() {
+        let filter = test_filter();
+        // 1password.exe is a legacy `[context].sensitive_process_names`
+        // entry, synthesised into a never_observe zone rule.
+        let response = gate_active_window(&filter, "1password.exe", "Personal — Bank login");
+        assert_eq!(response.process_name, EXCLUDED_PROCESS);
+        assert_eq!(response.title, EXCLUDED_TITLE);
+        assert!(
+            !response.title.contains("Bank"),
+            "an excluded window title must never be returned, not even redacted"
+        );
+    }
+
+    #[test]
+    fn active_window_redacts_a_local_only_title_but_keeps_the_process() {
+        let filter = test_filter();
+        let response = gate_active_window(&filter, "msedge.exe", "Health results - InPrivate");
+        assert_eq!(response.process_name, "msedge.exe");
+        assert_eq!(response.title, REDACTED_LOCAL_ONLY);
+        assert!(!response.title.contains("Health results"));
+    }
+
+    #[test]
+    fn active_window_scrubs_secrets_out_of_an_ordinary_title() {
+        let filter = test_filter();
+        let response = gate_active_window(
+            &filter,
+            "C:\\Users\\testuser\\bin\\code.exe",
+            "deploy.sh — sk-ant-api03-AbCdEf0123456789AbCdEf0123456789",
+        );
+        assert!(
+            !response.title.contains("sk-ant-api03"),
+            "secret survived in the window title: {}",
+            response.title
+        );
+        assert!(response.title.contains(REDACTED));
+        assert!(response.title.starts_with("deploy.sh"));
+        assert_eq!(
+            response.process_name, "~\\bin\\code.exe",
+            "the exe path must be username-scrubbed"
+        );
+    }
+
+    #[test]
+    fn active_window_honors_an_explicitly_configured_zone() {
+        // A user-configured `[privacy].zones` rule must bind the MCP tool
+        // exactly like it binds the runtime's frame loop — that equivalence
+        // is the whole point of the §5.1 retrofit.
+        let privacy = PrivacyConfig {
+            zones: vec![ZoneRule {
+                match_process: Some("notepad.exe".to_string()),
+                match_title_keyword: None,
+                zone: continuum_core::senses::privacy::Zone::NeverObserve,
+            }],
+            ..PrivacyConfig::default()
+        };
+        let filter = PrivacyFilter::from_config(&ContextConfig::default(), &privacy);
+        let response = gate_active_window(&filter, "notepad.exe", "diary.txt");
+        assert_eq!(response.process_name, EXCLUDED_PROCESS);
+        assert_eq!(response.title, EXCLUDED_TITLE);
+    }
+
+    #[test]
+    fn clipboard_text_is_always_scrubbed() {
+        let filter = test_filter();
+        let response = gate_clipboard(
+            &filter,
+            Some("token ghp_AbCd1234EfGh5678IjKl9012MnOp3456QrSt for the deploy".to_string()),
+        );
+        let text = response.text.expect("clipboard text");
+        assert!(!text.contains("ghp_"), "clipboard leaked a token: {text}");
+        assert!(text.contains(REDACTED));
+        // Non-secret content survives — this is filtering, not blanking.
+        assert!(text.contains("for the deploy"));
+    }
+
+    #[test]
+    fn clipboard_kill_switch_returns_none_without_reading_the_clipboard() {
+        let response = clipboard_get(&test_filter(), false);
+        assert!(
+            response.text.is_none(),
+            "[context_tools] clipboard_tool_enabled = false must yield text: null"
+        );
+    }
+
+    #[test]
+    fn clipboard_empty_stays_none() {
+        assert!(gate_clipboard(&test_filter(), None).text.is_none());
+    }
+
+    #[test]
+    fn live_context_filters_both_compact_and_state() {
+        use continuum_core::senses::live_context::{
+            write_snapshot, LiveWorldState, PrivacyDisposition, WindowWorldState,
+        };
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hub = continuum_core::senses::live_context::LiveContextHub::default();
+        let mut snapshot: LiveWorldState = hub.snapshot();
+        snapshot.window = Some(WindowWorldState {
+            process_name: "code.exe".into(),
+            title: "deploy — sk-ant-api03-AbCdEf0123456789AbCdEf0123456789".into(),
+            observed_at: chrono::Utc::now(),
+            in_call: false,
+            privacy: PrivacyDisposition::Visible,
+            pid: Some(1234),
+            exe_path: Some("C:\\Users\\testuser\\bin\\code.exe".into()),
+            monitor_id: Some("display-1".into()),
+            active_since_secs: 12,
+        });
+        snapshot.health.last_error =
+            Some("upload failed with Bearer abcdefghij1234567890XYZ".to_string());
+        write_snapshot(&dir.path().join("live-context.json"), &snapshot)
+            .expect("publish live context");
+
+        let response = live_context(dir.path(), &test_filter()).expect("read live context");
+        assert!(response.available);
+
+        // BOTH fields are gated (spec §5.1 says so explicitly).
+        let compact = response.compact.expect("compact");
+        let state = serde_json::to_string(&response.state.expect("state")).expect("serialize");
+        for secret in ["sk-ant-api03", "abcdefghij1234567890XYZ"] {
+            assert!(!compact.contains(secret), "compact leaked {secret}");
+            assert!(!state.contains(secret), "state leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn live_context_applies_the_window_sentinel_in_the_state_field() {
+        use continuum_core::senses::live_context::{
+            write_snapshot, LiveWorldState, PrivacyDisposition, WindowWorldState,
+        };
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hub = continuum_core::senses::live_context::LiveContextHub::default();
+        let mut snapshot: LiveWorldState = hub.snapshot();
+        snapshot.window = Some(WindowWorldState {
+            process_name: "1password.exe".into(),
+            title: "Personal Vault".into(),
+            observed_at: chrono::Utc::now(),
+            in_call: true,
+            privacy: PrivacyDisposition::Visible,
+            pid: Some(9001),
+            exe_path: Some("C:\\Program Files\\1Password\\1password.exe".into()),
+            monitor_id: Some("display-2".into()),
+            active_since_secs: 30,
+        });
+        write_snapshot(&dir.path().join("live-context.json"), &snapshot)
+            .expect("publish live context");
+
+        let response = live_context(dir.path(), &test_filter()).expect("read live context");
+        let window = response
+            .state
+            .expect("state")
+            .window
+            .expect("window entry present");
+        assert_eq!(window.process_name, EXCLUDED_PROCESS);
+        assert_eq!(window.title, EXCLUDED_TITLE);
+        assert!(!window.in_call);
+        // Schema v4 enrichment: pid/exe path/monitor ARE the identity and
+        // placement of the excluded app — the sentinel carries none of it.
+        assert!(window.pid.is_none());
+        assert!(window.exe_path.is_none());
+        assert!(window.monitor_id.is_none());
+        assert_eq!(window.active_since_secs, 0);
+    }
+
+    /// Non-negotiable #7: the retrofit changes **content**, never shape.
+    /// This pins the exact serialized field set of all three retrofitted
+    /// responses — a rename or an added field fails here before it can
+    /// reach a released tool schema.
+    #[test]
+    fn retrofitted_response_schemas_are_unchanged() {
+        /// Serialized field names, sorted (serde_json orders map keys, so
+        /// this is a set comparison, not a field-order one).
+        fn keys(value: &serde_json::Value) -> Vec<String> {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("response serializes to an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        }
+
+        let filter = test_filter();
+        let active = serde_json::to_value(gate_active_window(&filter, "code.exe", "main.rs"))
+            .expect("serialize active_window");
+        assert_eq!(
+            keys(&active),
+            vec!["process_name", "title"],
+            "system_active_window response schema changed"
+        );
+
+        let clipboard = serde_json::to_value(gate_clipboard(&filter, Some("hi".into())))
+            .expect("serialize clipboard");
+        assert_eq!(
+            keys(&clipboard),
+            vec!["text"],
+            "system_clipboard_get response schema changed"
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let live = serde_json::to_value(
+            live_context(dir.path(), &filter).expect("unavailable live context"),
+        )
+        .expect("serialize live context");
+        assert_eq!(
+            keys(&live),
+            vec!["available", "compact", "stale", "state"],
+            "system_live_context response schema changed"
+        );
     }
 }

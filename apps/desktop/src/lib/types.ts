@@ -143,6 +143,201 @@ export interface RecentAction {
   detail: string | null;
 }
 
+// --- Context engine (Task C1) ---
+// Mirrors crates/continuum-core/src/context/session_state.rs and the
+// ContextEngineSnapshot half of runtime_publish.rs, forwarded into
+// ContinuumState.context by the dashboard's runtime bridge
+// (apps/desktop/src-tauri/src/runtime_bridge.rs::apply_snapshot).
+
+/// A one-line fact plus when it was observed. Serialised as `{text, at}`;
+/// the Rust side also *accepts* a bare string from older producers, but
+/// what the runtime publishes is always this object.
+export interface StampedText {
+  text: string;
+  at: string;
+}
+
+/// Live session state (spec §4.8). `current_goal`/`current_task` are the
+/// inferred fields — hide them below `[session_state] confidence_floor`,
+/// and render `local_only` ones as "working in a private context" at any
+/// cloud egress point.
+export interface SessionState {
+  active_project: string | null;
+  current_goal: string | null;
+  current_task: string | null;
+  active_app: string | null;
+  window_title: string | null;
+  open_files: string[];
+  last_error: StampedText | null;
+  last_success: StampedText | null;
+  last_user_command: StampedText | null;
+  confidence: number;
+  local_only: boolean;
+  /// Field tokens ("project" | "goal" | "task") the user pinned on the
+  /// Context page (spec §4.13). A pinned field is never overwritten by the
+  /// frame loop or by inference.
+  pinned: string[];
+  /// Field tokens the user explicitly corrected. Informational — unlike a
+  /// pin, a correction does not block later inference.
+  user_confirmed: string[];
+  since: string;
+  updated: string;
+  /// When `current_goal`/`current_task` were last established (inference
+  /// or correction). `null` means never inferred. This — not `updated`,
+  /// which the frame loop rewrites every second — is the clock the §4.12
+  /// continuation resolver ages the task on.
+  inferred_at: string | null;
+}
+
+/// Per-component health summary (spec §7). Disabled-with-reason is a
+/// healthy state: `healthy: true, enabled: false` with the reason in
+/// `detail`. `should_restart` is the only restart signal.
+export interface ComponentHealthSummary {
+  healthy: boolean;
+  enabled: boolean;
+  should_restart: boolean;
+  detail: string | null;
+}
+
+export interface ContextEngineSnapshot {
+  idle: boolean;
+  context_watcher: ComponentHealthSummary | null;
+  live_context: ComponentHealthSummary | null;
+  git_watcher: ComponentHealthSummary | null;
+  file_watcher: ComponentHealthSummary | null;
+  events_writer: ComponentHealthSummary | null;
+  /// Off-loop triage evaluation. `should_restart` fires when a single
+  /// evaluation has been in flight far past any plausible model latency —
+  /// the signature of an evaluation task that died without releasing the
+  /// coalescer, which silently parks every later frame.
+  triage: ComponentHealthSummary | null;
+}
+
+// --- Context page (Task C5, spec §4.13) ---
+// Mirrors crates/continuum-core/src/runtime_publish.rs::ContextPageSnapshot.
+// The dashboard process links continuum-core with `default-features = false`,
+// so it can never open the raw-log SQLite database itself — everything the
+// Context page lists (projects, override rules, pins, the recent-events
+// strip, the live toggle values) is published by the runtime into
+// `state.json` and forwarded by the runtime bridge.
+
+export type ProjectStatus = "configured" | "discovered" | "confirmed";
+
+/// One row of the Projects table (spec §4.3). `status: "discovered"` is an
+/// unconfirmed auto-discovery candidate: it never participates in
+/// resolution and is never collected from until the user confirms it.
+export interface ProjectSummaryView {
+  id: string;
+  name: string;
+  status: ProjectStatus;
+  root_paths: string[];
+  last_active: string | null;
+  frames_count: number;
+  /// True for the resolver's current post-hysteresis project.
+  active: boolean;
+}
+
+/// A persisted tier-0 resolver override rule (spec §4.3).
+export interface OverrideRuleView {
+  match_process: string | null;
+  match_title_substring: string | null;
+  action: "force_project" | "exclude_project";
+  project_id: string;
+}
+
+/// A persisted session pin (spec §4.13). Pins block session-state
+/// *overwrite* only, never resolution.
+export interface SessionPinView {
+  field: string;
+  value: string | null;
+}
+
+/// One deduped `context_events` row, already privacy-gated by the runtime.
+export interface ContextEventView {
+  id: number;
+  ts: string;
+  source: string;
+  event_type: string;
+  application: string;
+  summary: string;
+  count: number;
+  project_id: string | null;
+  /// Pointer into the raw log (a perception-frame id for screen/audio
+  /// events). Required for the Forget cascade.
+  raw_reference: string | null;
+}
+
+/// Live values of the honest per-source observation toggles (spec §4.1).
+export interface ObservationTogglesView {
+  mic: boolean;
+  screen: boolean;
+  files: boolean;
+  git: boolean;
+  pause_all: boolean;
+}
+
+/// A ranked continuation candidate (spec §4.12).
+export interface ContinuationCandidateView {
+  kind: string;
+  label: string;
+  text: string;
+  confidence: number;
+}
+
+export interface ContextPageSnapshot {
+  projects: ProjectSummaryView[];
+  rules: OverrideRuleView[];
+  pins: SessionPinView[];
+  recent_events: ContextEventView[];
+  toggles: ObservationTogglesView;
+  continuation: ContinuationCandidateView[];
+}
+
+/// All three fields are `null` until the runtime bridge has read a
+/// `state.json` from a running `continuum` process that publishes them —
+/// which is also what "runtime not running" looks like to the Context page.
+export interface ContextState {
+  session: SessionState | null;
+  engine: ContextEngineSnapshot | null;
+  page: ContextPageSnapshot | null;
+}
+
+/// Payload of a `context-intents/*.json` file (spec §4.13), written by
+/// `context_write_intent` and drained by the runtime's main loop. The
+/// `kind` discriminant and the field names must match
+/// `continuum_core::context::intents::ContextAction` exactly.
+export type ContextIntentInput =
+  | {
+      kind: "add_project";
+      name: string;
+      root_path: string;
+      /// Explicit slug; omit to have the runtime slugify `name`. NOT `id` —
+      /// the envelope owns that key at the same JSON level.
+      project_id?: string | null;
+    }
+  | { kind: "confirm_project"; project_id: string }
+  | {
+      kind: "correct";
+      field: "project" | "goal" | "task";
+      value: string;
+      match_process?: string | null;
+      match_title_substring?: string | null;
+    }
+  | {
+      kind: "not_this_project";
+      project_id: string;
+      match_process?: string | null;
+      match_title_substring?: string | null;
+    }
+  | { kind: "pin"; field: "project" | "goal" | "task"; value: string | null }
+  | { kind: "forget"; raw_reference?: string | null; event_id?: number | null }
+  | { kind: "delete_range"; from: string; to: string }
+  | {
+      kind: "set_toggle";
+      name: "mic" | "screen" | "files" | "git" | "pause_all";
+      value: boolean;
+    };
+
 export interface ContinuumState {
   perception: PerceptionState;
   triage: TriageState;
@@ -152,6 +347,7 @@ export interface ContinuumState {
   memory: MemoryState;
   health: HealthState;
   system: SystemState;
+  context: ContextState;
   recent_actions: RecentAction[];
 }
 

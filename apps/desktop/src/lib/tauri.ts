@@ -12,6 +12,7 @@ import type {
   ChatEventPayload,
   ComponentHealth,
   ConnectionTestReport,
+  ContextIntentInput,
   ContinuumConfig,
   ContinuumState,
   Conversation,
@@ -306,6 +307,8 @@ export const continuum = {
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   talkNow: () => invoke<void>("talk_now"),
+  contextWriteIntent: (intent: ContextIntentInput) =>
+    invoke<void>("context_write_intent", { intent }),
   updateWakeSensitivity: (value: number) =>
     invoke<ContinuumConfig>("update_wake_sensitivity", { value }, DEFAULT_CONFIG),
   updateTtsLengthScale: (value: number) =>
@@ -482,6 +485,10 @@ export const DEFAULT_STATE: ContinuumState = {
     paused: false,
     version: "0.1.0-alpha.11",
   },
+  // Task C1: `null` until the runtime bridge has read a state.json from a
+  // running `continuum` process — the same shape the Context page treats
+  // as "runtime not running".
+  context: { session: null, engine: null, page: null },
   recent_actions: [],
 };
 

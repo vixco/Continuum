@@ -6,6 +6,7 @@ import {
   BrainCircuit,
   CalendarClock,
   Check,
+  Compass,
   Database,
   Home,
   MessagesSquare,
@@ -24,6 +25,7 @@ import {
 import { AutomationsTab } from "@/components/tabs/AutomationsTab";
 import { BrainTab } from "@/components/tabs/BrainTab";
 import { ChatTab } from "@/components/tabs/ChatTab";
+import { ContextTab } from "@/components/tabs/ContextTab";
 import { HealthTab } from "@/components/tabs/HealthTab";
 import { HomeTab } from "@/components/tabs/HomeTab";
 import { LogsTab } from "@/components/tabs/LogsTab";
@@ -42,6 +44,7 @@ type TabId =
   | "home"
   | "chat"
   | "voice"
+  | "context"
   | "brain"
   | "memory"
   | "tools"
@@ -63,6 +66,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
       { id: "home", label: "Home", icon: Home },
       { id: "chat", label: "Chat", icon: MessagesSquare },
       { id: "voice", label: "Voice", icon: Mic },
+      { id: "context", label: "Context", icon: Compass },
       { id: "memory", label: "Memory", icon: Database },
     ],
   },
@@ -286,6 +290,7 @@ export function Shell() {
             {tab === "home" && <HomeTab />}
             {tab === "chat" && <ChatTab />}
             {tab === "voice" && <VoiceTab />}
+            {tab === "context" && <ContextTab />}
             {tab === "brain" && <BrainTab />}
             {tab === "memory" && <MemoryTab />}
             {tab === "tools" && <ToolsTab />}

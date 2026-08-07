@@ -174,6 +174,7 @@ impl VaultToolExecutor {
                     source: Source::Chat,
                     source_ref: None,
                     sensitivity: Sensitivity::default(),
+                    expires: None,
                     relations: Vec::new(),
                     tags: tags.unwrap_or_default(),
                 })
@@ -309,6 +310,21 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path) -> Option<McpSpec> {
             "mcp__continuum__memory_get_fact",
             "mcp__continuum__memory_list_facts",
             "mcp__continuum__memory_query_episodic",
+            // Context family (spec §5.2: "the chat CLI provider's
+            // allowed-tools list gains the context family"). Listed
+            // explicitly rather than wildcarded so adding a tool to the
+            // MCP server is never the same act as granting chat access to
+            // it. All ten are read-only and privacy-gated server-side.
+            "mcp__continuum__context_session",
+            "mcp__continuum__context_window",
+            "mcp__continuum__context_screen",
+            "mcp__continuum__context_audio",
+            "mcp__continuum__context_projects",
+            "mcp__continuum__context_timeline",
+            "mcp__continuum__context_search",
+            "mcp__continuum__context_files",
+            "mcp__continuum__context_git",
+            "mcp__continuum__context_package",
         ]
         .into_iter()
         .map(String::from)
@@ -421,6 +437,7 @@ mod tests {
             source: Source::Chat,
             source_ref: None,
             sensitivity,
+            expires: None,
             relations: Vec::new(),
             tags: Vec::new(),
         }

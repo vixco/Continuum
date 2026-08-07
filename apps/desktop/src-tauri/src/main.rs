@@ -199,6 +199,7 @@ fn main() {
             commands::set_paused,
             commands::set_voice_muted,
             commands::talk_now,
+            commands::context_write_intent,
             commands::update_wake_sensitivity,
             commands::update_tts_length_scale,
             commands::update_tts_engine,

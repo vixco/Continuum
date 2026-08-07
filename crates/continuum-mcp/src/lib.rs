@@ -6,6 +6,8 @@
 pub mod allowlist;
 pub(crate) mod audit;
 pub mod config;
+/// Safety-redaction evaluation harness (context engine spec §9, Task C6).
+pub mod redaction;
 pub mod server;
 pub mod tools;
 

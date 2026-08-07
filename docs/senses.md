@@ -139,6 +139,8 @@ salience_threshold = 0.10   # Minimum salience to reach triage (0.0-1.0)
 db_path = "~/.continuum-dev/raw_log.sqlite"
 screenshots_dir = "~/.continuum-dev/screenshots"
 retention_days = 30          # Frames older than this are rotated (1-365)
+delete_screenshots_with_rotation = true   # Delete JPEGs with their rows + run the mtime sweep
+screenshot_max_age_hours = 720            # mtime backstop for orphaned JPEGs (0 = off)
 ```
 
 ## Required Models
@@ -183,8 +185,18 @@ This path is in `.gitignore`. Never committed.
 SQLite database at `~/.continuum-dev/raw_log.sqlite`. One row per `PerceptionFrame`.
 
 - **Retention:** 30 days by default, configurable via `storage.retention_days`.
-- **Rotation:** Nightly. Frames older than the retention period are deleted.
-- **Screenshots:** Stored as JPEG files on disk. The database stores file paths, not blobs.
+- **Rotation:** Hourly, on the memory-distiller ticker (it runs even when
+  distillation is disabled — retention is a privacy promise, not a
+  distillation feature). Frames older than the retention period are deleted.
+- **Screenshots:** Stored as JPEG files on disk. The database stores file
+  paths, not blobs. Rotation deletes the file each deleted row referenced,
+  and then sweeps `screenshots_dir` for any image whose mtime is older than
+  `storage.screenshot_max_age_hours` (default 720 h = the 30-day retention).
+  That backstop is what reclaims images orphaned by a crash between "file
+  written" and "row written"; it is mtime-only and never consults the
+  database, so keep `screenshot_max_age_hours >= retention_days * 24`.
+  Setting `storage.delete_screenshots_with_rotation = false` disables both
+  deletions (rows still rotate) and leaves the image cache entirely to you.
 - **Browsing:** Open with any SQLite browser (DB Browser for SQLite, DBeaver, `sqlite3` CLI).
 
 ## Debugging
@@ -212,3 +224,9 @@ FROM perception_frames
 ORDER BY ts DESC
 LIMIT 20;
 ```
+
+`screen_description` is the one-sentence vision caption. The compact
+multi-monitor world-state text lives in the separate `screen_world_compact`
+column (context engine spec §4.10) — it is the context packager's input and is
+never sent to the triage model. Frames written before that split still carry
+the old combined blob in `screen_description`.

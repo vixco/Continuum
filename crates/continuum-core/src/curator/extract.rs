@@ -238,6 +238,7 @@ pub fn candidate_to_draft(c: &CandidateJson, status: NodeStatus) -> NoteDraft {
         source,
         source_ref: Some("curator:extract".to_string()),
         sensitivity: Default::default(),
+        expires: None,
         relations,
         tags: c.tags.clone(),
     }
@@ -347,6 +348,7 @@ mod tests {
             source: Default::default(),
             source_ref: None,
             sensitivity: Default::default(),
+            expires: None,
             relations: vec![],
             tags: vec![],
         };

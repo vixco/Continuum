@@ -51,11 +51,24 @@ pub struct MemoryContext {
 /// 2. Searches episodic memory for similar past events
 /// 3. Looks up relevant semantic facts by key prefix
 ///
+/// `project_id` is the project resolver's post-hysteresis current project
+/// (Task A4, spec §4.3). It drives two things:
+///
+/// - the `project.<id>.` semantic-fact prefix (the legacy frame-only
+///   keyword hint is only a fallback when no project resolves);
+/// - the **soft episodic project filter** (Task B6, spec §4.11): episodic
+///   memories belonging to a *different* project are dropped, while
+///   unattributed memories (everything written before B6, and anything
+///   observed while no project resolved) always survive. Recall therefore
+///   never gets worse than it was before the filter existed — it only
+///   stops other projects' noise from crowding the wake context.
+///
 /// Target: complete in under 200ms.
 pub async fn retrieve_context(
     trigger_frame: &PerceptionFrame,
     episodic: &mut EpisodicStore,
     semantic: &SemanticStore,
+    project_id: Option<&str>,
 ) -> Result<MemoryContext> {
     // Build a query string from the trigger frame.
     let query = build_query_from_frame(trigger_frame);
@@ -68,7 +81,7 @@ pub async fn retrieve_context(
     );
 
     // Search episodic memory for similar events (top 5).
-    let similar_events = episodic.search_similar(&query, 5).await?;
+    let similar_events = episodic.search_similar(&query, 5, project_id).await?;
     let similar_events: Vec<EpisodicEvent> = similar_events.into_iter().map(|r| r.event).collect();
 
     // Look up relevant semantic facts.
@@ -79,8 +92,9 @@ pub async fn retrieve_context(
     let user_facts = semantic.query_facts_by_prefix("user.").await?;
     relevant_facts.extend(user_facts);
 
-    // Include project facts if we can identify the project from the frame.
-    if let Some(project_prefix) = infer_project_prefix(trigger_frame) {
+    // Include project facts for the resolved project (falling back to the
+    // legacy frame-only hint when nothing resolves).
+    if let Some(project_prefix) = infer_project_prefix(project_id, trigger_frame) {
         let project_facts = semantic.query_facts_by_prefix(&project_prefix).await?;
         relevant_facts.extend(project_facts);
     }
@@ -227,7 +241,10 @@ pub fn filter_pending(
 fn build_query_from_frame(frame: &PerceptionFrame) -> String {
     let mut parts = Vec::new();
 
-    // Screen description is always available.
+    // Screen caption is always available. Caption, not `world_compact`
+    // (spec §4.10): the embedding query wants the semantic sentence, and
+    // the blob's boilerplate (sequence numbers, privacy enums, geometry)
+    // would dominate the vector.
     if !frame.screen.description.is_empty() {
         parts.push(frame.screen.description.clone());
     }
@@ -254,31 +271,30 @@ fn build_query_from_frame(frame: &PerceptionFrame) -> String {
 /// Tries to infer a bare project hint (e.g. `"continuum"`) from the current
 /// frame context.
 ///
-/// Looks at the foreground window title and process to guess which project
-/// the user is working on. Used both for semantic-fact prefix lookups (via
-/// [`infer_project_prefix`]) and, unformatted, as the curator's
-/// `ActivitySignal::project_hint`.
+/// **Task A4:** this is now a thin backward-compat shim over the project
+/// resolver's keyword tier
+/// ([`crate::context::project::legacy_keyword_hint`]), kept for the one
+/// call site where a bogus guess is harmless: the semantic-fact key
+/// **prefix** ([`infer_project_prefix`]), where a wrong prefix simply
+/// matches no stored fact.
+///
+/// Fixwave 3b (C4): it is deliberately **not** a fallback for anything
+/// durable. `ActivitySignal::project_hint`, curator session attribution
+/// and skills matching take the resolver's post-hysteresis output or
+/// nothing — see [`crate::curator::run::ActivitySignal::project_hint`].
 pub fn infer_project_hint(frame: &PerceptionFrame) -> Option<String> {
-    let title = &frame.context.foreground_window_title;
-
-    // Common patterns: "filename - ProjectName - Editor"
-    // or file paths containing project names.
-    if title.contains("continuum") {
-        Some("continuum".to_string())
-    } else if title.contains("simcharts") || title.contains("SimCharts") {
-        Some("simcharts".to_string())
-    } else {
-        // Could be extended with a lookup table from semantic memory,
-        // but for now just return None for unknown projects.
-        None
-    }
+    crate::context::project::legacy_keyword_hint(&frame.context.foreground_window_title)
 }
 
-/// Formats [`infer_project_hint`] as a `"project.<hint>."` semantic-fact key
-/// prefix. Thin legacy wrapper — kept private since nothing outside this
-/// module needs the formatted form.
-fn infer_project_prefix(frame: &PerceptionFrame) -> Option<String> {
-    infer_project_hint(frame).map(|hint| format!("project.{hint}."))
+/// Formats the effective project id as a `"project.<id>."` semantic-fact
+/// key prefix: the resolver's project when one is current, else the legacy
+/// frame-only hint. Kept private since nothing outside this module needs
+/// the formatted form.
+fn infer_project_prefix(project_id: Option<&str>, frame: &PerceptionFrame) -> Option<String> {
+    project_id
+        .map(str::to_owned)
+        .or_else(|| infer_project_hint(frame))
+        .map(|id| format!("project.{id}."))
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +313,7 @@ mod tests {
             ts: Utc::now(),
             screen: ScreenObservation {
                 description: description.to_string(),
+                world_compact: None,
                 foreground_app: "Code.exe".to_string(),
                 has_error_visible: false,
                 confidence: 0.9,
@@ -316,6 +333,7 @@ mod tests {
                 idle_seconds: 0,
                 in_call: false,
                 ts: Utc::now(),
+                ..Default::default()
             },
             salience_hint: 0.7,
         }
@@ -345,19 +363,26 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_project_prefix_continuum() {
+    fn test_infer_project_prefix_resolver_output_wins() {
+        // Task A4: the resolver's project takes precedence over any
+        // frame-derived hint.
         let frame = test_frame("editor", None, "mod.rs - continuum-ai - VS Code");
         assert_eq!(
-            infer_project_prefix(&frame),
-            Some("project.continuum.".to_string())
+            infer_project_prefix(Some("simcharts"), &frame),
+            Some("project.simcharts.".to_string())
         );
     }
 
     #[test]
-    fn test_infer_project_prefix_simcharts() {
+    fn test_infer_project_prefix_falls_back_to_frame_hint() {
+        let frame = test_frame("editor", None, "mod.rs - continuum-ai - VS Code");
+        assert_eq!(
+            infer_project_prefix(None, &frame),
+            Some("project.continuum.".to_string())
+        );
         let frame = test_frame("editor", None, "ProcedureLayer.tsx - SimCharts");
         assert_eq!(
-            infer_project_prefix(&frame),
+            infer_project_prefix(None, &frame),
             Some("project.simcharts.".to_string())
         );
     }
@@ -365,7 +390,7 @@ mod tests {
     #[test]
     fn test_infer_project_prefix_unknown() {
         let frame = test_frame("editor", None, "random-project - VS Code");
-        assert_eq!(infer_project_prefix(&frame), None);
+        assert_eq!(infer_project_prefix(None, &frame), None);
     }
 
     #[test]
@@ -409,6 +434,7 @@ mod tests {
             source: Source::Observed,
             source_ref: None,
             sensitivity,
+            expires: None,
             relations: vec![],
             tags: vec![],
         }
@@ -427,6 +453,7 @@ mod tests {
             ts: Utc::now(),
             screen: ScreenObservation {
                 description: description.to_string(),
+                world_compact: None,
                 foreground_app: String::new(),
                 has_error_visible: false,
                 confidence: 0.9,
@@ -440,6 +467,7 @@ mod tests {
                 idle_seconds: 0,
                 in_call: false,
                 ts: Utc::now(),
+                ..Default::default()
             },
             salience_hint: 0.7,
         }

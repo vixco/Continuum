@@ -16,9 +16,10 @@ use tracing::{debug, error, info, warn};
 
 use continuum_llm::{GenerateOpts, LlmConfig, LocalLlm};
 
+use crate::llm_gate::LlmGate;
 use crate::senses::types::PerceptionFrame;
 use crate::triage::prompts::build_triage_prompt;
-use crate::triage::TriageDecision;
+use crate::triage::{TriageDecision, TriageOutput};
 
 /// Configuration for the triage layer.
 #[derive(Debug, Clone)]
@@ -46,7 +47,9 @@ impl Default for TriageConfig {
             context_size: 4096,
             n_threads: 4,
             gpu_layers: 999,
-            max_tokens: 128,
+            // 256 matches config.rs `TriageSection`: the §4.7 classification
+            // block adds ~60-90 decode tokens on top of the decision.
+            max_tokens: 256,
             temperature: 0.1,
             latency_warn_ms: 2000,
         }
@@ -62,6 +65,13 @@ pub struct TriageLayer {
     config: TriageConfig,
     /// Counter of consecutive total failures (3 retries all failed).
     consecutive_failures: std::sync::Arc<AtomicU32>,
+    /// Two-priority acquisition gate over `llm` (Task B2, spec §4.7):
+    /// every generation call on the shared local model goes through this
+    /// gate BEFORE it can touch `LocalLlm`'s internal blocking context
+    /// mutex, so a background caller (curator, session inference) never
+    /// queues ahead of an interactive triage evaluation. Clones share the
+    /// same gate.
+    gate: LlmGate,
 }
 
 impl TriageLayer {
@@ -91,7 +101,16 @@ impl TriageLayer {
             llm,
             config,
             consecutive_failures: std::sync::Arc::new(AtomicU32::new(0)),
+            gate: LlmGate::new(),
         })
+    }
+
+    /// The layer's two-priority LLM gate. Background consumers of the
+    /// shared model that don't go through [`TriageLayer::complete`]
+    /// (Plan B seam B5: the session-state inference task) acquire through
+    /// this — always via `acquire_background`.
+    pub fn gate(&self) -> &LlmGate {
+        &self.gate
     }
 
     /// Run a warmup generation to prime caches.
@@ -99,13 +118,22 @@ impl TriageLayer {
         self.llm.warmup().await
     }
 
-    /// Evaluate a perception frame and return a triage decision.
+    /// Evaluate a perception frame and return the full triage output:
+    /// the decision plus the optional §4.7 classification block.
     ///
     /// Uses GBNF grammar-constrained generation as primary method.
     /// Falls back to prompt-only generation with retries on grammar failure.
-    /// Returns `TriageDecision::Ignore` as safe default on total failure.
-    pub async fn evaluate(&self, frame: &PerceptionFrame, memory_summary: &str) -> TriageDecision {
+    /// A malformed or truncated classification block NEVER costs a retry —
+    /// the decision is salvaged and `classification` is `None`.
+    /// Returns `TriageDecision::Ignore` (no classification) as safe
+    /// default on total failure.
+    pub async fn evaluate(&self, frame: &PerceptionFrame, memory_summary: &str) -> TriageOutput {
         let start = Instant::now();
+        // Interactive priority (Task B2, spec §4.7): held across ALL retry
+        // attempts so a background caller can't interleave between them.
+        // Waits at most for the one generation currently in flight —
+        // background callers only try-acquire and never queue ahead.
+        let _permit = self.gate.acquire_interactive().await;
         let prompt = build_triage_prompt(frame, memory_summary);
 
         let opts = GenerateOpts {
@@ -132,11 +160,12 @@ impl TriageLayer {
                         "Fallback attempt raw output"
                     );
 
-                    if let Some(decision) = TriageDecision::from_json(trimmed) {
+                    if let Some(mut output) = TriageOutput::from_json(trimmed) {
                         let elapsed = start.elapsed();
                         self.consecutive_failures.store(0, Ordering::Relaxed);
-                        self.log_evaluation(frame, &decision, elapsed.as_millis() as u64);
-                        return decision.truncated();
+                        self.log_evaluation(frame, &output.decision, elapsed.as_millis() as u64);
+                        output.decision = output.decision.truncated();
+                        return output;
                     }
                 }
                 Err(e) => {
@@ -182,7 +211,7 @@ impl TriageLayer {
             "Triage defaulted to Ignore after total failure"
         );
 
-        TriageDecision::Ignore
+        TriageOutput::from_decision(TriageDecision::Ignore)
     }
 
     /// One-shot text completion against the shared local model. Used by the
@@ -198,10 +227,20 @@ impl TriageLayer {
     /// break every one of this method's callers — the curator's
     /// `parse_candidates`/`parse_verdict` JSON parsers and the session
     /// summary's exact `"SKIP"` match all expect the reply to start clean.
+    ///
+    /// Task B2 (spec §4.7): this is the BACKGROUND path onto the shared
+    /// model. Acquisition goes through [`LlmGate::acquire_background`] —
+    /// try-acquire with backoff, deferring to interactive triage — and the
+    /// effective `max_tokens` is clamped to
+    /// [`crate::llm_gate::BACKGROUND_MAX_TOKENS`] per call. A gate timeout
+    /// (interactive load never let go within the wait window) surfaces as
+    /// an `Err`, which every curator caller already treats as "skip this
+    /// pass, retry on the next tick".
     pub async fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        let (_permit, budget) = self.gate.acquire_background(max_tokens).await?;
         let opts = GenerateOpts {
             temperature: 0.2,
-            max_tokens: Some(max_tokens),
+            max_tokens: Some(budget),
             ..Default::default()
         };
         let wrapped = crate::curator::wrap_no_think(prompt);

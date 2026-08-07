@@ -17,8 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use continuum_core::config::{
+    ContextPackageConfig, ContextToolsConfig, GitContextConfig, ObservationToggles,
+};
 use continuum_core::health::repair::RepairSessionGrant;
 use continuum_core::memory::{episodic::EpisodicStore, semantic::SemanticStore};
+use continuum_core::senses::privacy::PrivacyFilter;
 use continuum_memory::Vault;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -32,6 +36,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 
+use crate::tools::context::{
+    self as ctxtool, ContextFilesRequest, ContextGitRequest, ContextPackageRequest,
+    ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest, PackageMemory,
+};
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
@@ -60,6 +68,29 @@ pub(crate) struct ServerState {
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
     pub(crate) repair_grant: Option<RepairSessionGrant>,
+    /// The privacy choke point every observation tool routes through
+    /// (context engine spec §5.1). Built from the **same** `config.toml`
+    /// the runtime loads, so a zone the user configured binds this process
+    /// identically — that equivalence is the point of the retrofit.
+    pub(crate) privacy: PrivacyFilter,
+    /// `[context_tools]` switches (spec §5.1/§6), incl. the clipboard
+    /// kill-switch and the `context_*` family master switch.
+    pub(crate) context_tools: ContextToolsConfig,
+    /// `[privacy.toggles]` — the spec §4.1 "honest toggles". The context
+    /// tool family (Task C3) checks them per source, so a user who turned
+    /// the microphone or the screen off does not get that source back
+    /// through an MCP tool.
+    pub(crate) toggles: ObservationToggles,
+    /// `[storage] db_path` — the raw-log SQLite database the context
+    /// tools open **read-only** (spec §5.2). Same value the runtime
+    /// writes to, so both processes agree on which file is the log.
+    pub(crate) raw_log_path: PathBuf,
+    /// `[git_context]` — the collector switch and the subprocess timeout
+    /// `context_git`'s named-project probe honours (Task C4, spec §4.4).
+    pub(crate) git_context: GitContextConfig,
+    /// `[context_package]` — budget + per-section caps for
+    /// `context_package`'s mcp-published profile (Task C4, spec §4.9).
+    pub(crate) package_config: ContextPackageConfig,
 }
 
 /// The main MCP server. Cloneable because rmcp can fan out the handler across
@@ -89,6 +120,39 @@ impl ContinuumMcpServer {
 
         // Load [mcp] config — non-fatal, falls back to defaults on any error.
         let mcp_cfg = crate::config::load(&data_dir);
+
+        // Load the FULL config for the privacy boundary (context engine
+        // spec §5.1). Same file, same loader, same defaults as the runtime
+        // — anything else would let the two processes disagree about which
+        // windows are excluded. A parse failure must not stop the server
+        // (the orchestrator spawns us on every wake), and defaults are the
+        // safe direction here: the built-in `never_observe` /
+        // private-browsing rules and all three scrubber families are on by
+        // default, so a broken config filters more, never less.
+        let full_cfg = continuum_core::config::load_config(&data_dir.join("config.toml"))
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    layer = "mcp",
+                    component = "privacy",
+                    error = %error,
+                    "Failed to load config.toml for the privacy filter — using defaults"
+                );
+                continuum_core::config::ContinuumConfig::default()
+            });
+        let privacy = PrivacyFilter::from_config(&full_cfg.context, &full_cfg.privacy);
+        let context_tools = full_cfg.context_tools.clone();
+        let toggles = full_cfg.privacy.toggles.clone();
+        let git_context = full_cfg.git_context.clone();
+        let package_config = full_cfg.context_package.clone();
+        // Honour the configured `[storage] db_path` when there is a real
+        // config file to honour; otherwise fall back to this process's
+        // data dir, because the config *defaults* point at the standard
+        // dev dir, which need not be the `--data-dir` we were given.
+        let raw_log_path = if data_dir.join("config.toml").exists() {
+            PathBuf::from(&full_cfg.storage.db_path)
+        } else {
+            data_dir.join("raw_log.sqlite")
+        };
         let repair_grant = std::env::var("CONTINUUM_REPAIR_TOKEN")
             .ok()
             .and_then(|token| {
@@ -128,6 +192,12 @@ impl ContinuumMcpServer {
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                privacy,
+                context_tools,
+                toggles,
+                raw_log_path,
+                git_context,
+                package_config,
             }),
             tool_router: Self::tool_router(),
         })
@@ -279,6 +349,125 @@ impl ContinuumMcpServer {
         Ok(())
     }
 
+    /// Builds the per-call gate every `context_*` tool reads through
+    /// (spec §5.2): where the published state lives, the §5.1 privacy
+    /// filter, the observation toggles, and the family master switch.
+    pub(crate) fn context_gate(&self) -> crate::tools::context::Gate<'_> {
+        crate::tools::context::Gate {
+            data_dir: &self.state.data_dir,
+            db_path: &self.state.raw_log_path,
+            filter: &self.state.privacy,
+            toggles: &self.state.toggles,
+            git_context: &self.state.git_context,
+            package_config: &self.state.package_config,
+            enabled: self.state.context_tools.enabled,
+        }
+    }
+
+    /// Fills `context_package`'s memory sections from **this process's
+    /// own** vault and episodic stores (spec §4.9 mcp-published profile).
+    ///
+    /// Both opens are lazy and both failures are non-fatal: a package with
+    /// no memories is still worth having, and a wake must not die because
+    /// LanceDB could not open. `stale` reports the difference.
+    async fn package_memory(&self, query: &str) -> PackageMemory {
+        let caps = self.state.package_config.caps();
+        let mut memory = PackageMemory::default();
+        let now = chrono::Utc::now();
+
+        match self.episodic().await {
+            Ok(mut store) => match store.search_similar(query, caps.memories, None).await {
+                Ok(hits) => {
+                    memory.memories = hits
+                        .into_iter()
+                        .map(|hit| continuum_core::context::package::MemoryLine {
+                            age: continuum_core::orchestrator::wake_context::render_age(
+                                now,
+                                hit.event.ts,
+                            ),
+                            text: self.state.privacy.scrub_text(&hit.event.summary),
+                            // Fixwave 3a (C1): the same gate the wake
+                            // packager applies. `context_package`'s
+                            // response is cloud-bound too, so a distilled
+                            // `local_only` memory must be withheld here
+                            // for exactly the reason it is withheld there.
+                            local_only: hit.event.sensitivity
+                                == continuum_core::memory::events::EventSensitivity::LocalOnly,
+                        })
+                        .collect();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "context_tools",
+                        error = %error,
+                        "Episodic search failed — context_package renders without memories"
+                    );
+                    memory.stale = true;
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    layer = "mcp",
+                    component = "context_tools",
+                    error = %error,
+                    "Episodic store unavailable — context_package renders without memories"
+                );
+                memory.stale = true;
+            }
+        }
+
+        match self.vault().await {
+            Ok(vault) => match vault
+                .search(query, (caps.vault_notes.saturating_mul(2).max(4)) as u32)
+                .await
+            {
+                Ok(hits) => {
+                    memory.vault_notes = hits
+                        .into_iter()
+                        .filter(|note| note.status == continuum_memory::NodeStatus::Confirmed)
+                        .take(caps.vault_notes)
+                        .map(|note| continuum_core::context::package::VaultNoteLine {
+                            node_type: note.node_type.as_str().to_string(),
+                            title: self.state.privacy.scrub_text(&note.title),
+                            snippet: note
+                                .snippet
+                                .as_deref()
+                                .map(|text| self.state.privacy.scrub_text(text)),
+                            importance: note.importance,
+                            // Unlike the wake profile (where retrieval has
+                            // already applied `include_sensitive_in_context`),
+                            // nothing upstream filtered this list — so a
+                            // note the user marked sensitive is tagged
+                            // local_only and the cloud gate drops it.
+                            local_only: note.sensitivity
+                                == continuum_memory::Sensitivity::Sensitive,
+                        })
+                        .collect();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "context_tools",
+                        error = %error,
+                        "Vault search failed — context_package renders without vault notes"
+                    );
+                    memory.stale = true;
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    layer = "mcp",
+                    component = "context_tools",
+                    error = %error.message,
+                    "Vault unavailable — context_package renders without vault notes"
+                );
+                memory.stale = true;
+            }
+        }
+        memory
+    }
+
     /// Builds the filesystem allowlist from all current sources:
     /// (1) `data_dir`, (2) config `[mcp.fs].extra_paths`,
     /// (3) semantic facts under `project.*.dir`. Called on every fs_* tool
@@ -413,9 +602,22 @@ impl ContinuumMcpServer {
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             let results = ep
-                .search_similar(&req.query, limit)
+                .search_similar(&req.query, limit, None)
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            // Fixwave 3a (C1): this response goes straight into a
+            // cloud-bound model's context, so it is an egress point like
+            // any package section. Now that distilled memories carry the
+            // §4.1 zone of the text they summarize, `local_only` ones are
+            // dropped here rather than rendered. Schema-stable: content
+            // filtering only, per §5.1's precedent.
+            let results: Vec<_> = results
+                .into_iter()
+                .filter(|r| {
+                    r.event.sensitivity
+                        != continuum_core::memory::events::EventSensitivity::LocalOnly
+                })
+                .collect();
             let hits: Vec<EpisodicHit> = results
                 .into_iter()
                 .map(|r| EpisodicHit {
@@ -594,6 +796,7 @@ impl ContinuumMcpServer {
                     source: continuum_memory::Source::AgentRun,
                     source_ref: Some(source_ref),
                     sensitivity: Default::default(),
+                    expires: None,
                     relations: vec![],
                     tags: vec![tag],
                 };
@@ -747,6 +950,7 @@ impl ContinuumMcpServer {
                     source: continuum_memory::Source::AgentRun,
                     source_ref: req.source_ref,
                     sensitivity: Default::default(),
+                    expires: None,
                     relations: relations.unwrap_or_default(),
                     tags: req.tags.unwrap_or_default(),
                 };
@@ -844,32 +1048,168 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Return the title and process name of the currently focused (foreground) window. Both fields are empty strings when no window is focused or the lookup fails."
+        description = "Return the title and process name of the currently focused (foreground) window. Both fields are empty strings when no window is focused or the lookup fails. Content is privacy-filtered: a window in a never_observe zone comes back as the `[excluded]` sentinel with an empty title, a local_only window keeps its process but not its title, and secrets in ordinary titles are redacted."
     )]
     async fn system_active_window(&self) -> Result<CallToolResult, McpError> {
         self.run_tool("system_active_window", &Value::Null, || async {
-            Ok::<_, McpError>(systool::active_window())
+            Ok::<_, McpError>(systool::active_window(&self.state.privacy))
         })
         .await
     }
 
     #[tool(
-        description = "Return Continuum's compact, ordered, source-attributed local live world-state: every connected monitor's latest local vision summary plus safe foreground-window, coarse input-activity, terminal, project, and degradation context. No raw screenshots, key values, pointer coordinates, or clipboard content."
+        description = "Return Continuum's compact, ordered, source-attributed local live world-state: every connected monitor's latest local vision summary plus safe foreground-window, coarse input-activity, terminal, project, and degradation context. No raw screenshots, key values, pointer coordinates, or clipboard content. Both the compact text and the structured state are privacy-filtered: excluded zones return sentinels, local-only content is replaced by a redaction marker, and secrets are scrubbed."
     )]
     async fn system_live_context(&self) -> Result<CallToolResult, McpError> {
         self.run_tool("system_live_context", &Value::Null, || async {
-            systool::live_context(&self.state.data_dir)
+            systool::live_context(&self.state.data_dir, &self.state.privacy)
                 .map_err(|error| McpError::internal_error(error, None))
         })
         .await
     }
 
     #[tool(
-        description = "Read the current Windows clipboard text. Returns null if the clipboard is empty, holds non-text data, or is locked by another app. Best-effort — never blocks."
+        description = "Read the current Windows clipboard text. Returns null if the clipboard is empty, holds non-text data, is locked by another app, the foreground window is in a never_observe privacy zone, or the tool is disabled via [context_tools] clipboard_tool_enabled. Returned text is scrubbed for secrets. Best-effort — never blocks."
     )]
     async fn system_clipboard_get(&self) -> Result<CallToolResult, McpError> {
         self.run_tool("system_clipboard_get", &Value::Null, || async {
-            Ok::<_, McpError>(systool::clipboard_get())
+            Ok::<_, McpError>(systool::clipboard_get(
+                &self.state.privacy,
+                self.state.context_tools.clipboard_tool_enabled,
+            ))
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Context tools (context engine spec §5.2) — read-only, privacy-gated,
+    // degrade to empty/stale answers instead of failing a wake. See
+    // `crate::tools::context` for the four rules the whole family obeys.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Continuum's live session state: the current project, the inferred goal and task (with a confidence), the foreground app/window, recently-touched files, and the last observed error/success/user command. Read this FIRST when the user says something like 'continue' or 'what was I doing' — it is what Continuum believes is happening right now. Returns `available: false` before the runtime has published anything and `stale: true` when the runtime stopped publishing (>30 s). Privacy-gated: a session marked local_only reports generalized goal/task, excluded windows report the sentinel, secrets are scrubbed."
+    )]
+    async fn context_session(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_session", &Value::Null, || async {
+            Ok::<_, McpError>(ctxtool::session(&self.context_gate()))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "The foreground window right now (process, title, zone, pid, exe path, monitor, seconds focused) plus the most recent focus switches with their dwell times. `limit` caps the switch list (default 10, max 50). Switches come from the deduped context-events log; an event database that does not exist yet returns an empty list with `stale: true` rather than an error. Privacy-gated: a never_observe window is the `[excluded]` sentinel with no pid/exe/monitor, a local_only title is redacted."
+    )]
+    async fn context_window(
+        &self,
+        Parameters(req): Parameters<ContextWindowRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_window", &req, || async {
+            Ok::<_, McpError>(ctxtool::window(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "What is on each screen: every connected monitor with its latest local-vision caption and privacy zone, plus the same compact source-attributed world render `system_live_context` returns. Excluded monitors are still listed — with an empty caption and a never_observe zone marker — so you can see a screen exists and is deliberately not described. `stale: true` once the published snapshot is older than 10 s. Returns nothing when `[privacy.toggles] screen` is off."
+    )]
+    async fn context_screen(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_screen", &Value::Null, || async {
+            Ok::<_, McpError>(ctxtool::screen(&self.context_gate()))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "The voice pipeline's latest published transcript with its timestamp, plus whether the user appears to be in a call and whether ambient mute is suppressing voice output. The transcript is scrubbed for secrets. Returns `available: false` when the microphone toggle (`[privacy.toggles] mic`, or `pause_all`) is off — an honest toggle silences this tool too — or when the runtime is not publishing."
+    )]
+    async fn context_audio(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_audio", &Value::Null, || async {
+            Ok::<_, McpError>(ctxtool::audio(&self.context_gate()))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Every project Continuum knows about: configured entries, user-confirmed ones, and auto-discovery proposals (status `discovered`, which never participate in project resolution until confirmed). Active project first, discovery proposals last. Root paths are home/username-scrubbed. Returns `available: false` when the runtime has never booted against this data directory."
+    )]
+    async fn context_projects(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_projects", &Value::Null, || async {
+            Ok::<_, McpError>(ctxtool::projects(&self.context_gate()).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Continuum's deduped event timeline: what happened, when, how often. Filter with `since`/`until` (RFC 3339), `types` (registry tokens like \"error\", \"commit\", \"focus_switch\"), `project` (slug), and `source` (window|git|file|screen|audio|system|voice); `limit` defaults to 50 and is capped at 200. Events are COLLAPSED — one row with `count: 14` means the same thing happened 14 times between `ts_first` and `ts_last`, which is a far stronger signal than a single occurrence. Rows marked local_only are never returned; `omitted_private` tells you how many were withheld. A cold event database returns an empty list with `stale: true`, never an error."
+    )]
+    async fn context_timeline(
+        &self,
+        Parameters(req): Parameters<ContextTimelineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_timeline", &req, || async {
+            Ok::<_, McpError>(ctxtool::timeline(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Full-text search over Continuum's event log (summaries and window titles), best match first. Use this to answer \"when did I last see X\" without scanning the timeline. Punctuation is stripped and each word becomes a prefix term, so \"build fail\" matches \"build failed\". `limit` defaults to 20 and is capped at 50. Same privacy contract as context_timeline: local_only rows are withheld and counted in `omitted_private`."
+    )]
+    async fn context_search(
+        &self,
+        Parameters(req): Parameters<ContextSearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_search", &req, || async {
+            Ok::<_, McpError>(ctxtool::search(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Recent file activity the file watcher recorded: created, modified, deleted, renamed, and storm-collapsed bulk-change events, oldest first. Optional `project` (slug) filter; `limit` defaults to 20 and is capped at 100. Paths are root-relative and home/username-scrubbed. Returns `available: false` when `[privacy.toggles] files` is off or the file watcher was never enabled."
+    )]
+    async fn context_files(
+        &self,
+        Parameters(req): Parameters<ContextFilesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_files", &req, || async {
+            Ok::<_, McpError>(ctxtool::files(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Git state: branch, dirty/staged/untracked counts, ahead/behind, conflicts, and the HEAD commit. With no arguments it returns the ACTIVE project's already-published state — no subprocess, no filesystem access. With `project` (a slug from context_projects) it runs one timeout-bounded `git status` against that project's root, but ONLY for a configured or confirmed project: a `discovered` auto-discovery proposal is refused with an explanatory `reason`, because Continuum never runs commands in a directory the user has not adopted. Ask the user to confirm the project instead of retrying. Root paths are scrubbed; the commit id is a structured identifier and is returned verbatim."
+    )]
+    async fn context_git(
+        &self,
+        Parameters(req): Parameters<ContextGitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_git", &req, || async {
+            Ok::<_, McpError>(ctxtool::git(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "The whole picture in one call: Continuum's context package rendered as markdown — current moment (screen captions + foreground window + compact world state), session state, what happened just before, relevant memories and vault notes, recent file/git changes, failed attempts, and the last success. `token_budget` defaults to the configured 1000 and is clamped to [200, 8000]; sections are dropped from a documented ladder when the budget binds. Two sections are structurally absent in this profile and listed in `sections_omitted`: `why_woken` (there is no wake to explain) and `trigger_frame_moment` (the live snapshot replaces it). `per_section_stale` says which of the four sources went cold."
+    )]
+    async fn context_package(
+        &self,
+        Parameters(req): Parameters<ContextPackageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_package", &req, || async {
+            let gate = self.context_gate();
+            // The memory query is the live world render — so "relevant"
+            // means relevant to what is on screen right now. No published
+            // state means no query, and we skip the store opens entirely
+            // rather than paying the fastembed load for a blank search.
+            let memory = match ctxtool::package_memory_query(&gate) {
+                Some(query) => self.package_memory(&query).await,
+                None => PackageMemory::default(),
+            };
+            Ok::<_, McpError>(ctxtool::package(&gate, &req, memory).await)
         })
         .await
     }
@@ -1188,6 +1528,7 @@ mod repair_authorization_tests {
             )
             .unwrap();
         }
+        let raw_log_path = data_dir.join("raw_log.sqlite");
         ContinuumMcpServer {
             state: Arc::new(ServerState {
                 data_dir,
@@ -1197,6 +1538,15 @@ mod repair_authorization_tests {
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                privacy: PrivacyFilter::from_config(
+                    &continuum_core::config::ContextConfig::default(),
+                    &continuum_core::config::PrivacyConfig::default(),
+                ),
+                context_tools: ContextToolsConfig::default(),
+                toggles: ObservationToggles::default(),
+                raw_log_path,
+                git_context: GitContextConfig::default(),
+                package_config: ContextPackageConfig::default(),
             }),
             tool_router: ContinuumMcpServer::tool_router(),
         }

@@ -59,3 +59,85 @@ pub mod stt;
 pub mod tts;
 #[cfg(feature = "runtime")]
 pub mod wake;
+
+/// Polls an optional hotkey channel inside a `tokio::select!` arm.
+///
+/// Lives here rather than in [`hotkey`] because the hotkey listener itself
+/// is Windows-only while the runtime's select loop is not.
+///
+/// Three behaviours, all deliberate:
+///
+/// - **Disabled** (`rx` is `None`, e.g. registration failed): the future
+///   pends forever, so the select arm is simply inert.
+/// - **Press**: yields `Some(())`.
+/// - **Channel closed** (M3): the listener thread died. Before this,
+///   `recv()` returning `None` made the arm's `Some(())` pattern fail and
+///   the branch re-poll a dead channel on every loop iteration, forever,
+///   with nothing logged. Now the channel is dropped (`*rx = None`), the
+///   failure is logged at error level so the repair agent sees it, and the
+///   arm goes inert like the disabled case.
+pub async fn recv_hotkey(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Option<()> {
+    let closed = match rx.as_mut() {
+        Some(channel) => channel.recv().await.is_none(),
+        // Disabled: never resolves.
+        None => std::future::pending::<bool>().await,
+    };
+    if !closed {
+        return Some(());
+    }
+    tracing::error!(
+        layer = "voice",
+        component = "hotkey",
+        "Hotkey listener channel closed — push-to-talk hotkey is disabled until restart"
+    );
+    *rx = None;
+    // Pend rather than returning: a `None` return would leave the caller's
+    // select arm re-polling us on every iteration for the rest of the
+    // process's life.
+    std::future::pending().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn recv_hotkey_yields_presses() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut rx = Some(rx);
+        tx.send(()).unwrap();
+        assert_eq!(recv_hotkey(&mut rx).await, Some(()));
+        assert!(rx.is_some(), "a live channel stays installed");
+    }
+
+    #[tokio::test]
+    async fn recv_hotkey_pends_forever_when_disabled() {
+        let mut rx: Option<mpsc::UnboundedReceiver<()>> = None;
+        let timed_out = tokio::time::timeout(Duration::from_millis(20), recv_hotkey(&mut rx))
+            .await
+            .is_err();
+        assert!(timed_out, "a disabled hotkey must never resolve");
+    }
+
+    /// M3: a dead listener disables itself once instead of leaving the
+    /// select arm spinning on a closed channel.
+    #[tokio::test]
+    async fn recv_hotkey_drops_a_closed_channel() {
+        let (tx, rx) = mpsc::unbounded_channel::<()>();
+        let mut rx = Some(rx);
+        drop(tx);
+        let timed_out = tokio::time::timeout(Duration::from_millis(20), recv_hotkey(&mut rx))
+            .await
+            .is_err();
+        assert!(timed_out, "must pend, not resolve, on a closed channel");
+        assert!(rx.is_none(), "the dead channel must be dropped");
+
+        // And it stays inert afterwards.
+        let timed_out_again = tokio::time::timeout(Duration::from_millis(20), recv_hotkey(&mut rx))
+            .await
+            .is_err();
+        assert!(timed_out_again);
+    }
+}

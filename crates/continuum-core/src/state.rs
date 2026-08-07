@@ -22,7 +22,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
-use crate::runtime_publish::CuratorSnapshot;
+use crate::context::session_state::SessionState;
+use crate::runtime_publish::{ContextEngineSnapshot, ContextPageSnapshot, CuratorSnapshot};
 use crate::senses::types::PerceptionFrame;
 use crate::triage::TriageDecision;
 
@@ -43,8 +44,34 @@ pub struct ContinuumState {
     pub memory: MemoryState,
     pub health: HealthState,
     pub system: SystemState,
+    /// Context engine (spec §4.8/§7), mirrored from the runtime's
+    /// `state.json` by the dashboard's runtime bridge (Task C1).
+    pub context: ContextState,
     /// Recent actions timeline (triage decisions + orchestrator wakes).
     pub recent_actions: VecDeque<RecentAction>,
+}
+
+/// Context-engine section of [`ContinuumState`] (Task C1): what the
+/// runtime knows about the current session plus per-source health. Both
+/// fields are `None` until the dashboard's runtime bridge has read a
+/// `state.json` from a running `continuum` process that publishes them —
+/// which is also what an older runtime looks like, and is exactly the
+/// "runtime not running / not reporting" state the Context page renders.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContextState {
+    /// Live session state (spec §4.8) as published by the runtime. The
+    /// **raw** state, not `cloud_view()` — the dashboard is a local
+    /// consumer and applies the cloud gate at its own egress points
+    /// (chat system prompt, tool responses).
+    pub session: Option<SessionState>,
+    /// Per-component context-engine health (spec §7), the same section
+    /// the repair agent reads out of `state.json`.
+    pub engine: Option<ContextEngineSnapshot>,
+    /// Context-page list data (Task C5, spec §4.13): projects, override
+    /// rules, pins, the recent-events strip, live toggles and continuation
+    /// candidates. The dashboard cannot read the raw-log database itself,
+    /// so this section is the page's only source for those lists.
+    pub page: Option<ContextPageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -232,6 +259,8 @@ pub enum StateEvent {
     Memory,
     Health,
     System,
+    /// Context engine (session state + per-source health), Task C1.
+    Context,
     RecentActions,
 }
 
@@ -297,6 +326,9 @@ impl StateHandle {
             let mut s = self.inner.write().await;
             s.perception.last_frame_id = Some(frame.id.to_string());
             s.perception.last_frame_ts = Some(frame.ts);
+            // Caption (spec §4.10) — the dashboard's "last description"
+            // line is a human-readable one-liner; before B4 it showed the
+            // whole compact world-state blob and rendered as a wall of text.
             s.perception.last_description = frame.screen.description.clone();
             s.perception.last_foreground_app = frame.context.foreground_process_name.clone();
             s.perception.last_screenshot_path = frame.screen.screenshot_path.clone();
@@ -560,6 +592,31 @@ impl StateHandle {
         self.notify(StateEvent::Memory);
     }
 
+    // --- Context engine ---
+
+    /// Mirrors the runtime's published context-engine state (Task C1), as
+    /// read from `state.json` by `runtime_bridge::apply_snapshot`.
+    ///
+    /// Both arguments are stored verbatim, `None` included: a runtime that
+    /// does not publish these sections (pre-C1, or one whose context
+    /// engine never started) must not leave the dashboard rendering a
+    /// stale ghost of an earlier session. One write, one broadcast — the
+    /// two sections always come from the same snapshot.
+    pub async fn set_context_snapshot(
+        &self,
+        session: Option<SessionState>,
+        engine: Option<ContextEngineSnapshot>,
+        page: Option<ContextPageSnapshot>,
+    ) {
+        {
+            let mut s = self.inner.write().await;
+            s.context.session = session;
+            s.context.engine = engine;
+            s.context.page = page;
+        }
+        self.notify(StateEvent::Context);
+    }
+
     // --- Health ---
 
     pub async fn set_components(&self, components: Vec<ComponentHealth>) {
@@ -660,6 +717,7 @@ mod tests {
             ts: Utc::now(),
             screen: ScreenObservation {
                 description: "VS Code open on state.rs".into(),
+                world_compact: None,
                 foreground_app: "Code.exe".into(),
                 has_error_visible: false,
                 confidence: 0.8,
@@ -673,6 +731,7 @@ mod tests {
                 idle_seconds: 0,
                 in_call: false,
                 ts: Utc::now(),
+                ..Default::default()
             },
             salience_hint: 0.25,
         }
@@ -741,6 +800,77 @@ mod tests {
             .expect("event arrived in time")
             .expect("event not lost");
         assert!(matches!(got, StateEvent::Voice));
+    }
+
+    /// Task C1: the context section stores what the runtime published and
+    /// broadcasts once; a subsequent `None` (runtime stopped reporting)
+    /// clears it rather than leaving a stale ghost.
+    #[tokio::test]
+    async fn set_context_snapshot_updates_context_and_notifies() {
+        use crate::runtime_publish::{
+            ComponentHealthSummary, ContextEngineSnapshot, ContextPageSnapshot, ProjectSummaryView,
+        };
+
+        let handle = StateHandle::new();
+        let mut rx = handle.subscribe();
+
+        let start = handle.snapshot().await;
+        assert!(start.context.session.is_none());
+        assert!(start.context.engine.is_none());
+
+        handle
+            .set_context_snapshot(
+                Some(SessionState {
+                    active_project: Some("continuum".into()),
+                    current_task: Some("wire the bridge".into()),
+                    confidence: 0.6,
+                    ..SessionState::default()
+                }),
+                Some(ContextEngineSnapshot {
+                    idle: true,
+                    context_watcher: Some(ComponentHealthSummary {
+                        healthy: true,
+                        enabled: true,
+                        should_restart: false,
+                        detail: Some("last poll 1s ago".into()),
+                    }),
+                    ..ContextEngineSnapshot::default()
+                }),
+                Some(ContextPageSnapshot {
+                    projects: vec![ProjectSummaryView {
+                        id: "continuum".into(),
+                        name: "Continuum".into(),
+                        status: "configured".into(),
+                        active: true,
+                        ..ProjectSummaryView::default()
+                    }],
+                    ..ContextPageSnapshot::default()
+                }),
+            )
+            .await;
+
+        let snap = handle.snapshot().await;
+        let session = snap.context.session.expect("session stored");
+        assert_eq!(session.current_task.as_deref(), Some("wire the bridge"));
+        let engine = snap.context.engine.expect("engine stored");
+        assert!(engine.idle);
+        assert!(engine.context_watcher.expect("watcher").enabled);
+        let page = snap.context.page.expect("page stored");
+        assert_eq!(page.projects.len(), 1);
+        assert!(page.projects[0].active);
+        assert!(page.toggles.mic, "toggles default to on");
+
+        let got = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("event arrived in time")
+            .expect("event not lost");
+        assert!(matches!(got, StateEvent::Context));
+
+        handle.set_context_snapshot(None, None, None).await;
+        let cleared = handle.snapshot().await;
+        assert!(cleared.context.session.is_none());
+        assert!(cleared.context.engine.is_none());
+        assert!(cleared.context.page.is_none());
     }
 
     #[tokio::test]

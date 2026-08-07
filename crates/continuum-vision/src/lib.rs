@@ -12,7 +12,10 @@
 //! In the Continuum four-layer cognitive architecture, vision sits in Layer 1
 //! (Senses). The pipeline is:
 //!
-//! 1. A screenshot is captured (by the MCP `perception_screenshot` tool)
+//! 1. A screenshot is captured by the runtime's vision watcher
+//!    (`continuum_core::senses::vision`, one capture worker per monitor via
+//!    `xcap`). There is no `perception_*` MCP tool — that namespace is
+//!    reserved but unimplemented; nothing outside the runtime drives capture.
 //! 2. The image is passed to [`VisionModel::describe()`]
 //! 3. The resulting [`VisionOutput`] is included in the perception frame
 //! 4. The frame flows up to Layer 2 (Triage) for decision-making

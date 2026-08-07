@@ -80,14 +80,143 @@ silence_duration_ms = 800
 # whisper inference on multi-minute monologues).
 max_segment_secs = 8
 
+# Context engine §4.11: raw-log retention and the screenshot policy. The
+# distiller ticker runs rotation hourly (even when distillation is off —
+# retention is a privacy promise). Rotation deletes the JPEG each expired
+# frame row referenced, then sweeps `screenshots_dir` for images whose
+# mtime is older than `screenshot_max_age_hours` — the backstop that
+# reclaims files orphaned by a crash between "image saved" and "row
+# written". The sweep never consults the database, so keep the backstop at
+# or above `retention_days * 24`. Set `screenshot_max_age_hours = 0` to
+# disable the age sweep, or `delete_screenshots_with_rotation = false` to
+# stop Continuum deleting images at all.
+[storage]
+retention_days = 30
+delete_screenshots_with_rotation = true
+screenshot_max_age_hours = 720
+
 [memory]
-# Phase 3 completion: raw perception frames that look worth remembering are
-# distilled into LanceDB episodic memory in the background.
+# Phase 3 completion: what looks worth remembering is distilled into LanceDB
+# episodic memory in the background. Since the context engine's §4.11
+# compression ladder the distiller reads DEDUPED context events first
+# (fourteen identical build failures become one "build failed (×14)" memory,
+# with a small importance boost per doubling of the count), and falls back to
+# the raw-frame salience predicate for frames that produced no classified
+# event.
+#
+# The two rungs have SEPARATE thresholds, because they measure different
+# things: `distillation_min_salience` gates raw frames (perception salience),
+# `distillation_min_event_importance` gates deduped events (classifier /
+# collector importance). Deterministic collector events are emitted at
+# importance 0.2 on purpose — individually they are bookkeeping, together
+# they are "what happened today" — so the event threshold defaults BELOW
+# that. Raise it toward 0.35 for a quieter episodic store; lower the frame
+# threshold to distil more unclassified frames.
 distillation_enabled = true
 distillation_interval_minutes = 15
 distillation_lookback_minutes = 20
 distillation_min_salience = 0.35
+distillation_min_event_importance = 0.15
 distillation_batch_size = 100
+
+# Context engine §4.7: per-type expiry for the vault memory candidates the
+# triage classifier proposes. A candidate nobody confirms is archived by the
+# vault's expiry sweep once its TTL passes. Omit a key (or set it to 0) to
+# make that type never expire — the right default for decisions and
+# preferences, which describe how the user works rather than transient state.
+[memory.candidate_ttl_days]
+task = 30
+error = 30
+# decision / preference: no TTL by default (omitted deliberately).
+note = 90
+
+# Context engine §4.8: session state — Continuum's live "what is the user
+# doing" picture. Everything except goal/task inference is mechanical and
+# free; these knobs govern the ONE background LLM call it ever makes.
+# Inference is skipped entirely while you are idle (§4.11) and always
+# queues behind interactive triage (§4.7 LocalLlm discipline).
+[session_state]
+# Hard rate limit: minimum seconds between two inference attempts, whatever
+# triggered them. A failed attempt starts the same cooldown as a successful
+# one, so a broken model can never spin.
+infer_min_interval_secs = 120
+# Re-infer when the current goal/task are older than this, even if nothing
+# else happened.
+infer_max_age_minutes = 10
+# Re-infer once this many *significant* events piled up since the last
+# attempt.
+infer_min_new_events = 8
+# Importance an event must reach to count toward infer_min_new_events.
+significant_importance = 0.5
+# Below this confidence, the inferred goal/task are discarded and every
+# consumer renders "unknown" — the honest answer when Continuum does not
+# know. Also caps the confidence of a very stale rehydrated snapshot.
+confidence_floor = 0.4
+# max_tokens for one inference call (the background LLM tier clamps to 256
+# regardless).
+infer_max_tokens = 256
+
+# --- Context package (spec §4.9/§6) ---
+# One package, three consumer profiles: the wake message (runtime), the
+# `context_package` MCP tool, and the desktop chat system prompt.
+#
+# Drop order when a package is over budget (documented + tested):
+#   open files -> recent changes -> just-before tail -> memories tail
+# NEVER dropped: why-woken, current moment, session state, pending memory
+# decisions (the order contract: pending is the last section before the
+# wake reason).
+#
+# Tokens are estimated at 3.5 bytes/token — the same proxy the triage
+# prompt-fit gate uses, not a real tokenizer.
+[context_package]
+# Whole-package budget for the wake profile.
+token_budget = 1000
+# Whole-package budget for the desktop chat profile.
+chat_token_budget = 600
+# How far back the packager reads deduped context_events for its
+# just-before / recent-changes / failed-attempts sections.
+events_window_minutes = 20
+# Per-section caps.
+max_just_before = 5
+max_memories = 3
+max_facts = 8
+max_vault_notes = 5
+max_pending_decisions = 5
+max_recent_changes = 5
+max_failed_attempts = 3
+max_open_files = 5
+max_tools = 12
+# Characters of the compact world-state blob (screen.world_compact) kept in
+# the current-moment section.
+world_compact_max_chars = 1200
+
+# Continuation resolver (context engine spec §4.12). Answers "the user said
+# 'ga door' — continue WHAT?" from ranked candidates that all have real
+# producers: the session-state task (survives a restart via rehydration),
+# the last wake's next step, the curator's `open_task:` trailer, the last
+# user command, and the last error. Pure logic — no LLM call.
+#
+# Ranking: score = base_confidence x per-kind prior x recency decay.
+# Priors (highest first): session task 1.0, last wake's next step 0.9,
+# open_task 0.8, last user command 0.7, last error 0.5 — an error is a
+# symptom, a task is intent. Recency decay is flat for 30 minutes, then
+# halves per hour, floored at 0.1.
+[continuation]
+# Score the best candidate must reach before Continuum acts on it. At or
+# above: the wake package renders "## Recommended next step" and the wake
+# reason says `Continue: <target>`. Below: the wake reason instructs the
+# orchestrator to ask ONE short question naming up to three candidates.
+confidence_floor = 0.6
+# Utterances that mean "pick up where we left off". Matched
+# case-insensitively as a whole utterance or a word-boundary prefix
+# ("ga door met de tests" counts; "continued" does not). A hotkey press
+# with no words at all counts as a trigger by itself.
+trigger_phrases = ["ga door", "continue", "verder", "waar was ik", "pak weer op"]
+# How far back the runtime looks for the last `wake_result` event when
+# collecting candidates. Deliberately much longer than
+# [context_package] events_window_minutes: "ga door" after lunch still has
+# to find this morning's next step.
+wake_result_lookback_hours = 12
 
 [stt]
 name = "Whisper small"

@@ -19,8 +19,13 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 use xcap::Monitor;
 
-use crate::config::ScreenConfig;
-use crate::senses::live_context::{LiveContextHub, MonitorWorldState, PrivacyDisposition};
+use crate::config::{ContextConfig, ObservationToggles, PrivacyConfig, ScreenConfig};
+use crate::senses::cadence::CadenceControl;
+use crate::senses::live_context::{
+    strictest_disposition, LiveContextHub, MonitorWorldState, PrivacyDisposition,
+};
+use crate::senses::privacy::{emit_system_event, source_enabled, ObservedSource, PrivacyFilter};
+use crate::senses::toggles::ToggleControl;
 use crate::senses::types::ScreenObservation;
 
 /// Capture the primary monitor once. Retained for diagnostics and compatibility.
@@ -203,6 +208,11 @@ struct VisionCache {
     confidence: f32,
     updated_at: Option<chrono::DateTime<Utc>>,
     last_inference: Option<Instant>,
+    /// Last wake-nudge sequence this monitor served (spec §4.11): a
+    /// changed sequence forces one inference regardless of the minimum
+    /// interval, consumed only by a describable packet so an old
+    /// buffered capture can't waste the forced pass.
+    last_nudge_seen: u64,
 }
 
 impl Default for VisionCache {
@@ -213,6 +223,7 @@ impl Default for VisionCache {
             confidence: 0.0,
             updated_at: None,
             last_inference: None,
+            last_nudge_seen: 0,
         }
     }
 }
@@ -223,6 +234,21 @@ pub struct VisionWatcher {
     vision_model: Arc<dyn continuum_vision::VisionModel>,
     screenshots_dir: PathBuf,
     live_context: LiveContextHub,
+    /// Privacy choke point (spec §4.1): captions are scrubbed through this
+    /// filter at collector emit, before the hub and the frame channel.
+    privacy: Arc<PrivacyFilter>,
+    /// Honest per-source toggles; `screen` (and `pause_all`) gate this
+    /// watcher entirely.
+    toggles: ObservationToggles,
+    /// Live toggle control (Task C5): re-read by the capture scheduler and
+    /// the vision consumer so a Context-page switch stops screen capture
+    /// without a restart.
+    toggle_control: Option<ToggleControl>,
+    /// Runtime-adjustable cadences (spec §3 sanctioned pattern, Task A8):
+    /// the capture workers and the vision gate read these every
+    /// iteration; the runtime's idle controller adjusts them without a
+    /// restart. Standalone construction seeds them from `[screen]`.
+    cadence: CadenceControl,
 }
 
 impl VisionWatcher {
@@ -241,18 +267,67 @@ impl VisionWatcher {
     }
 
     /// Construct a watcher attached to the runtime's shared world-state.
+    ///
+    /// Standalone construction synthesizes a privacy filter from default
+    /// config; the runtime shares its boot-time filter via
+    /// [`VisionWatcher::with_privacy`].
     pub fn new_with_live_context(
         config: ScreenConfig,
         vision_model: Arc<dyn continuum_vision::VisionModel>,
         screenshots_dir: impl Into<PathBuf>,
         live_context: LiveContextHub,
     ) -> Self {
+        let cadence =
+            CadenceControl::new(config.capture_interval_ms, config.vision_min_interval_ms);
         Self {
             config,
             vision_model,
             screenshots_dir: screenshots_dir.into(),
             live_context,
+            privacy: Arc::new(PrivacyFilter::from_config(
+                &ContextConfig::default(),
+                &PrivacyConfig::default(),
+            )),
+            toggles: ObservationToggles::default(),
+            toggle_control: None,
+            cadence,
         }
+    }
+
+    /// Attaches the shared boot-time privacy filter and observation
+    /// toggles (spec §4.1). Called once at senses spawn.
+    pub fn with_privacy(mut self, filter: Arc<PrivacyFilter>, toggles: ObservationToggles) -> Self {
+        self.privacy = filter;
+        self.toggles = toggles;
+        self
+    }
+
+    /// Attaches the shared **live** toggle control (Task C5, spec §4.13).
+    ///
+    /// Without it the watcher honours the boot-time [`ObservationToggles`]
+    /// copy it was given; with it, every loop iteration re-reads the
+    /// current value, so a Context-page switch takes effect without a
+    /// restart.
+    pub fn with_toggle_control(mut self, control: ToggleControl) -> Self {
+        self.toggle_control = Some(control);
+        self
+    }
+
+    /// The toggle values to honour right now: the live control when one is
+    /// attached, else the boot-time copy.
+    fn live_toggles(&self) -> ObservationToggles {
+        match &self.toggle_control {
+            Some(control) => control.snapshot(),
+            None => self.toggles.clone(),
+        }
+    }
+
+    /// Attaches the runtime's shared cadence control (Task A8, spec
+    /// §4.11) so the idle controller can adjust capture/vision cadences
+    /// while this watcher runs. Called once at senses spawn.
+    pub fn with_cadence(mut self, cadence: CadenceControl) -> Self {
+        self.cadence = cadence;
+        self
     }
 
     /// Run until shutdown. Capture workers never await inference or triage.
@@ -270,6 +345,21 @@ impl VisionWatcher {
             return;
         }
 
+        // Honest toggles (spec §4.1): a disabled screen source emits
+        // nothing. Cheapest honest implementation: the capture scheduler
+        // never starts, so no worker threads run, no bitmaps are captured,
+        // and no packets exist to leak. Toggles are read at spawn time
+        // (config has no hot-reload yet — NEXT-tier work); changing the
+        // toggle requires a runtime restart until then.
+        if !source_enabled(&self.live_toggles(), ObservedSource::Screen) {
+            emit_system_event(
+                "toggle_change",
+                "screen observation disabled by [privacy.toggles]; vision watcher emits nothing",
+            );
+            let _ = shutdown.changed().await;
+            return;
+        }
+
         tracing::info!(
             layer = "senses",
             component = "vision",
@@ -284,6 +374,10 @@ impl VisionWatcher {
         let buffer = OrderedBuffer::new(self.config.buffer_capacity);
         let scheduler = tokio::spawn(run_capture_scheduler(
             self.config.clone(),
+            self.cadence.clone(),
+            self.toggle_control
+                .clone()
+                .unwrap_or_else(|| ToggleControl::new(&self.toggles)),
             buffer.clone(),
             self.live_context.clone(),
             shutdown.clone(),
@@ -327,24 +421,47 @@ impl VisionWatcher {
             capture_event_sequence = buffered.sequence,
             "Processing ordered capture event"
         );
+        // Defense in depth for the live toggle (Task C5): a bitmap that
+        // was already in the ordered buffer when the switch flipped is
+        // dropped rather than captioned, stored or published.
+        if !source_enabled(&self.live_toggles(), ObservedSource::Screen) {
+            return;
+        }
         let mut packet = buffered.value;
-        // Privacy is attached at capture time. A later foreground change may
+        // Privacy is attached at capture time, per monitor (foreground
+        // disposition + the §4.1 visible-window sweep). A later change may
         // make processing stricter, but never less strict for this bitmap.
-        let current_privacy = self.live_context.current_privacy();
-        let privacy = if packet.privacy == PrivacyDisposition::Visible
-            && current_privacy == PrivacyDisposition::Visible
-        {
-            PrivacyDisposition::Visible
-        } else {
-            PrivacyDisposition::Redacted
-        };
+        let current_privacy = self.live_context.monitor_privacy(&packet.target.id);
+        let privacy = strictest_disposition(packet.privacy, current_privacy);
         let monitor_cache = cache.entry(packet.target.id.clone()).or_default();
-        let inference_due = monitor_cache
-            .last_inference
-            .map(|last| {
-                last.elapsed() >= Duration::from_millis(self.config.vision_min_interval_ms.max(100))
-            })
-            .unwrap_or(true);
+        // Vision minimum interval is read per packet from the shared
+        // cadence (spec §3 sanctioned pattern): the idle controller may
+        // have relaxed it (or set 0 = fully paused) since this watcher
+        // spawned. A pending wake nudge (spec §4.11) forces one
+        // inference; it is consumed only by a describable packet so an
+        // old buffered capture can't waste it.
+        let vision_min_interval_ms = self.cadence.vision_min_interval_ms();
+        let nudge = self.cadence.nudge_seq();
+        let nudged = monitor_cache.last_nudge_seen != nudge
+            && privacy == PrivacyDisposition::Visible
+            && packet.meaningful_change
+            && packet.image.is_some();
+        if nudged {
+            monitor_cache.last_nudge_seen = nudge;
+        }
+        let inference_due = if nudged {
+            true
+        } else if vision_min_interval_ms == 0 {
+            // 0 = vision fully paused during idle (spec §4.11).
+            false
+        } else {
+            monitor_cache
+                .last_inference
+                .map(|last| {
+                    last.elapsed() >= Duration::from_millis(vision_min_interval_ms.max(100))
+                })
+                .unwrap_or(true)
+        };
         let should_describe = privacy == PrivacyDisposition::Visible
             && packet.meaningful_change
             && packet.image.is_some()
@@ -352,7 +469,16 @@ impl VisionWatcher {
         let mut screenshot_path = None;
         let mut vision_updated = false;
 
-        if privacy != PrivacyDisposition::Visible {
+        if privacy == PrivacyDisposition::Excluded {
+            // Sentinel semantics (spec §4.1): a never_observe monitor gets
+            // no caption and no screenshot file — the bitmap is dropped
+            // here and never reaches the vision model or the disk.
+            monitor_cache.description = String::new();
+            monitor_cache.has_error_visible = false;
+            monitor_cache.confidence = 1.0;
+            monitor_cache.updated_at = None;
+            packet.image = None;
+        } else if privacy != PrivacyDisposition::Visible {
             monitor_cache.description = "[redacted by local privacy policy]".into();
             monitor_cache.has_error_visible = false;
             monitor_cache.confidence = 1.0;
@@ -377,9 +503,13 @@ impl VisionWatcher {
             monitor_cache.last_inference = Some(Instant::now());
             match self.vision_model.describe(&image).await {
                 Ok(output) => {
-                    monitor_cache.has_error_visible = output.has_error_visible
-                        || description_indicates_error(&output.description);
-                    monitor_cache.description = output.description;
+                    // Caption is free text: scrub at collector emit
+                    // (spec §4.1), before the hub fork and the frame
+                    // channel.
+                    let description = self.privacy.scrub_text(&output.description);
+                    monitor_cache.has_error_visible =
+                        output.has_error_visible || description_indicates_error(&description);
+                    monitor_cache.description = description;
                     monitor_cache.confidence = output.confidence;
                     monitor_cache.updated_at = Some(Utc::now());
                     vision_updated = true;
@@ -394,8 +524,19 @@ impl VisionWatcher {
             }
         }
 
-        let publication_privacy = self.live_context.current_privacy();
-        if publication_privacy != PrivacyDisposition::Visible {
+        // Re-check at publication time (monotonic tightening — the zone may
+        // have become stricter while the model ran, never less strict).
+        let publication_privacy = strictest_disposition(
+            privacy,
+            self.live_context.monitor_privacy(&packet.target.id),
+        );
+        if publication_privacy == PrivacyDisposition::Excluded {
+            monitor_cache.description = String::new();
+            monitor_cache.has_error_visible = false;
+            monitor_cache.confidence = 1.0;
+            monitor_cache.updated_at = None;
+            vision_updated = false;
+        } else if publication_privacy != PrivacyDisposition::Visible {
             monitor_cache.description = "[redacted by local privacy policy]".into();
             monitor_cache.has_error_visible = false;
             monitor_cache.confidence = 1.0;
@@ -403,9 +544,16 @@ impl VisionWatcher {
             vision_updated = false;
         }
 
+        // The caption for THIS monitor, after the publication-time privacy
+        // re-check: the raw one-sentence vision-model output (scrubbed), the
+        // redaction marker, or "" for an excluded monitor. Bound here so the
+        // mutable borrow of `cache` ends before the observation below reads
+        // the whole cache for the error rollup.
+        let caption = monitor_cache.description.clone();
+
         self.live_context.record_monitor_vision(
             &packet.target.id,
-            monitor_cache.description.clone(),
+            caption.clone(),
             monitor_cache.confidence,
             monitor_cache.updated_at,
             publication_privacy,
@@ -414,7 +562,12 @@ impl VisionWatcher {
 
         let snapshot = self.live_context.snapshot();
         let observation = ScreenObservation {
-            description: snapshot.compact_for_agents(1_400),
+            // Caption only (spec §4.10). The compact world-state blob used
+            // to live here, which put ~1.4 kB of monitor/window/project
+            // text into every triage prompt; it now rides `world_compact`
+            // and is consumed by the context packager instead.
+            description: caption,
+            world_compact: Some(snapshot.compact_for_agents(1_400)),
             foreground_app: String::new(),
             has_error_visible: snapshot.monitors.iter().any(|monitor| {
                 cache
@@ -439,6 +592,8 @@ impl VisionWatcher {
 
 async fn run_capture_scheduler(
     config: ScreenConfig,
+    cadence: CadenceControl,
+    toggles: ToggleControl,
     buffer: OrderedBuffer<CapturePacket>,
     live_context: LiveContextHub,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -461,6 +616,26 @@ async fn run_capture_scheduler(
     loop {
         tokio::select! {
             _ = discovery.tick() => {
+                // Honest toggle, live (spec §4.1, Task C5): switching the
+                // screen source off stops every capture worker within one
+                // discovery tick — no bitmap is taken, so no packet can
+                // leak. Switching it back on respawns them here.
+                if !toggles.enabled(ObservedSource::Screen) {
+                    let stopped: Vec<CaptureWorker> =
+                        workers.drain().map(|(_, worker)| worker).collect();
+                    if !stopped.is_empty() {
+                        tracing::info!(
+                            layer = "senses",
+                            component = "vision",
+                            workers = stopped.len(),
+                            "screen observation switched off; stopping capture workers"
+                        );
+                    }
+                    for worker in stopped {
+                        stop_worker(worker).await;
+                    }
+                    continue;
+                }
                 let discovery_config = config.clone();
                 match tokio::task::spawn_blocking(move || enumerate_monitors(&discovery_config)).await {
                     Ok(Ok(targets)) => {
@@ -487,6 +662,7 @@ async fn run_capture_scheduler(
                             if !workers.contains_key(&target.id) {
                                 let id = target.id.clone();
                                 let worker_config = config.clone();
+                                let worker_cadence = cadence.clone();
                                 let worker_buffer = buffer.clone();
                                 let worker_context = live_context.clone();
                                 let worker_shutdown = global_shutdown.clone();
@@ -497,6 +673,7 @@ async fn run_capture_scheduler(
                                     .spawn(move || run_monitor_capture_loop(
                                         target,
                                         worker_config,
+                                        worker_cadence,
                                         worker_buffer,
                                         worker_context,
                                         worker_shutdown,
@@ -535,12 +712,12 @@ async fn run_capture_scheduler(
 fn run_monitor_capture_loop(
     target: MonitorDescriptor,
     config: ScreenConfig,
+    cadence: CadenceControl,
     buffer: OrderedBuffer<CapturePacket>,
     live_context: LiveContextHub,
     shutdown: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 ) {
-    let cadence = Duration::from_millis(config.capture_interval_ms.max(50));
     let monitor = match monitor_by_native_id(target.native_id) {
         Ok(monitor) => monitor,
         Err(error) => {
@@ -554,10 +731,21 @@ fn run_monitor_capture_loop(
     let mut previous_signature: Option<Vec<u8>> = None;
     let mut previous_privacy = PrivacyDisposition::Redacted;
     let mut capture_sequence = 0u64;
+    // Wake-nudge tracking (spec §4.11): initialized to the current
+    // sequence so only nudges issued *after* this worker started force a
+    // meaningful capture.
+    let mut last_nudge_seen = cadence.nudge_seq();
     while !shutdown.load(Ordering::Acquire) && !cancel.load(Ordering::Acquire) {
         capture_sequence = capture_sequence.saturating_add(1);
         let captured_at = Utc::now();
         let started = Instant::now();
+        let nudge = cadence.nudge_seq();
+        let nudged = nudge != last_nudge_seen;
+        last_nudge_seen = nudge;
+        // Interval is re-read every iteration from the shared cadence
+        // (spec §3 sanctioned pattern) — the idle controller adjusts it
+        // without restarting this thread.
+        let target_interval_ms = cadence.capture_interval_ms().max(50);
         match monitor.capture_image() {
             Ok(image) => {
                 let signature = change_signature(&image);
@@ -565,12 +753,18 @@ fn run_monitor_capture_loop(
                     .as_deref()
                     .map(|previous| mean_luma_difference(previous, &signature))
                     .unwrap_or(1.0);
-                let privacy = live_context.current_privacy();
+                // Per-monitor disposition: strictest of the foreground
+                // window and this monitor's sweep-derived zone (spec §4.1).
+                let privacy = live_context.monitor_privacy(&target.id);
                 let privacy_became_visible = previous_privacy != PrivacyDisposition::Visible
                     && privacy == PrivacyDisposition::Visible;
+                // A wake nudge marks this capture meaningful (image
+                // attached) so the wake gets a fresh caption even when
+                // the screen didn't change while idle (spec §4.11).
                 let meaningful_change = previous_signature.is_none()
                     || change_score >= config.meaningful_change_threshold
-                    || privacy_became_visible;
+                    || privacy_became_visible
+                    || nudged;
                 previous_signature = Some(signature);
                 previous_privacy = privacy;
                 let capture_latency_ms = started.elapsed().as_millis() as u64;
@@ -606,7 +800,7 @@ fn run_monitor_capture_loop(
                         confidence: 0.0,
                         vision_updated_at: None,
                         privacy,
-                        target_interval_ms: config.capture_interval_ms.max(50),
+                        target_interval_ms,
                         capture_latency_ms: packet.capture_latency_ms,
                         dropped_before: buffered.dropped_before,
                     });
@@ -616,14 +810,26 @@ fn run_monitor_capture_loop(
                 .record_capture_failure(format!("monitor {} capture failed: {error}", target.id)),
         }
 
-        let deadline = started + cadence;
-        while !shutdown.load(Ordering::Acquire)
-            && !cancel.load(Ordering::Acquire)
-            && Instant::now() < deadline
-        {
+        // The deadline is recomputed every ≤50 ms slice from the *current*
+        // cadence (spec §3): when the idle controller shortens the
+        // interval mid-sleep the shorter deadline applies immediately,
+        // and a pending wake nudge breaks the wait for an instant
+        // capture (spec §4.11 wake-during-pause).
+        loop {
+            if shutdown.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) {
+                break;
+            }
+            let deadline = started + Duration::from_millis(cadence.capture_interval_ms().max(50));
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            if cadence.nudge_seq() != last_nudge_seen {
+                break;
+            }
             std::thread::sleep(
                 deadline
-                    .saturating_duration_since(Instant::now())
+                    .saturating_duration_since(now)
                     .min(Duration::from_millis(50)),
             );
         }
@@ -727,6 +933,72 @@ mod tests {
         assert_eq!(
             path.extension().and_then(|value| value.to_str()),
             Some("jpg")
+        );
+    }
+
+    struct StubModel;
+
+    #[async_trait::async_trait]
+    impl continuum_vision::VisionModel for StubModel {
+        async fn describe(
+            &self,
+            _image: &image::DynamicImage,
+        ) -> Result<continuum_vision::VisionOutput> {
+            Ok(continuum_vision::VisionOutput {
+                description: "stub".into(),
+                has_error_visible: false,
+                confidence: 0.0,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "stub"
+        }
+
+        async fn warmup(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn screen_toggle_off_stops_all_emission() {
+        // Honest toggles (spec §4.1): with `[privacy.toggles].screen =
+        // false` the watcher emits nothing even though capture is enabled
+        // in config — the capture scheduler never starts.
+        use crate::config::{ContextConfig, ObservationToggles, PrivacyConfig};
+        use crate::senses::privacy::PrivacyFilter;
+
+        let config = ScreenConfig {
+            enabled: true,
+            ..ScreenConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filter = Arc::new(PrivacyFilter::from_config(
+            &ContextConfig::default(),
+            &PrivacyConfig::default(),
+        ));
+        let toggles = ObservationToggles {
+            screen: false,
+            ..ObservationToggles::default()
+        };
+        let watcher = VisionWatcher::new(config, Arc::new(StubModel), dir.path())
+            .with_privacy(filter, toggles);
+        let (tx, mut rx) = mpsc::channel::<ScreenObservation>(8);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = tokio::spawn(async move {
+            watcher.run(tx, shutdown_rx).await;
+        });
+
+        let _ = shutdown_tx.send(true);
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            result.is_ok(),
+            "Screen-toggled-off watcher should exit promptly on shutdown"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Screen-toggled-off watcher must emit no observations"
         );
     }
 }
