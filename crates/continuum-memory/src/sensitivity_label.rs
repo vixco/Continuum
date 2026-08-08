@@ -3,7 +3,7 @@ use crate::model::Sensitivity;
 impl Sensitivity {
     /// Stable snake_case label matching the serde representation. Privacy and
     /// egress layers use this instead of re-implementing enum matches.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Public => "public",
             Self::Internal => "internal",
