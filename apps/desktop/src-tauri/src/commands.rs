@@ -1809,6 +1809,22 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "terminal_verify".into(),
             description: "Run a verifier and persist bounded evidence".into(),
         },
+        // --- native IDE bridge ---
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_status".into(),
+            description: "Check configured native editor availability".into(),
+        },
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_open_file".into(),
+            description: "Open an allowlisted file at a source location".into(),
+        },
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_open_diff".into(),
+            description: "Show two allowlisted files in the native IDE diff view".into(),
+        },
         // --- github (optional connection) ---
         McpTool {
             namespace: "github".into(),

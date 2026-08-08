@@ -102,6 +102,11 @@ git_rollback        = "always-confirm"
 # --- Restricted terminal broker ---
 [terminal]
 terminal_verify = "session-approved"
+
+# --- Native IDE bridge ---
+ide_status    = "auto"
+ide_open_file = "session-approved"
+ide_open_diff = "session-approved"
 terminal_run    = "always-confirm"
 
 # --- Optional GitHub connection (official gh CLI, keyring auth only) ---

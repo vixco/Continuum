@@ -349,6 +349,10 @@ max_timeout_secs = 900
 max_output_bytes = 524288
 max_args = 128
 
+[mcp.ide]
+allowed_editors = ["code", "code-insiders", "codium"]
+launch_timeout_secs = 15
+
 [github]
 enabled = true
 connect_timeout_secs = 600
