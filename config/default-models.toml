@@ -353,6 +353,13 @@ max_args = 128
 allowed_editors = ["code", "code-insiders", "codium"]
 launch_timeout_secs = 15
 
+[mcp.browser]
+enabled = false
+port = 9222
+allowed_hosts = ["localhost", "127.0.0.1"]
+max_text_bytes = 131072
+timeout_secs = 10
+
 [github]
 enabled = true
 connect_timeout_secs = 600

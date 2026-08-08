@@ -37,6 +37,9 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 
+use crate::tools::browser::{
+    BrowserClickRequest, BrowserFillRequest, BrowserNavigateRequest, BrowserTargetRequest,
+};
 use crate::tools::context::{
     self as ctxtool, ContextFilesRequest, ContextGitRequest, ContextPackageRequest,
     ContextProcessesRequest, ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest,
@@ -82,6 +85,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_max_patch_replacements: usize,
     pub(crate) terminal_config: crate::config::McpTerminalConfig,
     pub(crate) ide_config: crate::config::McpIdeConfig,
+    pub(crate) browser_config: crate::config::McpBrowserConfig,
     pub(crate) github_config: continuum_core::config::GitHubConfig,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
@@ -224,6 +228,7 @@ impl ContinuumMcpServer {
                 fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
                 terminal_config: mcp_cfg.terminal,
                 ide_config: mcp_cfg.ide,
+                browser_config: mcp_cfg.browser,
                 github_config,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
@@ -1569,6 +1574,94 @@ impl ContinuumMcpServer {
     }
 
     // -----------------------------------------------------------------------
+    // Opt-in Chromium DOM bridge
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Report whether the opt-in loopback Chromium DevTools bridge is enabled and reachable. Does not return page content."
+    )]
+    async fn browser_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_status", &Value::Null, || async {
+            Ok::<_, McpError>(
+                crate::tools::browser::status(&self.state.http, &self.state.browser_config).await,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List only page tabs whose exact host is explicitly allowed in mcp.browser.allowed_hosts."
+    )]
+    async fn browser_list_tabs(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_list_tabs", &Value::Null, || async {
+            crate::tools::browser::list_tabs(&self.state.http, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Return bounded visible text and form structure for one allowlisted Chromium tab. Password fields and all field values are excluded."
+    )]
+    async fn browser_dom_snapshot(
+        &self,
+        Parameters(req): Parameters<BrowserTargetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_dom_snapshot", &req, || async {
+            crate::tools::browser::snapshot(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Navigate one Chromium tab to an exact allowlisted HTTP(S) host. Requires a fresh confirmation every call."
+    )]
+    async fn browser_navigate(
+        &self,
+        Parameters(req): Parameters<BrowserNavigateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_navigate", &req, || async {
+            crate::tools::browser::navigate(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Click one CSS-selected non-password element in an allowlisted Chromium tab. Arbitrary JavaScript is not accepted. Requires fresh confirmation."
+    )]
+    async fn browser_click(
+        &self,
+        Parameters(req): Parameters<BrowserClickRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_click", &req, || async {
+            crate::tools::browser::click(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Fill one CSS-selected non-password field in an allowlisted Chromium tab and dispatch input/change events. Content is audit-redacted. Requires fresh confirmation."
+    )]
+    async fn browser_fill(
+        &self,
+        Parameters(req): Parameters<BrowserFillRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_fill", &req, || async {
+            crate::tools::browser::fill(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
     // Optional read-only GitHub integration
     // -----------------------------------------------------------------------
 
@@ -1939,6 +2032,7 @@ fn permission_resource(args: &Value) -> Option<String> {
         "repository",
         "url",
         "component",
+        "target_id",
     ];
     let object = args.as_object()?;
     if let (Some(owner), Some(repo)) = (
@@ -1977,6 +2071,17 @@ fn ide_err_to_mcp(error: crate::tools::ide::IdeError) -> McpError {
     use crate::tools::ide::IdeError;
     match error {
         IdeError::Spawn(_) | IdeError::Timeout => McpError::internal_error(error.to_string(), None),
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn browser_err_to_mcp(error: crate::tools::browser::BrowserError) -> McpError {
+    match error {
+        crate::tools::browser::BrowserError::Unavailable(_)
+        | crate::tools::browser::BrowserError::Protocol(_)
+        | crate::tools::browser::BrowserError::Timeout => {
+            McpError::internal_error(error.to_string(), None)
+        }
         _ => McpError::invalid_params(error.to_string(), None),
     }
 }
@@ -2081,6 +2186,7 @@ mod repair_authorization_tests {
                 fs_max_patch_replacements: 100,
                 terminal_config: crate::config::McpTerminalConfig::default(),
                 ide_config: crate::config::McpIdeConfig::default(),
+                browser_config: crate::config::McpBrowserConfig::default(),
                 github_config: continuum_core::config::GitHubConfig::default(),
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),

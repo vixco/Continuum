@@ -1825,6 +1825,37 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "ide_open_diff".into(),
             description: "Show two allowlisted files in the native IDE diff view".into(),
         },
+        // --- opt-in browser DOM bridge ---
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_status".into(),
+            description: "Check loopback Chromium bridge status".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_list_tabs".into(),
+            description: "List explicitly allowed Chromium tabs".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_dom_snapshot".into(),
+            description: "Read bounded visible DOM text and form structure".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_navigate".into(),
+            description: "Navigate a tab to an allowed host after confirmation".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_click".into(),
+            description: "Click a DOM element after confirmation".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_fill".into(),
+            description: "Fill a non-password field after confirmation".into(),
+        },
         // --- github (optional connection) ---
         McpTool {
             namespace: "github".into(),

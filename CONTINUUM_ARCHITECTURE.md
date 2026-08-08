@@ -195,6 +195,12 @@ and strips credential-bearing environment variables. It does not claim access
 to live editor buffers, diagnostics, selections, terminals, or debug state;
 those require a separately consented extension protocol.
 
+Browser DOM access is disabled by default and connects only to a user-started
+Chromium DevTools endpoint on loopback. Tabs and navigation are limited to
+exact configured hosts (localhost only by default). Snapshot expressions are
+fixed and bounded, omit password fields and all form values, and no tool accepts
+arbitrary JavaScript. Navigate, click, and fill require fresh confirmation.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

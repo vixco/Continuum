@@ -107,6 +107,14 @@ terminal_verify = "session-approved"
 ide_status    = "auto"
 ide_open_file = "session-approved"
 ide_open_diff = "session-approved"
+
+# --- Opt-in browser DOM bridge ---
+browser_status       = "auto"
+browser_list_tabs    = "session-approved"
+browser_dom_snapshot = "session-approved"
+browser_navigate     = "always-confirm"
+browser_click        = "always-confirm"
+browser_fill         = "always-confirm"
 terminal_run    = "always-confirm"
 
 # --- Optional GitHub connection (official gh CLI, keyring auth only) ---

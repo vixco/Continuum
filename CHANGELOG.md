@@ -6,6 +6,10 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Opt-in browser DOM bridge**: six `browser_*` tools connect only to a
+  user-started loopback Chromium DevTools endpoint. Exact host allowlisting,
+  bounded snapshots, password-field exclusion, fixed JavaScript, redacted fill
+  content, and per-call confirmation protect browser actions.
 - **Native IDE bridge**: `ide_status`, `ide_open_file`, and `ide_open_diff`
   detect and launch configured VS Code-compatible native executables. File
   targets use the project allowlist, editor input never reaches a shell, and

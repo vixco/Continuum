@@ -6,6 +6,7 @@
 //! (eventually) extracted implementations kept out of the server file for
 //! readability.
 
+pub mod browser;
 pub mod context;
 pub mod file_actions;
 pub mod fs;

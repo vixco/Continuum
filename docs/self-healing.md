@@ -83,6 +83,19 @@ Component: `ide`
 - Restart rule: restart after repeated spawn/timeouts. A missing executable or
   denied path is a configuration/permission issue and should not be retried.
 
+## Browser DOM bridge
+
+Component: `browser`
+
+- Health check: `browser_status` probes only the configured loopback port.
+- Logs: MCP permission and action audits; fill content is redacted.
+- Recovery: verify `mcp.browser.enabled`, the dedicated Chromium
+  `--remote-debugging-port`, and exact host allowlist. Restart the browser with
+  its dedicated profile if CDP is unavailable, then restart the MCP process.
+- Restart rule: protocol disconnects/timeouts may be retried after one status
+  check. Host denials and password-field blocks require configuration/user
+  action and are never auto-retried.
+
 ## GitHub CLI bridge
 
 Component: `github`
