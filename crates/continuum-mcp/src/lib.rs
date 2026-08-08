@@ -1,8 +1,9 @@
 //! # continuum-mcp library
 //!
-//! Exposes the MCP server struct for integration tests and reuse. The binary
-//! target (`src/main.rs`) re-imports these to run the server over stdio.
+//! Exposes the context MCP server and the provider-neutral Agent OS action
+//! server for integration tests and reuse. Binary targets run them over stdio.
 
+pub mod agent_os;
 pub mod allowlist;
 pub(crate) mod audit;
 pub mod config;
