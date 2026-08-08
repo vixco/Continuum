@@ -197,10 +197,10 @@ jobs:
         # remain mandatory, but receive their own single-thread scheduling
         # window below so runner load cannot turn commit timing into a flaky
         # product signal. Every other workspace test remains parallel here.
-        run: cargo test --workspace -- --skip bench::score::tests::
+        run: "cargo test --workspace -- --skip bench::score::tests::"
 
       - name: Run context-engine benchmark gates (isolated)
-        run: cargo test -p continuum-core bench::score::tests:: -- --test-threads=1
+        run: "cargo test -p continuum-core bench::score::tests:: -- --test-threads=1"
 
   build-desktop:
     name: Build desktop
