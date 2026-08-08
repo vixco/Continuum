@@ -40,6 +40,8 @@ import type {
   MemoryVaultInfo,
   ProviderAddInput,
   ProviderConnection,
+  ObservationPausePreset,
+  ObservationPauseStatus,
   RepairEvent,
   RepairPreview,
   ResourceConfig,
@@ -310,6 +312,14 @@ export const continuum = {
   runBackupNow: () => invoke<string>("run_backup_now"),
   rollbackConfig: (date: string) => invoke<void>("rollback_config", { date }),
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
+  getObservationPause: () =>
+    invoke<ObservationPauseStatus>("get_observation_pause", undefined, {
+      paused: false,
+      until: null,
+    }),
+  pauseObservation: (preset: ObservationPausePreset) =>
+    invoke<ObservationPauseStatus>("pause_observation", { preset }),
+  resumeObservation: () => invoke<ObservationPauseStatus>("resume_observation"),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   talkNow: () => invoke<void>("talk_now"),
   contextWriteIntent: (intent: ContextIntentInput) =>

@@ -9,6 +9,14 @@ export type VoiceMode = "idle" | "listening" | "thinking" | "speaking" | "muted"
 
 export type ComponentStatus = "healthy" | "degrading" | "error" | "unknown";
 
+export type ObservationPausePreset =
+  "fifteen_minutes" | "one_hour" | "four_hours" | "until_tomorrow" | "indefinite";
+
+export interface ObservationPauseStatus {
+  paused: boolean;
+  until: string | null;
+}
+
 export type RecentActionKind = "triage" | "wake" | "worker" | "voice" | "repair";
 
 export interface PerceptionState {

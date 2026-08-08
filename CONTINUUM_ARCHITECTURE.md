@@ -1,7 +1,7 @@
 # Continuum Architecture
 
 Status: Phase 0 architecture contract
-Last updated: 2026-08-01
+Last updated: 2026-08-09
 
 ## Product contract
 
@@ -94,6 +94,15 @@ configurable in the Brain tab, screenshot persistence is opt-in, configured
 sensitive applications/titles are redacted before vision or publication, and
 no key values, pointer coordinates, clipboard contents, or terminal text enter
 the live-context contract.
+
+The desktop shell exposes a persistent master privacy control. Pausing creates
+a local durable lease, gates every observation source before new data is
+collected, drops already-buffered frames before persistence or triage, clears
+the current live/process projections, and marks the control red. Leases may be
+timed or indefinite; timed leases survive restarts and the runtime resumes the
+individually enabled sources when the trusted local deadline expires. A corrupt
+lease fails closed. This control never starts an offline runtime merely to
+apply a privacy choice.
 
 Background-process activity is a separate opt-in source. It publishes a
 bounded `processes.json` snapshot and change-only lifecycle/resource-pressure

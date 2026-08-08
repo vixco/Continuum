@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use crate::config::{ContextConfig, PrivacyConfig, ProcessWatcherConfig};
 use crate::senses::privacy::{strictest, PrivacyFilter, Zone};
+use crate::senses::toggles::ToggleControl;
 
 #[cfg(feature = "runtime")]
 use crate::memory::events::{
@@ -150,6 +151,7 @@ pub struct ProcessWatcher {
     events: Option<Arc<dyn ProcessEventSink>>,
     snapshot_path: PathBuf,
     health: SharedProcessWatchHealth,
+    toggles: ToggleControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,12 +214,19 @@ impl ProcessWatcher {
             events: None,
             snapshot_path: dev_dir.join("processes.json"),
             health: SharedProcessWatchHealth::default(),
+            toggles: ToggleControl::default(),
         }
     }
 
     /// Attaches the shared privacy choke point.
     pub fn with_privacy(mut self, privacy: Arc<PrivacyFilter>) -> Self {
         self.privacy = privacy;
+        self
+    }
+
+    /// Attaches the live master privacy control shared by all collectors.
+    pub fn with_toggle_control(mut self, toggles: ToggleControl) -> Self {
+        self.toggles = toggles;
         self
     }
 
@@ -285,6 +294,27 @@ impl ProcessWatcher {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    if self.toggles.paused() {
+                        let snapshot = ProcessActivitySnapshot {
+                            version: 1,
+                            observed_at: Utc::now(),
+                            active: Vec::new(),
+                        };
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
+                            let _ = std::fs::write(&self.snapshot_path, bytes);
+                        }
+                        let mut health = self.health.write();
+                        health.enabled = false;
+                        health.disabled_reason = Some("all observation paused by user".to_string());
+                        drop(health);
+                        tracked.clear();
+                        continue;
+                    }
+                    {
+                        let mut health = self.health.write();
+                        health.enabled = true;
+                        health.disabled_reason = None;
+                    }
                     system.refresh_processes(ProcessesToUpdate::All, true);
                     let observed_at = Utc::now();
                     let mut current = HashMap::new();
@@ -439,6 +469,7 @@ impl ProcessWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::intents::ToggleName;
 
     #[test]
     fn process_names_are_normalized_for_config_matching() {
@@ -461,5 +492,29 @@ mod tests {
             resolve_process_zone(&filter, "1password", None),
             Zone::NeverObserve
         );
+    }
+
+    #[tokio::test]
+    async fn master_pause_prevents_process_polling_and_clears_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ProcessWatcherConfig::default();
+        config.enabled = true;
+        let toggles = ToggleControl::default();
+        toggles.set(ToggleName::PauseAll, true);
+        let watcher =
+            ProcessWatcher::new(config, dir.path().to_path_buf()).with_toggle_control(toggles);
+        let health = watcher.health_handle();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { watcher.run(shutdown_rx).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+
+        let snapshot: ProcessActivitySnapshot =
+            serde_json::from_slice(&std::fs::read(dir.path().join("processes.json")).unwrap())
+                .unwrap();
+        assert!(snapshot.active.is_empty());
+        assert!(!health.read().enabled);
+        assert_eq!(health.read().polls, 0);
     }
 }
