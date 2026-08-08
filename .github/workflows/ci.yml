@@ -10,8 +10,6 @@ env:
   CARGO_TERM_COLOR: always
   # Compiler version validated against the committed Cargo.lock.
   RUST_VERSION: "1.94.0"
-  # Node 22 is required by the desktop's native TypeScript stripping tests.
-  NODE_VERSION: "22"
   # Always land cargo artifacts under `target/` relative to the workspace.
   # Overrides the committed .cargo/config.toml hint when needed.
   CARGO_TARGET_DIR: target
@@ -222,7 +220,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -280,7 +278,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -332,7 +330,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
