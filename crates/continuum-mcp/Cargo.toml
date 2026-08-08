@@ -35,6 +35,8 @@ dirs = "6"
 glob = "0.3"
 base64 = "0.22"
 toml = "0.8"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 continuum-core = { path = "../continuum-core" }
 continuum-memory = { path = "../continuum-memory" }
 

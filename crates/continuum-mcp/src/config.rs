@@ -16,6 +16,7 @@ pub struct McpServerConfig {
     pub fs: McpFsConfig,
     pub terminal: McpTerminalConfig,
     pub ide: McpIdeConfig,
+    pub browser: McpBrowserConfig,
 }
 
 /// Filesystem-allowlist expansion settings.
@@ -88,6 +89,34 @@ impl Default for McpIdeConfig {
         Self {
             allowed_editors: vec!["code".into(), "code-insiders".into(), "codium".into()],
             launch_timeout_secs: 15,
+        }
+    }
+}
+
+/// Opt-in loopback Chromium DevTools bridge.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct McpBrowserConfig {
+    /// Master kill switch. The user must also start Chromium with remote debugging.
+    pub enabled: bool,
+    /// Loopback CDP port.
+    pub port: u16,
+    /// Exact hosts whose page content/actions are allowed.
+    pub allowed_hosts: Vec<String>,
+    /// Maximum returned visible text.
+    pub max_text_bytes: usize,
+    /// CDP request timeout.
+    pub timeout_secs: u64,
+}
+
+impl Default for McpBrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 9222,
+            allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
+            max_text_bytes: 128 * 1024,
+            timeout_secs: 10,
         }
     }
 }

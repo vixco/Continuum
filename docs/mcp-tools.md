@@ -91,6 +91,20 @@ executed; on Windows they are used only as a location hint for the adjacent
 native editor executable. This bridge does not read unsaved buffers,
 diagnostics, selections, terminal output, or debug state.
 
+### Browser DOM bridge (optional)
+
+`browser_status`, `browser_list_tabs`, and `browser_dom_snapshot` provide the
+read boundary; `browser_navigate`, `browser_click`, and `browser_fill` are
+always-confirm. Set `mcp.browser.enabled = true`, explicitly configure exact
+`allowed_hosts`, and start Chromium with a dedicated profile and a loopback
+remote-debugging port matching `mcp.browser.port`. Defaults expose only
+`localhost` and `127.0.0.1`.
+
+The bridge never accepts arbitrary JavaScript. Its fixed snapshot omits field
+values and password controls; fill refuses password inputs and its content is
+redacted from audit details. Incognito, banking, and unrelated tabs remain
+inaccessible unless the user deliberately adds their exact host.
+
 ### GitHub (optional)
 
 Settings → Integrations contains a GitHub card. Connect launches the official
