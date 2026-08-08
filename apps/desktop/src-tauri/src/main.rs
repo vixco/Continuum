@@ -16,6 +16,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_os_bootstrap;
 mod chat;
 mod chat_store;
 mod chat_tools;
@@ -154,6 +155,45 @@ fn main() {
         repair_gate: Arc::new(tokio::sync::Mutex::new(())),
         pending_repair: tokio::sync::Mutex::new(None),
     });
+
+    match agent_os_bootstrap::ensure_registered(&app_state) {
+        Ok(agent_os_bootstrap::BootstrapOutcome::Registered { binary }) => tracing::info!(
+            layer = "desktop",
+            component = "agent_os_bootstrap",
+            binary = %binary.display(),
+            "Registered the bundled Agent OS MCP server"
+        ),
+        Ok(agent_os_bootstrap::BootstrapOutcome::AlreadyCurrent { binary }) => tracing::debug!(
+            layer = "desktop",
+            component = "agent_os_bootstrap",
+            binary = %binary.display(),
+            "Bundled Agent OS MCP registration is current"
+        ),
+        Ok(agent_os_bootstrap::BootstrapOutcome::Missing { searched }) => {
+            if cfg!(debug_assertions) {
+                tracing::debug!(
+                    layer = "desktop",
+                    component = "agent_os_bootstrap",
+                    ?searched,
+                    "Bundled Agent OS binary is not present in this development build"
+                );
+            } else {
+                tracing::error!(
+                    layer = "desktop",
+                    component = "agent_os_bootstrap",
+                    ?searched,
+                    "Packaged desktop is missing the Agent OS binary; computer use and Composio will be unavailable"
+                );
+            }
+        }
+        Err(error) => tracing::error!(
+            layer = "desktop",
+            component = "agent_os_bootstrap",
+            error = %error,
+            "Could not repair the bundled Agent OS MCP registration"
+        ),
+    }
+
     let runtime_for_tauri = runtime.clone();
 
     let chat_state = Arc::new(providers::ChatState {
