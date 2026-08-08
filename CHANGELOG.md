@@ -19,6 +19,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   hard-denied secret paths, and never disturb the user's index. Rollback
   requires per-call confirmation, creates a safety checkpoint, and preserves
   loose/sensitive files under `.git/continuum-recovery/` before resetting.
+- **Safe filesystem actions**: `fs_create_file`, `fs_apply_patch`, `fs_move`,
+  and `fs_delete_to_trash` enforce the existing canonical allowlist and secret
+  deny rules. Creates refuse overwrite, patches require exact current text and
+  preserve the original, moves refuse overwrite, and delete is a recoverable
+  move under `<data_dir>/recovery/files/`. Write size and replacement caps are
+  configurable under `[mcp.fs]`.
 
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained

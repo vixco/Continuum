@@ -340,6 +340,8 @@ conversation_followup_seconds = 5
 # fs_list_dir. Paths support ~ expansion.
 [mcp.fs]
 extra_paths = []
+max_write_bytes = 1048576
+max_patch_replacements = 100
 
 # Adaptive resource policy. Probed once at boot (CPU cores, RAM, GPU/VRAM,
 # laptop-vs-desktop, AC-vs-battery) and resolved into concrete knobs applied

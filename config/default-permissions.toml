@@ -85,6 +85,10 @@ context_package  = "auto"
 [fs]
 fs_read_file = "auto"
 fs_list_dir  = "auto"
+fs_create_file = "session-approved"
+fs_apply_patch = "session-approved"
+fs_move = "session-approved"
+fs_delete_to_trash = "always-confirm"
 
 # --- Git checkpoints (allowlisted repositories only) ---
 # Checkpoint writes an isolated ref but leaves the worktree/index untouched.

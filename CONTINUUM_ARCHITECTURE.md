@@ -166,6 +166,12 @@ they do not stage or clean the user's working tree. Rollback is always-confirm,
 creates a pre-rollback safety checkpoint, and moves recoverable loose files
 under the repository's Git directory before restoring tracked state.
 
+Brokered filesystem mutations are explicit and recoverable: create refuses
+overwrite, patch requires an exact old-text precondition, move refuses an
+existing destination, and delete moves the target into Continuum recovery
+storage. Existing targets and new-path parents pass the same canonical
+allowlist and hard secret deny rules as filesystem reads.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

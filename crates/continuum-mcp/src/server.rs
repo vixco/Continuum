@@ -42,6 +42,9 @@ use crate::tools::context::{
     ContextProcessesRequest, ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest,
     PackageMemory,
 };
+use crate::tools::file_actions::{
+    FsApplyPatchRequest, FsCreateFileRequest, FsDeleteRequest, FsMoveRequest,
+};
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::git::{
     GitCheckpointListRequest, GitCheckpointRequest, GitDiffRequest, GitRollbackRequest,
@@ -69,6 +72,8 @@ pub(crate) struct ServerState {
     #[allow(dead_code)]
     pub(crate) http: reqwest::Client,
     pub(crate) fs_extra_paths: Vec<PathBuf>,
+    pub(crate) fs_max_write_bytes: usize,
+    pub(crate) fs_max_patch_replacements: usize,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
@@ -205,6 +210,8 @@ impl ContinuumMcpServer {
                 data_dir,
                 http,
                 fs_extra_paths: mcp_cfg.fs.extra_paths,
+                fs_max_write_bytes: mcp_cfg.fs.max_write_bytes,
+                fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
@@ -1319,6 +1326,80 @@ impl ContinuumMcpServer {
         .await
     }
 
+    #[tool(
+        description = "Atomically create a new UTF-8 file inside an allowlisted existing directory. Refuses overwrite, denied secret names, symlink escapes, and content above mcp.fs.max_write_bytes."
+    )]
+    async fn fs_create_file(
+        &self,
+        Parameters(req): Parameters<FsCreateFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_create_file", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::create_file(&req, &allowlist, self.state.fs_max_write_bytes)
+                .await
+                .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Patch an existing allowlisted UTF-8 file by exact old_text precondition. A non-replace-all patch must match exactly once. The original is preserved under Continuum recovery storage before replacement."
+    )]
+    async fn fs_apply_patch(
+        &self,
+        Parameters(req): Parameters<FsApplyPatchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_apply_patch", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::apply_patch(
+                &req,
+                &allowlist,
+                &self.state.data_dir.join("recovery").join("files"),
+                self.state.fs_max_write_bytes,
+                self.state.fs_max_patch_replacements,
+            )
+            .await
+            .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Move an allowlisted file or directory to a new allowlisted destination. The destination parent must exist and overwrite is never allowed."
+    )]
+    async fn fs_move(
+        &self,
+        Parameters(req): Parameters<FsMoveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_move", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::move_path(&req, &allowlist)
+                .await
+                .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Recoverably delete an allowlisted file or directory by moving it under <data_dir>/recovery/files. Returns the recovery path; no recursive erase command is used."
+    )]
+    async fn fs_delete_to_trash(
+        &self,
+        Parameters(req): Parameters<FsDeleteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_delete_to_trash", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::delete_to_trash(
+                &req,
+                &allowlist,
+                &self.state.data_dir.join("recovery").join("files"),
+            )
+            .await
+            .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Git checkpoint tools
     // -----------------------------------------------------------------------
@@ -1610,7 +1691,16 @@ impl ContinuumMcpServer {
 }
 
 fn permission_resource(args: &Value) -> Option<String> {
-    const RESOURCE_KEYS: &[&str] = &["path", "cwd", "repo", "repository", "url", "component"];
+    const RESOURCE_KEYS: &[&str] = &[
+        "path",
+        "source",
+        "destination",
+        "cwd",
+        "repo",
+        "repository",
+        "url",
+        "component",
+    ];
     let object = args.as_object()?;
     for key in RESOURCE_KEYS {
         if let Some(value) = object.get(*key).and_then(Value::as_str) {
@@ -1627,6 +1717,14 @@ fn fs_err_to_mcp(e: &crate::tools::fs::FsError) -> McpError {
             McpError::invalid_params(e.to_string(), None)
         }
         FsError::Io(_) => McpError::internal_error(e.to_string(), None),
+    }
+}
+
+fn file_action_err_to_mcp(error: crate::tools::file_actions::FileActionError) -> McpError {
+    use crate::tools::file_actions::FileActionError;
+    match error {
+        FileActionError::Io(_) => McpError::internal_error(error.to_string(), None),
+        _ => McpError::invalid_params(error.to_string(), None),
     }
 }
 
@@ -1671,7 +1769,7 @@ impl ServerHandler for ContinuumMcpServer {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "Continuum MCP server — exposes memory (facts + the memory vault), system info, \
-                 filesystem reads, recoverable Git checkpoints, web fetch, and notifications. \
+                 safe filesystem actions, recoverable Git checkpoints, web fetch, and notifications. \
                  Every tool call passes the local permission gateway and is audited.",
             )
     }
@@ -1706,6 +1804,8 @@ mod repair_authorization_tests {
                 data_dir,
                 http: reqwest::Client::new(),
                 fs_extra_paths: Vec::new(),
+                fs_max_write_bytes: 1024 * 1024,
+                fs_max_patch_replacements: 100,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
