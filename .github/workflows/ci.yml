@@ -192,7 +192,17 @@ jobs:
         run: cargo test -p continuum-core --no-default-features --lib
 
       - name: Run tests (full workspace)
-        run: cargo test --workspace
+        # The memory-precision benchmark drives frame writes and the async
+        # context-events writer against the same SQLite file. Under a heavily
+        # parallel Windows test run its deliberately short SQLite busy timeout
+        # can make the benchmark miss its writer-drain deadline even though the
+        # same test is stable when given its own scheduling window. Keep the
+        # workspace parallel, but run this integration-style benchmark
+        # immediately afterwards in isolation instead of hiding/skipping it.
+        run: cargo test --workspace -- --skip bench::score::tests::memory_is_precise_and_not_duplicated
+
+      - name: Run memory precision benchmark (isolated)
+        run: cargo test -p continuum-core bench::score::tests::memory_is_precise_and_not_duplicated -- --exact --test-threads=1
 
   build-desktop:
     name: Build desktop
