@@ -1856,6 +1856,21 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "browser_fill".into(),
             description: "Fill a non-password field after confirmation".into(),
         },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_focused_element".into(),
+            description: "Inspect focused accessibility metadata".into(),
+        },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_invoke_focused".into(),
+            description: "Invoke the focused semantic control after confirmation".into(),
+        },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_set_focused_value".into(),
+            description: "Fill the focused non-password control after confirmation".into(),
+        },
         // --- github (optional connection) ---
         McpTool {
             namespace: "github".into(),

@@ -23,7 +23,7 @@ use continuum_core::config::{
 use continuum_core::health::repair::RepairSessionGrant;
 use continuum_core::memory::{episodic::EpisodicStore, semantic::SemanticStore};
 use continuum_core::permissions::{PermissionDecision, PermissionGateway};
-use continuum_core::senses::privacy::PrivacyFilter;
+use continuum_core::senses::privacy::{PrivacyFilter, Zone};
 use continuum_memory::Vault;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -70,6 +70,7 @@ use crate::tools::repair::{
 use crate::tools::system::{self as systool, NotificationRequest};
 use crate::tools::terminal::TerminalRunRequest;
 use crate::tools::web::WebFetchRequest;
+use crate::tools::windows_ui::WindowsUiSetValueRequest;
 use crate::tools::workers::{
     self as workertool, SpawnWorkerRequest, WorkerIdRequest, WorkerListRequest, WorkerWaitRequest,
 };
@@ -269,6 +270,17 @@ impl ContinuumMcpServer {
                     None,
                 )
             })
+    }
+
+    fn require_cloud_allowed_focus(&self) -> Result<(), McpError> {
+        let (title, process) = continuum_core::senses::context::foreground_window();
+        if self.state.privacy.resolve_zone(&process, &title) != Zone::CloudAllowed {
+            return Err(McpError::invalid_request(
+                "focused application privacy zone blocks cloud-bound UI Automation",
+                None,
+            ));
+        }
+        Ok(())
     }
 
     fn require_repair_component(&self, component: &str) -> Result<RepairSessionGrant, McpError> {
@@ -1661,6 +1673,42 @@ impl ContinuumMcpServer {
         .await
     }
 
+    #[tool(
+        description = "Read bounded metadata for the currently focused Windows accessibility element. Local-only and excluded privacy zones are blocked."
+    )]
+    async fn windows_ui_focused_element(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_focused_element", &Value::Null, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::focused_element().map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Invoke only the currently focused Windows UI Automation element through InvokePattern. No coordinates or arbitrary search. Requires fresh confirmation."
+    )]
+    async fn windows_ui_invoke_focused(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_invoke_focused", &Value::Null, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::invoke_focused().map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Set only the currently focused non-password, writable Windows UI Automation ValuePattern. Content is audit-redacted and requires fresh confirmation."
+    )]
+    async fn windows_ui_set_focused_value(
+        &self,
+        Parameters(req): Parameters<WindowsUiSetValueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_set_focused_value", &req, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::set_focused_value(&req).map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Optional read-only GitHub integration
     // -----------------------------------------------------------------------
@@ -2084,6 +2132,10 @@ fn browser_err_to_mcp(error: crate::tools::browser::BrowserError) -> McpError {
         }
         _ => McpError::invalid_params(error.to_string(), None),
     }
+}
+
+fn windows_ui_err_to_mcp(error: crate::tools::windows_ui::WindowsUiError) -> McpError {
+    McpError::invalid_params(error.to_string(), None)
 }
 
 fn git_err_to_mcp(error: crate::tools::git::GitToolError) -> McpError {

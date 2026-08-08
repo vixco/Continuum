@@ -115,6 +115,11 @@ browser_dom_snapshot = "session-approved"
 browser_navigate     = "always-confirm"
 browser_click        = "always-confirm"
 browser_fill         = "always-confirm"
+
+# --- Focused-element Windows UI Automation ---
+windows_ui_focused_element   = "session-approved"
+windows_ui_invoke_focused    = "always-confirm"
+windows_ui_set_focused_value = "always-confirm"
 terminal_run    = "always-confirm"
 
 # --- Optional GitHub connection (official gh CLI, keyring auth only) ---

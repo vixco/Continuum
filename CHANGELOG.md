@@ -6,6 +6,10 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Focused Windows UI Automation**: semantic focused-element inspection,
+  InvokePattern, and non-password ValuePattern actions. Mutations are
+  always-confirm, privacy zones are enforced, and no coordinate or arbitrary
+  accessibility-tree input is exposed.
 - **Opt-in browser DOM bridge**: six `browser_*` tools connect only to a
   user-started loopback Chromium DevTools endpoint. Exact host allowlisting,
   bounded snapshots, password-field exclusion, fixed JavaScript, redacted fill
