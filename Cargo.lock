@@ -1416,6 +1416,7 @@ name = "continuum-mcp"
 version = "0.1.0-alpha.11"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "continuum-core",
  "continuum-memory",

@@ -50,6 +50,11 @@ Two processes cooperate:
 | Logs          | Real-time ring buffer (10k entries) with level / layer / component / text filters. NDJSON export. |
 | Health        | Live component probes, per-component detail, one-time repair preview, verified backup status, and guarded repair output. |
 
+Settings → Integrations also exposes an optional GitHub connection. It launches
+the official `gh` browser/device flow, displays the active account and OAuth
+scopes, accepts only OS-keyring storage, and makes local disconnect semantics
+explicit (remote OAuth revocation remains a GitHub account action).
+
 ## Curator row
 
 A full-width strip on the Home tab, right below the header stats

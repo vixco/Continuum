@@ -25,6 +25,7 @@ pub mod config;
 pub mod config_edit;
 pub mod context;
 pub mod curator;
+pub mod github_cli;
 pub mod guard;
 pub mod hardware;
 pub mod health;

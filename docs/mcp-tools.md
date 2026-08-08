@@ -76,6 +76,27 @@ would reintroduce shell parsing. The default native-program allowlist is
 `cargo`, `git`, `dotnet`, `rustc`, and `rustfmt`; users can narrow or expand it
 in config.
 
+### GitHub (optional)
+
+Settings → Integrations contains a GitHub card. Connect launches the official
+GitHub CLI browser/device flow; Continuum never receives the OAuth token. It
+accepts the connection only when `gh auth status --json hosts` reports
+`tokenSource: keyring`, and removes environment token overrides on every CLI
+call. Disconnect removes local CLI auth; remote revocation remains available
+on GitHub's Authorized OAuth Apps page.
+
+Read tools are session-approved except `github_status` (auto):
+
+- `github_me`
+- `github_list_repos`
+- `github_get_repo`
+- `github_list_issues`
+- `github_get_file`
+
+Owner/repository/path inputs are validated, traversal is rejected, list sizes
+are bounded, binary files are rejected, and `github.max_response_bytes` caps
+JSON and decoded file responses. `github.enabled = false` is a hard kill switch.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

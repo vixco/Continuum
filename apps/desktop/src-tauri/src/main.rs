@@ -22,6 +22,7 @@ mod chat_tools;
 mod commands;
 mod components;
 mod events;
+mod github;
 mod memory;
 mod onboarding;
 mod providers;
@@ -237,6 +238,9 @@ fn main() {
             providers::provider_refresh_models,
             providers::provider_remove,
             providers::provider_set_default_model,
+            github::github_status,
+            github::github_connect,
+            github::github_disconnect,
             chat::chat_list_conversations,
             chat::chat_get_conversation,
             chat::chat_create_conversation,

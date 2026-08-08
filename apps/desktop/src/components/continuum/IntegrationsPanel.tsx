@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
-import { Plus, RefreshCcw, Trash2, Zap } from "lucide-react";
+import { Github, Plus, RefreshCcw, Trash2, Zap } from "lucide-react";
 
 import { ProviderLogo } from "@/components/providers/ProviderLogo";
 import { continuum } from "@/lib/tauri";
@@ -14,6 +14,7 @@ import {
 import type {
   CatalogEntry,
   ConnectionTestReport,
+  GitHubAuthStatus,
   ProviderConnection,
   ProviderKind,
 } from "@/lib/types";
@@ -39,6 +40,9 @@ export function IntegrationsPanel() {
   const [rowMessage, setRowMessage] = useState<Record<string, RowMessage>>({});
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [github, setGithub] = useState<GitHubAuthStatus | null>(null);
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [githubConfirmDisconnect, setGithubConfirmDisconnect] = useState(false);
 
   // "Add provider" modal state.
   const [modalOpen, setModalOpen] = useState(false);
@@ -59,12 +63,14 @@ export function IntegrationsPanel() {
   useEffect(() => {
     void (async () => {
       try {
-        const [cat, provs] = await Promise.all([
+        const [cat, provs, githubStatus] = await Promise.all([
           continuum.catalogList(),
           continuum.providersList(),
+          continuum.githubStatus(),
         ]);
         setCatalog(cat);
         setProviders(provs);
+        setGithub(githubStatus);
         setError(null);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -218,8 +224,91 @@ export function IntegrationsPanel() {
     }
   }
 
+  async function handleGithubConnect() {
+    setGithubBusy(true);
+    setError(null);
+    try {
+      setGithub(await continuum.githubConnect());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setGithubBusy(false);
+    }
+  }
+
+  async function handleGithubDisconnect() {
+    if (!githubConfirmDisconnect) {
+      setGithubConfirmDisconnect(true);
+      return;
+    }
+    setGithubBusy(true);
+    setError(null);
+    try {
+      setGithub(await continuum.githubDisconnect());
+      setGithubConfirmDisconnect(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setGithubBusy(false);
+    }
+  }
+
   return (
     <>
+      <Card
+        title="GitHub"
+        subtitle="Optional repository context for Continuum tools, authenticated by the official GitHub CLI."
+        actions={
+          github?.connected ? (
+            <Button
+              size="sm"
+              variant={githubConfirmDisconnect ? "danger" : "ghost"}
+              disabled={githubBusy}
+              onClick={() => void handleGithubDisconnect()}
+            >
+              {githubConfirmDisconnect ? "Confirm disconnect" : "Disconnect"}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={githubBusy || github?.installed === false}
+              onClick={() => void handleGithubConnect()}
+            >
+              <Github size={13} /> {githubBusy ? "Waiting for browser…" : "Connect GitHub"}
+            </Button>
+          )
+        }
+      >
+        <div className="flex items-start gap-3">
+          <Github size={20} className={github?.connected ? "text-state-healthy" : "text-ink-dim"} />
+          <div className="min-w-0 flex-1 text-sm">
+            <div className="text-ink">
+              {github?.connected ? `Connected as ${github.login}` : "Not connected"}
+            </div>
+            <div className="mt-1 text-xs text-ink-muted">
+              {github?.detail ?? "Checking the GitHub CLI connection…"}
+            </div>
+            {github?.connected && (
+              <div className="mt-2 text-[11px] text-ink-dim">
+                Secure storage: OS keyring · OAuth scopes:{" "}
+                {github.scopes.join(", ") || "none reported"}
+              </div>
+            )}
+            {!github?.installed && (
+              <div className="mt-2 text-xs text-state-warn">
+                Install the official GitHub CLI (`gh`) before connecting.
+              </div>
+            )}
+            <div className="mt-2 text-[11px] text-ink-dim">
+              Connecting opens GitHub&apos;s browser/device flow. Continuum never reads or stores
+              the token. Disconnect removes local CLI auth; revoke remote access from GitHub&apos;s
+              Authorized OAuth Apps page.
+            </div>
+          </div>
+        </div>
+      </Card>
+
       <Card
         title="AI providers"
         subtitle="Connect local or cloud models for Chat."
