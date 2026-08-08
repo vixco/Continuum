@@ -189,16 +189,21 @@ jobs:
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
+            expected_uname: arm64
           - arch: x86_64
             target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
+            expected_uname: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "${{ matrix.expected_uname }}"
 
       - name: Verify DMG packaging contract
         run: |
