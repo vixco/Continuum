@@ -123,17 +123,20 @@ class PlanTests(unittest.TestCase):
             self.assertTrue(plan.recovering)
             self.assertEqual(plan.release_commit, release_commit)
 
-    def test_published_tag_is_not_recovered(self) -> None:
+    def test_complete_release_for_same_source_is_a_noop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source_sha = initialize_repo(root)
             git(root, "commit", "--allow-empty", "-m", "release snapshot")
+            release_commit = git(root, "rev-parse", "HEAD")
             git(root, "tag", "v0.1.0-alpha.11")
             plan = release_contract.plan_release(
                 root, source_sha, {"v0.1.0-alpha.11"}
             )
-            self.assertEqual(str(plan.version), "0.1.0-alpha.12")
+            self.assertEqual(str(plan.version), "0.1.0-alpha.11")
             self.assertFalse(plan.recovering)
+            self.assertTrue(plan.already_published)
+            self.assertEqual(plan.release_commit, release_commit)
 
 
 class ContractTests(unittest.TestCase):
@@ -231,6 +234,46 @@ class ContractTests(unittest.TestCase):
             release_json.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaises(release_contract.ContractError):
                 release_contract.verify_published_release(release_json, version)
+
+    def test_complete_tags_excludes_partial_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            version = "0.1.0-alpha.12"
+            complete_assets = [
+                {"name": name, "size": 10}
+                for name in [
+                    *release_contract.expected_asset_names(version),
+                    "latest.json",
+                    "release-manifest.json",
+                    "SHA256SUMS.txt",
+                ]
+            ]
+            lines = root / "releases.ndjson"
+            lines.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "tag_name": f"v{version}",
+                                "draft": False,
+                                "assets": complete_assets,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "tag_name": "v0.1.0-alpha.13",
+                                "draft": False,
+                                "assets": complete_assets[:-1],
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = root / "complete.txt"
+            release_contract.write_complete_release_tags(lines, output)
+            self.assertEqual(output.read_text(encoding="utf-8"), f"v{version}\n")
 
     def test_assemble_fails_when_intel_dmg_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
