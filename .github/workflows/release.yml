@@ -27,7 +27,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
@@ -75,7 +75,7 @@ jobs:
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
@@ -92,9 +92,8 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: choco install protoc --no-progress --confirm
 
       - name: Configure LLVM and Ninja
         shell: pwsh
@@ -106,14 +105,14 @@ jobs:
           choco install ninja --no-progress --confirm --skip-if-not-installed
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.11.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -174,7 +173,7 @@ jobs:
           Copy-Item $nsis[0].FullName "$assets/continuum-$version-windows-x64-setup.exe"
           Copy-Item $sig.FullName "$assets/continuum-$version-windows-x64-setup.exe.sig"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: release-assets/
@@ -190,16 +189,21 @@ jobs:
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
+            expected_uname: arm64
           - arch: x86_64
             target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
+            expected_uname: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "${{ matrix.expected_uname }}"
 
       - name: Verify DMG packaging contract
         run: |
@@ -219,14 +223,14 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot $(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.11.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -288,7 +292,7 @@ jobs:
           cp "${updater[0]}" "release-assets/continuum-$version-macos-$arch.app.tar.gz"
           cp "${updater[0]}.sig" "release-assets/continuum-$version-macos-$arch.app.tar.gz.sig"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-macos-${{ matrix.arch }}
           path: release-assets/
@@ -303,12 +307,12 @@ jobs:
       group: continuum-release-main
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets
@@ -348,7 +352,7 @@ jobs:
           git push origin HEAD:main --follow-tags
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Continuum ${{ needs.prepare.outputs.tag }}
