@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
   # Compiler version validated against the committed Cargo.lock.
   RUST_VERSION: "1.94.0"
+  # Node 22 is required by the desktop's native TypeScript stripping tests.
+  NODE_VERSION: "22"
   # Always land cargo artifacts under `target/` relative to the workspace.
   # Overrides the committed .cargo/config.toml hint when needed.
   CARGO_TARGET_DIR: target
@@ -192,17 +194,15 @@ jobs:
         run: cargo test -p continuum-core --no-default-features --lib
 
       - name: Run tests (full workspace)
-        # The memory-precision benchmark drives frame writes and the async
-        # context-events writer against the same SQLite file. Under a heavily
-        # parallel Windows test run its deliberately short SQLite busy timeout
-        # can make the benchmark miss its writer-drain deadline even though the
-        # same test is stable when given its own scheduling window. Keep the
-        # workspace parallel, but run this integration-style benchmark
-        # immediately afterwards in isolation instead of hiding/skipping it.
-        run: cargo test --workspace -- --skip bench::score::tests::memory_is_precise_and_not_duplicated
+        # The score module contains integration-style benchmarks that drive
+        # concurrent frame and event writes against one SQLite database. They
+        # remain mandatory, but receive their own single-thread scheduling
+        # window below so runner load cannot turn commit timing into a flaky
+        # product signal. Every other workspace test remains parallel here.
+        run: cargo test --workspace -- --skip bench::score::tests::
 
-      - name: Run memory precision benchmark (isolated)
-        run: cargo test -p continuum-core bench::score::tests::memory_is_precise_and_not_duplicated -- --exact --test-threads=1
+      - name: Run context-engine benchmark gates (isolated)
+        run: cargo test -p continuum-core bench::score::tests:: -- --test-threads=1
 
   build-desktop:
     name: Build desktop
@@ -222,7 +222,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -280,7 +280,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -332,7 +332,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
