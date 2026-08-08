@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "pnpm test:desktop && next build",
     "start": "next start",
     "lint": "next lint",
     "test:chat": "node --experimental-strip-types --test tests/chat-tool-invocations.test.mjs",
