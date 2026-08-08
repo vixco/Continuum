@@ -192,6 +192,10 @@ pub struct ContextEngineSnapshot {
     /// notify channel death).
     #[serde(default)]
     pub file_watcher: Option<ComponentHealthSummary>,
+    /// Background-process lifecycle/resource collector (opt-in; never reads
+    /// command lines, environment variables, or process memory).
+    #[serde(default)]
+    pub process_watcher: Option<ComponentHealthSummary>,
     /// Context-events writer task (queue depth + last flush; restarts
     /// only when the task died unexpectedly).
     #[serde(default)]
@@ -595,6 +599,12 @@ mod tests {
                     enabled: false,
                     should_restart: false,
                     detail: Some("disabled by [file_watcher].enabled".into()),
+                }),
+                process_watcher: Some(ComponentHealthSummary {
+                    healthy: true,
+                    enabled: false,
+                    should_restart: false,
+                    detail: Some("disabled by [process_watcher].enabled".into()),
                 }),
                 events_writer: Some(ComponentHealthSummary {
                     healthy: true,

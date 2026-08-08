@@ -75,6 +75,7 @@ use continuum_core::senses::frame::PerceptionFrameBuilder;
 use continuum_core::senses::git_watch::{GitWatcher, SharedGitWatchHealth};
 use continuum_core::senses::live_context::{self, LiveContextHub};
 use continuum_core::senses::privacy::{emit_system_event, strictest, PrivacyFilter, Zone};
+use continuum_core::senses::process_watch::{ProcessWatcher, SharedProcessWatchHealth};
 use continuum_core::senses::screenshots::ScreenshotPolicy;
 use continuum_core::senses::toggles::ToggleControl;
 use continuum_core::senses::types::{
@@ -633,6 +634,7 @@ async fn main() -> Result<()> {
     let mut context_watch_health: Option<SharedContextWatchHealth> = None;
     let mut git_watch_health: Option<SharedGitWatchHealth> = None;
     let mut file_watch_health: Option<SharedFileWatchHealth> = None;
+    let mut process_watch_health: Option<SharedProcessWatchHealth> = None;
 
     if observation_toggles.pause_all {
         // pause_all gates the entire frame loop (spec §4.1): no watchers,
@@ -743,6 +745,19 @@ async fn main() -> Result<()> {
         let file_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             file_watcher.run(file_shutdown).await;
+        });
+
+        // --- Background-process collector --- opt-in, default OFF.
+        // Emits only configured lifecycle events and sustained resource
+        // pressure; command lines, environment and process memory are never
+        // read. A compact current snapshot backs `context_processes`.
+        let process_watcher = ProcessWatcher::new(config.process_watcher.clone(), dev_dir.clone())
+            .with_privacy(privacy_filter.clone())
+            .with_event_sender(event_sender.clone());
+        process_watch_health = Some(process_watcher.health_handle());
+        let process_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            process_watcher.run(process_shutdown).await;
         });
 
         // --- Frame builder ---
@@ -1012,6 +1027,7 @@ async fn main() -> Result<()> {
         let health_context = context_watch_health.clone();
         let health_git = git_watch_health.clone();
         let health_file = file_watch_health.clone();
+        let health_process = process_watch_health.clone();
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
         let triage_enabled = triage.is_some();
@@ -1096,6 +1112,7 @@ async fn main() -> Result<()> {
                     health_context.as_ref(),
                     health_git.as_ref(),
                     health_file.as_ref(),
+                    health_process.as_ref(),
                     &health_writer,
                     &health_triage,
                     triage_enabled,
@@ -2852,6 +2869,7 @@ fn build_context_engine_snapshot(
     context_watch: Option<&SharedContextWatchHealth>,
     git_watch: Option<&SharedGitWatchHealth>,
     file_watch: Option<&SharedFileWatchHealth>,
+    process_watch: Option<&SharedProcessWatchHealth>,
     event_writer: &continuum_core::memory::events::EventWriterHandle,
     triage_busy: &TriageBusyHandle,
     triage_enabled: bool,
@@ -2957,6 +2975,33 @@ fn build_context_engine_snapshot(
         })
         .unwrap_or_else(not_running);
 
+    let process_watcher = process_watch
+        .map(|handle| {
+            let health = handle.read().clone();
+            ComponentHealthSummary {
+                healthy: !health.enabled || health.last_error.is_none(),
+                enabled: health.enabled,
+                should_restart: false,
+                detail: health
+                    .disabled_reason
+                    .clone()
+                    .or_else(|| health.last_error.clone())
+                    .or_else(|| {
+                        Some(format!(
+                            "polls={} active={} events={} last_poll_at={}",
+                            health.polls,
+                            health.active_processes,
+                            health.events_emitted,
+                            health
+                                .last_poll_at
+                                .map(|ts| ts.to_rfc3339())
+                                .unwrap_or_else(|| "never".to_string()),
+                        ))
+                    }),
+            }
+        })
+        .unwrap_or_else(not_running);
+
     let events_writer = ComponentHealthSummary {
         healthy: event_writer.is_healthy(),
         enabled: true,
@@ -3002,6 +3047,7 @@ fn build_context_engine_snapshot(
         live_context: Some(live_context),
         git_watcher: Some(git_watcher),
         file_watcher: Some(file_watcher),
+        process_watcher: Some(process_watcher),
         events_writer: Some(events_writer),
         triage: Some(triage),
     }

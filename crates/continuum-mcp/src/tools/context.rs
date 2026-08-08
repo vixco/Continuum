@@ -16,6 +16,7 @@
 //! | [`screen`] | `live-context.json` monitors + compact render |
 //! | [`audio`] | `state.json` voice telemetry + `live-context.json` call flag |
 //! | [`projects`] | `projects` table, opened read-only |
+//! | [`processes`] | opt-in `processes.json` snapshot |
 //!
 //! and the five *events/git/package* tools Task C4 added, which share the
 //! same [`Gate`] and the same readers:
@@ -106,6 +107,9 @@ use continuum_core::senses::live_context::{
 use continuum_core::senses::privacy::{
     source_enabled, ObservedSource, PrivacyFilter, Zone, EXCLUDED_PROCESS,
 };
+use continuum_core::senses::process_watch::{
+    resolve_process_zone, ProcessActivitySnapshot, ProcessSensitivity,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +145,10 @@ pub const FILES_DEFAULT_LIMIT: u32 = 20;
 
 /// Hard cap on `context_files`' `limit`.
 pub const FILES_MAX_LIMIT: u32 = 100;
+
+/// Default and hard limits for `context_processes`.
+pub const PROCESSES_DEFAULT_LIMIT: u32 = 20;
+pub const PROCESSES_MAX_LIMIT: u32 = 100;
 
 /// Lower bound on `context_package`'s `token_budget` — below this the
 /// never-drop sections alone blow the budget and the answer is noise.
@@ -217,6 +225,8 @@ pub struct Gate<'a> {
     pub package_config: &'a ContextPackageConfig,
     /// `[context_tools] enabled` — the family master switch (spec §5.2).
     pub enabled: bool,
+    /// Opt-in collector consent boundary. False hides even a stale snapshot.
+    pub process_watcher_enabled: bool,
 }
 
 impl Gate<'_> {
@@ -934,6 +944,112 @@ pub async fn projects(gate: &Gate<'_>) -> ContextProjectsResponse {
     }
 }
 
+/// `context_processes` request.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ContextProcessesRequest {
+    /// Maximum active processes returned. Defaults to 20, capped at 100.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Optional coarse category (`build`, `runtime`, `ai`, `service`,
+    /// `application`). Unknown categories simply match nothing.
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// One active, privacy-gated background process.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ProcessView {
+    pub pid: u32,
+    pub name: String,
+    pub category: String,
+    pub exe_path: Option<String>,
+    pub cpu_percent: f32,
+    pub memory_mb: u64,
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+/// Current background-process snapshot response.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextProcessesResponse {
+    pub available: bool,
+    pub stale: bool,
+    pub processes: Vec<ProcessView>,
+    /// Entries withheld by a `local_only`/`never_observe` privacy rule.
+    pub omitted_private: u32,
+}
+
+/// Reads the runtime-published process snapshot. Lifecycle and pressure
+/// history remains available through `context_timeline` with
+/// `source: "process"`.
+pub async fn processes(
+    gate: &Gate<'_>,
+    request: &ContextProcessesRequest,
+) -> ContextProcessesResponse {
+    if gate.disabled() || gate.toggles.pause_all || !gate.process_watcher_enabled {
+        return ContextProcessesResponse {
+            available: false,
+            stale: false,
+            processes: Vec::new(),
+            omitted_private: 0,
+        };
+    }
+    let Some(snapshot): Option<ProcessActivitySnapshot> =
+        read_published_json(&gate.data_dir.join("processes.json"))
+    else {
+        return ContextProcessesResponse {
+            available: false,
+            stale: true,
+            processes: Vec::new(),
+            omitted_private: 0,
+        };
+    };
+    let stale = age_secs(snapshot.observed_at) > RUNTIME_STATE_STALE_AFTER_SECS;
+    let category = request
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let limit = request
+        .limit
+        .unwrap_or(PROCESSES_DEFAULT_LIMIT)
+        .clamp(1, PROCESSES_MAX_LIMIT) as usize;
+    let mut omitted_private = 0;
+    let mut views = Vec::new();
+    for process in snapshot.active {
+        if category.is_some_and(|wanted| !process.category.eq_ignore_ascii_case(wanted)) {
+            continue;
+        }
+        if process.sensitivity == ProcessSensitivity::LocalOnly
+            || resolve_process_zone(gate.filter, &process.name, process.exe_path.as_deref())
+                != Zone::CloudAllowed
+        {
+            omitted_private += 1;
+            continue;
+        }
+        views.push(ProcessView {
+            pid: process.pid,
+            name: gate.filter.scrub_text(&process.name),
+            category: process.category,
+            exe_path: process
+                .exe_path
+                .as_deref()
+                .map(|path| gate.filter.scrub_path(path)),
+            cpu_percent: process.cpu_percent,
+            memory_mb: process.memory_mb,
+            started_at: process.started_at,
+        });
+        if views.len() >= limit {
+            break;
+        }
+    }
+    ContextProcessesResponse {
+        available: true,
+        stale,
+        processes: views,
+        omitted_private,
+    }
+}
+
 fn project_zone_token(zone: Zone) -> &'static str {
     match zone {
         Zone::NeverObserve => "never_observe",
@@ -965,7 +1081,7 @@ pub struct EventView {
     /// How many occurrences collapsed into this row.
     pub count: i64,
     /// Collector family: `window` | `git` | `file` | `screen` | `audio` |
-    /// `system` | `voice`.
+    /// `process` | `system` | `voice`.
     pub source: String,
     /// What happened, as the closed-registry token (`focus_switch`,
     /// `commit`, `error`, …).
@@ -1043,6 +1159,9 @@ fn toggle_for_source(source: EventSource) -> Option<ObservedSource> {
         // changes, drops) — not an observation of the user. `pause_all`
         // still stops the whole family upstream.
         EventSource::System => None,
+        // Process collection has its own opt-in `[process_watcher].enabled`
+        // boundary rather than an honest-toggle entry.
+        EventSource::Process => None,
     }
 }
 
@@ -1067,6 +1186,9 @@ fn event_views(gate: &Gate<'_>, rows: &[ContextEventRow]) -> (Vec<EventView>, u3
     let mut omitted = 0u32;
     let mut views = Vec::with_capacity(rows.len());
     for row in rows {
+        if row.source == EventSource::Process && !gate.process_watcher_enabled {
+            continue;
+        }
         if let Some(source) = toggle_for_source(row.source) {
             if !gate.source_on(source) {
                 continue;
@@ -1173,7 +1295,7 @@ pub struct ContextTimelineRequest {
     #[serde(default)]
     pub project: Option<String>,
     /// Restrict to one collector family (`window` | `git` | `file` |
-    /// `screen` | `audio` | `system` | `voice`).
+    /// `process` | `screen` | `audio` | `system` | `voice`).
     #[serde(default)]
     pub source: Option<String>,
     /// Max events returned. Default 50, clamped to 200.
@@ -1987,6 +2109,7 @@ mod tests {
         write_snapshot, LiveContextHub, MonitorWorldState, WindowWorldState, REDACTED_LOCAL_ONLY,
     };
     use continuum_core::senses::privacy::REDACTED;
+    use continuum_core::senses::process_watch::ProcessActivityEntry;
 
     fn test_filter() -> PrivacyFilter {
         PrivacyFilter::from_config(&ContextConfig::default(), &PrivacyConfig::default())
@@ -2004,6 +2127,7 @@ mod tests {
         git_context: GitContextConfig,
         package_config: ContextPackageConfig,
         enabled: bool,
+        process_watcher_enabled: bool,
     }
 
     impl Fixture {
@@ -2018,6 +2142,7 @@ mod tests {
                 git_context: GitContextConfig::default(),
                 package_config: ContextPackageConfig::default(),
                 enabled: true,
+                process_watcher_enabled: true,
             }
         }
 
@@ -2030,6 +2155,7 @@ mod tests {
                 git_context: &self.git_context,
                 package_config: &self.package_config,
                 enabled: self.enabled,
+                process_watcher_enabled: self.process_watcher_enabled,
             }
         }
 
@@ -2044,6 +2170,14 @@ mod tests {
         fn write_live(&self, state: &LiveWorldState) {
             write_snapshot(&self.dir.path().join("live-context.json"), state)
                 .expect("publish live-context.json");
+        }
+
+        fn write_processes(&self, snapshot: &ProcessActivitySnapshot) {
+            std::fs::write(
+                self.dir.path().join("processes.json"),
+                serde_json::to_vec(snapshot).expect("encode process snapshot"),
+            )
+            .expect("publish processes.json");
         }
     }
 
@@ -2545,6 +2679,61 @@ mod tests {
         let response = projects(&fixture.gate()).await;
         assert!(!response.available);
         assert!(response.projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn processes_reads_fresh_snapshot_and_withholds_local_only_entries() {
+        let fixture = Fixture::new();
+        fixture.write_processes(&ProcessActivitySnapshot {
+            version: 1,
+            observed_at: Utc::now(),
+            active: vec![
+                ProcessActivityEntry {
+                    pid: 10,
+                    name: "cargo".into(),
+                    category: "build".into(),
+                    exe_path: Some("C:\\Users\\testuser\\bin\\cargo.exe".into()),
+                    cpu_percent: 42.0,
+                    memory_mb: 300,
+                    started_at: Some(Utc::now()),
+                    sensitivity: ProcessSensitivity::CloudAllowed,
+                },
+                ProcessActivityEntry {
+                    pid: 11,
+                    name: "private-helper".into(),
+                    category: "application".into(),
+                    exe_path: None,
+                    cpu_percent: 1.0,
+                    memory_mb: 10,
+                    started_at: None,
+                    sensitivity: ProcessSensitivity::LocalOnly,
+                },
+            ],
+        });
+        let response = processes(&fixture.gate(), &ContextProcessesRequest::default()).await;
+        assert!(response.available);
+        assert!(!response.stale);
+        assert_eq!(response.processes.len(), 1);
+        assert_eq!(response.processes[0].name, "cargo");
+        assert_eq!(
+            response.processes[0].exe_path.as_deref(),
+            Some("~\\bin\\cargo.exe")
+        );
+        assert_eq!(response.omitted_private, 1);
+    }
+
+    #[tokio::test]
+    async fn processes_hides_stale_snapshot_after_collector_is_disabled() {
+        let mut fixture = Fixture::new();
+        fixture.process_watcher_enabled = false;
+        fixture.write_processes(&ProcessActivitySnapshot {
+            version: 1,
+            observed_at: Utc::now(),
+            active: Vec::new(),
+        });
+        let response = processes(&fixture.gate(), &ContextProcessesRequest::default()).await;
+        assert!(!response.available);
+        assert!(response.processes.is_empty());
     }
 
     // =================================================================

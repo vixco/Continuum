@@ -137,6 +137,35 @@ genuinely stopped, not filtered afterwards.
    written back through the config editor, which rewrites the file and does not
    preserve comments.
 
+### Background-process activity (opt-in)
+
+`[process_watcher].enabled` is a separate consent boundary and defaults to
+`false`. When enabled, Continuum samples the process table and persists only
+meaningful changes: configured developer/model processes starting or stopping,
+plus CPU or resident-memory pressure sustained across several samples. The
+current bounded snapshot is published to `processes.json`; lifecycle history is
+written through the same deduplicated `context_events` writer as window, Git,
+and file activity.
+
+```toml
+[process_watcher]
+enabled = false
+poll_secs = 2
+cpu_threshold_percent = 75.0
+memory_threshold_mb = 2048
+sustained_samples = 3
+snapshot_limit = 50
+include_names = ["cargo", "rustc", "node", "python", "ollama", "docker"]
+exclude_names = ["system", "registry", "lsass", "svchost"]
+```
+
+The collector never reads command lines, environment variables, process
+memory, or hidden-window contents. Generic OS polling can prove that a process
+disappeared but cannot reliably distinguish a clean exit from a crash or recover
+its exit code. Exact exit codes and stderr remain available only for processes
+Continuum launched/supervised itself or applications that publish permitted
+logs/Windows crash evidence.
+
 ---
 
 ## Classification and session state, in plain language
@@ -183,7 +212,7 @@ naming up to three candidates instead of guessing.
 
 ## What the AI can ask for
 
-Ten read-only, privacy-gated tools. They read only what the runtime already
+Eleven read-only, privacy-gated tools. They read only what the runtime already
 published, they degrade to `available: false` / `stale: true` instead of
 erroring, and `[context_tools] enabled = false` empties the whole family without
 changing a single schema. Full argument and response schemas are in
@@ -196,6 +225,7 @@ changing a single schema. Full argument and response schemas are in
 | `context_screen` | What is on screen | Per-monitor caption with a zone marker, plus the compact world render |
 | `context_audio` | What was heard | Latest published transcript + timestamp, in-call and mute state |
 | `context_projects` | Which projects exist | Configured, confirmed and discovered projects, active first |
+| `context_processes` | Meaningful background activity | Active build/runtime/AI/service processes with PID, CPU, memory, start time and scrubbed executable path; never command lines or environment variables |
 | `context_timeline` | What happened | Deduped events with counts, filterable by `since` / `until` / `types` / `project` / `source`, `limit` default 50, max 200 |
 | `context_search` | Find an event | Full-text search over event summaries and window titles (`query`, `limit` default 20, max 50) |
 | `context_files` | What files changed | File events, optionally per project (`limit` default 20, max 100) |

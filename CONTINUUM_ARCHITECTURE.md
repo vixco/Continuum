@@ -48,7 +48,7 @@ boundary for Continuum.
 
 ```text
 Local sources
-  Git | filesystem | project docs | agent runs | user confirmations
+  Git | filesystem | process activity | project docs | agent runs | user confirmations
                                |
                                v
                     Append-only event store
@@ -94,6 +94,13 @@ configurable in the Brain tab, screenshot persistence is opt-in, configured
 sensitive applications/titles are redacted before vision or publication, and
 no key values, pointer coordinates, clipboard contents, or terminal text enter
 the live-context contract.
+
+Background-process activity is a separate opt-in source. It publishes a
+bounded `processes.json` snapshot and change-only lifecycle/resource-pressure
+events; it never captures command lines, environment variables, process
+memory, or hidden-window contents. Generic process polling may report that a
+process stopped, but an exact exit code or crash cause is evidence only when a
+supervised adapter/worker or an allowed application log provides it.
 
 ## Domain model
 

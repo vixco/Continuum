@@ -198,6 +198,9 @@ pub fn vault_node_type(event_type: EventType) -> Option<NodeType> {
         | EventType::FileDeleted
         | EventType::FileRenamed
         | EventType::FilesBulkChange
+        | EventType::ProcessStarted
+        | EventType::ProcessStopped
+        | EventType::ResourcePressure
         | EventType::IdleStart
         | EventType::IdleEnd
         | EventType::Wake

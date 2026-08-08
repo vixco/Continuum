@@ -357,11 +357,32 @@ runtime has never booted against this data directory.
 { "name": "mcp__continuum__context_projects", "arguments": {} }
 ```
 
+#### `context_processes`
+
+Meaningful active background processes from the opt-in process collector.
+The response contains executable basename, coarse category (`build`,
+`runtime`, `ai`, `service`, `application`), PID, CPU, resident memory, start
+time, and a home/username-scrubbed executable path. It never contains command
+lines, environment variables, process memory, or hidden-window contents.
+
+`category` is optional; `limit` defaults to 20 and is capped at 100. Lifecycle,
+stop, and sustained-resource-pressure history is queried through
+`context_timeline` with `source: "process"`. When `[process_watcher].enabled`
+is false, the tool returns `available: false` even if an older snapshot remains
+on disk.
+
+```jsonc
+{
+  "name": "mcp__continuum__context_processes",
+  "arguments": { "category": "build", "limit": 20 }
+}
+```
+
 #### `context_timeline`
 
 Continuum's deduped event log, filtered. Arguments: `since` / `until`
 (RFC 3339), `types` (registry tokens), `project` (slug), `source`
-(`window` | `git` | `file` | `screen` | `audio` | `system` | `voice`),
+(`window` | `git` | `file` | `process` | `screen` | `audio` | `system` | `voice`),
 `limit` (default 50, max 200). Events come back oldest first.
 
 Rows are **collapsed**, not raw occurrences: one row with `count: 14`
