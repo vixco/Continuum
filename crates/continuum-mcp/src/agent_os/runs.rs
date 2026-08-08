@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
 
@@ -23,7 +24,8 @@ impl RunStore {
 
     pub fn load(&self, run_id: &str) -> Result<Option<RunRecord>> {
         validate_run_id(run_id)?;
-        let _guard = self.gate.lock().expect("run store lock poisoned");
+        let _guard = self.lock()?;
+        self.recover_interrupted_replace(run_id)?;
         let path = self.path(run_id);
         match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -36,27 +38,63 @@ impl RunStore {
 
     pub fn save(&self, record: &RunRecord) -> Result<()> {
         validate_run_id(&record.run_id)?;
-        let _guard = self.gate.lock().expect("run store lock poisoned");
+        let _guard = self.lock()?;
+        self.recover_interrupted_replace(&record.run_id)?;
+
         let path = self.path(&record.run_id);
+        let backup = self.backup_path(&record.run_id);
         let temporary = self.runs_dir.join(format!(
             ".{}-{}-{}.tmp",
             record.run_id,
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
-        std::fs::write(&temporary, serde_json::to_vec_pretty(record)?)
+        let payload = serde_json::to_vec_pretty(record)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .with_context(|| format!("Failed to create {}", temporary.display()))?;
+        file.write_all(&payload)
             .with_context(|| format!("Failed to write {}", temporary.display()))?;
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("Failed to replace {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync {}", temporary.display()))?;
+        drop(file);
+
+        if backup.exists() {
+            std::fs::remove_file(&backup)
+                .with_context(|| format!("Failed to remove stale {}", backup.display()))?;
         }
-        std::fs::rename(&temporary, &path)
-            .with_context(|| format!("Failed to activate {}", path.display()))?;
+        if path.exists() {
+            std::fs::rename(&path, &backup).with_context(|| {
+                format!(
+                    "Failed to move current run record {} to recovery backup {}",
+                    path.display(),
+                    backup.display()
+                )
+            })?;
+        }
+
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            if backup.exists() && !path.exists() {
+                let _ = std::fs::rename(&backup, &path);
+            }
+            return Err(error)
+                .with_context(|| format!("Failed to activate {}", path.display()));
+        }
+
+        if backup.exists() {
+            std::fs::remove_file(&backup)
+                .with_context(|| format!("Failed to remove {}", backup.display()))?;
+        }
+        sync_directory(&self.runs_dir)?;
         Ok(())
     }
 
     pub fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
-        let _guard = self.gate.lock().expect("run store lock poisoned");
+        let _guard = self.lock()?;
+        self.recover_all_interrupted_replaces()?;
         let mut records = Vec::new();
         for entry in std::fs::read_dir(&self.runs_dir)
             .with_context(|| format!("Failed to read {}", self.runs_dir.display()))?
@@ -84,9 +122,77 @@ impl RunStore {
         Ok(records)
     }
 
+    fn lock(&self) -> Result<MutexGuard<'_, ()>> {
+        self.gate
+            .lock()
+            .map_err(|_| anyhow::anyhow!("run store lock was poisoned by a previous panic"))
+    }
+
+    fn recover_all_interrupted_replaces(&self) -> Result<()> {
+        for entry in std::fs::read_dir(&self.runs_dir)
+            .with_context(|| format!("Failed to read {}", self.runs_dir.display()))?
+        {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(run_id) = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".backup"))
+            else {
+                continue;
+            };
+            if validate_run_id(run_id).is_ok() {
+                self.recover_interrupted_replace(run_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn recover_interrupted_replace(&self, run_id: &str) -> Result<()> {
+        let path = self.path(run_id);
+        let backup = self.backup_path(run_id);
+        match (path.exists(), backup.exists()) {
+            (true, true) => {
+                std::fs::remove_file(&backup).with_context(|| {
+                    format!("Failed to remove stale run backup {}", backup.display())
+                })?;
+            }
+            (false, true) => {
+                std::fs::rename(&backup, &path).with_context(|| {
+                    format!(
+                        "Failed to recover interrupted run update {} from {}",
+                        path.display(),
+                        backup.display()
+                    )
+                })?;
+                sync_directory(&self.runs_dir)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn path(&self, run_id: &str) -> PathBuf {
         self.runs_dir.join(format!("{run_id}.json"))
     }
+
+    fn backup_path(&self, run_id: &str) -> PathBuf {
+        self.runs_dir.join(format!(".{run_id}.backup"))
+    }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("Failed to sync {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub fn validate_run_id(run_id: &str) -> Result<()> {
@@ -106,22 +212,50 @@ mod tests {
     use super::*;
     use crate::agent_os::types::RunRecord;
 
-    #[test]
-    fn save_and_load_roundtrip() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = RunStore::new(temp.path()).expect("store");
+    fn record(run_id: &str, goal: &str) -> RunRecord {
         let now = chrono::Utc::now();
-        let record = RunRecord {
-            run_id: "run-test".into(),
-            goal: "test".into(),
+        RunRecord {
+            run_id: run_id.into(),
+            goal: goal.into(),
             status: "running".into(),
             created_at: now,
             updated_at: now,
             steps: vec![],
             results: vec![],
-        };
-        store.save(&record).expect("save");
+        }
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        store.save(&record("run-test", "test")).expect("save");
         assert_eq!(store.load("run-test").expect("load").unwrap().goal, "test");
+    }
+
+    #[test]
+    fn repeated_save_replaces_record_without_leaving_backup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        store.save(&record("run-test", "before")).expect("first");
+        store.save(&record("run-test", "after")).expect("second");
+        assert_eq!(store.load("run-test").expect("load").unwrap().goal, "after");
+        assert!(!store.backup_path("run-test").exists());
+    }
+
+    #[test]
+    fn interrupted_replace_recovers_last_complete_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        store.save(&record("run-test", "durable")).expect("save");
+        std::fs::rename(store.path("run-test"), store.backup_path("run-test"))
+            .expect("simulate interrupted replace");
+        assert_eq!(
+            store.load("run-test").expect("load").unwrap().goal,
+            "durable"
+        );
+        assert!(store.path("run-test").exists());
+        assert!(!store.backup_path("run-test").exists());
     }
 
     #[test]
