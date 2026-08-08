@@ -1871,6 +1871,31 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "windows_ui_set_focused_value".into(),
             description: "Fill the focused non-password control after confirmation".into(),
         },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_write".into(),
+            description: "Create or update a durable task plan".into(),
+        },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_get".into(),
+            description: "Read a durable task plan".into(),
+        },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_list".into(),
+            description: "List durable task plans".into(),
+        },
+        McpTool {
+            namespace: "evidence".into(),
+            name: "evidence_record".into(),
+            description: "Persist bounded agent evidence".into(),
+        },
+        McpTool {
+            namespace: "evidence".into(),
+            name: "evidence_list".into(),
+            description: "List durable agent evidence".into(),
+        },
         // --- github (optional connection) ---
         McpTool {
             namespace: "github".into(),

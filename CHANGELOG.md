@@ -6,6 +6,9 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Durable task and evidence tools**: atomic task plans with explicit step
+  statuses and evidence links, plus bounded source-attributed agent evidence
+  records for verified handoff and continuation.
 - **Focused Windows UI Automation**: semantic focused-element inspection,
   InvokePattern, and non-password ValuePattern actions. Mutations are
   always-confirm, privacy zones are enforced, and no coordinate or arbitrary
