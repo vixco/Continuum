@@ -16,6 +16,7 @@ pub mod ide;
 pub mod memory;
 pub mod repair;
 pub mod system;
+pub mod task_evidence;
 pub mod terminal;
 pub mod web;
 pub mod windows_ui;

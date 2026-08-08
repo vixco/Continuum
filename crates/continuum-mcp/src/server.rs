@@ -68,6 +68,9 @@ use crate::tools::repair::{
     TestRequest,
 };
 use crate::tools::system::{self as systool, NotificationRequest};
+use crate::tools::task_evidence::{
+    EvidenceWriteRequest, RecordIdRequest, RecordListRequest, TaskPlanWriteRequest,
+};
 use crate::tools::terminal::TerminalRunRequest;
 use crate::tools::web::WebFetchRequest;
 use crate::tools::windows_ui::WindowsUiSetValueRequest;
@@ -1709,6 +1712,66 @@ impl ContinuumMcpServer {
         .await
     }
 
+    #[tool(
+        description = "Create or atomically update a bounded durable task plan with explicit step statuses and evidence links."
+    )]
+    async fn task_plan_write(
+        &self,
+        Parameters(req): Parameters<TaskPlanWriteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_write", &req, || async {
+            crate::tools::task_evidence::write_task(&self.state.data_dir, &req)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "Read one durable task plan by id.")]
+    async fn task_plan_get(
+        &self,
+        Parameters(req): Parameters<RecordIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_get", &req, || async {
+            crate::tools::task_evidence::get_task(&self.state.data_dir, &req.id)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "List recent durable task plans, newest first.")]
+    async fn task_plan_list(
+        &self,
+        Parameters(req): Parameters<RecordListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_list", &req, || async {
+            crate::tools::task_evidence::list_tasks(&self.state.data_dir, req.limit)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(
+        description = "Persist bounded source-attributed agent/test/outcome evidence and optionally link it to a task. Content is audit-redacted."
+    )]
+    async fn evidence_record(
+        &self,
+        Parameters(req): Parameters<EvidenceWriteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("evidence_record", &req, || async {
+            crate::tools::task_evidence::write_evidence(&self.state.data_dir, &req)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "List recent durable agent evidence records, newest first.")]
+    async fn evidence_list(
+        &self,
+        Parameters(req): Parameters<RecordListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("evidence_list", &req, || async {
+            crate::tools::task_evidence::list_evidence(&self.state.data_dir, req.limit)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Optional read-only GitHub integration
     // -----------------------------------------------------------------------
@@ -2135,6 +2198,10 @@ fn browser_err_to_mcp(error: crate::tools::browser::BrowserError) -> McpError {
 }
 
 fn windows_ui_err_to_mcp(error: crate::tools::windows_ui::WindowsUiError) -> McpError {
+    McpError::invalid_params(error.to_string(), None)
+}
+
+fn record_err_to_mcp(error: crate::tools::task_evidence::RecordError) -> McpError {
     McpError::invalid_params(error.to_string(), None)
 }
 

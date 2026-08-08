@@ -120,6 +120,13 @@ browser_fill         = "always-confirm"
 windows_ui_focused_element   = "session-approved"
 windows_ui_invoke_focused    = "always-confirm"
 windows_ui_set_focused_value = "always-confirm"
+
+# --- Durable task and evidence records ---
+task_plan_write = "session-approved"
+task_plan_get    = "auto"
+task_plan_list   = "auto"
+evidence_record  = "session-approved"
+evidence_list    = "auto"
 terminal_run    = "always-confirm"
 
 # --- Optional GitHub connection (official gh CLI, keyring auth only) ---

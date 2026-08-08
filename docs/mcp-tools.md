@@ -114,6 +114,14 @@ focused when the call executes. Password values, coordinates, global input,
 and arbitrary tree queries are unavailable. The same foreground privacy zone
 used by observation tools blocks local-only and excluded applications.
 
+### Tasks and agent evidence
+
+`task_plan_write`, `task_plan_get`, and `task_plan_list` maintain bounded,
+atomic plans under `<data_dir>/task-plans/`. Steps use explicit statuses and
+link evidence ids. `evidence_record` and `evidence_list` store bounded outcome,
+test, log, or agent evidence under `<data_dir>/evidence/agent/`; detailed
+content is redacted from tool audit metadata.
+
 ### GitHub (optional)
 
 Settings → Integrations contains a GitHub card. Connect launches the official

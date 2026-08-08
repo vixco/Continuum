@@ -108,6 +108,16 @@ Component: `windows_ui`
 - Restart rule: restart the MCP process only after repeated COM initialization
   failures; never auto-repeat InvokePattern or ValuePattern mutations.
 
+## Task and evidence records
+
+Component: `task_evidence`
+
+- Health check: list operations parse bounded recent records; malformed or
+  oversized files fail visibly rather than being treated as proof.
+- Recovery: atomic writes leave only hidden temporary files on interruption;
+  remove an orphan `.tmp` after inspection and retry the write. Existing JSON
+  records are not auto-deleted.
+
 ## GitHub CLI bridge
 
 Component: `github`

@@ -207,6 +207,11 @@ invoke or set the value of only the element focused at execution. Password
 elements and non-cloud privacy zones are blocked. There is no coordinate input,
 global input injection, or arbitrary accessibility-tree search in this slice.
 
+Task plans and normalized agent evidence are durable JSON records under the
+Continuum data directory, written atomically and bounded on input/read. Plans
+carry explicit task/step status and evidence links; evidence carries kind,
+summary, source reference, outcome, and optional task association.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:
