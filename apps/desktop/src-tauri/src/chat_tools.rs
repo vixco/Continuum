@@ -28,7 +28,6 @@ const MCP_BIN_NAME: &str = if cfg!(windows) {
 /// broker merely because it lives inside the desktop process.
 pub struct VaultToolExecutor {
     pub vault: Arc<Vault>,
-    pub include_sensitive: bool,
 }
 
 #[async_trait::async_trait]
@@ -75,9 +74,7 @@ impl VaultToolExecutor {
             .into_iter()
             .filter(|hit| {
                 !matches!(hit.status, NodeStatus::Rejected | NodeStatus::Superseded)
-            })
-            .filter(|hit| {
-                self.include_sensitive || hit.sensitivity != Sensitivity::Sensitive
+                    && hit.sensitivity != Sensitivity::Sensitive
             })
             .map(|hit| {
                 json!({
@@ -102,9 +99,9 @@ impl VaultToolExecutor {
             .get(id)
             .await
             .map_err(|error| error.user_message())?;
-        if note.frontmatter.sensitivity == Sensitivity::Sensitive && !self.include_sensitive {
+        if note.frontmatter.sensitivity == Sensitivity::Sensitive {
             return Err(
-                "Sensitive memory body withheld by the chat privacy policy. Open it locally in the Memory tab or explicitly enable sensitive memory for this chat."
+                "Sensitive memory body withheld by the chat privacy policy. Open it locally in the Memory tab."
                     .to_string(),
             );
         }
@@ -219,8 +216,7 @@ impl VaultToolExecutor {
         Ok(hits
             .into_iter()
             .find(|hit| {
-                hit.title.trim().to_lowercase() == target
-                    && hit.project.as_deref() == project
+                hit.title.trim().to_lowercase() == target && hit.project.as_deref() == project
             })
             .map(|hit| hit.id))
     }
@@ -238,7 +234,7 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "memory_search".into(),
-            description: "Search the user's saved memories. Sensitive and rejected memories are withheld unless the user explicitly enabled sensitive-memory access for this chat."
+            description: "Search the user's saved memories. Sensitive, rejected and superseded memories are withheld from cloud chat."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -251,7 +247,7 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "memory_get".into(),
-            description: "Fetch one saved memory by id, subject to the same sensitive-memory egress policy."
+            description: "Fetch one saved memory by id. Sensitive bodies are always withheld from cloud chat."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -409,14 +405,13 @@ pub fn memory_context_section(notes: &[NodeSummary]) -> String {
 mod tests {
     use super::*;
 
-    async fn executor(include_sensitive: bool) -> (tempfile::TempDir, VaultToolExecutor) {
+    async fn executor() -> (tempfile::TempDir, VaultToolExecutor) {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let vault = Vault::open(temporary.path()).await.expect("open vault");
         (
             temporary,
             VaultToolExecutor {
                 vault: Arc::new(vault),
-                include_sensitive,
             },
         )
     }
@@ -450,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_creates_then_updates_same_project_case_insensitively() {
-        let (_temporary, executor) = executor(false).await;
+        let (_temporary, executor) = executor().await;
         let created = executor
             .execute(
                 "memory_save",
@@ -487,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_title_in_different_projects_does_not_overwrite() {
-        let (_temporary, executor) = executor(false).await;
+        let (_temporary, executor) = executor().await;
         let first = parse(
             &executor
                 .execute(
@@ -510,8 +505,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sensitive_search_and_get_are_withheld_by_default() {
-        let (_temporary, executor) = executor(false).await;
+    async fn sensitive_search_and_get_are_always_withheld() {
+        let (_temporary, executor) = executor().await;
         let sensitive = executor
             .vault
             .create(draft(
@@ -534,21 +529,11 @@ mod tests {
             .await
             .expect_err("sensitive body must be withheld");
         assert!(error.contains("Sensitive memory body withheld"));
-
-        let allowed = VaultToolExecutor {
-            vault: executor.vault.clone(),
-            include_sensitive: true,
-        };
-        let output = allowed
-            .execute("memory_get", &json!({"id":sensitive.frontmatter.id}))
-            .await
-            .expect("explicit sensitive access");
-        assert_eq!(parse(&output)["body"], "body of Alpha secret");
     }
 
     #[tokio::test]
     async fn rejected_notes_never_surface() {
-        let (_temporary, executor) = executor(true).await;
+        let (_temporary, executor) = executor().await;
         executor
             .vault
             .create(draft(
@@ -568,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_note() {
-        let (_temporary, executor) = executor(false).await;
+        let (_temporary, executor) = executor().await;
         let note = executor
             .vault
             .create(draft(
