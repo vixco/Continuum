@@ -1,6 +1,6 @@
 ---
 name: agent-os
-description: Execute real computer and connected-app work through Continuum's policy-gated, verified Agent OS
+description: Execute computer and connected-app work through Continuum's policy-gated, durable Agent OS
 source: bundled
 triggers:
   - do this on my computer
@@ -20,117 +20,119 @@ triggers:
 
 # Continuum Agent OS
 
-Use the `agent-os` MCP server when a request needs real action on the local
-Windows desktop or in a connected SaaS app. Agent OS is an execution plane, not
-a reason to skip judgment: every action must be grounded in current state,
-policy, and post-action evidence.
+Use the `agent-os` MCP server when a request needs a real action on the desktop
+or in a connected SaaS app. The server is an execution plane, not permission to
+skip judgment. Every mutation must be authorized, durably checkpointed and
+verified against an observable postcondition.
 
-## Start with status
+## Control loop
 
-Call `agent_status` once near the beginning of an action-oriented session. It
-shows whether Windows computer use is supported, whether Composio is configured,
-the active permission modes, and recent resumable runs.
+1. **Observe.** Read current state with `computer_observe`,
+   `computer_list_windows`, `computer_accessibility` or `composio_search`.
+2. **Plan.** Put every mutation in one `agent_run_plan`. Supply a stable
+   `run_id`, small steps and a typed `expectation` for each mutation.
+3. **Act.** Prefer semantic UI Automation selectors. Use coordinates only when
+   the target is absent from accessibility state.
+4. **Verify.** Continuum evaluates the typed postcondition before the next step
+   may run. A non-error transport response alone is not success.
+5. **Recover.** Resume the exact immutable plan only when the journal says it is
+   safe. Never replay an `unknown` or unresolved `dispatched` mutation.
 
-Do not ask the user to repeat configuration that `agent_status` or
-`composio_status` can reveal.
+Direct mutation tools are intentionally closed at the public Agent OS boundary.
+Do not call `computer_click`, `computer_type`, `composio_execute` or similar
+write tools outside `agent_run_plan`.
 
-## The control loop
+## Reliable plan contract
 
-1. **Observe.** Use `computer_observe`, `computer_list_windows`, or
-   `computer_accessibility`. For connected apps, use `composio_search` to
-   discover the exact tool and schema.
-2. **Plan.** For more than one mutation, build an `agent_run_plan` with small,
-   explicit steps and an expectation for each important transition. Use
-   `dry_run: true` when the risk or chosen tools are uncertain.
-3. **Act.** Prefer semantic `computer_click_element` over coordinate clicks.
-   Use coordinate clicks only when UI Automation does not expose the target.
-4. **Verify.** Read the returned before/after verification object. A tool call
-   returning without transport error is not enough when the expected state is
-   absent.
-5. **Recover.** Re-observe, adjust the selector or wait for the UI, then resume
-   the same `run_id`. Do not restart successful steps.
+A mutating plan must include:
 
-## Bounded autonomy and idempotency
+- a stable `run_id` containing only letters, numbers, `-` and `_`;
+- `verify_each_step: true`;
+- an immutable goal and step list;
+- a typed expectation for every mutating step;
+- `continue_on_error: false` for every mutating step.
 
-- Before resuming a known `run_id`, call `agent_get_run`. Reuse the immutable
-  original goal and steps exactly; never invent a different plan under the same
-  identifier.
-- Never start the same `run_id` concurrently. When another invocation may still
-  be active, inspect its run record and evidence instead of racing it.
-- A timeout, dropped transport response, or missing evidence is an **unknown
-  outcome**, not permission to retry a mutation. First inspect
-  `agent_evidence_query` and the real destination state. Retry only after proving
-  the original action did not take effect.
-- Use `continue_on_error` only for genuinely independent, non-destructive steps.
-  A dependent, financial, publishing, account-security, or irreversible step
-  must halt the plan on error.
-- Keep expectations observable and specific. Prefer “a window titled X is
-  foreground” or “record Y exists with status Z” over subjective success text.
-- Stop and report the exact unresolved state when verification is unavailable or
-  contradictory. Never turn uncertainty into a success claim.
-- Do not expand scope during execution. New goals, new recipients, additional
-  records, or broader permissions require a new plan and fresh authorization.
+Read-only plans may omit `run_id` and default to `result_ok` verification.
 
-## Computer-use rules
+### Typed expectations
 
-- Use accessibility names, automation IDs, control types, and class names to
-  target elements robustly.
-- Take screenshots only when semantic state is insufficient. Screenshots are
-  written locally and require their own policy capability.
-- Before typing, focus or click the target. `computer_type` uses a temporary
-  payload file and clipboard paste, then restores the previous clipboard. Its
-  text is redacted from evidence.
-- Use `computer_wait_for_element` instead of blind long sleeps where possible.
-- Never infer that `state_changed: false` proves typing failed; some controls do
-  not expose their value through UI Automation. Inspect the relevant UI or take
-  an approved screenshot.
-- A semantic target must be visible and enabled. If it is offscreen, disabled,
-  duplicated, or unexpectedly moved, re-observe instead of falling back to a
-  guessed coordinate.
-- Do not retry a denied action through a different low-level tool.
+Use one of these exact forms:
 
-## Composio workflow
+- `state_changed`
+- `json_pointer_exists:/result/response/data/id`
+- `json_pointer_equals:/result/response/data/status="completed"`
+- `text_contains:created issue`
+- `window_title_contains:Linear`
+- `element_present:{"name":"Save","control_type":"Button"}`
 
-1. Call `composio_search` with a natural-language use case.
-2. Inspect `primary_tool_slugs`, schemas, connection status, pitfalls, and
-   recommended steps.
-3. When no connection exists, call `composio_execute_meta` with
-   `COMPOSIO_MANAGE_CONNECTIONS`. Surface the returned OAuth link to the user,
-   then use `COMPOSIO_WAIT_FOR_CONNECTIONS`.
-4. Execute the discovered app tool with `composio_execute` and the exact schema.
-5. Use `COMPOSIO_MULTI_EXECUTE_TOOL` only when the actions are independent and
-   their aggregate risk is acceptable.
+`result_ok` is accepted only for reads. Descriptive prose such as “the form
+should be saved” is rejected because it cannot be evaluated deterministically.
 
-Read tools default to allow, writes default to a native approval, and actions
-classified as destructive default to deny. Money movement, refunds, purchases,
-credential rotation, account deactivation, remote workbench, and remote bash are
-all destructive surfaces. Do not enable automatic workbench offload merely to
-work around a missing app schema or denied action.
+Choose a postcondition that proves the requested outcome, not merely that
+something changed. For a SaaS write, prefer a returned object ID or status. For
+a desktop action, prefer a semantic element or expected foreground-window title.
 
-## Resumable plans
+## Exactly-once behavior
 
-Use only these action names in `agent_run_plan`:
+Continuum maintains a write-ahead journal and a cross-process lock per `run_id`.
+Before a mutation enters the tool handler, its step becomes `dispatched` on disk.
 
-- `computer_observe`, `computer_list_windows`, `computer_accessibility`,
-  `computer_screenshot`, `computer_find_element`
-- `computer_click`, `computer_click_element`, `computer_type`, `computer_key`,
-  `computer_scroll`, `computer_focus_window`, `computer_open_url`
-- `computer_wait`, `computer_wait_for_element`
-- `composio_create_session`, `composio_search`, `composio_execute`,
-  `composio_execute_meta`
+- Successful, verified steps are skipped on resume.
+- A second process cannot execute the same `run_id` concurrently.
+- A timeout, transport loss, process crash or failed postcondition after
+  dispatch becomes `unknown`.
+- `unknown` steps are never retried automatically.
+- A lock left by a crashed process is deliberately not deleted automatically.
+  The operator must inspect the real destination before clearing or replacing
+  the run.
 
-The plan is immutable for a given `run_id`. A native approval for the exact plan
-can satisfy `ask` steps in that run once, but explicit `deny` rules still win.
-Successful steps are skipped when the run is resumed.
+When `agent_get_run` reports `unknown`, stop. Explain the unresolved state and
+ask for a deliberate reconciliation plan; do not invent a new run that repeats
+the same mutation.
 
-## Evidence and data minimization
+## Permissions
 
-Every authorized, denied, successful, and failed action attempts to append an
-evidence event. Use `agent_evidence_query` by `run_id` when explaining what was
-done. Never expose or reconstruct secret-redacted fields.
+The ordinary Continuum MCP server enforces `auto`, `session-approved`,
+`always-confirm` and `blocked` before a tool body runs. Unknown tools default to
+confirmation. The desktop Tools page writes the effective overrides atomically
+to the local permission policy; a fresh MCP process reads them on the next agent
+run.
 
-Do not place passwords, API keys, OAuth links, full email bodies, private message
-text, or other secrets in goals, intents, expectations, or step identifiers.
-Continuum minimizes connected-app arguments, search queries, account identifiers,
-third-party responses, and error text in persistent evidence; preserve that
-boundary rather than echoing sensitive payloads into another field.
+Agent OS has its own capability policy:
+
+- observation may be allowed automatically;
+- screenshots and mutations normally require a native dialog;
+- destructive Composio actions default to deny;
+- a denied action must never be retried through a lower-level tool.
+
+## Computer use
+
+- Prefer accessibility names, automation IDs, control types and class names.
+- Targets must be visible and enabled.
+- Re-observe when a target moved, is duplicated or is offscreen.
+- Focus a field before typing. Typed text is minimized in persistent evidence.
+- Use `computer_wait_for_element` instead of blind long sleeps.
+- A raw coordinate is not proof of the intended target; pair it with a typed
+  postcondition.
+
+## Composio
+
+1. Search by natural-language use case with `composio_search`.
+2. Inspect the current slug, schema, connection state and pitfalls.
+3. Use connection-management meta-tools only when OAuth is actually needed.
+4. Put the concrete write in `agent_run_plan` with a stable `run_id`.
+5. Verify an identifier or status returned by the destination.
+
+Money movement, refunds, purchases, credential rotation, account deactivation,
+remote workbench and remote bash are destructive surfaces. Do not enable
+workbench offload merely to bypass a missing schema or denied action.
+
+## Privacy and evidence
+
+Do not place passwords, API keys, OAuth URLs, full message bodies or reusable
+secrets in goals, step IDs, intents or expectation strings. Continuum minimizes
+connected-app arguments, account identifiers, search queries, third-party
+responses and errors in persistent evidence and reliable journals.
+
+Sensitive memory results are withheld at the MCP egress boundary. Never try to
+reconstruct or expose fields that were marked redacted or withheld.
