@@ -50,6 +50,27 @@ Do not ask the user to repeat configuration that `agent_status` or
 5. **Recover.** Re-observe, adjust the selector or wait for the UI, then resume
    the same `run_id`. Do not restart successful steps.
 
+## Bounded autonomy and idempotency
+
+- Before resuming a known `run_id`, call `agent_get_run`. Reuse the immutable
+  original goal and steps exactly; never invent a different plan under the same
+  identifier.
+- Never start the same `run_id` concurrently. When another invocation may still
+  be active, inspect its run record and evidence instead of racing it.
+- A timeout, dropped transport response, or missing evidence is an **unknown
+  outcome**, not permission to retry a mutation. First inspect
+  `agent_evidence_query` and the real destination state. Retry only after proving
+  the original action did not take effect.
+- Use `continue_on_error` only for genuinely independent, non-destructive steps.
+  A dependent, financial, publishing, account-security, or irreversible step
+  must halt the plan on error.
+- Keep expectations observable and specific. Prefer “a window titled X is
+  foreground” or “record Y exists with status Z” over subjective success text.
+- Stop and report the exact unresolved state when verification is unavailable or
+  contradictory. Never turn uncertainty into a success claim.
+- Do not expand scope during execution. New goals, new recipients, additional
+  records, or broader permissions require a new plan and fresh authorization.
+
 ## Computer-use rules
 
 - Use accessibility names, automation IDs, control types, and class names to
@@ -63,6 +84,9 @@ Do not ask the user to repeat configuration that `agent_status` or
 - Never infer that `state_changed: false` proves typing failed; some controls do
   not expose their value through UI Automation. Inspect the relevant UI or take
   an approved screenshot.
+- A semantic target must be visible and enabled. If it is offscreen, disabled,
+  duplicated, or unexpectedly moved, re-observe instead of falling back to a
+  guessed coordinate.
 - Do not retry a denied action through a different low-level tool.
 
 ## Composio workflow
@@ -78,8 +102,10 @@ Do not ask the user to repeat configuration that `agent_status` or
    their aggregate risk is acceptable.
 
 Read tools default to allow, writes default to a native approval, and actions
-classified as destructive default to deny. Remote workbench and remote bash are
-treated as destructive because they can execute arbitrary code or bulk changes.
+classified as destructive default to deny. Money movement, refunds, purchases,
+credential rotation, account deactivation, remote workbench, and remote bash are
+all destructive surfaces. Do not enable automatic workbench offload merely to
+work around a missing app schema or denied action.
 
 ## Resumable plans
 
@@ -97,8 +123,14 @@ The plan is immutable for a given `run_id`. A native approval for the exact plan
 can satisfy `ask` steps in that run once, but explicit `deny` rules still win.
 Successful steps are skipped when the run is resumed.
 
-## Evidence
+## Evidence and data minimization
 
 Every authorized, denied, successful, and failed action attempts to append an
 evidence event. Use `agent_evidence_query` by `run_id` when explaining what was
 done. Never expose or reconstruct secret-redacted fields.
+
+Do not place passwords, API keys, OAuth links, full email bodies, private message
+text, or other secrets in goals, intents, expectations, or step identifiers.
+Continuum minimizes connected-app arguments, search queries, account identifiers,
+third-party responses, and error text in persistent evidence; preserve that
+boundary rather than echoing sensitive payloads into another field.
