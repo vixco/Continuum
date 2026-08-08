@@ -8,17 +8,16 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Keep the latest PR run only, but never cancel a main release after artifacts
+  # or a tag may already have been created.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  # Compiler version validated against the committed Cargo.lock.
   RUST_VERSION: "1.94.0"
-  # Always land cargo artifacts under `target/` relative to the workspace.
-  # Overrides the committed .cargo/config.toml hint when needed.
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.11.1"
   CARGO_TARGET_DIR: target
-  # sccache caching is opt-in at the job level via RUSTC_WRAPPER; turning
-  # it on workflow-wide broke pre-install steps with "program not found".
   SCCACHE_CACHE_SIZE: "2G"
 
 jobs:
@@ -35,6 +34,18 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  release-contract:
+    name: Release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run release contract tests
+        run: python3 -m unittest -v scripts/test_release_contract.py
+
+      - name: Validate Tauri release configuration
+        run: python3 scripts/release_contract.py validate-config --repo-root .
 
   clippy-light:
     name: Clippy (light path — no native deps)
@@ -58,17 +69,12 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Clippy (continuum-core no-default-features)
-        # The "light" path is what the Tauri dashboard consumes: continuum-core
-        # without runtime, no llama-cpp / whisper-rs-sys / ort / lancedb
-        # build scripts, no native toolchain needed.
         run: cargo clippy -p continuum-core --no-default-features --lib --tests -- -D warnings
 
       - name: Clippy (continuum-desktop)
         run: cargo clippy -p continuum-desktop --no-deps -- -D warnings
 
   clippy-full:
-    # Exhaustive native linting runs on every push to main so PR authors see
-    # failures before review and main stays green at all times.
     name: Clippy (full workspace — with native deps)
     runs-on: windows-latest
     steps:
@@ -79,9 +85,6 @@ jobs:
         with:
           components: clippy
 
-      # LLVM ships pre-installed on windows-latest at C:\Program Files\LLVM;
-      # point the whisper-rs-sys bindgen at it and override the committed
-      # maintainer-local default of C:\LLVM\bin.
       - name: Configure LLVM for bindgen
         shell: pwsh
         run: |
@@ -125,14 +128,9 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Clippy (full workspace)
-        # Full-workspace clippy hits whisper-rs-sys, llama-cpp-sys, ort,
-        # and lancedb build scripts. The toolchain install steps above
-        # are required or this fails during bindgen.
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   full-test:
-    # Full workspace test runs on every push to main. The native build cache
-    # makes the second run cheap; this keeps main green at all times.
     name: Full test suite
     runs-on: windows-latest
     needs: [fmt, clippy-light]
@@ -172,9 +170,6 @@ jobs:
             throw "libclang.dll was not found under LIBCLANG_PATH=$env:LIBCLANG_PATH"
           }
 
-      # The full Clippy job owns writes for this shared native cache key. This
-      # test job runs in parallel and must only restore it; otherwise both jobs
-      # can spend many minutes compressing/uploading the same multi-GB target.
       - name: Restore cargo artifacts
         uses: actions/cache/restore@v5
         with:
@@ -187,25 +182,17 @@ jobs:
             ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-full-
             ${{ runner.os }}-cargo-registry-
 
-      # Light tests: the lib test path for continuum-core without runtime. Fast,
-      # covers the UTF-8 / sentence-split / config / permissions code that
-      # doesn't need a native toolchain.
       - name: Run tests (light path)
         run: cargo test -p continuum-core --no-default-features --lib
 
       - name: Run tests (full workspace)
-        # The score module contains integration-style benchmarks that drive
-        # concurrent frame and event writes against one SQLite database. They
-        # remain mandatory, but receive their own single-thread scheduling
-        # window below so runner load cannot turn commit timing into a flaky
-        # product signal. Every other workspace test remains parallel here.
         run: "cargo test --workspace -- --skip bench::score::tests::"
 
       - name: Run context-engine benchmark gates (isolated)
         run: "cargo test -p continuum-core bench::score::tests:: -- --test-threads=1"
 
   build-desktop:
-    name: Build desktop
+    name: Build desktop (Windows x64)
     runs-on: windows-latest
     needs: [fmt, clippy-light]
     steps:
@@ -217,12 +204,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.11.1
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -237,7 +224,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
 
-      - name: Install frontend dependencies (pnpm workspace root)
+      - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Dashboard type-check
@@ -256,14 +243,11 @@ jobs:
         run: pnpm build
         working-directory: apps/desktop
 
-      - name: Build Tauri desktop app (debug)
-        # Debug build is faster for CI and still validates the Rust side compiles.
-        # Release bundling happens in release.yml. Desktop depends on
-        # continuum-core with default-features = false, so no native toolchain needed.
+      - name: Build Tauri desktop app
         run: cargo build -p continuum-desktop
 
   build-desktop-macos:
-    name: Build desktop (macOS arm64)
+    name: Build desktop (macOS Apple Silicon)
     runs-on: macos-15
     needs: [fmt, clippy-light]
     steps:
@@ -278,12 +262,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.11.1
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -298,7 +282,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
 
-      - name: Install frontend dependencies (pnpm workspace root)
+      - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Dashboard type-check
@@ -317,7 +301,65 @@ jobs:
         run: pnpm build
         working-directory: apps/desktop
 
-      - name: Build Tauri desktop app (debug)
+      - name: Build Tauri desktop app
+        run: cargo build -p continuum-desktop
+
+  build-desktop-macos-intel:
+    name: Build desktop (macOS Intel)
+    runs-on: macos-15-intel
+    needs: [fmt, clippy-light]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "x86_64"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Dashboard type-check
+        run: pnpm typecheck
+        working-directory: apps/desktop
+
+      - name: Dashboard lint
+        run: pnpm lint
+        working-directory: apps/desktop
+
+      - name: Dashboard format check
+        run: pnpm format
+        working-directory: apps/desktop
+
+      - name: Build frontend
+        run: pnpm build
+        working-directory: apps/desktop
+
+      - name: Build Tauri desktop app
         run: cargo build -p continuum-desktop
 
   docs-site:
@@ -330,18 +372,38 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.11.1
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install dependencies (pnpm workspace root)
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build docs site
         run: pnpm build
         working-directory: apps/docs
+
+  release:
+    name: Publish cross-platform release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - fmt
+      - release-contract
+      - clippy-light
+      - clippy-full
+      - full-test
+      - build-desktop
+      - build-desktop-macos
+      - build-desktop-macos-intel
+      - docs-site
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      release_sha: ${{ github.sha }}
+    secrets: inherit
