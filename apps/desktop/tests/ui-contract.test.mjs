@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+const readRoot = (path) => readFile(new URL(`../../../${path}`, import.meta.url), "utf8");
 
 test("Hallmark polish loads after the base token stylesheet", async () => {
   const layout = await read("src/app/layout.tsx");
@@ -38,4 +39,43 @@ test("chat remains virtualized for long agent transcripts", async () => {
   assert.match(list, /react-virtuoso/);
   assert.match(list, /<Virtuoso/);
   assert.match(list, /atBottomStateChange=\{setAtBottom\}/);
+});
+
+test("MCP permission controls read and persist the enforced native policy", async () => {
+  const tools = await read("src/components/tabs/ToolsTab.tsx");
+  const tauriMain = await read("src-tauri/src/main.rs");
+  const broker = await readRoot("crates/continuum-mcp/src/permission_broker.rs");
+
+  assert.match(tools, /invoke<ToolPermissionView\[]>\("list_tool_permissions"\)/);
+  assert.match(tools, /invoke<ToolPermissionView\[]>\("set_tool_permission"/);
+  assert.doesNotMatch(tools, /in-memory only/i);
+  assert.match(tauriMain, /permissions::list_tool_permissions/);
+  assert.match(tauriMain, /permissions::set_tool_permission/);
+  assert.match(broker, /unwrap_or\(ToolPermission::AlwaysConfirm\)/);
+  assert.match(broker, /self\.broker\.authorize\(&tool, &arguments\)\.await/);
+});
+
+test("release publication requires Windows and both macOS architectures", async () => {
+  const workflow = await readRoot(".github/workflows/publish.yml");
+
+  assert.match(workflow, /runner: macos-15\n\s+uname: arm64/);
+  assert.match(workflow, /runner: macos-15-intel\n\s+uname: x86_64/);
+  assert.match(workflow, /pnpm tauri build --bundles app,dmg/);
+  assert.match(workflow, /continuum-agent-os/);
+  assert.match(workflow, /continuum-\$version-macos-aarch64\.dmg/);
+  assert.match(workflow, /continuum-\$version-macos-x86_64\.dmg/);
+  assert.match(workflow, /continuum-\$version-macos-aarch64\.app\.tar\.gz\.sig/);
+  assert.match(workflow, /continuum-\$version-macos-x86_64\.app\.tar\.gz\.sig/);
+  assert.match(workflow, /fail_on_unmatched_files: true/);
+});
+
+test("Agent OS mutations are journaled and typed before execution", async () => {
+  const reliable = await readRoot("crates/continuum-mcp/src/reliable_agent_v2.rs");
+
+  assert.match(reliable, /StepState::Dispatched/);
+  assert.match(reliable, /automatic replay is blocked/i);
+  assert.match(reliable, /json_pointer_exists:/);
+  assert.match(reliable, /window_title_contains:/);
+  assert.match(reliable, /element_present:/);
+  assert.match(reliable, /Direct Agent OS mutations are disabled/);
 });
