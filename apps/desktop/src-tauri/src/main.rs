@@ -25,6 +25,7 @@ mod components;
 mod events;
 mod memory;
 mod onboarding;
+#[cfg_attr(test, allow(dead_code))]
 mod permissions;
 mod providers;
 mod runtime_bridge;
