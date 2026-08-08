@@ -50,17 +50,14 @@ impl RunStore {
             uuid::Uuid::new_v4().simple()
         ));
         let payload = serde_json::to_vec_pretty(record)?;
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .with_context(|| format!("Failed to create {}", temporary.display()))?;
-        file.write_all(&payload)
-            .with_context(|| format!("Failed to write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to sync {}", temporary.display()))?;
-        drop(file);
+        if let Err(error) = write_synced_new_file(&temporary, &payload) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
 
+        // A backup that survived with no canonical record is recovered above.
+        // If both exist and the stale backup cannot be removed, stop before
+        // touching the known-good canonical record.
         if backup.exists() {
             std::fs::remove_file(&backup)
                 .with_context(|| format!("Failed to remove stale {}", backup.display()))?;
@@ -83,11 +80,30 @@ impl RunStore {
             return Err(error).with_context(|| format!("Failed to activate {}", path.display()));
         }
 
+        // From this point the new canonical record is active. Cleanup and a
+        // directory fsync may improve durability, but they must not report the
+        // already-committed save as failed: a caller retry could replay an
+        // external side effect even though its checkpoint is safely readable.
         if backup.exists() {
-            std::fs::remove_file(&backup)
-                .with_context(|| format!("Failed to remove {}", backup.display()))?;
+            if let Err(error) = std::fs::remove_file(&backup) {
+                tracing::warn!(
+                    layer = "mcp",
+                    component = "agent_os_runs",
+                    path = %backup.display(),
+                    error = %error,
+                    "Run record committed; stale recovery backup will be retried later"
+                );
+            }
         }
-        sync_directory(&self.runs_dir)?;
+        if let Err(error) = sync_directory(&self.runs_dir) {
+            tracing::warn!(
+                layer = "mcp",
+                component = "agent_os_runs",
+                path = %self.runs_dir.display(),
+                error = %error,
+                "Run record committed but directory sync could not be confirmed"
+            );
+        }
         Ok(())
     }
 
@@ -153,9 +169,15 @@ impl RunStore {
         let backup = self.backup_path(run_id);
         match (path.exists(), backup.exists()) {
             (true, true) => {
-                std::fs::remove_file(&backup).with_context(|| {
-                    format!("Failed to remove stale run backup {}", backup.display())
-                })?;
+                if let Err(error) = std::fs::remove_file(&backup) {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "agent_os_runs",
+                        path = %backup.display(),
+                        error = %error,
+                        "Canonical run record is valid; stale recovery backup could not be removed"
+                    );
+                }
             }
             (false, true) => {
                 std::fs::rename(&backup, &path).with_context(|| {
@@ -165,7 +187,15 @@ impl RunStore {
                         backup.display()
                     )
                 })?;
-                sync_directory(&self.runs_dir)?;
+                if let Err(error) = sync_directory(&self.runs_dir) {
+                    tracing::warn!(
+                        layer = "mcp",
+                        component = "agent_os_runs",
+                        path = %self.runs_dir.display(),
+                        error = %error,
+                        "Recovered run record but directory sync could not be confirmed"
+                    );
+                }
             }
             _ => {}
         }
@@ -179,6 +209,18 @@ impl RunStore {
     fn backup_path(&self, run_id: &str) -> PathBuf {
         self.runs_dir.join(format!(".{run_id}.backup"))
     }
+}
+
+fn write_synced_new_file(path: &Path, payload: &[u8]) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Failed to create {}", path.display()))?;
+    file.write_all(payload)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync {}", path.display()))
 }
 
 #[cfg(unix)]
