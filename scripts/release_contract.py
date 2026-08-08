@@ -105,6 +105,7 @@ class ReleasePlan:
     version: SemVer
     recovering: bool
     release_commit: str | None
+    already_published: bool = False
 
     @property
     def tag(self) -> str:
@@ -231,7 +232,7 @@ def next_available_version(source: SemVer, used: Sequence[SemVer]) -> SemVer:
 def plan_release(
     repo_root: Path,
     source_sha: str,
-    published_tags: set[str],
+    complete_release_tags: set[str],
     explicit_version: str | None = None,
 ) -> ReleasePlan:
     source_sha = run_git(repo_root, "rev-parse", source_sha)
@@ -240,38 +241,63 @@ def plan_release(
     source_version = read_workspace_version(repo_root)
     requested = SemVer.parse(explicit_version) if explicit_version else source_version
 
-    # Recover only a tag whose release commit is exactly this source commit or
-    # has this source commit as its first parent. This prevents stale orphaned
-    # tags from older code from being attached to a new release.
-    recoverable: list[tuple[SemVer, str]] = []
+    # A tag is related only when its target is this exact source commit or a
+    # release-only child commit. This prevents stale orphaned tags from older
+    # code from being attached to a newer build.
+    related: list[tuple[SemVer, str, str]] = []
     for tag, version in parsed_tags.items():
-        if tag in published_tags or not same_release_series(version, requested):
+        if not same_release_series(version, requested):
             continue
         commit = resolve_tag_commit(repo_root, tag)
         if commit == source_sha or first_parent(repo_root, commit) == source_sha:
-            recoverable.append((version, commit))
+            related.append((version, tag, commit))
 
     if explicit_version:
         tag = requested.tag
-        if tag in published_tags:
-            raise ContractError(f"Release {tag} is already published")
         if tag in parsed_tags:
-            commit = resolve_tag_commit(repo_root, tag)
-            if commit == source_sha or first_parent(repo_root, commit) == source_sha:
-                return ReleasePlan(requested, True, commit)
-            raise ContractError(
-                f"Tag {tag} already points to unrelated commit {commit}; choose another version"
+            matching = next(
+                (entry for entry in related if entry[1] == tag),
+                None,
+            )
+            if matching is None:
+                commit = resolve_tag_commit(repo_root, tag)
+                raise ContractError(
+                    f"Tag {tag} already points to unrelated commit {commit}; choose another version"
+                )
+            _, _, commit = matching
+            return ReleasePlan(
+                requested,
+                recovering=tag not in complete_release_tags,
+                release_commit=commit,
+                already_published=tag in complete_release_tags,
             )
         return ReleasePlan(requested, False, None)
 
-    if recoverable:
-        version, commit = max(recoverable, key=lambda item: semver_sort_key(item[0]))
+    incomplete = [
+        entry for entry in related if entry[1] not in complete_release_tags
+    ]
+    if incomplete:
+        version, _, commit = max(
+            incomplete, key=lambda item: semver_sort_key(item[0])
+        )
         return ReleasePlan(version, True, commit)
+
+    complete = [entry for entry in related if entry[1] in complete_release_tags]
+    if complete:
+        version, _, commit = max(
+            complete, key=lambda item: semver_sort_key(item[0])
+        )
+        return ReleasePlan(
+            version,
+            recovering=False,
+            release_commit=commit,
+            already_published=True,
+        )
 
     used_versions = list(parsed_tags.values())
     used_versions.extend(
         SemVer.parse(tag.removeprefix("v"))
-        for tag in published_tags
+        for tag in complete_release_tags
         if SEMVER_RE.fullmatch(tag.removeprefix("v"))
     )
     return ReleasePlan(next_available_version(requested, used_versions), False, None)
@@ -499,6 +525,56 @@ def assemble_release(
         raise ContractError(f"Failed to assemble: {sorted(missing_final)}")
 
 
+def release_has_complete_assets(payload: dict[str, object]) -> bool:
+    tag = str(payload.get("tag_name") or "")
+    if payload.get("draft") is True or not tag.startswith("v"):
+        return False
+    try:
+        version = str(SemVer.parse(tag.removeprefix("v")))
+    except ContractError:
+        return False
+    required = {
+        *expected_asset_names(version),
+        "latest.json",
+        "release-manifest.json",
+        "SHA256SUMS.txt",
+    }
+    assets = payload.get("assets")
+    if not isinstance(assets, list):
+        return False
+    sizes = {
+        str(asset.get("name")): int(asset.get("size") or 0)
+        for asset in assets
+        if isinstance(asset, dict) and asset.get("name")
+    }
+    return all(sizes.get(name, 0) > 0 for name in required)
+
+
+def write_complete_release_tags(release_json_lines: Path, output: Path) -> None:
+    complete: set[str] = set()
+    for line_number, line in enumerate(
+        release_json_lines.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ContractError(
+                f"Invalid release JSON on line {line_number}: {error}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ContractError(
+                f"Release JSON line {line_number} is not an object"
+            )
+        if release_has_complete_assets(payload):
+            complete.add(str(payload["tag_name"]))
+    output.write_text(
+        "".join(f"{tag}\n" for tag in sorted(complete)),
+        encoding="utf-8",
+    )
+
+
 def verify_published_release(release_json: Path, version: str) -> None:
     SemVer.parse(version)
     payload = json.loads(release_json.read_text(encoding="utf-8"))
@@ -563,6 +639,10 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument("--repository", required=True)
     assemble_parser.add_argument("--source-sha", required=True)
 
+    complete_parser = subparsers.add_parser("complete-tags")
+    complete_parser.add_argument("--release-json-lines", type=Path, required=True)
+    complete_parser.add_argument("--output", type=Path, required=True)
+
     verify_parser = subparsers.add_parser("verify-published")
     verify_parser.add_argument("--release-json", type=Path, required=True)
     verify_parser.add_argument("--version", required=True)
@@ -588,6 +668,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "tag": plan.tag,
                     "recovering": str(plan.recovering).lower(),
                     "release_commit": plan.release_commit or "",
+                    "already_published": str(plan.already_published).lower(),
                 },
             )
         elif args.command == "validate-config":
@@ -601,6 +682,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.tag,
                 args.repository,
                 args.source_sha,
+            )
+        elif args.command == "complete-tags":
+            write_complete_release_tags(
+                args.release_json_lines.resolve(),
+                args.output.resolve(),
             )
         elif args.command == "verify-published":
             verify_published_release(args.release_json.resolve(), args.version)
