@@ -55,11 +55,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_development_binary_is_a_clean_noop() {
+    fn existing_registration_is_preserved_without_requiring_a_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
-        assert!(!ensure_bundled(temp.path()).expect("registration check"));
-        assert!(continuum_core::mcp_registry::list_servers(temp.path())
-            .expect("list")
-            .is_empty());
+        let executable = temp.path().join(if cfg!(windows) {
+            "agent-os-fixture.exe"
+        } else {
+            "agent-os-fixture"
+        });
+        std::fs::write(&executable, b"fixture").expect("fixture executable");
+        continuum_core::mcp_registry::install_server(
+            temp.path(),
+            AGENT_OS_NAME,
+            executable.to_str().expect("utf8 path"),
+            vec!["--data-dir".into(), temp.path().to_string_lossy().into_owned()],
+        )
+        .expect("seed registration");
+
+        assert!(!ensure_bundled(temp.path()).expect("idempotent registration"));
+        let servers = continuum_core::mcp_registry::list_servers(temp.path()).expect("list");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, AGENT_OS_NAME);
+        assert_eq!(servers[0].command, executable.canonicalize().unwrap().to_string_lossy());
     }
 }
