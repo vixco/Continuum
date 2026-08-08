@@ -49,7 +49,9 @@ impl ComputerBackend {
                 "mouse_input": cfg!(windows),
                 "keyboard_input": cfg!(windows),
                 "semantic_element_targeting": cfg!(windows),
-                "state_verification": true
+                "state_verification": true,
+                "virtual_screen_click_guard": cfg!(windows),
+                "verified_window_focus": cfg!(windows)
             },
             "screenshots_dir": self.screenshots_dir,
             "implementation": "Windows UI Automation + Win32 input through isolated PowerShell child processes"
@@ -185,7 +187,7 @@ impl ComputerBackend {
             .await?;
         find_matching_node(&tree, request).ok_or_else(|| {
             anyhow::anyhow!(
-                "No accessible element matched name={:?}, automation_id={:?}, control_type={:?}, class_name={:?}",
+                "No visible, enabled accessible element matched name={:?}, automation_id={:?}, control_type={:?}, class_name={:?}",
                 request.name,
                 request.automation_id,
                 request.control_type,
@@ -222,6 +224,7 @@ impl ComputerBackend {
 
     pub async fn click_element(&self, request: &ClickElementRequest) -> Result<Value> {
         let element = self.find_element(&request.selector).await?;
+        ensure_actionable_element(&element)?;
         let bounds = element
             .get("bounds")
             .and_then(Value::as_object)
@@ -450,6 +453,24 @@ fn validate_selector(request: &FindElementRequest) -> Result<()> {
     Ok(())
 }
 
+fn ensure_actionable_element(element: &Value) -> Result<()> {
+    if !element
+        .get("is_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        bail!("Matched element is disabled and will not be clicked");
+    }
+    if element
+        .get("is_offscreen")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        bail!("Matched element is offscreen and will not be clicked");
+    }
+    Ok(())
+}
+
 fn find_matching_node(tree: &Value, request: &FindElementRequest) -> Option<Value> {
     let nodes = tree.get("nodes")?.as_array()?;
     let matches = |field: &str, expected: &Option<String>, node: &Value| -> bool {
@@ -471,20 +492,19 @@ fn find_matching_node(tree: &Value, request: &FindElementRequest) -> Option<Valu
         .filter(|node| matches("automation_id", &request.automation_id, node))
         .filter(|node| matches("control_type", &request.control_type, node))
         .filter(|node| matches("class_name", &request.class_name, node))
+        .filter(|node| {
+            node.get("is_enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !node
+                    .get("is_offscreen")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+        })
         .max_by_key(|node| {
-            let enabled = node
-                .get("is_enabled")
+            node.get("is_keyboard_focusable")
                 .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let offscreen = node
-                .get("is_offscreen")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            let focusable = node
-                .get("is_keyboard_focusable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            (enabled as u8) * 4 + (!offscreen as u8) * 2 + focusable as u8
+                .unwrap_or(false) as u8
         })
         .cloned()
 }
@@ -744,6 +764,8 @@ using System.Runtime.InteropServices;
 public static class ContinuumFocusApi {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 '@
 $null = Add-Type -TypeDefinition $source -Language CSharp
@@ -763,9 +785,17 @@ if ($handleValue -ne 0) {
 if ($null -eq $selected) { throw 'No matching top-level window was found' }
 $handle = [IntPtr]$selected.MainWindowHandle
 $null = [ContinuumFocusApi]::ShowWindowAsync($handle, 9)
-$focused = [ContinuumFocusApi]::SetForegroundWindow($handle)
+$null = [ContinuumFocusApi]::BringWindowToTop($handle)
+$requested = [ContinuumFocusApi]::SetForegroundWindow($handle)
+Start-Sleep -Milliseconds 120
+$actual = [ContinuumFocusApi]::GetForegroundWindow()
+$verified = ($actual -eq $handle)
+if (-not $requested -or -not $verified) {
+  throw "Windows did not confirm the requested foreground window (requested=$requested, actual=$($actual.ToInt64()), expected=$($handle.ToInt64()))"
+}
 [ordered]@{
-  focused = $focused
+  focused = $true
+  verified = $verified
   handle = $handle.ToInt64()
   process_id = $selected.Id
   process_name = $selected.ProcessName
@@ -775,6 +805,7 @@ $focused = [ContinuumFocusApi]::SetForegroundWindow($handle)
 
 const CLICK_PS: &str = r#"
 $ErrorActionPreference = 'Stop'
+$null = Add-Type -AssemblyName System.Windows.Forms
 $source = @'
 using System;
 using System.Runtime.InteropServices;
@@ -786,6 +817,10 @@ public static class ContinuumMouseApi {
 $null = Add-Type -TypeDefinition $source -Language CSharp
 $x = [int]$env:CONTINUUM_X
 $y = [int]$env:CONTINUUM_Y
+$virtual = [System.Windows.Forms.SystemInformation]::VirtualScreen
+if (-not $virtual.Contains($x, $y)) {
+  throw "Click coordinate ($x, $y) is outside the virtual screen $($virtual.X),$($virtual.Y),$($virtual.Width),$($virtual.Height)"
+}
 $count = [Math]::Max(1, [Math]::Min(3, [int]$env:CONTINUUM_CLICK_COUNT))
 $button = $env:CONTINUUM_MOUSE_BUTTON
 switch ($button) {
@@ -799,7 +834,13 @@ for ($i=0; $i -lt $count; $i++) {
   [ContinuumMouseApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
   if ($i + 1 -lt $count) { Start-Sleep -Milliseconds 90 }
 }
-[ordered]@{ x=$x; y=$y; button=$button; count=$count } | ConvertTo-Json -Compress
+[ordered]@{
+  x=$x
+  y=$y
+  button=$button
+  count=$count
+  virtual_screen=[ordered]@{ x=$virtual.X; y=$virtual.Y; width=$virtual.Width; height=$virtual.Height }
+} | ConvertTo-Json -Compress -Depth 3
 "#;
 
 const TYPE_PS: &str = r#"
@@ -812,6 +853,7 @@ if ([string]::IsNullOrWhiteSpace($textPath) -or -not (Test-Path -LiteralPath $te
 $text = [System.IO.File]::ReadAllText($textPath, [System.Text.Encoding]::UTF8)
 $previous = $null
 $hadPrevious = $false
+$restored = $false
 try {
   $previous = [System.Windows.Forms.Clipboard]::GetDataObject()
   $hadPrevious = ($null -ne $previous)
@@ -824,9 +866,10 @@ try {
   try {
     if ($hadPrevious) { [System.Windows.Forms.Clipboard]::SetDataObject($previous, $true) }
     else { [System.Windows.Forms.Clipboard]::Clear() }
+    $restored = $true
   } catch {}
 }
-[ordered]@{ typed_characters=$text.Length; clipboard_restored=$true } | ConvertTo-Json -Compress
+[ordered]@{ typed_characters=$text.Length; clipboard_restored=$restored } | ConvertTo-Json -Compress
 "#;
 
 const KEY_PS: &str = r#"
@@ -903,15 +946,8 @@ $process = Start-Process -FilePath $url -PassThru
 mod tests {
     use super::*;
 
-    #[test]
-    fn semantic_selector_prefers_visible_enabled_node() {
-        let tree = serde_json::json!({
-            "nodes": [
-                {"name":"Save", "automation_id":"", "control_type":"Button", "class_name":"", "is_enabled":false, "is_offscreen":false},
-                {"name":"Save", "automation_id":"save", "control_type":"Button", "class_name":"", "is_enabled":true, "is_offscreen":false}
-            ]
-        });
-        let request = FindElementRequest {
+    fn selector() -> FindElementRequest {
+        FindElementRequest {
             window_handle: None,
             name: Some("save".into()),
             automation_id: None,
@@ -920,9 +956,49 @@ mod tests {
             exact: false,
             max_nodes: 20,
             max_depth: 4,
-        };
-        let node = find_matching_node(&tree, &request).expect("match");
+        }
+    }
+
+    #[test]
+    fn semantic_selector_prefers_visible_enabled_node() {
+        let tree = serde_json::json!({
+            "nodes": [
+                {"name":"Save", "automation_id":"", "control_type":"Button", "class_name":"", "is_enabled":false, "is_offscreen":false},
+                {"name":"Save", "automation_id":"save", "control_type":"Button", "class_name":"", "is_enabled":true, "is_offscreen":false}
+            ]
+        });
+        let node = find_matching_node(&tree, &selector()).expect("match");
         assert_eq!(node["automation_id"], "save");
+    }
+
+    #[test]
+    fn semantic_selector_refuses_disabled_or_offscreen_only_matches() {
+        for node in [
+            serde_json::json!({"name":"Save", "control_type":"Button", "is_enabled":false, "is_offscreen":false}),
+            serde_json::json!({"name":"Save", "control_type":"Button", "is_enabled":true, "is_offscreen":true}),
+        ] {
+            let tree = serde_json::json!({"nodes":[node]});
+            assert!(find_matching_node(&tree, &selector()).is_none());
+        }
+    }
+
+    #[test]
+    fn click_guard_requires_actionable_metadata() {
+        assert!(ensure_actionable_element(&serde_json::json!({
+            "is_enabled": true,
+            "is_offscreen": false
+        }))
+        .is_ok());
+        assert!(ensure_actionable_element(&serde_json::json!({
+            "is_enabled": false,
+            "is_offscreen": false
+        }))
+        .is_err());
+        assert!(ensure_actionable_element(&serde_json::json!({
+            "is_enabled": true,
+            "is_offscreen": true
+        }))
+        .is_err());
     }
 
     #[test]
