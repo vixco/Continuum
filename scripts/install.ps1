@@ -1,20 +1,12 @@
 # Continuum install.ps1
-# Installer for Continuum — the AI that knows when to act.
+# Idempotent Windows installer for the Continuum desktop, runtime and MCP servers.
 #
 # Usage:
-#   # Install from GitHub release (default):
 #   irm https://raw.githubusercontent.com/vixco/Continuum/main/scripts/install.ps1 | iex
-#
-#   # Or clone and run locally:
-#   .\scripts\install.ps1
-#   .\scripts\install.ps1 -FromSource          # build from source (requires Rust toolchain)
-#   .\scripts\install.ps1 -SkipModels          # skip the model download step
-#   .\scripts\install.ps1 -AutoStart           # also register Continuum to start with Windows
-#   .\scripts\install.ps1 -DesktopShortcut     # also create a desktop shortcut
-#   .\scripts\install.ps1 -Version v0.1.0-alpha.1   # pin a specific release tag
-#
-# The installer is idempotent — rerunning it upgrades / repairs without
-# losing any config, memory, or models already on disk.
+#   .\scripts\install.ps1 -FromSource
+#   .\scripts\install.ps1 -SkipModels
+#   .\scripts\install.ps1 -AutoStart -DesktopShortcut
+#   .\scripts\install.ps1 -Version v0.1.0-alpha.12
 
 [CmdletBinding()]
 param(
@@ -27,377 +19,400 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"  # Invoke-WebRequest is ~10x faster without the progress bar
+$ProgressPreference = "SilentlyContinue"
 
-# ---- Cosmetics --------------------------------------------------------------
+$Repository = "vixco/Continuum"
+$DefaultInstallDir = "$env:LOCALAPPDATA\Continuum"
+$ContinuumData = Join-Path $env:USERPROFILE ".continuum"
+$ContinuumDev = Join-Path $env:USERPROFILE ".continuum-dev"
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptRoot
 
-function Write-Header($text) {
-    Write-Host ""
-    Write-Host "=== $text ===" -ForegroundColor Cyan
-}
-
-function Write-Ok($text)   { Write-Host "  [OK]   $text" -ForegroundColor Green }
+function Write-Header($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
+function Write-Ok($text) { Write-Host "  [OK]   $text" -ForegroundColor Green }
 function Write-Info($text) { Write-Host "  [..]   $text" -ForegroundColor Gray }
 function Write-Warn($text) { Write-Host "  [WARN] $text" -ForegroundColor Yellow }
-function Write-Err($text)  { Write-Host "  [FAIL] $text" -ForegroundColor Red }
+function Write-Err($text) { Write-Host "  [FAIL] $text" -ForegroundColor Red }
 function Write-Step($text) { Write-Host "`n-> $text" -ForegroundColor White }
 
+function Test-Command([string]$Command) {
+    try {
+        $null = & $Command --version 2>&1
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-GitHubJson([string]$Uri) {
+    $headers = @{
+        "Accept" = "application/vnd.github+json"
+        "User-Agent" = "Continuum-Installer"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    try {
+        return Invoke-RestMethod -Uri $Uri -Headers $headers
+    } catch {
+        throw "GitHub API request failed for $Uri. $($_.Exception.Message)"
+    }
+}
+
+function Get-ReleaseAsset($Release, [string]$Pattern, [string]$Description) {
+    $matches = @($Release.assets | Where-Object { $_.name -match $Pattern })
+    if ($matches.Count -ne 1) {
+        $names = @($Release.assets | ForEach-Object { $_.name }) -join ", "
+        throw "Expected exactly one $Description asset matching '$Pattern'; found $($matches.Count). Assets: $names"
+    }
+    if ([int64]$matches[0].size -le 0) {
+        throw "$Description asset '$($matches[0].name)' is empty"
+    }
+    return $matches[0]
+}
+
+function Save-ReleaseAsset($Asset, [string]$Destination) {
+    Write-Info "Downloading $($Asset.name)..."
+    Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Destination -Headers @{ "User-Agent" = "Continuum-Installer" }
+    if (-not (Test-Path $Destination) -or (Get-Item $Destination).Length -le 0) {
+        throw "Downloaded asset is missing or empty: $Destination"
+    }
+}
+
+function Assert-Checksum([string]$Path, [string]$ChecksumFile) {
+    $name = Split-Path -Leaf $Path
+    $escaped = [Regex]::Escape($name)
+    $line = Get-Content $ChecksumFile | Where-Object { $_ -match "^([0-9a-fA-F]{64})\s+\*?$escaped$" } | Select-Object -First 1
+    if (-not $line) {
+        throw "SHA256SUMS.txt has no checksum for $name"
+    }
+    $expected = ([Regex]::Match($line, "^[0-9a-fA-F]{64}")).Value.ToLowerInvariant()
+    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw "Checksum mismatch for $name (expected $expected, got $actual)"
+    }
+    Write-Ok "Verified SHA-256 for $name"
+}
+
+function Install-AgentOsRegistration([string]$AgentOsPath) {
+    $mcpDir = Join-Path $ContinuumDev "mcp-servers"
+    New-Item -ItemType Directory -Force -Path $mcpDir | Out-Null
+    $registration = [ordered]@{
+        name = "agent-os"
+        command = [System.IO.Path]::GetFullPath($AgentOsPath)
+        args = @("--data-dir", [System.IO.Path]::GetFullPath($ContinuumDev))
+        env = @{}
+        enabled = $true
+        installed_at = [DateTime]::UtcNow.ToString("o")
+    }
+    $target = Join-Path $mcpDir "agent-os.json"
+    $temporary = "$target.$PID.tmp"
+    $registration | ConvertTo-Json -Depth 6 | Set-Content -Path $temporary -Encoding UTF8
+    Move-Item -Path $temporary -Destination $target -Force
+    Write-Ok "Registered policy-gated Agent OS MCP server"
+}
+
 Write-Host ""
-Write-Host "       K" -NoNewline -ForegroundColor White
-Write-Host "AI" -NoNewline -ForegroundColor Magenta
-Write-Host "ro" -ForegroundColor White
-Write-Host "       the AI that knows when to act" -ForegroundColor DarkGray
-Write-Host ""
+Write-Host "  CONTINUUM" -ForegroundColor Cyan
+Write-Host "  Persistent context and action layer for AI agents" -ForegroundColor DarkGray
 
-# ---- Step 1: Windows version check ------------------------------------------
+# ---- Platform and prerequisites ---------------------------------------------
 
-Write-Header "Checking Windows version"
-
+Write-Header "Checking Windows"
 $winVersion = [System.Environment]::OSVersion.Version
-$buildNumber = (Get-CimInstance Win32_OperatingSystem).BuildNumber
-Write-Info "Windows $($winVersion.Major).$($winVersion.Minor) build $buildNumber"
-
-if ($winVersion.Major -lt 10) {
-    Write-Err "Continuum requires Windows 10 or 11. Detected: $($winVersion.Major).$($winVersion.Minor)"
+$buildNumber = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+if ($winVersion.Major -lt 10 -or ($winVersion.Major -eq 10 -and $buildNumber -lt 18362)) {
+    Write-Err "Continuum requires Windows 10 1903+ or Windows 11. Detected build $buildNumber."
     exit 1
 }
-if ($winVersion.Major -eq 10 -and [int]$buildNumber -lt 18362) {
-    Write-Err "Continuum requires Windows 10 1903+ (build 18362) for Graphics Capture API. Detected build: $buildNumber"
-    exit 1
-}
-Write-Ok "Windows version supported"
-
-# ---- Step 2: Prerequisite checks --------------------------------------------
+Write-Ok "Windows build $buildNumber is supported"
 
 Write-Header "Checking prerequisites"
-
-function Test-Command($cmd) {
-    try { $null = & $cmd --version 2>&1; return $true } catch { return $false }
-}
-
-# Node.js
 $nodeOk = $false
 try {
     $nodeVer = node --version 2>&1
     if ($LASTEXITCODE -eq 0) {
         $major = [int]($nodeVer -replace '^v(\d+)\..*', '$1')
-        if ($major -ge 18) {
+        if ($major -ge 22) {
             Write-Ok "Node.js $nodeVer"
             $nodeOk = $true
-        } else {
-            Write-Warn "Node.js $nodeVer found, but Continuum needs 18+. Install from https://nodejs.org"
         }
     }
-} catch {
-    Write-Warn "Node.js not found. Claude Code CLI needs it."
-}
+} catch {}
 if (-not $nodeOk) {
-    Write-Host "    -> Install Node.js 18 or newer from https://nodejs.org" -ForegroundColor Yellow
-    Write-Host "    -> Rerun this installer after installing Node.js" -ForegroundColor Yellow
+    Write-Err "Continuum requires Node.js 22 or newer. Install it from https://nodejs.org and rerun."
     exit 1
 }
 
-# Claude Code CLI
-$claudeOk = $false
-try {
-    $claudeVer = claude --version 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Claude Code CLI: $claudeVer"
-        $claudeOk = $true
-    }
-} catch {
-    # Fall through
-}
-if (-not $claudeOk) {
-    Write-Warn "Claude Code CLI not found."
-    Write-Host "    -> Continuum drives Claude Code as a subprocess, so this is required." -ForegroundColor Yellow
-    $response = Read-Host "    -> Install now via 'npm install -g @anthropic-ai/claude-code'? [Y/n]"
+if (-not (Test-Command "claude")) {
+    Write-Warn "Claude Code CLI is not installed. Continuum can use other providers, but the Claude adapter will be unavailable."
+    $response = Read-Host "Install @anthropic-ai/claude-code now? [Y/n]"
     if ($response -ne "n" -and $response -ne "N") {
-        Write-Info "Installing @anthropic-ai/claude-code globally..."
         npm install -g @anthropic-ai/claude-code
         if ($LASTEXITCODE -ne 0) {
-            Write-Err "npm install failed. Install manually: npm install -g @anthropic-ai/claude-code"
-            exit 1
+            throw "npm install -g @anthropic-ai/claude-code failed"
         }
         Write-Ok "Claude Code CLI installed"
-    } else {
-        Write-Err "Claude Code CLI is required. Aborting."
-        exit 1
     }
-}
-
-# Claude Code auth status
-Write-Info "Checking Claude Code login status..."
-$authOk = $false
-$authOutput = & claude config get 2>&1 | Out-String
-if ($LASTEXITCODE -eq 0 -and $authOutput -match "Anthropic|account|logged in|auth" -and $authOutput -notmatch "not logged in|no account") {
-    # The `claude config get` surface is a bit chatty; rely on a real `claude -p` ping below if it ever becomes unclear.
-    Write-Ok "Claude Code appears to be configured"
-    $authOk = $true
 } else {
-    Write-Warn "Could not confirm Claude Code is logged in."
-    Write-Host "    -> Run 'claude login' in a separate terminal and follow the prompts." -ForegroundColor Yellow
-    $response = Read-Host "    -> Continue anyway? [y/N]"
-    if ($response -ne "y" -and $response -ne "Y") {
-        Write-Info "Aborting. Run 'claude login' and then rerun this installer."
-        exit 1
-    }
+    Write-Ok "Claude Code CLI available"
 }
 
-# Rust toolchain (only needed for source builds)
 if ($FromSource) {
-    Write-Info "Source build requested — checking build toolchain..."
-    $rustOk = Test-Command "rustc"
-    $cargoOk = Test-Command "cargo"
-    $cmakeOk = Test-Command "cmake"
-    if (-not $rustOk -or -not $cargoOk) {
-        Write-Err "Rust toolchain missing. Install from https://rustup.rs and rerun."
-        exit 1
+    foreach ($tool in @("rustc", "cargo", "cmake")) {
+        if (-not (Test-Command $tool)) {
+            Write-Err "$tool is required for -FromSource. Install the Rust/native toolchain and rerun."
+            exit 1
+        }
     }
-    Write-Ok "Rust $(rustc --version)"
-    if (-not $cmakeOk) {
-        Write-Err "CMake not on PATH. Source builds need CMake + Ninja + LLVM. See scripts/dev-setup.ps1 for the full list."
-        exit 1
-    }
-    Write-Ok "CMake present"
-    if (-not $env:LIBCLANG_PATH -or -not (Test-Path $env:LIBCLANG_PATH)) {
-        Write-Warn "LIBCLANG_PATH not set. whisper-rs bindgen will likely fail."
-        Write-Host "    -> Install LLVM and set LIBCLANG_PATH to <llvm>\bin (default: C:\LLVM\bin)" -ForegroundColor Yellow
+    if (-not (Test-Command "pnpm")) {
+        Write-Info "Installing pnpm 10.11.1..."
+        npm install -g pnpm@10.11.1
+        if ($LASTEXITCODE -ne 0) { throw "pnpm installation failed" }
     }
 }
 
-# ---- Step 3: Create ~/.continuum/ directory layout ------------------------------
+# ---- Data and install directories -------------------------------------------
 
-Write-Header "Preparing ~/.continuum/ data directory"
-
-$ContinuumData = Join-Path $env:USERPROFILE ".continuum"
-$subdirs = @("config", "models", "models\vision", "models\triage", "models\stt", "models\tts",
-             "logs", "memory", "backups", "bin", "worker-intents", "workers", "repair-intents")
-foreach ($sd in $subdirs) {
-    $full = Join-Path $ContinuumData $sd
-    if (-not (Test-Path $full)) {
-        New-Item -ItemType Directory -Force -Path $full | Out-Null
-    }
+Write-Header "Preparing local data"
+$continuumSubdirs = @(
+    "config", "models", "models\vision", "models\triage", "models\stt", "models\tts",
+    "logs", "memory", "backups", "bin", "worker-intents", "workers", "repair-intents"
+)
+foreach ($subdir in $continuumSubdirs) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $ContinuumData $subdir) | Out-Null
 }
-Write-Ok "Created $ContinuumData"
+foreach ($subdir in @("mcp-servers", "logs", "chats", "backups")) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $ContinuumDev $subdir) | Out-Null
+}
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+Write-Ok "Prepared $ContinuumData and $ContinuumDev"
 
-# Copy default config files (only if they don't already exist — we never clobber user config)
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = Split-Path -Parent $scriptRoot
 $defaultConfigDir = Join-Path $repoRoot "config"
 $userConfigDir = Join-Path $ContinuumData "config"
-
 if (Test-Path $defaultConfigDir) {
-    foreach ($cfg in Get-ChildItem $defaultConfigDir -File) {
-        $dest = Join-Path $userConfigDir $cfg.Name
-        if (-not (Test-Path $dest)) {
-            Copy-Item $cfg.FullName $dest
-            Write-Ok "Seeded $($cfg.Name)"
-        } else {
-            Write-Info "$($cfg.Name) already exists — keeping yours"
+    foreach ($configFile in Get-ChildItem $defaultConfigDir -File) {
+        $destination = Join-Path $userConfigDir $configFile.Name
+        if (-not (Test-Path $destination)) {
+            Copy-Item $configFile.FullName $destination
+            Write-Ok "Seeded $($configFile.Name)"
         }
     }
 }
 
-# ---- Step 4: Install Continuum binary -------------------------------------------
+# ---- Install binaries --------------------------------------------------------
 
-Write-Header "Installing Continuum binary"
-
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-}
+Write-Header "Installing Continuum"
+$desktopInstalledByNsis = $false
 
 if ($FromSource) {
-    Write-Step "Building from source (release, this may take ~10 minutes)..."
+    Write-Step "Building runtime, context MCP and Agent OS from source..."
     Push-Location $repoRoot
     try {
-        cargo build --release --bin continuum
-        if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-        cargo build --release --bin continuum-mcp
-        if ($LASTEXITCODE -ne 0) { throw "cargo build continuum-mcp failed" }
-        Copy-Item "target\release\continuum.exe" (Join-Path $InstallDir "continuum.exe") -Force
-        Copy-Item "target\release\continuum-mcp.exe" (Join-Path $InstallDir "continuum-mcp.exe") -Force
-        Write-Ok "Built and installed continuum.exe + continuum-mcp.exe"
+        cargo build --release --locked --bin continuum --bin continuum-mcp --bin continuum-agent-os
+        if ($LASTEXITCODE -ne 0) { throw "Rust runtime build failed" }
 
-        Write-Step "Building desktop app (cargo tauri build)..."
+        foreach ($binary in @("continuum.exe", "continuum-mcp.exe", "continuum-agent-os.exe")) {
+            Copy-Item (Join-Path $repoRoot "target\release\$binary") (Join-Path $InstallDir $binary) -Force
+        }
+
+        $resourceBin = Join-Path $repoRoot "apps\desktop\src-tauri\resources\bin"
+        New-Item -ItemType Directory -Force -Path $resourceBin | Out-Null
+        Copy-Item (Join-Path $repoRoot "target\release\continuum.exe") (Join-Path $resourceBin "continuum.exe") -Force
+        Copy-Item (Join-Path $repoRoot "target\release\continuum-mcp.exe") (Join-Path $resourceBin "continuum-mcp.exe") -Force
+        Copy-Item (Join-Path $repoRoot "target\release\continuum-agent-os.exe") (Join-Path $resourceBin "continuum-agent-os.exe") -Force
+
+        Write-Step "Building desktop frontend and Tauri executable..."
         Push-Location (Join-Path $repoRoot "apps\desktop")
         try {
             pnpm install --frozen-lockfile
-            pnpm tauri build
-            if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed" }
-            $bundled = Get-ChildItem "src-tauri\target\release" -Filter "continuum-desktop.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($bundled) {
-                Copy-Item $bundled.FullName (Join-Path $InstallDir "continuum-desktop.exe") -Force
-                Write-Ok "Installed continuum-desktop.exe"
-            }
+            if ($LASTEXITCODE -ne 0) { throw "pnpm install failed" }
+            pnpm build
+            if ($LASTEXITCODE -ne 0) { throw "desktop frontend build failed" }
         } finally {
             Pop-Location
         }
+        cargo build --release --locked -p continuum-desktop
+        if ($LASTEXITCODE -ne 0) { throw "continuum-desktop build failed" }
+        Copy-Item (Join-Path $repoRoot "target\release\continuum-desktop.exe") (Join-Path $InstallDir "continuum-desktop.exe") -Force
+        Write-Ok "Installed desktop, runtime, context MCP and Agent OS"
     } finally {
         Pop-Location
     }
 } else {
-    # Download from GitHub releases
-    Write-Step "Downloading release binary..."
-    $repo = "vixco/Continuum"
+    Write-Step "Resolving release assets from GitHub..."
+    $releaseUri = if ($Version -eq "latest") {
+        "https://api.github.com/repos/$Repository/releases/latest"
+    } else {
+        $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+        "https://api.github.com/repos/$Repository/releases/tags/$tag"
+    }
+    $release = Invoke-GitHubJson $releaseUri
+    if ($release.draft -or $release.prerelease) {
+        throw "Release $($release.tag_name) is not a complete latest-channel release"
+    }
+
+    $portableAsset = Get-ReleaseAsset $release '^continuum-.+-windows-x64\.zip$' "Windows portable"
+    $installerAsset = Get-ReleaseAsset $release '^continuum-.+-windows-x64-setup\.exe$' "Windows installer"
+    $checksumAsset = Get-ReleaseAsset $release '^SHA256SUMS\.txt$' "checksum manifest"
+
+    $tempRoot = Join-Path $env:TEMP "continuum-install-$PID-$([Guid]::NewGuid().ToString('N'))"
+    $zipPath = Join-Path $tempRoot $portableAsset.name
+    $setupPath = Join-Path $tempRoot $installerAsset.name
+    $checksumPath = Join-Path $tempRoot "SHA256SUMS.txt"
+    $extractDir = Join-Path $tempRoot "portable"
+    New-Item -ItemType Directory -Force -Path $tempRoot,$extractDir | Out-Null
     try {
-        if ($Version -eq "latest") {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "continuum-installer" }
-        } else {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$Version" -Headers @{ "User-Agent" = "continuum-installer" }
-        }
-        Write-Ok "Found release $($release.tag_name)"
+        Save-ReleaseAsset $portableAsset $zipPath
+        Save-ReleaseAsset $installerAsset $setupPath
+        Save-ReleaseAsset $checksumAsset $checksumPath
+        Assert-Checksum $zipPath $checksumPath
+        Assert-Checksum $setupPath $checksumPath
 
-        $asset = $release.assets | Where-Object { $_.name -match 'continuum-.*-windows.*\.zip$' } | Select-Object -First 1
-        if (-not $asset) {
-            Write-Err "No Windows .zip asset in release $($release.tag_name)."
-            Write-Host "    -> Fall back to: .\scripts\install.ps1 -FromSource" -ForegroundColor Yellow
-            exit 1
-        }
-        $sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
-
-        $tmpZip = Join-Path $env:TEMP "continuum-release.zip"
-        Write-Info "Downloading $($asset.name) (~$([math]::Round($asset.size / 1MB)) MB)..."
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpZip
-
-        # Verify SHA256 if the release ships a SHA256SUMS.txt (all releases
-        # from v0.1.0-alpha.2 onward). If the file is missing (older alpha)
-        # we warn rather than abort so existing install flows don't break.
-        if ($sumsAsset) {
-            $tmpSums = Join-Path $env:TEMP "continuum-SHA256SUMS.txt"
-            Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $tmpSums
-            $expected = $null
-            foreach ($line in Get-Content $tmpSums) {
-                $parts = $line -split '\s+', 2
-                if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $asset.name) {
-                    $expected = $parts[0].ToLower()
-                    break
-                }
-            }
-            Remove-Item $tmpSums -Force
-            if (-not $expected) {
-                Write-Err "SHA256SUMS.txt did not list $($asset.name). Refusing to install an unverified binary."
-                Remove-Item $tmpZip -Force
-                exit 1
-            }
-            $actual = (Get-FileHash $tmpZip -Algorithm SHA256).Hash.ToLower()
-            if ($actual -ne $expected) {
-                Write-Err "Checksum mismatch! expected $expected, got $actual"
-                Write-Err "Do NOT run the downloaded binary. Report via SECURITY.md."
-                Remove-Item $tmpZip -Force
-                exit 1
-            }
-            Write-Ok "SHA256 verified ($($expected.Substring(0,12))...)"
-        } else {
-            Write-Warn "Release is missing SHA256SUMS.txt — skipping integrity check."
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        foreach ($binary in @("continuum.exe", "continuum-mcp.exe", "continuum-agent-os.exe")) {
+            $source = Get-ChildItem $extractDir -Recurse -File -Filter $binary | Select-Object -First 1
+            if (-not $source) { throw "Release ZIP does not contain required binary $binary" }
+            Copy-Item $source.FullName (Join-Path $InstallDir $binary) -Force
         }
 
-        Write-Info "Extracting to $InstallDir..."
-        Expand-Archive -Path $tmpZip -DestinationPath $InstallDir -Force
-        Remove-Item $tmpZip -Force
-        Write-Ok "Continuum binary installed"
-    } catch {
-        Write-Err "Release download failed: $($_.Exception.Message)"
-        Write-Host "    -> Fall back to building from source: .\scripts\install.ps1 -FromSource" -ForegroundColor Yellow
-        exit 1
+        foreach ($directory in @("config", "prompts", "skills")) {
+            $sourceDir = Get-ChildItem $extractDir -Recurse -Directory -Filter $directory | Select-Object -First 1
+            if ($sourceDir) {
+                Copy-Item $sourceDir.FullName (Join-Path $InstallDir $directory) -Recurse -Force
+            }
+        }
+
+        Write-Step "Installing the Continuum desktop app..."
+        $nsisArgs = @("/S")
+        if ([System.IO.Path]::GetFullPath($InstallDir) -ne [System.IO.Path]::GetFullPath($DefaultInstallDir)) {
+            $nsisArgs += "/D=$([System.IO.Path]::GetFullPath($InstallDir))"
+        }
+        $process = Start-Process -FilePath $setupPath -ArgumentList $nsisArgs -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "Continuum desktop installer exited with code $($process.ExitCode)"
+        }
+        $desktopInstalledByNsis = $true
+        Write-Ok "Installed release $($release.tag_name)"
+    } finally {
+        Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-# Add InstallDir to the user PATH if it isn't already there
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -notlike "*$InstallDir*") {
-    $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-    Write-Ok "Added $InstallDir to user PATH (restart your shell to pick it up)"
-} else {
-    Write-Info "PATH already contains $InstallDir"
+$runtimeExe = Join-Path $InstallDir "continuum.exe"
+$mcpExe = Join-Path $InstallDir "continuum-mcp.exe"
+$agentOsExe = Join-Path $InstallDir "continuum-agent-os.exe"
+foreach ($required in @($runtimeExe, $mcpExe, $agentOsExe)) {
+    if (-not (Test-Path $required)) { throw "Required installed binary is missing: $required" }
+}
+Install-AgentOsRegistration $agentOsExe
+
+# ---- PATH and shortcuts ------------------------------------------------------
+
+Write-Header "Configuring launch integration"
+$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+if (($userPath -split ';') -notcontains $InstallDir) {
+    [Environment]::SetEnvironmentVariable("PATH", (($userPath.TrimEnd(';') + ";" + $InstallDir).TrimStart(';')), "User")
+    Write-Ok "Added $InstallDir to user PATH"
+}
+$env:PATH = "$env:PATH;$InstallDir"
+
+$desktopExe = Join-Path $InstallDir "continuum-desktop.exe"
+$shortcutTarget = if (Test-Path $desktopExe) { $desktopExe } else { $runtimeExe }
+$shortcutArgs = if (Test-Path $desktopExe) { "" } else { "run" }
+$shell = New-Object -ComObject WScript.Shell
+$startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Continuum"
+New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
+$shortcut = $shell.CreateShortcut((Join-Path $startMenuDir "Continuum.lnk"))
+$shortcut.TargetPath = $shortcutTarget
+$shortcut.Arguments = $shortcutArgs
+$shortcut.WorkingDirectory = $InstallDir
+$shortcut.Description = "Continuum AI context and action layer"
+$shortcut.Save()
+Write-Ok "Created Start Menu shortcut"
+
+if ($DesktopShortcut) {
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $shortcut = $shell.CreateShortcut((Join-Path $desktopPath "Continuum.lnk"))
+    $shortcut.TargetPath = $shortcutTarget
+    $shortcut.Arguments = $shortcutArgs
+    $shortcut.WorkingDirectory = $InstallDir
+    $shortcut.Description = "Continuum AI context and action layer"
+    $shortcut.Save()
+    Write-Ok "Created Desktop shortcut"
 }
 
-# ---- Step 5: Download default models ----------------------------------------
+if ($AutoStart) {
+    $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+    $shortcut = $shell.CreateShortcut((Join-Path $startupDir "Continuum.lnk"))
+    $shortcut.TargetPath = $shortcutTarget
+    $shortcut.Arguments = $shortcutArgs
+    $shortcut.WorkingDirectory = $InstallDir
+    $shortcut.Description = "Start Continuum with Windows"
+    $shortcut.Save()
+    Write-Ok "Registered Windows startup shortcut"
+}
+
+# ---- Optional local model download ------------------------------------------
 
 if (-not $SkipModels) {
-    Write-Header "Downloading default models"
-    $modelScript = Join-Path $repoRoot "scripts\download-models.ps1"
-    if (Test-Path $modelScript) {
-        # The shipped download script writes to ~/.continuum-dev/models/; redirect via env.
-        $env:CONTINUUM_MODELS_DIR = Join-Path $ContinuumData "models"
-        & $modelScript
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Some models failed to download. You can rerun 'continuum setup' later to retry."
+    Write-Header "Local models"
+    $configPath = Join-Path $repoRoot "config\config.example.toml"
+    $downloadScript = Join-Path $repoRoot "scripts\download-models.ps1"
+    if (Test-Path $downloadScript) {
+        $response = Read-Host "Download recommended local models now? This can require several GB. [y/N]"
+        if ($response -eq "y" -or $response -eq "Y") {
+            $oldContinuumHome = $env:CONTINUUM_HOME
+            $env:CONTINUUM_HOME = $ContinuumData
+            try {
+                & $downloadScript
+            } finally {
+                $env:CONTINUUM_HOME = $oldContinuumHome
+            }
+        } else {
+            Write-Info "Skipped model downloads"
         }
     } else {
-        Write-Warn "scripts/download-models.ps1 not found. Run 'continuum setup' after install to fetch models."
+        Write-Info "Model download script is not present in this installation"
     }
-} else {
-    Write-Info "Skipping model download (-SkipModels)."
 }
 
-# ---- Step 6: Register shortcuts ---------------------------------------------
+# ---- First-run config and verification --------------------------------------
 
-Write-Header "Registering shortcuts"
-
-$wshell = New-Object -ComObject WScript.Shell
-
-# Start Menu shortcut
-$startMenu = [Environment]::GetFolderPath("Programs")
-$startLnk = Join-Path $startMenu "Continuum.lnk"
-$targetExe = Join-Path $InstallDir "continuum-desktop.exe"
-if (-not (Test-Path $targetExe)) {
-    # Fall back to continuum.exe if the dashboard wasn't bundled in this install
-    $targetExe = Join-Path $InstallDir "continuum.exe"
-}
-if (Test-Path $targetExe) {
-    $s = $wshell.CreateShortcut($startLnk)
-    $s.TargetPath = $targetExe
-    $s.WorkingDirectory = $InstallDir
-    $s.Description = "Continuum — the AI that knows when to act"
-    $s.Save()
-    Write-Ok "Start Menu shortcut created"
-} else {
-    Write-Warn "Continuum executable not found at $targetExe — skipping Start Menu shortcut"
+Write-Header "Finalising configuration"
+$configFile = Join-Path $ContinuumDev "config.toml"
+if (-not (Test-Path $configFile)) {
+    $example = Join-Path $repoRoot "config\config.example.toml"
+    if (Test-Path $example) {
+        Copy-Item $example $configFile
+        Write-Ok "Created $configFile"
+    }
 }
 
-# Desktop shortcut (optional)
-if ($DesktopShortcut -and (Test-Path $targetExe)) {
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $dl = $wshell.CreateShortcut((Join-Path $desktop "Continuum.lnk"))
-    $dl.TargetPath = $targetExe
-    $dl.WorkingDirectory = $InstallDir
-    $dl.Description = "Continuum — the AI that knows when to act"
-    $dl.Save()
-    Write-Ok "Desktop shortcut created"
+try {
+    $versionOutput = & $runtimeExe --version 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "continuum --version failed" }
+    Write-Ok $versionOutput.Trim()
+} catch {
+    Write-Warn "Runtime verification failed: $($_.Exception.Message)"
 }
 
-# Auto-start (optional)
-if ($AutoStart -and (Test-Path $targetExe)) {
-    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    New-ItemProperty -Path $runKey -Name "Continuum" -Value "`"$targetExe`"" -PropertyType String -Force | Out-Null
-    Write-Ok "Registered to start with Windows"
+try {
+    $agentHelp = & $agentOsExe --help 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $agentHelp -notmatch "Agent OS") {
+        throw "continuum-agent-os --help did not return the expected contract"
+    }
+    Write-Ok "Agent OS executable verified"
+} catch {
+    throw "Agent OS verification failed: $($_.Exception.Message)"
 }
 
-# ---- Step 7: Mark install complete (not onboarding — that's the wizard) ----
-
-$marker = Join-Path $userConfigDir "install-version"
-$release_tag = if ($FromSource) { "source-$(git -C $repoRoot rev-parse --short HEAD 2>$null)" } else { $Version }
-Set-Content -Path $marker -Value "continuum $release_tag installed $(Get-Date -Format o)"
-
-# ---- Summary ----------------------------------------------------------------
-
 Write-Host ""
-Write-Host "=============================================" -ForegroundColor Green
-Write-Host "  Continuum installed successfully." -ForegroundColor Green
-Write-Host "=============================================" -ForegroundColor Green
+Write-Host "Continuum installation complete." -ForegroundColor Green
 Write-Host ""
-Write-Host "  Install dir: $InstallDir"
-Write-Host "  Data dir:    $ContinuumData"
+Write-Host "Installed components:" -ForegroundColor White
+Write-Host "  Desktop:       $shortcutTarget" -ForegroundColor Gray
+Write-Host "  Runtime:       $runtimeExe" -ForegroundColor Gray
+Write-Host "  Context MCP:   $mcpExe" -ForegroundColor Gray
+Write-Host "  Agent OS MCP:  $agentOsExe" -ForegroundColor Gray
+Write-Host "  Data:          $ContinuumDev" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  Next steps:" -ForegroundColor Cyan
-Write-Host "    1. Launch Continuum from the Start Menu or run 'continuum' from a new shell."
-Write-Host "    2. The dashboard will open and guide you through first-run setup."
-Write-Host "    3. If anything needs a second look, run 'continuum setup' at any time."
-Write-Host ""
-Write-Host "  Docs: https://vixco.github.io/Continuum" -ForegroundColor Gray
-Write-Host "  Issues: https://github.com/vixco/Continuum/issues" -ForegroundColor Gray
-Write-Host ""
-
-exit 0
+Write-Host "Open Continuum from the Start Menu. A new terminal is required before the updated PATH is visible." -ForegroundColor Cyan
