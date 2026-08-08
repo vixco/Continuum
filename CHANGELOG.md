@@ -6,6 +6,10 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Native IDE bridge**: `ide_status`, `ide_open_file`, and `ide_open_diff`
+  detect and launch configured VS Code-compatible native executables. File
+  targets use the project allowlist, editor input never reaches a shell, and
+  open actions require session approval.
 - **Confirmed GitHub mutations**: `github_create_issue`,
   `github_comment_issue`, and `github_create_pull_request` are bounded to one
   validated repository and require a fresh confirmation on every call. Bodies

@@ -53,6 +53,7 @@ use crate::tools::github::{
     GitHubCommentRequest, GitHubCreateIssueRequest, GitHubCreatePullRequest, GitHubGetFileRequest,
     GitHubListIssuesRequest, GitHubListReposRequest, GitHubRepoRequest,
 };
+use crate::tools::ide::{IdeOpenDiffRequest, IdeOpenFileRequest};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
     MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultDeleteRequest,
@@ -80,6 +81,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_max_write_bytes: usize,
     pub(crate) fs_max_patch_replacements: usize,
     pub(crate) terminal_config: crate::config::McpTerminalConfig,
+    pub(crate) ide_config: crate::config::McpIdeConfig,
     pub(crate) github_config: continuum_core::config::GitHubConfig,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
@@ -221,6 +223,7 @@ impl ContinuumMcpServer {
                 fs_max_write_bytes: mcp_cfg.fs.max_write_bytes,
                 fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
                 terminal_config: mcp_cfg.terminal,
+                ide_config: mcp_cfg.ide,
                 github_config,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
@@ -1520,6 +1523,52 @@ impl ContinuumMcpServer {
     }
 
     // -----------------------------------------------------------------------
+    // Native IDE bridge
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Report which configured VS Code-compatible native editor executables are available. Does not open an editor or inspect editor content."
+    )]
+    async fn ide_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_status", &Value::Null, || async {
+            Ok::<_, McpError>(crate::tools::ide::status(&self.state.ide_config))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open one existing allowlisted file in a configured VS Code-compatible editor at an optional one-based line and column. Uses a native executable directly; no shell or arbitrary editor command is exposed."
+    )]
+    async fn ide_open_file(
+        &self,
+        Parameters(req): Parameters<IdeOpenFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_open_file", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::ide::open_file(&req, &allowlist, &self.state.ide_config)
+                .await
+                .map_err(ide_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open two existing allowlisted files in a configured VS Code-compatible editor's native diff view. Uses a native executable directly and does not modify either file."
+    )]
+    async fn ide_open_diff(
+        &self,
+        Parameters(req): Parameters<IdeOpenDiffRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_open_diff", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::ide::open_diff(&req, &allowlist, &self.state.ide_config)
+                .await
+                .map_err(ide_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
     // Optional read-only GitHub integration
     // -----------------------------------------------------------------------
 
@@ -1924,6 +1973,14 @@ fn file_action_err_to_mcp(error: crate::tools::file_actions::FileActionError) ->
     }
 }
 
+fn ide_err_to_mcp(error: crate::tools::ide::IdeError) -> McpError {
+    use crate::tools::ide::IdeError;
+    match error {
+        IdeError::Spawn(_) | IdeError::Timeout => McpError::internal_error(error.to_string(), None),
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
 fn git_err_to_mcp(error: crate::tools::git::GitToolError) -> McpError {
     use crate::tools::git::GitToolError;
     match error {
@@ -2023,6 +2080,7 @@ mod repair_authorization_tests {
                 fs_max_write_bytes: 1024 * 1024,
                 fs_max_patch_replacements: 100,
                 terminal_config: crate::config::McpTerminalConfig::default(),
+                ide_config: crate::config::McpIdeConfig::default(),
                 github_config: continuum_core::config::GitHubConfig::default(),
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),

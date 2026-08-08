@@ -187,6 +187,14 @@ Issue creation, comments, and pull-request creation are repository-scoped,
 bounded, and always-confirm. Mutation bodies are redacted from audit metadata;
 pull-request creation references an existing remote branch and never pushes.
 
+IDE actions prefer a direct native integration. The first bridge supports VS
+Code-compatible executables through `ide_status`, `ide_open_file`, and
+`ide_open_diff`. It canonicalizes every file through the project allowlist,
+uses only fixed CLI switches, launches the native executable without a shell,
+and strips credential-bearing environment variables. It does not claim access
+to live editor buffers, diagnostics, selections, terminals, or debug state;
+those require a separately consented extension protocol.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

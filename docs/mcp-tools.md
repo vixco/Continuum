@@ -76,6 +76,21 @@ would reintroduce shell parsing. The default native-program allowlist is
 `cargo`, `git`, `dotnet`, `rustc`, and `rustfmt`; users can narrow or expand it
 in config.
 
+### Native IDE bridge
+
+| Tool | Default tier | Effect |
+|---|---|---|
+| `ide_status` | auto | Lists configured VS Code-compatible editors whose native executable is available. |
+| `ide_open_file` | session-approved | Opens one existing allowlisted file at an optional one-based line/column. |
+| `ide_open_diff` | session-approved | Opens two existing allowlisted files in the editor's native diff view. |
+
+The bridge accepts only aliases from `mcp.ide.allowed_editors` (`code`,
+`code-insiders`, and `codium` by default), resolves a native executable, and
+passes fixed arguments directly without a shell. `.cmd` launchers are never
+executed; on Windows they are used only as a location hint for the adjacent
+native editor executable. This bridge does not read unsaved buffers,
+diagnostics, selections, terminal output, or debug state.
+
 ### GitHub (optional)
 
 Settings → Integrations contains a GitHub card. Connect launches the official

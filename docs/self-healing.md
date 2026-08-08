@@ -70,6 +70,19 @@ Component: `terminal_tools`
 - Restart rule: restart the MCP process after repeated spawn failures; first
   verify PATH and `mcp.terminal.allowed_programs` configuration.
 
+## Native IDE bridge
+
+Component: `ide`
+
+- Health check: `ide_status` resolves configured editor aliases to native
+  executables without opening files or inspecting editor state.
+- Logs: every MCP handoff is audited with its editor and canonical target path.
+- Recovery: ensure VS Code, VS Code Insiders, or VSCodium is installed and its
+  command is on PATH; adjust `mcp.ide.allowed_editors` if needed, then restart
+  the MCP process and call `ide_status` again.
+- Restart rule: restart after repeated spawn/timeouts. A missing executable or
+  denied path is a configuration/permission issue and should not be retried.
+
 ## GitHub CLI bridge
 
 Component: `github`

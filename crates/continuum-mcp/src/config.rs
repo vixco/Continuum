@@ -15,6 +15,7 @@ use serde::Deserialize;
 pub struct McpServerConfig {
     pub fs: McpFsConfig,
     pub terminal: McpTerminalConfig,
+    pub ide: McpIdeConfig,
 }
 
 /// Filesystem-allowlist expansion settings.
@@ -68,6 +69,25 @@ impl Default for McpTerminalConfig {
             max_timeout_secs: 900,
             max_output_bytes: 512 * 1024,
             max_args: 128,
+        }
+    }
+}
+
+/// Native editor bridge limits and executable allowlist.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct McpIdeConfig {
+    /// Supported editor command aliases. Paths and arbitrary programs are rejected.
+    pub allowed_editors: Vec<String>,
+    /// Maximum time to wait for the editor CLI handoff.
+    pub launch_timeout_secs: u64,
+}
+
+impl Default for McpIdeConfig {
+    fn default() -> Self {
+        Self {
+            allowed_editors: vec!["code".into(), "code-insiders".into(), "codium".into()],
+            launch_timeout_secs: 15,
         }
     }
 }
@@ -143,6 +163,11 @@ mod tests {
         let cfg = load(dir.path());
         assert_eq!(cfg.fs.extra_paths.len(), 2);
         assert_eq!(cfg.fs.max_write_bytes, 1024 * 1024);
+        assert!(cfg
+            .ide
+            .allowed_editors
+            .iter()
+            .any(|editor| editor == "code"));
     }
 
     #[test]
