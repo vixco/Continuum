@@ -247,7 +247,7 @@ jobs:
         run: cargo build -p continuum-desktop
 
   build-desktop-macos:
-    name: Build desktop (macOS Apple Silicon)
+    name: Build desktop and Agent OS (macOS Apple Silicon)
     runs-on: macos-15
     needs: [fmt, clippy-light]
     steps:
@@ -259,6 +259,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
+      - name: Install Agent OS native prerequisites
+        run: brew install ninja protobuf llvm
+
+      - name: Configure LLVM for bindgen
+        run: |
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot $(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -278,9 +286,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-agent-os-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-agent-os-
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -304,8 +312,11 @@ jobs:
       - name: Build Tauri desktop app
         run: cargo build -p continuum-desktop
 
+      - name: Build Agent OS binary
+        run: cargo build -p continuum-mcp --bin continuum-agent-os
+
   build-desktop-macos-intel:
-    name: Build desktop (macOS Intel)
+    name: Build desktop and Agent OS (macOS Intel)
     runs-on: macos-15-intel
     needs: [fmt, clippy-light]
     steps:
@@ -317,6 +328,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
+      - name: Install Agent OS native prerequisites
+        run: brew install ninja protobuf llvm
+
+      - name: Configure LLVM for bindgen
+        run: |
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot $(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -336,9 +355,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-agent-os-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-agent-os-
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -361,6 +380,9 @@ jobs:
 
       - name: Build Tauri desktop app
         run: cargo build -p continuum-desktop
+
+      - name: Build Agent OS binary
+        run: cargo build -p continuum-mcp --bin continuum-agent-os
 
   docs-site:
     name: Build docs site
