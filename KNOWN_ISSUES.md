@@ -1,89 +1,150 @@
-# Known issues — 0.1.0-alpha.1
+# Known issues
 
-Continuum is in **alpha**. This document lists things that don't yet work, don't yet work well, or would bite you on a clean install. Items are grouped by severity so you can decide whether an alpha-grade install is right for you.
+Continuum is in alpha. This file lists current product limitations and
+operational risks; it is not a roadmap or a place to hide failing tests.
 
-Last updated: 2026-04-15.
+Last updated: 2026-08-09.
 
----
+## Release and distribution
 
-## Platform coverage
+- **The automatic cross-platform Release pipeline is new.** A release is not
+  considered complete until the GitHub Release contains validated Windows x64,
+  macOS Apple Silicon, and macOS Intel assets plus updater metadata, manifest,
+  and checksums. Tags without those assets are incomplete release state.
+- **Windows binaries are not Authenticode-signed.** SmartScreen can warn on
+  first launch until an OV/EV signing certificate is configured.
+- **macOS packages are not yet Developer ID signed or notarized.** The workflow
+  produces DMGs for Apple Silicon and Intel, but Gatekeeper can warn until Apple
+  signing, hardened runtime, notarization, and stapling credentials are added.
+- **Tauri updater signatures are not publisher certificates.** They protect the
+  updater artifact and are verified by installed Continuum clients; they do not
+  remove SmartScreen or Gatekeeper warnings.
+- **Linux has no supported desktop package.** The Rust workspace may compile on
+  Linux in selected configurations, but no Linux installer or full desktop
+  support contract exists.
 
-- **Windows 10 (1903+) and Windows 11 only.** macOS and Linux support are explicitly post-1.0 — the Windows-specific APIs (Graphics Capture, UI Automation foreground tracking, `RegisterHotKey`) run deep through the senses and voice layers. Track [#macos-support] and [#linux-support] if you want to follow the ports.
-- **No ARM64 builds.** x64 only for now.
+## Platform parity
 
-## Installer / setup
+- **Computer use is Windows-first.** Window observation, UI Automation,
+  semantic element targeting, mouse/keyboard input, screenshots, and verified
+  foreground focus are implemented for Windows. The macOS desktop can be built
+  and distributed, but it does not yet have feature-equivalent native computer
+  control.
+- **Several ambient/voice integrations remain Windows-specific.** Global
+  hotkeys, some foreground-window sensing, and legacy capture paths still rely
+  on Win32 APIs.
+- **Apple Silicon and Intel are separate packages.** Continuum does not yet ship
+  a universal macOS binary.
 
-- **Binaries are not code-signed.** Windows SmartScreen will warn on first launch; click "More info" → "Run anyway". Signing is tracked for the first non-alpha release — see [docs/release.md](./docs/release.md).
-- **No auto-update mechanism.** Upgrading is "rerun the installer" today. `winget` publication is planned for 0.1.x.
-- **The installer cannot verify Claude Code login** reliably — `claude config get` output is chatty and version-sensitive. If `claude login` fails silently, Continuum will only notice at wake time (via a clear error). Run `claude login` manually if you have any doubt.
-- **Models download ~6.5 GB.** On slow connections this dominates onboarding time. The onboarding wizard lets you skip models you already have locally at `~/.continuum-dev/models/`.
+## Agent OS control plane
 
-## Voice
+- **There is no first-class per-run pause/cancel/emergency-stop MCP tool yet.**
+  Runs are bounded, resumable, policy-gated, and protected against concurrent
+  duplicate execution, but a dedicated user-visible kill switch is still
+  required for high-confidence unattended operation.
+- **Execution leases are process-local.** They prevent concurrent tasks inside
+  one Agent OS server from replaying a run. A future multi-process execution
+  topology will need an OS/file/database-backed distributed lease.
+- **A lost transport response remains an unknown outcome.** The bundled skill
+  instructs agents to inspect evidence and the destination state before retrying,
+  but not every external service offers an idempotency key or definitive read
+  after write.
+- **Post-action computer verification is structural, not semantic proof.** A
+  changed accessibility tree or foreground window is useful evidence, but it
+  does not prove that a human-level goal was achieved. Important workflows
+  still need explicit observable expectations.
 
-- **Whisper `small` mishears "Continuum".** It isn't in the vocab and tends to hallucinate "Cairo", "Hey Cairo", "kayo" variants, or split it across words. `medium` is the default for a reason. If you downgrade to `small`, expect missed wake-word detections.
-- **Dutch Piper voice is barely intelligible.** The `nl_NL-mls-medium` voice ships with noticeable artifacts. The default config disables it; English (`en_US-norman-medium`) is the current default. Multilingual output is waiting on better small Piper voices.
-- **ElevenLabs TTS is stubbed.** The config and backend selector are in place; the actual streaming client is a Phase 5 extension point that returns an error. Setting `tts.engine = "elevenlabs"` logs a warning and falls back to Piper.
-- **There is a known failing test**, `matches_whisper_k_to_c_homophone`, that asserts `"hey cairo"` should match the `"hey continuum"` wake phrase. It's being left failing on purpose: the wake matcher is intentionally strict to avoid false positives from Discord voice traffic. Ignore for now.
-- **Global hotkey is Windows-only.** `Ctrl+Shift+K` push-to-talk uses `RegisterHotKey` — there is no cross-platform abstraction yet.
-- **No wake word customization in the wizard.** You can edit `~/.continuum/config/default-models.toml` manually (`[voice].wake_keyword`). A UI is planned.
+## Connected apps and Composio
 
-## Triage
+- **Composio requires a user-supplied API key and account connections.** The key
+  is not accepted through an MCP tool; on Windows it can be stored with DPAPI.
+- **Live provider behavior can drift.** Composio tool schemas and response
+  envelopes are external contracts. Continuum rejects explicit/malformed
+  failures and classifies destructive actions conservatively, but a maintained
+  mocked contract suite and a dedicated live test tenant are still needed.
+- **Tool-name risk classification is conservative but heuristic.** Unknown
+  mutations default to write authority, and money/account-security verbs are
+  destructive. Newly introduced vendor terminology may still require an
+  explicit regression test.
+- **Remote workbench and remote bash surfaces remain deny-by-default.** They are
+  intentionally not a fallback for missing schemas or denied app actions.
 
-- **Qwen 3 8B occasionally over-wakes on visible errors** when the user is mid-edit of a file with a transient compile error. We're still calibrating the "error visible ≥ N seconds + idle" heuristic.
-- **Qwen 3 4B fallback loses ~5% accuracy** on boundary cases (ignore vs remember, whisper vs wake). If you're on a 6 GB GPU or CPU-only, budget for more false wakes.
-- **Non-English reasoning is untested.** The triage prompt and benchmark are English + Dutch only.
-- **GBNF grammar-constrained generation is disabled.** llama.cpp's grammar sampler aborts on the Qwen 3 tokenizer with `GGML_ASSERT(!stacks.empty())` regardless of grammar content or sampler ordering. `continuum-llm::generate_sync` now returns `LlmError::GrammarUnsupported` instead of silently dropping the constraint, but until that's resolved we rely on prompt-only JSON generation with brace-depth early stopping.
+## Checkpoints, evidence, and privacy
 
-## Orchestrator / Claude Code
+- **Windows resumable run checkpoints use current-user DPAPI.** They cannot be
+  moved to another Windows user or machine and expected to decrypt. Legacy
+  plaintext checkpoints are migrated when next saved.
+- **Unix checkpoints are permission-restricted, not encrypted.** Files are
+  owner-only (`0600`) under an owner-only directory (`0700`), but full at-rest
+  encryption for macOS/Linux is not implemented.
+- **Evidence is minimized but not cryptographically chained.** Sensitive
+  Composio arguments, typed text, account identifiers, OAuth URLs, and upstream
+  responses are redacted/minimized. The JSONL evidence log is append-only by
+  convention, but it is not yet tamper-evident with a hash chain or signature.
+- **Approved screenshots are sensitive local artifacts.** They are stored under
+  the Agent OS data directory when requested. Automatic retention limits,
+  encryption, and a user-facing purge control still need to be added.
+- **Goals and expectations can still contain user-supplied sensitive text.** The
+  skill explicitly forbids putting secrets there; stronger structured
+  sensitivity labels and field-level encryption are future work.
 
-- **Claude Code CLI surface can drift between releases.** Continuum is pinned to the event schema seen in v2.1.100; a new CLI release may surface fields Continuum's `events.rs` doesn't recognise. The parser is forward-compatible (unknown fields are dropped) but new event *types* will be silently skipped. Watch the logs for `"unknown event type"` warnings.
-- **Long Opus responses (>2000 words) may be truncated** when streamed into the TTS queue. The orchestrator prompt nudges Opus toward terse replies, but the truncation logic in `voice::tts` is heuristic.
+## Memory and world model
 
-## Workers
+- **Memory poisoning is not fully solved.** Provenance, status, confidence, and
+  supersession are core design requirements, but every ingestion source still
+  needs consistent trust scoring and confirmation rules.
+- **Long-term memory is local-user scoped.** There is no household/multi-user
+  isolation model beyond the operating-system account boundary.
+- **Export, selective deletion, and retention controls are incomplete.** Power
+  users can inspect local stores, but the desktop does not yet expose a complete
+  privacy lifecycle for every memory/evidence artifact.
+- **Embeddings improve retrieval but cannot prove truth or freshness.** Durable
+  decisions must continue to use source references, validity windows, and
+  confirmation rather than vector similarity alone.
 
-- **Worker output is not rendered as Markdown.** The Home tab's active-workers panel shows raw text. Formatting passes are planned.
-- **No way to resume a failed worker** from the dashboard yet — you have to respawn with the same task.
-- **Max concurrent workers is capped at 10**, default 3. There's no visible UI to change it mid-session; edit `~/.continuum/config/default-models.toml` under `[workers]`.
+## Desktop and UX
 
-## Dashboard
+- **Some panels remain hybrid or fixture-backed.** `docs/CURRENT_TABS.md` is the
+  source of truth for each tab's live/fixture status. Fixture data must never be
+  presented as live state.
+- **The permissions experience is still developer-oriented.** Capability names,
+  risk levels, evidence IDs, and integration state need a simpler user-facing
+  explanation without hiding the underlying authority boundary.
+- **Computer-use approvals are native dialogs, not a complete activity center.**
+  A persistent queue with diffable scope, timeout, cancellation, and grouped
+  approvals is still needed.
+- **Accessibility and reduced-motion contracts need continuous end-to-end UI
+  testing.** Static UI contract tests exist, but they do not replace screen
+  reader and keyboard-only validation on each desktop platform.
 
-- **No search inside the Memory tab's raw log view** — only semantic + episodic panels have search.
-- **Dark theme only.** Light theme is not planned.
-- **The dashboard process and the runtime process are separate.** They communicate via `~/.continuum-dev/state.json` and intent-file queues. Occasionally state lags by ~2 s after a config change. See [docs/dashboard.md](./docs/dashboard.md).
-- **No keyboard shortcuts** for tab switching yet.
+## Models, voice, and orchestration
 
-## Self-healing
+- **Model/provider behavior is not deterministic.** Continuum can enforce tool
+  schemas, permissions, budgets, and evidence, but cannot guarantee that every
+  provider will produce the same plan or explanation.
+- **Local-model quality depends heavily on hardware and quantization.** Smaller
+  models can produce weaker routing, planning, and verification decisions.
+- **Voice quality and wake behavior vary by language and model.** Dutch and
+  multilingual paths still need broader evaluation, especially around false
+  wakes and proper nouns.
+- **A real verifier must remain independent from the planner's confidence.**
+  Current structural verification is a foundation; higher-level outcome
+  verification and adversarial evaluation are still required.
 
-- **The repair agent is spawned in the repo root as cwd.** On a release install, that path is `%LOCALAPPDATA%\Continuum`. The agent can currently read logs and call `mcp__continuum__repair_*` tools, but it cannot edit the Rust source tree directly (by design).
-- **Rollback only covers `config.toml`.** Nightly backups snapshot five files but the rollback path currently only restores the main config.
+## Security boundaries that are not bugs
 
-## Memory
+- MCP alone cannot constrain an agent's native shell or filesystem tools.
+  Continuum can claim enforced permissions only when it launches the agent with
+  matching sandbox restrictions or routes execution through its own broker.
+- Access by another process already executing as the same OS user is outside the
+  protection offered by ordinary user-level file permissions and DPAPI use.
+- Deliberately relaxing a policy or adding a broad filesystem path expands the
+  authority the user granted. The UI should make that clear, but it cannot make
+  an intentionally broad grant narrow.
 
-- **Vector search over episodic memory uses fastembed BGE-small** (384-dim, ~66 MB). Quality is acceptable for "what did Continuum see last Tuesday" queries but weak for fuzzy concept queries.
-- **No multi-user mode.** Everything is scoped to the local OS user. A household with two people on one PC will see each other's episodic memory.
-- **Memory export is manual** — a full export feature is planned. For now, the SQLite and LanceDB files under `~/.continuum/memory/` are self-describing.
+## Reporting
 
-## Skills
-
-- **Hot reload watches `skills/`** under the repo root, not under `~/.continuum/skills/`. The intended user-skills directory is honored on load but not auto-reloaded. Restart Continuum after adding a user skill until the watcher is generalized.
-- **Skill trigger scoring is heuristic.** Weights in `skills/matcher.rs` are hand-tuned. Expect the occasional miss where the orchestrator picks up the wrong skill.
-
-## MCP tools
-
-- **No write-side filesystem tools** yet. Reads only (`fs_read_file`, `fs_list_dir`). This is by design for alpha — write tools need stronger permission scaffolding.
-- **No shell tool, and there will never be one** at the Continuum MCP layer. This is a non-negotiable from [CLAUDE.md](./CLAUDE.md). Workers can use Claude Code's built-in Bash tool, gated by Claude Code's own allowlist.
-- **`web_fetch` is GET-only** and capped at 50 KB. Redirects are disabled outright to close redirect-SSRF.
-
-## Not yet
-
-These aren't bugs, they're things the alpha deliberately defers:
-
-- **Discord / Matrix community space.** Will come with 0.1.0-beta once the first round of external users has given feedback.
-- **A proper marketing website.** The README and the docs site are it for now.
-- **Mobile companion app.** Post-1.0 idea.
-- **Memory marketplace / shared skills registry.** Post-1.0 idea.
-- **Voice cloning.** Post-1.0 idea.
-
----
-
-Spotted something not on this list? Please [open an issue](https://github.com/vixco/Continuum/issues/new/choose). An alpha that documents its own limits is much easier to work with than one that hides them.
+For ordinary bugs, open a GitHub issue with reproduction steps and logs that do
+not contain secrets. For permission bypasses, credential exposure, updater
+integrity issues, or other security-sensitive findings, follow
+[SECURITY.md](./SECURITY.md) and report privately.
