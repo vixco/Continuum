@@ -9,10 +9,13 @@ pub(crate) mod audit;
 pub mod config;
 /// Mandatory authorization and egress controls for the context MCP server.
 pub mod permission_broker;
+/// Durable, cross-process-safe plan execution and typed postconditions.
+pub mod reliable_agent;
 /// Safety-redaction evaluation harness (context engine spec §9, Task C6).
 pub mod redaction;
 pub mod server;
 pub mod tools;
 
 pub use permission_broker::PermissionedMcpServer;
+pub use reliable_agent::ReliableAgentOsServer;
 pub use server::ContinuumMcpServer;
