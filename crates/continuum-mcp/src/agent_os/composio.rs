@@ -212,7 +212,7 @@ impl ComposioClient {
             "session_id": session_id,
             "tool_slug": request.tool_slug.trim().to_ascii_uppercase(),
             "intent": request.intent,
-            "verification": { "source": "composio_tool_response", "accepted": true },
+            "verification": { "source": "composio_response_envelope", "accepted": true },
             "response": result
         }))
     }
@@ -235,7 +235,7 @@ impl ComposioClient {
             "session_id": session_id,
             "meta_tool": request.meta_tool.trim().to_ascii_uppercase(),
             "intent": request.intent,
-            "verification": { "source": "composio_tool_response", "accepted": true },
+            "verification": { "source": "composio_response_envelope", "accepted": true },
             "response": result
         }))
     }
@@ -721,28 +721,64 @@ fn is_supported_meta_tool(slug: &str) -> bool {
 }
 
 fn ensure_tool_response_success(value: &Value) -> Result<()> {
-    let Some(error) = value.get("error") else {
-        return Ok(());
-    };
-    let failed = match error {
-        Value::Null => false,
-        Value::String(message) => !message.trim().is_empty(),
-        Value::Object(map) => !map.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Bool(value) => *value,
-        Value::Number(_) => true,
-    };
+    if !value.is_object() {
+        bail!("Composio tool execution returned a malformed response envelope");
+    }
+
+    let failed = response_envelope_failed(value)
+        || value
+            .pointer("/data/results")
+            .and_then(Value::as_array)
+            .is_some_and(|results| results.iter().any(response_envelope_failed));
     if failed {
         bail!("Composio tool execution failed: {}", compact_error(value));
     }
     Ok(())
 }
 
+fn response_envelope_failed(value: &Value) -> bool {
+    let explicit_error = value.get("error").is_some_and(response_error_is_present);
+    let explicit_failure = [
+        "/successful",
+        "/success",
+        "/data/successful",
+        "/data/success",
+    ]
+    .iter()
+    .any(|pointer| value.pointer(pointer).and_then(Value::as_bool) == Some(false));
+    let failed_status = ["/status", "/data/status"].iter().any(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                ["error", "failed", "failure"]
+                    .iter()
+                    .any(|candidate| status.trim().eq_ignore_ascii_case(candidate))
+            })
+    });
+    explicit_error || explicit_failure || failed_status
+}
+
+fn response_error_is_present(error: &Value) -> bool {
+    match error {
+        Value::Null => false,
+        Value::String(message) => !message.trim().is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Bool(value) => *value,
+        Value::Number(_) => true,
+    }
+}
+
 fn compact_error(value: &Value) -> String {
     let candidate = value
         .pointer("/error/message")
+        .or_else(|| value.pointer("/data/error/message"))
         .or_else(|| value.get("error"))
-        .or_else(|| value.get("message"));
+        .or_else(|| value.pointer("/data/message"))
+        .or_else(|| value.get("message"))
+        .or_else(|| value.pointer("/data/status"))
+        .or_else(|| value.get("status"));
     match candidate {
         Some(Value::String(message)) => message.chars().take(2_000).collect(),
         Some(other) => serde_json::to_string(other)
@@ -883,6 +919,52 @@ mod tests {
             classify_meta_tool("COMPOSIO_MULTI_EXECUTE_TOOL", &arguments),
             RiskLevel::Destructive
         );
+    }
+
+    #[test]
+    fn accepts_supported_success_envelopes() {
+        for response in [
+            serde_json::json!({"data":{"id":"item_1"},"error":null,"log_id":"log_1"}),
+            serde_json::json!({"data":{},"successful":true}),
+            serde_json::json!({"data":{"status":"success"}}),
+            serde_json::json!({
+                "data": {
+                    "results": [
+                        {"data":{"id":"one"},"error":null},
+                        {"data":{"id":"two"},"successful":true}
+                    ]
+                }
+            }),
+        ] {
+            assert!(ensure_tool_response_success(&response).is_ok(), "{response}");
+        }
+    }
+
+    #[test]
+    fn rejects_explicit_failure_envelopes() {
+        for response in [
+            serde_json::json!({"data":null,"error":{"message":"upstream failed"}}),
+            serde_json::json!({"data":{},"successful":false}),
+            serde_json::json!({"data":{"success":false}}),
+            serde_json::json!({"data":{"status":"failed"}}),
+            serde_json::json!({
+                "data": {
+                    "results": [
+                        {"data":{"id":"one"},"error":null},
+                        {"data":null,"error":"second action failed"}
+                    ]
+                }
+            }),
+        ] {
+            assert!(ensure_tool_response_success(&response).is_err(), "{response}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_non_object_execution_response() {
+        for response in [Value::Null, Value::String("ok".into()), Value::Array(vec![])] {
+            assert!(ensure_tool_response_success(&response).is_err());
+        }
     }
 
     #[test]
