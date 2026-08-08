@@ -38,7 +38,8 @@ use tokio::sync::{Mutex, MutexGuard, OnceCell};
 
 use crate::tools::context::{
     self as ctxtool, ContextFilesRequest, ContextGitRequest, ContextPackageRequest,
-    ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest, PackageMemory,
+    ContextProcessesRequest, ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest,
+    PackageMemory,
 };
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::memory::{
@@ -91,6 +92,9 @@ pub(crate) struct ServerState {
     /// `[context_package]` — budget + per-section caps for
     /// `context_package`'s mcp-published profile (Task C4, spec §4.9).
     pub(crate) package_config: ContextPackageConfig,
+    /// `[process_watcher].enabled` consent boundary. A stale snapshot must
+    /// not remain readable after the collector is switched off.
+    pub(crate) process_watcher_enabled: bool,
 }
 
 /// The main MCP server. Cloneable because rmcp can fan out the handler across
@@ -144,6 +148,7 @@ impl ContinuumMcpServer {
         let toggles = full_cfg.privacy.toggles.clone();
         let git_context = full_cfg.git_context.clone();
         let package_config = full_cfg.context_package.clone();
+        let process_watcher_enabled = full_cfg.process_watcher.enabled;
         // Honour the configured `[storage] db_path` when there is a real
         // config file to honour; otherwise fall back to this process's
         // data dir, because the config *defaults* point at the standard
@@ -198,6 +203,7 @@ impl ContinuumMcpServer {
                 raw_log_path,
                 git_context,
                 package_config,
+                process_watcher_enabled,
             }),
             tool_router: Self::tool_router(),
         })
@@ -360,6 +366,7 @@ impl ContinuumMcpServer {
             toggles: &self.state.toggles,
             git_context: &self.state.git_context,
             package_config: &self.state.package_config,
+            process_watcher_enabled: self.state.process_watcher_enabled,
             enabled: self.state.context_tools.enabled,
         }
     }
@@ -1141,7 +1148,20 @@ impl ContinuumMcpServer {
     }
 
     #[tool(
-        description = "Continuum's deduped event timeline: what happened, when, how often. Filter with `since`/`until` (RFC 3339), `types` (registry tokens like \"error\", \"commit\", \"focus_switch\"), `project` (slug), and `source` (window|git|file|screen|audio|system|voice); `limit` defaults to 50 and is capped at 200. Events are COLLAPSED — one row with `count: 14` means the same thing happened 14 times between `ts_first` and `ts_last`, which is a far stronger signal than a single occurrence. Rows marked local_only are never returned; `omitted_private` tells you how many were withheld. A cold event database returns an empty list with `stale: true`, never an error."
+        description = "Meaningful active background processes from Continuum's opt-in process collector. Returns executable basename, coarse category, PID, CPU, memory, start time and a scrubbed executable path; never command lines, environment variables or process memory. Filter by `category`; `limit` defaults to 20 and is capped at 100. Lifecycle, stop and sustained-pressure history is available through context_timeline with source `process`. Returns `available: false` while [process_watcher].enabled is off."
+    )]
+    async fn context_processes(
+        &self,
+        Parameters(req): Parameters<ContextProcessesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("context_processes", &req, || async {
+            Ok::<_, McpError>(ctxtool::processes(&self.context_gate(), &req).await)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Continuum's deduped event timeline: what happened, when, how often. Filter with `since`/`until` (RFC 3339), `types` (registry tokens like \"error\", \"commit\", \"focus_switch\"), `project` (slug), and `source` (window|git|file|process|screen|audio|system|voice); `limit` defaults to 50 and is capped at 200. Events are COLLAPSED — one row with `count: 14` means the same thing happened 14 times between `ts_first` and `ts_last`, which is a far stronger signal than a single occurrence. Rows marked local_only are never returned; `omitted_private` tells you how many were withheld. A cold event database returns an empty list with `stale: true`, never an error."
     )]
     async fn context_timeline(
         &self,
@@ -1547,6 +1567,7 @@ mod repair_authorization_tests {
                 raw_log_path,
                 git_context: GitContextConfig::default(),
                 package_config: ContextPackageConfig::default(),
+                process_watcher_enabled: true,
             }),
             tool_router: ContinuumMcpServer::tool_router(),
         }

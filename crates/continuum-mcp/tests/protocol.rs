@@ -63,6 +63,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "context_screen",
     "context_audio",
     "context_projects",
+    "context_processes",
     // Plan C, Task C4 — context tool family, part 2 (events / git / package)
     "context_timeline",
     "context_search",

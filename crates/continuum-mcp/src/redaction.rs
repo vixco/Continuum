@@ -546,6 +546,7 @@ pub async fn stage_mcp_tools(
         git_context: &git_context,
         package_config: &package_config,
         enabled: tools.enabled,
+        process_watcher_enabled: true,
     };
 
     let mut omitted_private = 0u32;
@@ -579,6 +580,13 @@ pub async fn stage_mcp_tools(
         report,
         "context_projects",
         serde_json::to_value(ctxtool::projects(&gate).await)?,
+    );
+    scan(
+        report,
+        "context_processes",
+        serde_json::to_value(
+            ctxtool::processes(&gate, &ctxtool::ContextProcessesRequest::default()).await,
+        )?,
     );
 
     let timeline = ctxtool::timeline(&gate, &ctxtool::ContextTimelineRequest::default()).await;
@@ -859,6 +867,7 @@ mod tests {
             git_context: &git_context,
             package_config: &package_config,
             enabled: true,
+            process_watcher_enabled: true,
         };
         let timeline = ctxtool::timeline(&gate, &ctxtool::ContextTimelineRequest::default()).await;
         assert!(timeline.available);

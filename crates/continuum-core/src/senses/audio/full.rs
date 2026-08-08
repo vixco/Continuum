@@ -1625,7 +1625,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
-            watcher.run(tx, shutdown_rx).await;
+            watcher.run(tx, shutdown_rx, None).await;
         });
 
         let _ = shutdown_tx.send(true);

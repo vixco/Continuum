@@ -387,6 +387,11 @@ const SOURCE_ROWS: Array<{ key: SourceKey; label: string; description: string }>
     description: "File changes under confirmed project roots. Opt-in, off by default.",
   },
   {
+    key: "process_watcher",
+    label: "Background activity",
+    description: "Meaningful process starts, stops and sustained CPU or memory pressure. Opt-in.",
+  },
+  {
     key: "events_writer",
     label: "Event log writer",
     description: "Writes the deduplicated context event log to the local database.",

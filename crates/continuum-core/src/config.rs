@@ -70,6 +70,11 @@ pub struct ContinuumConfig {
     /// default OFF.
     #[serde(default)]
     pub file_watcher: FileWatcherConfig,
+    /// Background-process activity collector. Opt-in because even process
+    /// names can reveal user activity; it never reads command lines,
+    /// environment variables, or process memory.
+    #[serde(default)]
+    pub process_watcher: ProcessWatcherConfig,
     /// Idle-mode performance knobs (context engine spec §4.11/§6): when
     /// the user goes idle, capture and vision cadences relax via the
     /// shared [`crate::senses::cadence::CadenceControl`].
@@ -405,6 +410,83 @@ impl Default for FileWatcherConfig {
             ignore_globs: default_file_watcher_ignore_globs(),
             rearm_secs: 60,
             storm_threshold: 50,
+        }
+    }
+}
+
+/// Configuration for the background-process activity collector
+/// (`[process_watcher]`). The collector is opt-in and change-driven: it
+/// publishes relevant starts/stops plus sustained resource pressure instead
+/// of continuously persisting the complete operating-system process table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessWatcherConfig {
+    /// Master consent boundary. When false no process table is sampled.
+    pub enabled: bool,
+    /// Seconds between process-table samples.
+    pub poll_secs: u64,
+    /// CPU usage that becomes meaningful after `sustained_samples` polls.
+    pub cpu_threshold_percent: f32,
+    /// Resident memory that becomes meaningful after `sustained_samples`
+    /// polls.
+    pub memory_threshold_mb: u64,
+    /// Consecutive threshold crossings required before emitting a pressure
+    /// event, preventing single-sample noise.
+    pub sustained_samples: u32,
+    /// Process basenames whose lifecycle is useful even below thresholds.
+    pub include_names: Vec<String>,
+    /// Process basenames that are never published by this collector.
+    pub exclude_names: Vec<String>,
+    /// Maximum number of active entries in the published snapshot.
+    pub snapshot_limit: usize,
+}
+
+impl Default for ProcessWatcherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_secs: 2,
+            cpu_threshold_percent: 75.0,
+            memory_threshold_mb: 2_048,
+            sustained_samples: 3,
+            include_names: [
+                "cargo",
+                "rustc",
+                "node",
+                "python",
+                "python3",
+                "deno",
+                "bun",
+                "ollama",
+                "docker",
+                "cmake",
+                "ninja",
+                "msbuild",
+                "dotnet",
+                "java",
+                "continuum",
+                "continuum-mcp",
+            ]
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+            exclude_names: [
+                "system",
+                "idle",
+                "registry",
+                "smss",
+                "csrss",
+                "wininit",
+                "services",
+                "lsass",
+                "svchost",
+                "fontdrvhost",
+                "dwm",
+            ]
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+            snapshot_limit: 50,
         }
     }
 }
@@ -1617,6 +1699,7 @@ impl Default for ContinuumConfig {
             git_context: GitContextConfig::default(),
             events: EventsConfig::default(),
             file_watcher: FileWatcherConfig::default(),
+            process_watcher: ProcessWatcherConfig::default(),
             performance: PerformanceConfig::default(),
             session_state: SessionStateConfig::default(),
             context_package: ContextPackageConfig::default(),
@@ -2130,6 +2213,37 @@ interval_secs = 5
         assert_eq!(config.screen.interval_secs, 5);
         // Other fields should be defaults
         assert_eq!(config.frame.salience_threshold, 0.10);
+    }
+
+    #[test]
+    fn process_watcher_is_opt_in_and_every_threshold_is_overridable() {
+        let defaults = ContinuumConfig::default().process_watcher;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.poll_secs, 2);
+        assert!(defaults.include_names.iter().any(|name| name == "cargo"));
+
+        let parsed: ContinuumConfig = toml::from_str(
+            r#"
+[process_watcher]
+enabled = true
+poll_secs = 5
+cpu_threshold_percent = 60.0
+memory_threshold_mb = 1024
+sustained_samples = 4
+include_names = ["my-builder"]
+exclude_names = ["private-app"]
+snapshot_limit = 12
+"#,
+        )
+        .expect("parse process watcher");
+        assert!(parsed.process_watcher.enabled);
+        assert_eq!(parsed.process_watcher.poll_secs, 5);
+        assert_eq!(parsed.process_watcher.cpu_threshold_percent, 60.0);
+        assert_eq!(parsed.process_watcher.memory_threshold_mb, 1024);
+        assert_eq!(parsed.process_watcher.sustained_samples, 4);
+        assert_eq!(parsed.process_watcher.include_names, ["my-builder"]);
+        assert_eq!(parsed.process_watcher.exclude_names, ["private-app"]);
+        assert_eq!(parsed.process_watcher.snapshot_limit, 12);
     }
 
     #[test]

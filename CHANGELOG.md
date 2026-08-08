@@ -6,6 +6,15 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Opt-in background-process context**: a change-driven process collector now
+  records configured developer/model process starts and stops plus sustained
+  CPU or memory pressure, publishes a bounded privacy-classified
+  `processes.json` snapshot, exposes runtime health and the additive read-only
+  `context_processes` MCP tool, and feeds lifecycle history into
+  `context_timeline` under the new `process` source. Command lines,
+  environment variables, process memory and hidden-window contents are never
+  collected; `[process_watcher].enabled` defaults to false.
+
 - **macOS desktop distribution**: the Tauri desktop build now ships a native
   Keychain-backed provider-secret store, runtime/MCP binaries and their
   config/prompt/skill resources inside the app bundle, and macOS CI coverage.

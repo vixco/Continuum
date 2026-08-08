@@ -37,5 +37,6 @@ pub mod file_watch;
 pub mod frame;
 #[cfg(feature = "runtime")]
 pub mod git_watch;
+pub mod process_watch;
 #[cfg(feature = "runtime")]
 pub mod vision;

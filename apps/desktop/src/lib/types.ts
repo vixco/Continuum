@@ -205,6 +205,7 @@ export interface ContextEngineSnapshot {
   live_context: ComponentHealthSummary | null;
   git_watcher: ComponentHealthSummary | null;
   file_watcher: ComponentHealthSummary | null;
+  process_watcher: ComponentHealthSummary | null;
   events_writer: ComponentHealthSummary | null;
   /// Off-loop triage evaluation. `should_restart` fires when a single
   /// evaluation has been in flight far past any plausible model latency —

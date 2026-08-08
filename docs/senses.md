@@ -32,7 +32,7 @@ latest observations at a fixed interval and writes `PerceptionFrame` rows to
 the SQLite raw log. The separate live-context projection gives every agent role
 the same compact current world-state without exposing raw screenshots.
 
-## The Three Watchers
+## Watchers
 
 ### Vision Watcher
 
@@ -75,6 +75,15 @@ Polls Windows APIs once per second. No AI, no models -- pure structured data.
   never collected by live context.
 - **Call detection:** Checks for Discord, Teams, Zoom, Slack processes or browser tabs with "meet"/"zoom" in the title.
 - **Platform:** Windows-only via `#[cfg(windows)]`. Non-Windows gets stub observations.
+
+### Background Process Watcher (opt-in)
+
+Samples the process table and publishes only configured developer/model
+lifecycles and sustained CPU or memory pressure. It writes a bounded current
+snapshot to `~/.continuum-dev/processes.json` and change events to the deduped
+context-event log. It never reads command lines, environment variables,
+process memory, or hidden-window contents. Enable with
+`[process_watcher].enabled = true`; it is off by default.
 
 ## Frame Builder
 

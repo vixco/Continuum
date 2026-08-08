@@ -215,6 +215,19 @@ probe.
   restore the directory (or remove the project root from config) and wait
   one rearm tick; no restart needed.
 
+### Background-process collector (`process_watcher`)
+
+- Logs: `layer = "senses"`, `component = "process_watch"`.
+- Health: disabled-with-reason by default because `[process_watcher].enabled`
+  is an opt-in consent boundary. While enabled, `detail` reports poll count,
+  active significant processes, emitted events, and `last_poll_at`.
+  `should_restart` is always `false`: an individual process-table refresh or
+  snapshot write is retried on the next poll, so restart-thrashing cannot help.
+- Recovery: confirm the data directory is writable when `processes.json`
+  publication fails. Adjust `[process_watcher]` thresholds/include/exclude
+  names when the signal is too noisy or too sparse, then restart the runtime;
+  configuration is read at startup.
+
 ### Events writer (`events_writer`)
 
 - Logs: `layer = "memory"`, `component = "events"`.

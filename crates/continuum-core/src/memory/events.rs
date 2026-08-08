@@ -96,11 +96,13 @@ pub enum EventSource {
     System,
     /// Voice-command pipeline.
     Voice,
+    /// Background-process lifecycle and sustained resource pressure.
+    Process,
 }
 
 /// Every [`EventSource`] variant, for per-source bookkeeping (dropped
 /// counters, registry tests). Keep in sync when the registry grows.
-pub const ALL_EVENT_SOURCES: [EventSource; 7] = [
+pub const ALL_EVENT_SOURCES: [EventSource; 8] = [
     EventSource::Window,
     EventSource::Git,
     EventSource::File,
@@ -108,6 +110,7 @@ pub const ALL_EVENT_SOURCES: [EventSource; 7] = [
     EventSource::Audio,
     EventSource::System,
     EventSource::Voice,
+    EventSource::Process,
 ];
 
 /// The per-source event vocabulary as one flat enum (spec §4.6, closed
@@ -141,6 +144,14 @@ pub enum EventType {
     FileRenamed,
     /// Storm-collapsed "N files changed in <project>" event.
     FilesBulkChange,
+    // -- process --
+    /// A configured or resource-significant process appeared.
+    ProcessStarted,
+    /// A previously observed significant process disappeared. Generic OS
+    /// polling cannot prove whether this was a clean exit or a crash.
+    ProcessStopped,
+    /// CPU or resident memory stayed above the configured threshold.
+    ResourcePressure,
     // -- screen/audio classification (spec §4.7 enum) --
     /// An error was observed (build failure, stack trace, error dialog).
     Error,
@@ -179,7 +190,7 @@ pub enum EventType {
 
 /// Every [`EventType`] variant, for registry-stability tests. Keep in
 /// sync when the registry grows.
-pub const ALL_EVENT_TYPES: [EventType; 27] = [
+pub const ALL_EVENT_TYPES: [EventType; 30] = [
     EventType::FocusSwitch,
     EventType::ProjectSwitch,
     EventType::Commit,
@@ -191,6 +202,9 @@ pub const ALL_EVENT_TYPES: [EventType; 27] = [
     EventType::FileDeleted,
     EventType::FileRenamed,
     EventType::FilesBulkChange,
+    EventType::ProcessStarted,
+    EventType::ProcessStopped,
+    EventType::ResourcePressure,
     EventType::Error,
     EventType::Success,
     EventType::Decision,
@@ -221,6 +235,7 @@ impl EventType {
             FileModified | FileCreated | FileDeleted | FileRenamed | FilesBulkChange => {
                 source == EventSource::File
             }
+            ProcessStarted | ProcessStopped | ResourcePressure => source == EventSource::Process,
             Error | Success | Decision | Preference | TaskProgress | Communication | Routine
             | Other => matches!(source, EventSource::Screen | EventSource::Audio),
             VoiceCommand => matches!(source, EventSource::System | EventSource::Voice),
@@ -536,9 +551,16 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 ///   never byte-stable).
 /// - Per-path file events: `hash(source, event_type, project_id,
 ///   summary)` — the **raw** summary, see [`file_event_keys_on_raw_path`].
+/// - Process lifecycle/pressure events: `hash(source, event_type, project_id,
+///   raw_reference)` — the collector's stable process identity keeps
+///   concurrent processes with the same executable name distinct.
 pub fn dedupe_key(event: &ContextEvent) -> String {
     let discriminator = match event.source {
         EventSource::Screen | EventSource::Audio => event.application.clone(),
+        EventSource::Process => event
+            .raw_reference
+            .clone()
+            .unwrap_or_else(|| event.application.clone()),
         _ if file_event_keys_on_raw_path(event) => event.summary.clone(),
         _ => normalize_summary(&event.summary),
     };
@@ -573,6 +595,7 @@ fn source_index(source: EventSource) -> usize {
         EventSource::Audio => 4,
         EventSource::System => 5,
         EventSource::Voice => 6,
+        EventSource::Process => 7,
     }
 }
 
@@ -1383,7 +1406,7 @@ mod tests {
         // The persisted tokens are frozen (additive-only registry): this
         // list is the contract. A variant rename breaks this test — and
         // would break every persisted row, so don't.
-        let expected_types: [(EventType, &str); 27] = [
+        let expected_types: [(EventType, &str); 30] = [
             (EventType::FocusSwitch, "focus_switch"),
             (EventType::ProjectSwitch, "project_switch"),
             (EventType::Commit, "commit"),
@@ -1395,6 +1418,9 @@ mod tests {
             (EventType::FileDeleted, "file_deleted"),
             (EventType::FileRenamed, "file_renamed"),
             (EventType::FilesBulkChange, "files_bulk_change"),
+            (EventType::ProcessStarted, "process_started"),
+            (EventType::ProcessStopped, "process_stopped"),
+            (EventType::ResourcePressure, "resource_pressure"),
             (EventType::Error, "error"),
             (EventType::Success, "success"),
             (EventType::Decision, "decision"),
@@ -1422,7 +1448,7 @@ mod tests {
             );
             assert!(ALL_EVENT_TYPES.contains(&event_type));
         }
-        let expected_sources: [(EventSource, &str); 7] = [
+        let expected_sources: [(EventSource, &str); 8] = [
             (EventSource::Window, "window"),
             (EventSource::Git, "git"),
             (EventSource::File, "file"),
@@ -1430,6 +1456,7 @@ mod tests {
             (EventSource::Audio, "audio"),
             (EventSource::System, "system"),
             (EventSource::Voice, "voice"),
+            (EventSource::Process, "process"),
         ];
         for (source, token) in expected_sources {
             assert_eq!(event_enum_token(&source), token);
@@ -1702,6 +1729,25 @@ mod tests {
         let mut d = a.clone();
         d.source = EventSource::Audio;
         assert_ne!(dedupe_key(&a), dedupe_key(&d));
+    }
+
+    #[test]
+    fn process_key_uses_stable_process_identity() {
+        let ts = Utc::now();
+        let mut first = template_event("runtime process python stopped (pid 10)", ts);
+        first.source = EventSource::Process;
+        first.event_type = EventType::ProcessStopped;
+        first.application = "python".into();
+        first.raw_reference = Some("pid:10:started:100".into());
+
+        let mut second = first.clone();
+        second.summary = "runtime process python stopped (pid 11)".into();
+        second.raw_reference = Some("pid:11:started:101".into());
+        assert_ne!(dedupe_key(&first), dedupe_key(&second));
+
+        let mut repeat = first.clone();
+        repeat.summary = "python sustained resource pressure: 91% CPU".into();
+        assert_eq!(dedupe_key(&first), dedupe_key(&repeat));
     }
 
     // --- fixwave 3a C2: per-path file events must not share one key -------
