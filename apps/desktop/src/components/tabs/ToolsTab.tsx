@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import { CheckCircle2, ChevronDown, Loader2, Plus, Server, Trash2 } from "lucide-react";
@@ -14,13 +15,6 @@ import type {
   Skill,
 } from "@/lib/types";
 
-/**
- * Permission presets surfaced in the per-tool dropdown. The wire-up against
- * `default-permissions.toml` is intentionally NOT live yet — toggling
- * here updates component state only, with a small banner telling the user
- * that the runtime is unaware of the change. That avoids a silent "save
- * but nothing happens" footgun while the in-memory state exists.
- */
 const PERMISSION_PRESETS: Array<{ value: Permission; label: string }> = [
   { value: "auto", label: "Auto" },
   { value: "session", label: "Session" },
@@ -30,6 +24,16 @@ const PERMISSION_PRESETS: Array<{ value: Permission; label: string }> = [
 
 type Permission = "auto" | "session" | "confirm" | "blocked";
 
+interface ToolPermissionView {
+  tool: string;
+  permission: Permission;
+  source: "bundled_default" | "user_override";
+}
+
+function permissionMap(items: ToolPermissionView[]): Record<string, Permission> {
+  return Object.fromEntries(items.map((item) => [item.tool, item.permission]));
+}
+
 export function ToolsTab() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [editing, setEditing] = useState<Skill | null>(null);
@@ -37,7 +41,6 @@ export function ToolsTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // --- MCP tools (live, sourced from continuum-mcp static manifest) ---
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerRegistration[]>([]);
   const [mcpLoading, setMcpLoading] = useState(false);
@@ -45,6 +48,7 @@ export function ToolsTab() {
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [showServerInstaller, setShowServerInstaller] = useState(false);
   const [toolPermissions, setToolPermissions] = useState<Record<string, Permission>>({});
+  const [savingPermissions, setSavingPermissions] = useState<Set<string>>(new Set());
 
   async function refresh() {
     setLoading(true);
@@ -61,43 +65,66 @@ export function ToolsTab() {
   async function refreshMcpTools() {
     setMcpLoading(true);
     try {
-      const [tools, servers] = await Promise.all([
+      const [tools, servers, permissions] = await Promise.all([
         continuum.listMcpTools(),
         continuum.listInstalledMcpServers(),
+        invoke<ToolPermissionView[]>("list_tool_permissions"),
       ]);
       setMcpTools(tools);
       setMcpServers(servers);
+      setToolPermissions(permissionMap(permissions));
       setMcpError(null);
     } catch (e) {
-      setMcpError(`Failed to load MCP tools: ${e}`);
+      setMcpError(`Failed to load MCP tools and permissions: ${formatError(e)}`);
     } finally {
       setMcpLoading(false);
     }
   }
 
   useEffect(() => {
-    refresh();
-    refreshMcpTools();
+    void refresh();
+    void refreshMcpTools();
   }, []);
 
-  // Group MCP tools by namespace, preserve the order returned by the backend.
   const mcpByNamespace = useMemo(() => {
     const out: Array<{ namespace: string; tools: McpTool[] }> = [];
     const index = new Map<string, number>();
-    for (const t of mcpTools) {
-      let i = index.get(t.namespace);
-      if (i === undefined) {
-        i = out.length;
-        index.set(t.namespace, i);
-        out.push({ namespace: t.namespace, tools: [] });
+    for (const tool of mcpTools) {
+      let groupIndex = index.get(tool.namespace);
+      if (groupIndex === undefined) {
+        groupIndex = out.length;
+        index.set(tool.namespace, groupIndex);
+        out.push({ namespace: tool.namespace, tools: [] });
       }
-      out[i].tools.push(t);
+      out[groupIndex].tools.push(tool);
     }
     return out;
   }, [mcpTools]);
 
-  function setToolPermission(name: string, value: Permission) {
-    setToolPermissions((prev) => ({ ...prev, [name]: value }));
+  async function handlePermissionChange(name: string, value: Permission) {
+    const previous = toolPermissions[name];
+    setToolPermissions((current) => ({ ...current, [name]: value }));
+    setSavingPermissions((current) => new Set(current).add(name));
+    setMcpError(null);
+    try {
+      const permissions = await invoke<ToolPermissionView[]>("set_tool_permission", {
+        tool: name,
+        permission: value,
+      });
+      setToolPermissions(permissionMap(permissions));
+      setMcpNotice(
+        `${name} is now ${value}. The enforced policy is used by the next MCP/agent process.`
+      );
+    } catch (permissionError) {
+      setToolPermissions((current) => ({ ...current, [name]: previous ?? "blocked" }));
+      setMcpError(`Permission update failed: ${formatError(permissionError)}`);
+    } finally {
+      setSavingPermissions((current) => {
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
+    }
   }
 
   async function handleInstallServer(input: InstallMcpServerInput) {
@@ -147,16 +174,11 @@ export function ToolsTab() {
     }
   }
 
-  const dirtyPermissionCount = useMemo(
-    () => Object.keys(toolPermissions).length,
-    [toolPermissions]
-  );
-
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <Card
         title="MCP tools"
-        subtitle={`${mcpTools.length} tools across ${mcpByNamespace.length} namespaces — exposed to the orchestrator via continuum-mcp`}
+        subtitle={`${mcpTools.length} tools across ${mcpByNamespace.length} namespaces — enforced by continuum-mcp`}
         actions={
           <Button
             size="sm"
@@ -171,17 +193,14 @@ export function ToolsTab() {
           </Button>
         }
       >
-        {dirtyPermissionCount > 0 && (
-          <div
-            className="mb-3 rounded-md border border-state-warn/40 bg-state-warn/10 px-3 py-2 text-xs text-state-warn"
-            role="status"
-          >
-            {dirtyPermissionCount} permission change
-            {dirtyPermissionCount === 1 ? "" : "s"} held in memory only. The runtime does not yet
-            read the dashboard&apos;s per-tool permissions — this UI exists so the
-            orchestrator&apos;s eventual permission policy is visible and reviewable.
-          </div>
-        )}
+        <div
+          className="mb-3 rounded-md border border-accent-blue/30 bg-accent-blue/10 px-3 py-2 text-xs leading-relaxed text-accent-blue"
+          role="status"
+        >
+          These permissions are live. Continuum writes changes atomically to the local permission
+          policy, and the broker enforces them before a tool body runs. Unknown tools require
+          confirmation by default.
+        </div>
 
         {mcpError && (
           <div
@@ -237,12 +256,13 @@ export function ToolsTab() {
           </div>
         ) : (
           <div className="space-y-2">
-            {mcpByNamespace.map((ns) => (
+            {mcpByNamespace.map((namespace) => (
               <McpNamespace
-                key={ns.namespace}
-                ns={ns}
+                key={namespace.namespace}
+                ns={namespace}
                 permissions={toolPermissions}
-                onPermissionChange={setToolPermission}
+                saving={savingPermissions}
+                onPermissionChange={handlePermissionChange}
               />
             ))}
           </div>
@@ -306,30 +326,30 @@ export function ToolsTab() {
           </div>
         ) : (
           <ul className="divide-y divide-bg-border">
-            {skills.map((s) => (
+            {skills.map((skill) => (
               <li
-                key={s.name}
+                key={skill.name}
                 className="flex flex-col gap-2 py-3 text-sm sm:flex-row sm:items-center"
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 text-ink">
-                    <span>{s.name}</span>
-                    {s.source && <SourceBadge source={s.source} />}
+                    <span>{skill.name}</span>
+                    {skill.source && <SourceBadge source={skill.source} />}
                   </div>
-                  <div className="truncate text-xs text-ink-muted">{s.description}</div>
+                  <div className="truncate text-xs text-ink-muted">{skill.description}</div>
                   <div className="mt-0.5 truncate text-[11px] text-ink-dim">
-                    triggers: {s.triggers.join(", ") || "-"}
+                    triggers: {skill.triggers.join(", ") || "-"}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Toggle checked={s.enabled} onChange={() => handleToggle(s)} />
-                  <Button size="sm" variant="ghost" onClick={() => setEditing(s)}>
+                  <Toggle checked={skill.enabled} onChange={() => handleToggle(skill)} />
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(skill)}>
                     Edit
                   </Button>
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => handleDelete(s)}
+                    onClick={() => handleDelete(skill)}
                     title="Delete skill"
                   >
                     <Trash2 size={12} />
@@ -389,8 +409,8 @@ function McpServerInstaller({
     setInstalling(true);
     try {
       await onInstall({ name: name.trim(), command: command.trim(), args });
-    } catch (error) {
-      setInstallError(formatError(error));
+    } catch (installErrorValue) {
+      setInstallError(formatError(installErrorValue));
     } finally {
       setInstalling(false);
     }
@@ -426,7 +446,7 @@ function McpServerInstaller({
           Register an MCP server that is already installed on this computer. Continuum checks the
           executable and saves the registration locally; it does not download packages or run the
           server during installation. The server connects on the next agent run. Only register
-          software you trust, because its process runs with your Windows account access.
+          software you trust, because its process runs with your operating-system account access.
         </div>
 
         <Field label="Server name">
@@ -494,18 +514,20 @@ function formatError(error: unknown): string {
   try {
     return JSON.stringify(error);
   } catch {
-    return "An unknown error occurred while installing the server.";
+    return "An unknown error occurred.";
   }
 }
 
 function McpNamespace({
   ns,
   permissions,
+  saving,
   onPermissionChange,
 }: {
   ns: { namespace: string; tools: McpTool[] };
   permissions: Record<string, Permission>;
-  onPermissionChange: (name: string, value: Permission) => void;
+  saving: Set<string>;
+  onPermissionChange: (name: string, value: Permission) => Promise<void>;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -532,13 +554,17 @@ function McpNamespace({
                 <div className="truncate font-mono text-xs text-ink">{tool.name}</div>
                 <div className="truncate text-xs text-ink-muted">{tool.description}</div>
               </div>
-              <Select
-                value={permissions[tool.name] ?? "auto"}
-                options={PERMISSION_PRESETS}
-                onChange={(v) => onPermissionChange(tool.name, v as Permission)}
-                className="w-28"
-                title="Per-tool permission is in-memory only — the runtime reads default-permissions.toml on startup."
-              />
+              <div className="flex items-center gap-2">
+                {saving.has(tool.name) && <Loader2 size={12} className="animate-spin text-ink-dim" />}
+                <Select
+                  value={permissions[tool.name] ?? "blocked"}
+                  options={PERMISSION_PRESETS}
+                  onChange={(value) => void onPermissionChange(tool.name, value as Permission)}
+                  disabled={saving.has(tool.name)}
+                  className="w-28"
+                  title="Enforced by continuum-mcp. Changes apply to the next MCP process."
+                />
+              </div>
             </li>
           ))}
         </ul>
@@ -553,7 +579,7 @@ function SkillEditor({
   onCancel,
 }: {
   initial: Skill;
-  onSave: (s: SaveSkillInput) => void;
+  onSave: (skill: SaveSkillInput) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initial.name);
@@ -577,7 +603,7 @@ function SkillEditor({
                 description: description.trim(),
                 triggers: triggers
                   .split(",")
-                  .map((t) => t.trim())
+                  .map((trigger) => trigger.trim())
                   .filter(Boolean),
                 body,
                 source: initial.source ?? "user",
