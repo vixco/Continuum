@@ -18,4 +18,5 @@ pub mod repair;
 pub mod system;
 pub mod terminal;
 pub mod web;
+pub mod windows_ui;
 pub mod workers;

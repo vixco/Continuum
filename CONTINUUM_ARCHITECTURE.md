@@ -201,6 +201,12 @@ exact configured hosts (localhost only by default). Snapshot expressions are
 fixed and bounded, omit password fields and all form values, and no tool accepts
 arbitrary JavaScript. Navigate, click, and fill require fresh confirmation.
 
+Windows UI control begins with a narrow focused-element boundary. Continuum
+may inspect bounded accessibility metadata and, after fresh confirmation,
+invoke or set the value of only the element focused at execution. Password
+elements and non-cloud privacy zones are blocked. There is no coordinate input,
+global input injection, or arbitrary accessibility-tree search in this slice.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

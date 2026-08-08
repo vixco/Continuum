@@ -105,6 +105,15 @@ values and password controls; fill refuses password inputs and its content is
 redacted from audit details. Incognito, banking, and unrelated tabs remain
 inaccessible unless the user deliberately adds their exact host.
 
+### Windows UI Automation
+
+`windows_ui_focused_element` reads the focused element's name, automation id,
+control type, and password flag. `windows_ui_invoke_focused` and
+`windows_ui_set_focused_value` are always-confirm and act only on the element
+focused when the call executes. Password values, coordinates, global input,
+and arbitrary tree queries are unavailable. The same foreground privacy zone
+used by observation tools blocks local-only and excluded applications.
+
 ### GitHub (optional)
 
 Settings → Integrations contains a GitHub card. Connect launches the official

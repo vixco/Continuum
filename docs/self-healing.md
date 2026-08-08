@@ -96,6 +96,18 @@ Component: `browser`
   check. Host denials and password-field blocks require configuration/user
   action and are never auto-retried.
 
+## Windows UI Automation
+
+Component: `windows_ui`
+
+- Health check: `windows_ui_focused_element` performs a live focused-element
+  probe after permission and privacy checks.
+- Recovery: refocus a stable semantic control and retry inspection once.
+  Unsupported patterns, password controls, and privacy-zone denials are policy
+  results, not restartable failures.
+- Restart rule: restart the MCP process only after repeated COM initialization
+  failures; never auto-repeat InvokePattern or ValuePattern mutations.
+
 ## GitHub CLI bridge
 
 Component: `github`
