@@ -56,6 +56,20 @@ Component: `file_actions`
   files named `.continuum-write-*.tmp` or `.continuum-patch-*.tmp` may be
   quarantined after verifying no MCP file action is active.
 
+## Terminal broker
+
+Component: `terminal_tools`
+
+- Health check: run an allowed program's version command through
+  `terminal_verify` in an allowlisted project and verify its evidence JSON can
+  be read back.
+- Logs: MCP/permission audit plus immutable per-run JSON under
+  `<data_dir>/evidence/terminal/`.
+- Recovery: a timed-out child is killed on drop. If evidence persistence fails,
+  the verifier call fails instead of claiming success without proof.
+- Restart rule: restart the MCP process after repeated spawn failures; first
+  verify PATH and `mcp.terminal.allowed_programs` configuration.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):

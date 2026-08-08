@@ -25,6 +25,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   preserve the original, moves refuse overwrite, and delete is a recoverable
   move under `<data_dir>/recovery/files/`. Write size and replacement caps are
   configurable under `[mcp.fs]`.
+- **Restricted terminal and verifier broker**: `terminal_run` and
+  `terminal_verify` launch only configured executable basenames with literal
+  argument vectors—never shell strings—in allowlisted working directories.
+  Stdin is closed, sensitive environment variables and credential-like
+  arguments are excluded, and runtime/output limits are configurable.
+  Verifier results are atomically persisted under `evidence/terminal/`.
 
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained

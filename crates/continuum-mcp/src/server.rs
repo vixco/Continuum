@@ -60,6 +60,7 @@ use crate::tools::repair::{
     TestRequest,
 };
 use crate::tools::system::{self as systool, NotificationRequest};
+use crate::tools::terminal::TerminalRunRequest;
 use crate::tools::web::WebFetchRequest;
 use crate::tools::workers::{
     self as workertool, SpawnWorkerRequest, WorkerIdRequest, WorkerListRequest, WorkerWaitRequest,
@@ -74,6 +75,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_extra_paths: Vec<PathBuf>,
     pub(crate) fs_max_write_bytes: usize,
     pub(crate) fs_max_patch_replacements: usize,
+    pub(crate) terminal_config: crate::config::McpTerminalConfig,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
@@ -212,6 +214,7 @@ impl ContinuumMcpServer {
                 fs_extra_paths: mcp_cfg.fs.extra_paths,
                 fs_max_write_bytes: mcp_cfg.fs.max_write_bytes,
                 fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
+                terminal_config: mcp_cfg.terminal,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
@@ -1469,6 +1472,47 @@ impl ContinuumMcpServer {
     }
 
     // -----------------------------------------------------------------------
+    // Restricted terminal broker
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Run a configured executable as program + literal args in an allowlisted cwd. No shell is involved, stdin is closed, credential-like args are rejected, sensitive environment variables are stripped, and timeout/output are capped. Requires confirmation every call."
+    )]
+    async fn terminal_run(
+        &self,
+        Parameters(req): Parameters<TerminalRunRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("terminal_run", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::terminal::run(&req, &allowlist, &self.state.terminal_config)
+                .await
+                .map_err(terminal_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Run a configured verification command under the restricted terminal broker and persist its exit code, bounded output, duration, cwd, and command as durable JSON evidence."
+    )]
+    async fn terminal_verify(
+        &self,
+        Parameters(req): Parameters<TerminalRunRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("terminal_verify", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::terminal::verify(
+                &req,
+                &allowlist,
+                &self.state.terminal_config,
+                &self.state.data_dir,
+            )
+            .await
+            .map_err(terminal_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
     // Web fetch (GET only, no redirects)
     // -----------------------------------------------------------------------
 
@@ -1743,6 +1787,16 @@ fn git_err_to_mcp(error: crate::tools::git::GitToolError) -> McpError {
     }
 }
 
+fn terminal_err_to_mcp(error: crate::tools::terminal::TerminalError) -> McpError {
+    use crate::tools::terminal::TerminalError;
+    match error {
+        TerminalError::Spawn(_) | TerminalError::Evidence(_) | TerminalError::EvidencePath => {
+            McpError::internal_error(error.to_string(), None)
+        }
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
 fn web_err_to_mcp(e: &crate::tools::web::WebFetchError) -> McpError {
     use crate::tools::web::WebFetchError;
     match e {
@@ -1806,6 +1860,7 @@ mod repair_authorization_tests {
                 fs_extra_paths: Vec::new(),
                 fs_max_write_bytes: 1024 * 1024,
                 fs_max_patch_replacements: 100,
+                terminal_config: crate::config::McpTerminalConfig::default(),
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),

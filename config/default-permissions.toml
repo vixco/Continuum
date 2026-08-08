@@ -99,6 +99,11 @@ git_checkpoint_list = "auto"
 git_checkpoint      = "session-approved"
 git_rollback        = "always-confirm"
 
+# --- Restricted terminal broker ---
+[terminal]
+terminal_verify = "session-approved"
+terminal_run    = "always-confirm"
+
 # --- Web fetch (GET only, public-IP only, no redirects) ---
 [web]
 web_fetch = "auto"

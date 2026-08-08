@@ -55,6 +55,27 @@ All content is UTF-8. `mcp.fs.max_write_bytes` defaults to 1 MiB and
 created implicitly: the direct destination parent must already exist. Directory
 moves across volumes are refused rather than copied recursively.
 
+### Terminal and verifier
+
+`terminal_run` (always-confirm) and `terminal_verify` (session-approved) share
+one restricted subprocess broker. Requests contain `cwd`, `program`, `args[]`,
+optional `timeout_secs`, and an optional display `label`. The broker:
+
+- accepts only executable basenames listed in `mcp.terminal.allowed_programs`;
+- passes arguments directly, with no shell interpolation;
+- requires an allowlisted existing cwd and closes stdin;
+- removes environment variables whose names indicate tokens, passwords,
+  secrets, auth, cookies, credentials, or private keys;
+- rejects credential-like arguments and caps argument count, timeout, and
+  captured output.
+
+`terminal_verify` writes the complete bounded result to
+`<data_dir>/evidence/terminal/<id>.json` and returns the evidence id/path.
+Batch, `.cmd`, and PowerShell script programs remain hard-blocked because they
+would reintroduce shell parsing. The default native-program allowlist is
+`cargo`, `git`, `dotnet`, `rustc`, and `rustfmt`; users can narrow or expand it
+in config.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

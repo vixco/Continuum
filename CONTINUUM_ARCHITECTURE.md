@@ -172,6 +172,12 @@ existing destination, and delete moves the target into Continuum recovery
 storage. Existing targets and new-path parents pass the same canonical
 allowlist and hard secret deny rules as filesystem reads.
 
+Terminal actions are brokered as executable plus literal argument vector; a
+shell never parses model input. Executable basenames, timeout, output size, and
+argument count are configurable. Cwd passes the project allowlist, stdin is
+closed, sensitive environment variables are removed, and verifier runs persist
+bounded evidence for later handoff.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:
