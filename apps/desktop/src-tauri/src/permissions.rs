@@ -1,15 +1,36 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
+use serde_json::Value;
 use tauri::State;
+use tokio::sync::Mutex;
 
 use crate::AppState;
 
 const DEFAULTS: &str = include_str!("../../../../config/default-permissions.toml");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeToolPermission {
+    Auto,
+    SessionApproved,
+    AlwaysConfirm,
+    Blocked,
+}
+
+impl NativeToolPermission {
+    fn parse(value: &str) -> Result<Self, String> {
+        match canonical_permission(value)? {
+            "auto" => Ok(Self::Auto),
+            "session-approved" => Ok(Self::SessionApproved),
+            "always-confirm" => Ok(Self::AlwaysConfirm),
+            _ => Ok(Self::Blocked),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolPermissionView {
@@ -59,6 +80,56 @@ pub async fn set_tool_permission(
     effective_permissions(&path)
 }
 
+/// The HTTP-provider chat path executes memory tools inside the Tauri process
+/// rather than through `continuum-mcp`. This is its mandatory authorization
+/// choke point so those tools cannot bypass the policy shown in the Tools tab.
+#[cfg(not(test))]
+pub(crate) async fn authorize_in_process_tool(
+    local_tool: &str,
+    arguments: &Value,
+) -> Result<(), String> {
+    let canonical_tool = canonical_chat_tool(local_tool).ok_or_else(|| {
+        format!("Unknown in-process chat tool {local_tool:?}; permission denied by default")
+    })?;
+    let data_dir = continuum_core::config::continuum_dev_dir();
+    let permission = effective_permission_for_tool(
+        &data_dir.join("permissions.toml"),
+        canonical_tool,
+    )?;
+
+    match permission {
+        NativeToolPermission::Auto => Ok(()),
+        NativeToolPermission::Blocked => Err(format!(
+            "Tool {canonical_tool:?} is blocked by the enforced local permission policy"
+        )),
+        NativeToolPermission::SessionApproved => {
+            let grants = in_process_session_grants();
+            if grants.lock().await.contains(canonical_tool) {
+                return Ok(());
+            }
+            require_native_approval(canonical_tool, arguments, "Approve for this chat session")
+                .await?;
+            grants.lock().await.insert(canonical_tool.to_string());
+            Ok(())
+        }
+        NativeToolPermission::AlwaysConfirm => {
+            require_native_approval(canonical_tool, arguments, "Approve this tool call once").await
+        }
+    }
+}
+
+/// Unit tests exercise the vault behavior without opening native UI. Permission
+/// parsing and fail-closed mapping are tested separately below.
+#[cfg(test)]
+pub(crate) async fn authorize_in_process_tool(
+    local_tool: &str,
+    _arguments: &Value,
+) -> Result<(), String> {
+    canonical_chat_tool(local_tool)
+        .map(|_| ())
+        .ok_or_else(|| format!("Unknown in-process chat tool {local_tool:?}"))
+}
+
 fn permission_path(app: &AppState) -> PathBuf {
     app.runtime.dev_dir().join("permissions.toml")
 }
@@ -94,6 +165,31 @@ fn effective_permissions(path: &Path) -> Result<Vec<ToolPermissionView>, String>
     }
     output.sort_by(|left, right| left.tool.cmp(&right.tool));
     Ok(output)
+}
+
+fn effective_permission_for_tool(
+    path: &Path,
+    tool: &str,
+) -> Result<NativeToolPermission, String> {
+    let defaults = parse_permissions(DEFAULTS, "bundled defaults")?;
+    let default = defaults
+        .values()
+        .find_map(|tools| tools.get(tool))
+        .ok_or_else(|| {
+            format!(
+                "Tool {tool:?} is absent from config/default-permissions.toml and is denied by default"
+            )
+        })?;
+
+    if path.exists() {
+        let body = std::fs::read_to_string(path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let overrides = parse_permissions(&body, &path.display().to_string())?;
+        if let Some(value) = overrides.values().find_map(|tools| tools.get(tool)) {
+            return NativeToolPermission::parse(value);
+        }
+    }
+    NativeToolPermission::parse(default)
 }
 
 fn parse_permissions(
@@ -142,6 +238,218 @@ fn ui_permission(value: &str) -> &'static str {
         "always-confirm" => "confirm",
         _ => "blocked",
     }
+}
+
+fn canonical_chat_tool(local_tool: &str) -> Option<&'static str> {
+    match local_tool {
+        "memory_search" => Some("memory_vault_search"),
+        "memory_get" => Some("memory_vault_get"),
+        "memory_save" => Some("memory_vault_save"),
+        "memory_delete" => Some("memory_vault_delete"),
+        _ => None,
+    }
+}
+
+fn in_process_session_grants() -> &'static Mutex<HashSet<String>> {
+    static GRANTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    GRANTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(not(test))]
+async fn require_native_approval(
+    tool: &str,
+    arguments: &Value,
+    scope: &str,
+) -> Result<(), String> {
+    if std::env::var("CONTINUUM_MCP_HEADLESS")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    {
+        return Err(format!(
+            "Tool {tool:?} requires native approval, but Continuum is running headless"
+        ));
+    }
+    let summary = approval_summary(tool, arguments, scope);
+    if native_approval(&summary).await? {
+        Ok(())
+    } else {
+        Err(format!("The user denied tool {tool:?}"))
+    }
+}
+
+#[cfg(not(test))]
+fn approval_summary(tool: &str, arguments: &Value, scope: &str) -> String {
+    let safe = minimize_arguments(arguments, 0);
+    let rendered = serde_json::to_string_pretty(&safe).unwrap_or_else(|_| "{}".to_string());
+    sanitize_dialog_text(&format!(
+        "Continuum chat wants to call: {tool}\n\n{scope}\n\nArguments (private payloads minimized):\n{rendered}"
+    ))
+}
+
+#[cfg(not(test))]
+fn minimize_arguments(value: &Value, depth: usize) -> Value {
+    if depth > 5 {
+        return Value::String("[depth-limited]".to_string());
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .take(40)
+                .map(|(key, child)| {
+                    let lowered = key.to_ascii_lowercase();
+                    let private = [
+                        "password",
+                        "secret",
+                        "token",
+                        "key",
+                        "authorization",
+                        "cookie",
+                        "body",
+                        "content",
+                        "text",
+                    ]
+                    .iter()
+                    .any(|needle| lowered.contains(needle));
+                    (
+                        key.clone(),
+                        if private {
+                            redacted_shape(child)
+                        } else {
+                            minimize_arguments(child, depth + 1)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .take(20)
+                .map(|child| minimize_arguments(child, depth + 1))
+                .collect(),
+        ),
+        Value::String(value) => Value::String(value.chars().take(160).collect()),
+        other => other.clone(),
+    }
+}
+
+#[cfg(not(test))]
+fn redacted_shape(value: &Value) -> Value {
+    match value {
+        Value::String(value) => {
+            serde_json::json!({"redacted": true, "chars": value.chars().count()})
+        }
+        Value::Array(items) => serde_json::json!({"redacted": true, "items": items.len()}),
+        Value::Object(object) => {
+            serde_json::json!({"redacted": true, "fields": object.len()})
+        }
+        Value::Null => serde_json::json!({"redacted": true, "kind": "null"}),
+        Value::Bool(_) => serde_json::json!({"redacted": true, "kind": "boolean"}),
+        Value::Number(_) => serde_json::json!({"redacted": true, "kind": "number"}),
+    }
+}
+
+#[cfg(not(test))]
+fn sanitize_dialog_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !character.is_control() || matches!(character, '\n' | '\t')
+        })
+        .filter(|character| {
+            !matches!(
+                character,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .take(3_500)
+        .collect()
+}
+
+#[cfg(all(not(test), windows))]
+async fn native_approval(summary: &str) -> Result<bool, String> {
+    const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$result = [System.Windows.Forms.MessageBox]::Show(
+  $env:CONTINUUM_APPROVAL_SUMMARY,
+  'Continuum chat tool permission',
+  [System.Windows.Forms.MessageBoxButtons]::YesNo,
+  [System.Windows.Forms.MessageBoxIcon]::Warning,
+  [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+)
+if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { 'allow' } else { 'deny' }
+"#;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                SCRIPT,
+            ])
+            .env("CONTINUUM_APPROVAL_SUMMARY", summary)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Chat tool approval timed out".to_string())?
+    .map_err(|error| format!("Could not open chat tool approval: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Chat tool approval failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .eq_ignore_ascii_case("allow"))
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+async fn native_approval(summary: &str) -> Result<bool, String> {
+    const SCRIPT: &str = r#"
+set promptText to system attribute "CONTINUUM_APPROVAL_SUMMARY"
+try
+  display dialog promptText with title "Continuum chat tool permission" buttons {"Deny", "Allow"} default button "Deny" with icon caution
+  if button returned of result is "Allow" then return "allow"
+on error number -128
+end try
+return "deny"
+"#;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::process::Command::new("osascript")
+            .args(["-e", SCRIPT])
+            .env("CONTINUUM_APPROVAL_SUMMARY", summary)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Chat tool approval timed out".to_string())?
+    .map_err(|error| format!("Could not open chat tool approval: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Chat tool approval failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .eq_ignore_ascii_case("allow"))
+}
+
+#[cfg(all(not(test), not(any(windows, target_os = "macos"))))]
+async fn native_approval(_summary: &str) -> Result<bool, String> {
+    Err("Native chat-tool approvals are supported on Windows and macOS only".to_string())
 }
 
 fn load_override_document(path: &Path) -> Result<toml::Value, String> {
@@ -229,13 +537,40 @@ mod tests {
     }
 
     #[test]
+    fn in_process_tools_map_to_the_same_mcp_policy() {
+        assert_eq!(
+            canonical_chat_tool("memory_search"),
+            Some("memory_vault_search")
+        );
+        assert_eq!(
+            canonical_chat_tool("memory_delete"),
+            Some("memory_vault_delete")
+        );
+        assert_eq!(canonical_chat_tool("unknown"), None);
+    }
+
+    #[test]
+    fn effective_permission_uses_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("permissions.toml");
+        std::fs::write(
+            &path,
+            "[memory]\nmemory_vault_get = \"blocked\"\n",
+        )
+        .expect("write override");
+        assert_eq!(
+            effective_permission_for_tool(&path, "memory_vault_get").expect("permission"),
+            NativeToolPermission::Blocked
+        );
+    }
+
+    #[test]
     fn atomic_override_roundtrip() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("permissions.toml");
-        let document: toml::Value = toml::from_str(
-            "[memory]\nmemory_vault_get = \"blocked\"\n",
-        )
-        .expect("document");
+        let document: toml::Value =
+            toml::from_str("[memory]\nmemory_vault_get = \"blocked\"\n")
+                .expect("document");
         persist_document(&path, &document).expect("persist");
         let effective = effective_permissions(&path).expect("effective");
         let selected = effective
