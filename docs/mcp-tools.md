@@ -97,6 +97,17 @@ Owner/repository/path inputs are validated, traversal is rejected, list sizes
 are bounded, binary files are rejected, and `github.max_response_bytes` caps
 JSON and decoded file responses. `github.enabled = false` is a hard kill switch.
 
+Mutation tools always require a fresh confirmation:
+
+- `github_create_issue`
+- `github_comment_issue`
+- `github_create_pull_request`
+
+Each mutation is scoped to one validated `owner/repo`. Titles, bodies, issue
+numbers, and branch refs are bounded or validated before the official `gh api`
+call. Issue and pull-request bodies are omitted from audit details. Pull-request
+creation expects the head branch to exist remotely and does not push it.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

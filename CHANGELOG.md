@@ -6,6 +6,11 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Confirmed GitHub mutations**: `github_create_issue`,
+  `github_comment_issue`, and `github_create_pull_request` are bounded to one
+  validated repository and require a fresh confirmation on every call. Bodies
+  are redacted from local audit metadata, and pull-request creation never
+  pushes code.
 - **Enforced action permission gateway**: MCP calls now pass through the
   bundled and user-overridden `auto` / `session-approved` /
   `always-confirm` / `blocked` policy before execution. Approval requests,

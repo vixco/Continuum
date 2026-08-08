@@ -116,7 +116,9 @@ fn sanitize_map(m: &Map<String, Value>) -> Map<String, Value> {
 fn is_sensitive_key(k: &str) -> bool {
     let lower = k.to_lowercase();
     // Match on substring because keys like "api_key", "accessToken", "authHeader" should all catch.
-    const NEEDLES: &[&str] = &["password", "secret", "token", "apikey", "api_key", "auth"];
+    const NEEDLES: &[&str] = &[
+        "password", "secret", "token", "apikey", "api_key", "auth", "body", "content",
+    ];
     NEEDLES.iter().any(|n| lower.contains(n))
 }
 
@@ -144,10 +146,10 @@ mod tests {
 
     #[test]
     fn sanitize_redacts_nested_auth_keys() {
-        let v = json!({"headers": {"Authorization": "Bearer xyz"}, "body": {"msg": "ok"}});
+        let v = json!({"headers": {"Authorization": "Bearer xyz"}, "metadata": {"msg": "ok"}});
         let s = sanitize(&v);
         assert_eq!(s["headers"]["Authorization"], json!("[REDACTED]"));
-        assert_eq!(s["body"]["msg"], json!("ok"));
+        assert_eq!(s["metadata"]["msg"], json!("ok"));
     }
 
     #[test]
@@ -157,6 +159,14 @@ mod tests {
         assert_eq!(s["accessToken"], json!("[REDACTED]"));
         assert_eq!(s["api_key"], json!("[REDACTED]"));
         assert_eq!(s["Normal"], json!("keep"));
+    }
+
+    #[test]
+    fn sanitize_redacts_mutation_bodies() {
+        let value = json!({"title": "safe summary", "body": "private details"});
+        let sanitized = sanitize(&value);
+        assert_eq!(sanitized["title"], json!("safe summary"));
+        assert_eq!(sanitized["body"], json!("[REDACTED]"));
     }
 
     #[test]

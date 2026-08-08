@@ -82,6 +82,10 @@ Component: `github`
   revoke the GitHub CLI OAuth grant remotely if compromise is suspected.
 - Restart rule: restart the MCP process after repeated CLI spawn/timeouts; auth
   failures require reconnect rather than restart.
+- Mutation failures are non-retriable by default: inspect the returned GitHub
+  response, correct the request or permissions, and ask for a new confirmation.
+  Continuum never automatically repeats an issue, comment, or pull-request
+  creation because duplicate external writes are not safely recoverable.
 
 ## Repair MCP tools
 

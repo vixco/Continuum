@@ -114,6 +114,10 @@ pub struct GitHubConfig {
     pub api_timeout_secs: u64,
     /// Maximum bytes returned from one API call.
     pub max_response_bytes: usize,
+    /// Maximum UTF-8 bytes sent in one issue/comment/PR body.
+    pub max_mutation_body_bytes: usize,
+    /// Maximum title characters for issues and pull requests.
+    pub max_title_chars: usize,
 }
 
 impl Default for GitHubConfig {
@@ -123,6 +127,8 @@ impl Default for GitHubConfig {
             connect_timeout_secs: 600,
             api_timeout_secs: 30,
             max_response_bytes: 512 * 1024,
+            max_mutation_body_bytes: 64 * 1024,
+            max_title_chars: 256,
         }
     }
 }

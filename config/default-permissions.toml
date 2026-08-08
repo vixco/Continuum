@@ -112,6 +112,9 @@ github_list_repos  = "session-approved"
 github_get_repo    = "session-approved"
 github_list_issues = "session-approved"
 github_get_file    = "session-approved"
+github_create_issue        = "always-confirm"
+github_comment_issue       = "always-confirm"
+github_create_pull_request = "always-confirm"
 
 # --- Web fetch (GET only, public-IP only, no redirects) ---
 [web]

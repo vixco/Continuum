@@ -1809,6 +1809,52 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "terminal_verify".into(),
             description: "Run a verifier and persist bounded evidence".into(),
         },
+        // --- github (optional connection) ---
+        McpTool {
+            namespace: "github".into(),
+            name: "github_status".into(),
+            description: "Check secure official GitHub CLI auth status".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_me".into(),
+            description: "Read the connected GitHub user profile".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_list_repos".into(),
+            description: "List repositories visible to the connected account".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_get_repo".into(),
+            description: "Read repository metadata".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_list_issues".into(),
+            description: "List repository issues and pull requests".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_get_file".into(),
+            description: "Read a UTF-8 repository file or directory listing".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_create_issue".into(),
+            description: "Create a bounded issue after explicit confirmation".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_comment_issue".into(),
+            description: "Comment after explicit confirmation".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_create_pull_request".into(),
+            description: "Open a pull request after explicit confirmation".into(),
+        },
         // --- web ---
         McpTool {
             namespace: "web".into(),

@@ -354,6 +354,8 @@ enabled = true
 connect_timeout_secs = 600
 api_timeout_secs = 30
 max_response_bytes = 524288
+max_mutation_body_bytes = 65536
+max_title_chars = 256
 
 # Adaptive resource policy. Probed once at boot (CPU cores, RAM, GPU/VRAM,
 # laptop-vs-desktop, AC-vs-battery) and resolved into concrete knobs applied
