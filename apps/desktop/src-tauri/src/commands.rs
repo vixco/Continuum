@@ -1757,6 +1757,27 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "fs_list_dir".into(),
             description: "List up to 500 entries of a directory".into(),
         },
+        // --- git ---
+        McpTool {
+            namespace: "git".into(),
+            name: "git_checkpoint".into(),
+            description: "Checkpoint tracked and safe untracked repository state".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_diff".into(),
+            description: "Show bounded status and unified diff".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_checkpoint_list".into(),
+            description: "List durable Continuum checkpoint refs".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_rollback".into(),
+            description: "Recoverably restore a confirmed checkpoint".into(),
+        },
         // --- web ---
         McpTool {
             namespace: "web".into(),

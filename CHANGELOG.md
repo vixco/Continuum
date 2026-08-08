@@ -13,6 +13,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   durable across the desktop and MCP processes and audited to
   `logs/actions.jsonl`. The Tools tab now reads and saves the real policy and
   lets users approve pending calls or revoke active grants.
+- **Recoverable Git tools**: `git_checkpoint`, `git_diff`,
+  `git_checkpoint_list`, and `git_rollback` operate only in allowlisted
+  repositories. Checkpoints use an isolated index and dedicated refs, exclude
+  hard-denied secret paths, and never disturb the user's index. Rollback
+  requires per-call confirmation, creates a safety checkpoint, and preserves
+  loose/sensitive files under `.git/continuum-recovery/` before resetting.
 
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained

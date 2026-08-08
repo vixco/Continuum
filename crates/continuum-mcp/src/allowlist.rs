@@ -184,6 +184,44 @@ pub fn is_path_allowed(path: &Path, cfg: &AllowlistConfig) -> Result<PathBuf, De
     Ok(canonical)
 }
 
+/// Checks only the hard deny rules for a repository-relative path.
+///
+/// This is used for deleted Git paths that cannot be canonicalized. Absolute
+/// paths and parent traversals are rejected as invalid.
+pub fn is_relative_path_denied(path: &Path) -> Result<(), DenyReason> {
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(DenyReason::InvalidPath(
+            "expected a repository-relative path".to_string(),
+        ));
+    }
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            let value = name.to_string_lossy();
+            if let Some(denied) = DENY_DIRS
+                .iter()
+                .find(|denied| value.eq_ignore_ascii_case(denied))
+            {
+                return Err(DenyReason::DeniedDirectory((*denied).to_string()));
+            }
+        }
+    }
+    if let Some(name) = path.file_name().map(|value| value.to_string_lossy()) {
+        for pattern in DENY_PATTERNS {
+            if matches_glob_ci(&name, pattern) {
+                return Err(DenyReason::DeniedPattern((*pattern).to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Canonicalize a path and strip the Windows `\\?\` verbatim prefix if present
 /// (which `std::fs::canonicalize` always emits on Windows).
 fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
@@ -258,6 +296,13 @@ mod tests {
             is_path_allowed(&key, &cfg).unwrap_err(),
             DenyReason::DeniedPattern(_)
         ));
+    }
+
+    #[test]
+    fn lexical_check_rejects_deleted_secret_paths_and_traversal() {
+        assert!(is_relative_path_denied(Path::new("config/.env")).is_err());
+        assert!(is_relative_path_denied(Path::new("../outside.txt")).is_err());
+        assert!(is_relative_path_denied(Path::new("src/main.rs")).is_ok());
     }
 
     #[test]

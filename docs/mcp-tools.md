@@ -25,6 +25,22 @@ Unknown tools and malformed policy fail closed. The Health repair MCP process
 retains its separate short-lived, component-scoped capability and cannot use
 that exception to reach repair operations excluded by its preview.
 
+### Git checkpoints
+
+| Tool | Tier | Effect |
+|---|---|---|
+| `git_diff` | auto | Bounded tracked unified diff plus porcelain status; optional checkpoint comparison. |
+| `git_checkpoint_list` | auto | Lists refs below `refs/continuum/checkpoints/`. |
+| `git_checkpoint` | session-approved | Creates a checkpoint commit through a temporary index without touching the real index/worktree. |
+| `git_rollback` | always-confirm | Creates a safety checkpoint, preserves loose/sensitive files, then restores the requested checkpoint. |
+
+All repository paths pass the filesystem allowlist. Checkpoints include
+tracked and untracked files except hard-denied paths (`.env`, private keys,
+credential directories, and the other deny rules). Rollback moves untracked
+files to `.git/continuum-recovery/<safety-checkpoint>/untracked/` and copies
+modified sensitive tracked files to the sibling `sensitive-tracked/` folder
+before `git reset --hard`. Ignored files are not altered.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls
