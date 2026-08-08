@@ -1,14 +1,43 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
 use super::types::RunRecord;
 
+const RUN_LEASE_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionOwner {
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveExecution {
+    owner: ExecutionOwner,
+    last_seen: Instant,
+}
+
+#[derive(Default)]
+struct RunStoreState {
+    active: BTreeMap<String, ActiveExecution>,
+}
+
+#[derive(Debug)]
+struct LeaseTransition {
+    owner: ExecutionOwner,
+    previous: Option<ActiveExecution>,
+    touched: bool,
+    release_after_commit: bool,
+}
+
 pub struct RunStore {
     runs_dir: PathBuf,
-    gate: Mutex<()>,
+    gate: Mutex<RunStoreState>,
 }
 
 impl RunStore {
@@ -18,7 +47,7 @@ impl RunStore {
             .with_context(|| format!("Failed to create run directory {}", runs_dir.display()))?;
         Ok(Self {
             runs_dir,
-            gate: Mutex::new(()),
+            gate: Mutex::new(RunStoreState::default()),
         })
     }
 
@@ -38,9 +67,53 @@ impl RunStore {
 
     pub fn save(&self, record: &RunRecord) -> Result<()> {
         validate_run_id(&record.run_id)?;
-        let _guard = self.lock()?;
+        let mut state = self.lock()?;
         self.recover_interrupted_replace(&record.run_id)?;
+        let transition = prepare_execution_transition(&mut state, record)?;
 
+        match self.save_record_locked(record) {
+            Ok(()) => {
+                finish_execution_transition(&mut state, &record.run_id, &transition);
+                Ok(())
+            }
+            Err(error) => {
+                rollback_execution_transition(&mut state, &record.run_id, &transition);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
+        let _guard = self.lock()?;
+        self.recover_all_interrupted_replaces()?;
+        let mut records = Vec::new();
+        for entry in std::fs::read_dir(&self.runs_dir)
+            .with_context(|| format!("Failed to read {}", self.runs_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            match std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RunRecord>(&bytes).ok())
+            {
+                Some(record) => records.push(record),
+                None => tracing::warn!(
+                    layer = "mcp",
+                    component = "agent_os_runs",
+                    path = %path.display(),
+                    "Skipping unreadable agent run record"
+                ),
+            }
+        }
+        records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        records.truncate(limit.clamp(1, 100));
+        Ok(records)
+    }
+
+    fn save_record_locked(&self, record: &RunRecord) -> Result<()> {
         let path = self.path(&record.run_id);
         let backup = self.backup_path(&record.run_id);
         let temporary = self.runs_dir.join(format!(
@@ -55,9 +128,9 @@ impl RunStore {
             return Err(error);
         }
 
-        // A backup that survived with no canonical record is recovered above.
-        // If both exist and the stale backup cannot be removed, stop before
-        // touching the known-good canonical record.
+        // A backup that survived with no canonical record is recovered before
+        // this method is called. If both exist and the stale backup cannot be
+        // removed, stop before touching the known-good canonical record.
         if backup.exists() {
             std::fs::remove_file(&backup)
                 .with_context(|| format!("Failed to remove stale {}", backup.display()))?;
@@ -107,37 +180,7 @@ impl RunStore {
         Ok(())
     }
 
-    pub fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
-        let _guard = self.lock()?;
-        self.recover_all_interrupted_replaces()?;
-        let mut records = Vec::new();
-        for entry in std::fs::read_dir(&self.runs_dir)
-            .with_context(|| format!("Failed to read {}", self.runs_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                continue;
-            }
-            match std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<RunRecord>(&bytes).ok())
-            {
-                Some(record) => records.push(record),
-                None => tracing::warn!(
-                    layer = "mcp",
-                    component = "agent_os_runs",
-                    path = %path.display(),
-                    "Skipping unreadable agent run record"
-                ),
-            }
-        }
-        records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        records.truncate(limit.clamp(1, 100));
-        Ok(records)
-    }
-
-    fn lock(&self) -> Result<MutexGuard<'_, ()>> {
+    fn lock(&self) -> Result<MutexGuard<'_, RunStoreState>> {
         self.gate
             .lock()
             .map_err(|_| anyhow::anyhow!("run store lock was poisoned by a previous panic"))
@@ -211,6 +254,104 @@ impl RunStore {
     }
 }
 
+fn current_execution_owner() -> ExecutionOwner {
+    tokio::task::try_id()
+        .map(ExecutionOwner::Task)
+        .unwrap_or_else(|| ExecutionOwner::Thread(std::thread::current().id()))
+}
+
+fn prepare_execution_transition(
+    state: &mut RunStoreState,
+    record: &RunRecord,
+) -> Result<LeaseTransition> {
+    let owner = current_execution_owner();
+    let now = Instant::now();
+    let previous = state.active.get(&record.run_id).copied();
+
+    if record.status == "running" {
+        if let Some(active) = previous {
+            let age = now.saturating_duration_since(active.last_seen);
+            if active.owner != owner && age < RUN_LEASE_TTL {
+                bail!(
+                    "run_id {} is already executing in another task; inspect the existing run and evidence before retrying",
+                    record.run_id
+                );
+            }
+            if active.owner != owner {
+                tracing::warn!(
+                    layer = "mcp",
+                    component = "agent_os_runs",
+                    run_id = %record.run_id,
+                    lease_age_ms = age.as_millis(),
+                    "Taking over an expired Agent OS execution lease"
+                );
+            }
+        }
+        state.active.insert(
+            record.run_id.clone(),
+            ActiveExecution {
+                owner,
+                last_seen: now,
+            },
+        );
+        Ok(LeaseTransition {
+            owner,
+            previous,
+            touched: true,
+            release_after_commit: false,
+        })
+    } else {
+        if let Some(active) = previous {
+            let age = now.saturating_duration_since(active.last_seen);
+            if active.owner != owner && age < RUN_LEASE_TTL {
+                bail!(
+                    "run_id {} is still owned by another active task and cannot transition to status {:?}",
+                    record.run_id,
+                    record.status
+                );
+            }
+        }
+        Ok(LeaseTransition {
+            owner,
+            previous,
+            touched: false,
+            release_after_commit: true,
+        })
+    }
+}
+
+fn finish_execution_transition(
+    state: &mut RunStoreState,
+    run_id: &str,
+    transition: &LeaseTransition,
+) {
+    if transition.release_after_commit {
+        state.active.remove(run_id);
+    } else if let Some(active) = state.active.get_mut(run_id) {
+        if active.owner == transition.owner {
+            active.last_seen = Instant::now();
+        }
+    }
+}
+
+fn rollback_execution_transition(
+    state: &mut RunStoreState,
+    run_id: &str,
+    transition: &LeaseTransition,
+) {
+    if !transition.touched {
+        return;
+    }
+    match transition.previous {
+        Some(previous) => {
+            state.active.insert(run_id.to_string(), previous);
+        }
+        None => {
+            state.active.remove(run_id);
+        }
+    }
+}
+
 fn write_synced_new_file(path: &Path, payload: &[u8]) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -250,6 +391,8 @@ pub fn validate_run_id(run_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::agent_os::types::RunRecord;
 
@@ -297,6 +440,77 @@ mod tests {
         );
         assert!(store.path("run-test").exists());
         assert!(!store.backup_path("run-test").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_task_cannot_reenter_or_finish_active_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RunStore::new(temp.path()).expect("store"));
+        let mut active = record("run-shared", "one side effect at a time");
+        store.save(&active).expect("claim active run");
+
+        let contender = Arc::clone(&store);
+        let running_result = tokio::spawn(async move {
+            contender.save(&record("run-shared", "one side effect at a time"))
+        })
+        .await
+        .expect("join contender");
+        assert!(running_result
+            .expect_err("parallel running save must be rejected")
+            .to_string()
+            .contains("already executing"));
+
+        let contender = Arc::clone(&store);
+        let terminal_result = tokio::spawn(async move {
+            let mut terminal = record("run-shared", "one side effect at a time");
+            terminal.status = "completed".into();
+            contender.save(&terminal)
+        })
+        .await
+        .expect("join terminal contender");
+        assert!(terminal_result
+            .expect_err("foreign terminal save must be rejected")
+            .to_string()
+            .contains("still owned"));
+
+        active.status = "completed".into();
+        active.updated_at = chrono::Utc::now();
+        store.save(&active).expect("owner releases run");
+
+        let contender = Arc::clone(&store);
+        let resumed_result = tokio::spawn(async move {
+            contender.save(&record("run-shared", "one side effect at a time"))
+        })
+        .await
+        .expect("join resumed contender");
+        assert!(resumed_result.is_ok());
+    }
+
+    #[test]
+    fn expired_lease_can_be_reclaimed() {
+        let other_thread = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("thread id");
+        let mut state = RunStoreState::default();
+        state.active.insert(
+            "run-stale".into(),
+            ActiveExecution {
+                owner: ExecutionOwner::Thread(other_thread),
+                last_seen: Instant::now()
+                    .checked_sub(RUN_LEASE_TTL + Duration::from_secs(1))
+                    .expect("past instant"),
+            },
+        );
+        let transition = prepare_execution_transition(
+            &mut state,
+            &record("run-stale", "recover abandoned execution"),
+        )
+        .expect("reclaim stale lease");
+        assert!(transition.touched);
+        assert_eq!(
+            state.active.get("run-stale").expect("active").owner,
+            current_execution_owner()
+        );
     }
 
     #[test]

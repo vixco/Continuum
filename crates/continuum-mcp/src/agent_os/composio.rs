@@ -936,7 +936,10 @@ mod tests {
                 }
             }),
         ] {
-            assert!(ensure_tool_response_success(&response).is_ok(), "{response}");
+            assert!(
+                ensure_tool_response_success(&response).is_ok(),
+                "{response}"
+            );
         }
     }
 
@@ -956,13 +959,20 @@ mod tests {
                 }
             }),
         ] {
-            assert!(ensure_tool_response_success(&response).is_err(), "{response}");
+            assert!(
+                ensure_tool_response_success(&response).is_err(),
+                "{response}"
+            );
         }
     }
 
     #[test]
     fn rejects_malformed_non_object_execution_response() {
-        for response in [Value::Null, Value::String("ok".into()), Value::Array(vec![])] {
+        for response in [
+            Value::Null,
+            Value::String("ok".into()),
+            Value::Array(vec![]),
+        ] {
             assert!(ensure_tool_response_success(&response).is_err());
         }
     }
