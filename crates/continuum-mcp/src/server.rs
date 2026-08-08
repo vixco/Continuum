@@ -43,6 +43,9 @@ use crate::tools::context::{
     PackageMemory,
 };
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
+use crate::tools::git::{
+    GitCheckpointListRequest, GitCheckpointRequest, GitDiffRequest, GitRollbackRequest,
+};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
     MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultDeleteRequest,
@@ -505,6 +508,13 @@ impl ContinuumMcpServer {
             &self.state.fs_extra_paths,
             &project_dirs,
         )
+    }
+
+    fn git_timeout_ms(&self) -> u64 {
+        self.state
+            .git_context
+            .command_timeout_secs
+            .saturating_mul(1_000)
     }
 
     /// Returns a reference to the semantic store, opening it if not yet opened.
@@ -1310,6 +1320,74 @@ impl ContinuumMcpServer {
     }
 
     // -----------------------------------------------------------------------
+    // Git checkpoint tools
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Create a durable checkpoint under refs/continuum/checkpoints without changing the user's real index or worktree. Captures tracked and untracked non-secret files; hard-denied paths such as .env and private keys are excluded."
+    )]
+    async fn git_checkpoint(
+        &self,
+        Parameters(req): Parameters<GitCheckpointRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_checkpoint", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::checkpoint(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Show porcelain status and a bounded unified diff for an allowlisted repository. Optionally compare the working tree against an exact Continuum checkpoint id. Read-only; untracked names appear in status but their contents are not returned."
+    )]
+    async fn git_diff(
+        &self,
+        Parameters(req): Parameters<GitDiffRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_diff", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::diff(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List durable Continuum checkpoints for an allowlisted repository, newest first."
+    )]
+    async fn git_checkpoint_list(
+        &self,
+        Parameters(req): Parameters<GitCheckpointListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_checkpoint_list", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::list_checkpoints(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Restore an exact Continuum checkpoint. Always creates a pre-rollback safety checkpoint, moves untracked files into .git/continuum-recovery, and copies modified sensitive tracked files there before reset. Requires confirmation every call."
+    )]
+    async fn git_rollback(
+        &self,
+        Parameters(req): Parameters<GitRollbackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_rollback", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::rollback(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
     // Web fetch (GET only, no redirects)
     // -----------------------------------------------------------------------
 
@@ -1552,6 +1630,21 @@ fn fs_err_to_mcp(e: &crate::tools::fs::FsError) -> McpError {
     }
 }
 
+fn git_err_to_mcp(error: crate::tools::git::GitToolError) -> McpError {
+    use crate::tools::git::GitToolError;
+    match error {
+        GitToolError::Denied(_)
+        | GitToolError::Git(_)
+        | GitToolError::NonUtf8
+        | GitToolError::InvalidCheckpointId
+        | GitToolError::UnknownCheckpoint
+        | GitToolError::UnsafePath => McpError::invalid_params(error.to_string(), None),
+        GitToolError::Timeout | GitToolError::Io(_) => {
+            McpError::internal_error(error.to_string(), None)
+        }
+    }
+}
+
 fn web_err_to_mcp(e: &crate::tools::web::WebFetchError) -> McpError {
     use crate::tools::web::WebFetchError;
     match e {
@@ -1578,7 +1671,7 @@ impl ServerHandler for ContinuumMcpServer {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "Continuum MCP server — exposes memory (facts + the memory vault), system info, \
-                 filesystem (read-only), web fetch, and notification tools to the orchestrator. \
+                 filesystem reads, recoverable Git checkpoints, web fetch, and notifications. \
                  Every tool call passes the local permission gateway and is audited.",
             )
     }

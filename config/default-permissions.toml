@@ -86,6 +86,15 @@ context_package  = "auto"
 fs_read_file = "auto"
 fs_list_dir  = "auto"
 
+# --- Git checkpoints (allowlisted repositories only) ---
+# Checkpoint writes an isolated ref but leaves the worktree/index untouched.
+# Rollback changes tracked files, so it always requires a fresh confirmation.
+[git]
+git_diff            = "auto"
+git_checkpoint_list = "auto"
+git_checkpoint      = "session-approved"
+git_rollback        = "always-confirm"
+
 # --- Web fetch (GET only, public-IP only, no redirects) ---
 [web]
 web_fetch = "auto"

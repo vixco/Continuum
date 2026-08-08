@@ -28,6 +28,19 @@ Component: `permissions`
 - Restart rule: `PermissionHealth::should_restart()` is true when effective
   policy cannot be parsed. Restarting alone does not weaken or bypass policy.
 
+## Git checkpoint broker
+
+Component: `git_tools`
+
+- Health check: run `git --version`, then a read-only `git rev-parse
+  --show-toplevel` in an allowlisted confirmed project.
+- Logs: MCP tool audit plus permission decisions in `logs/actions.jsonl`.
+- Recovery: orphaned files in `.git/continuum-tmp/` are temporary indexes and
+  can be removed when no MCP Git call is active. Never delete
+  `.git/continuum-recovery/`; it contains rollback recovery copies.
+- Restart rule: restart the MCP process after a command timeout. Git
+  subprocesses use `git_context.command_timeout_secs` and are killed on drop.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):

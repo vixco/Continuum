@@ -8,6 +8,7 @@
 
 pub mod context;
 pub mod fs;
+pub mod git;
 pub mod memory;
 pub mod repair;
 pub mod system;

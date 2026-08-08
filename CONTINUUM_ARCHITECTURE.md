@@ -160,6 +160,12 @@ requests and scoped grants with the desktop. This enforcement applies only to
 Continuum-brokered MCP calls; native agent shell/filesystem access remains
 outside this claim until those actions are routed through Continuum brokers.
 
+Git state changes use the same broker. Continuum checkpoints are commit objects
+under `refs/continuum/checkpoints/` created with an isolated temporary index;
+they do not stage or clean the user's working tree. Rollback is always-confirm,
+creates a pre-rollback safety checkpoint, and moves recoverable loose files
+under the repository's Git directory before restoring tracked state.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:
