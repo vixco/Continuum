@@ -966,6 +966,36 @@ export interface McpTool {
   description: string;
 }
 
+export type PermissionTier = "auto" | "session-approved" | "always-confirm" | "blocked";
+
+export interface PermissionPolicyEntry {
+  action: string;
+  tier: PermissionTier;
+  overridden: boolean;
+}
+
+export interface PermissionRequest {
+  id: string;
+  session_id: string;
+  action: string;
+  resource: string | null;
+  tier: PermissionTier;
+  summary: string;
+  created_at: string;
+}
+
+export type GrantScope = "once" | "session";
+
+export interface PermissionGrant {
+  id: string;
+  session_id: string;
+  action: string;
+  resource: string | null;
+  scope: GrantScope;
+  created_at: string;
+  expires_at: string;
+}
+
 /** A validated local stdio MCP server registration. */
 export interface McpServerRegistration {
   name: string;

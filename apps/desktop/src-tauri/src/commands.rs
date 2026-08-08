@@ -14,6 +14,10 @@ use continuum_core::config::{ContinuumConfig, ProfileMode, ResourceConfig};
 use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
 use continuum_core::health::{self, repair::RepairInput};
 use continuum_core::logs::{LogEntry, LogFilter};
+use continuum_core::permissions::{
+    GrantScope, PermissionGateway, PermissionGrant, PermissionPolicyEntry, PermissionRequest,
+    PermissionTier,
+};
 use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
 use continuum_core::state::{ComponentHealth, ComponentStatus, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
@@ -1519,6 +1523,86 @@ pub struct McpTool {
 #[tauri::command]
 pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
     Ok(mcp_tool_manifest())
+}
+
+fn permission_gateway(app: &AppState) -> PermissionGateway {
+    PermissionGateway::new(
+        app.runtime.dev_dir(),
+        "desktop",
+        include_str!("../../../../config/default-permissions.toml"),
+    )
+}
+
+/// Return the effective per-tool permission policy.
+#[tauri::command]
+pub async fn list_tool_permissions(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<PermissionPolicyEntry>, String> {
+    permission_gateway(&app)
+        .list_policy()
+        .map_err(|error| error.to_string())
+}
+
+/// Persist one per-tool permission override.
+#[tauri::command]
+pub async fn set_tool_permission(
+    app: State<'_, Arc<AppState>>,
+    action: String,
+    tier: PermissionTier,
+) -> Result<(), String> {
+    permission_gateway(&app)
+        .set_policy(&action, tier)
+        .map_err(|error| error.to_string())
+}
+
+/// Return permission requests waiting for a user decision.
+#[tauri::command]
+pub async fn list_permission_requests(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<PermissionRequest>, String> {
+    Ok(permission_gateway(&app).list_requests())
+}
+
+/// Return active permission grants so the user can revoke them.
+#[tauri::command]
+pub async fn list_permission_grants(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<PermissionGrant>, String> {
+    Ok(permission_gateway(&app).list_grants())
+}
+
+/// Approve a pending permission request.
+#[tauri::command]
+pub async fn approve_permission_request(
+    app: State<'_, Arc<AppState>>,
+    request_id: String,
+    scope: GrantScope,
+) -> Result<PermissionGrant, String> {
+    permission_gateway(&app)
+        .approve(&request_id, scope, 8 * 60 * 60)
+        .map_err(|error| error.to_string())
+}
+
+/// Deny a pending permission request.
+#[tauri::command]
+pub async fn deny_permission_request(
+    app: State<'_, Arc<AppState>>,
+    request_id: String,
+) -> Result<(), String> {
+    permission_gateway(&app)
+        .deny_request(&request_id)
+        .map_err(|error| error.to_string())
+}
+
+/// Revoke an active permission grant.
+#[tauri::command]
+pub async fn revoke_permission_grant(
+    app: State<'_, Arc<AppState>>,
+    grant_id: String,
+) -> Result<(), String> {
+    permission_gateway(&app)
+        .revoke(&grant_id)
+        .map_err(|error| error.to_string())
 }
 
 /// Input accepted by the local MCP-server registration flow.

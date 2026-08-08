@@ -152,6 +152,14 @@ Agent-native shell and filesystem tools cannot be intercepted by MCP alone.
 Continuum may claim enforced permissions only when it launches the agent with
 matching sandbox/tool restrictions or routes execution through its own broker.
 
+The brokered MCP boundary is implemented by
+`continuum_core::permissions::PermissionGateway`. It evaluates the bundled
+defaults plus `<data_dir>/permissions.toml` before each MCP handler body runs,
+fails closed for unknown or malformed policy, and coordinates durable approval
+requests and scoped grants with the desktop. This enforcement applies only to
+Continuum-brokered MCP calls; native agent shell/filesystem access remains
+outside this claim until those actions are routed through Continuum brokers.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

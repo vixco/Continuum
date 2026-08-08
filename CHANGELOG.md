@@ -6,6 +6,14 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Enforced action permission gateway**: MCP calls now pass through the
+  bundled and user-overridden `auto` / `session-approved` /
+  `always-confirm` / `blocked` policy before execution. Approval requests,
+  scoped grants, denial, revocation, expiry, and one-use consumption are
+  durable across the desktop and MCP processes and audited to
+  `logs/actions.jsonl`. The Tools tab now reads and saves the real policy and
+  lets users approve pending calls or revoke active grants.
+
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained
   CPU or memory pressure, publishes a bounded privacy-classified

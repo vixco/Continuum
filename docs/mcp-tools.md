@@ -2,6 +2,29 @@
 
 Continuum's orchestrator (Claude Opus 4.6 via the `claude` CLI) can call Rust-native MCP tools at wake time. The tool server is a separate binary, `continuum-mcp`, spawned by the CLI via `--mcp-config`.
 
+## Permission gateway
+
+Every tool handler is evaluated before its body runs. Effective policy is the
+bundled `config/default-permissions.toml` overlaid by the user's
+`<data_dir>/permissions.toml`:
+
+- `auto`: execute immediately.
+- `session-approved`: create an approval request unless a matching, unexpired
+  session or one-use grant exists.
+- `always-confirm`: require a fresh one-use grant for every call.
+- `blocked`: refuse the call.
+
+Requests and grants are stored as separate atomic JSON records under
+`permission-requests/` and `permission-grants/`. They are scoped to the exact
+tool, agent session, and—where available—the path, repository, URL, working
+directory, or component. The desktop Tools tab persists policy overrides,
+approves or denies requests, and revokes grants. Decisions are written to
+`logs/actions.jsonl`; raw tool arguments are not stored in permission records.
+
+Unknown tools and malformed policy fail closed. The Health repair MCP process
+retains its separate short-lived, component-scoped capability and cannot use
+that exception to reach repair operations excluded by its preview.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

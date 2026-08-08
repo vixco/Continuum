@@ -31,6 +31,7 @@ pub mod health;
 pub mod llm_gate;
 pub mod logs;
 pub mod mcp_registry;
+pub mod permissions;
 pub mod runtime;
 pub mod runtime_publish;
 pub mod senses;
