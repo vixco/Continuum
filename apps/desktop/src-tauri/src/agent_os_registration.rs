@@ -67,7 +67,10 @@ mod tests {
             temp.path(),
             AGENT_OS_NAME,
             executable.to_str().expect("utf8 path"),
-            vec!["--data-dir".into(), temp.path().to_string_lossy().into_owned()],
+            vec![
+                "--data-dir".into(),
+                temp.path().to_string_lossy().into_owned(),
+            ],
         )
         .expect("seed registration");
 
@@ -75,6 +78,13 @@ mod tests {
         let servers = continuum_core::mcp_registry::list_servers(temp.path()).expect("list");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, AGENT_OS_NAME);
-        assert_eq!(servers[0].command, executable.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(
+            servers[0].command,
+            executable
+                .canonicalize()
+                .expect("canonical fixture")
+                .to_string_lossy()
+                .into_owned()
+        );
     }
 }
