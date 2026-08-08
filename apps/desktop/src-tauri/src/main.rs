@@ -24,6 +24,7 @@ mod components;
 mod events;
 mod memory;
 mod onboarding;
+mod permissions;
 mod providers;
 mod runtime_bridge;
 mod tray;
@@ -223,6 +224,8 @@ fn main() {
             commands::list_mcp_tools,
             commands::list_installed_mcp_servers,
             commands::install_mcp_server,
+            permissions::list_tool_permissions,
+            permissions::set_tool_permission,
             providers::catalog_list,
             providers::providers_list,
             providers::provider_add,
