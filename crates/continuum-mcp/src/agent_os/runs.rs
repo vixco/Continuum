@@ -80,8 +80,7 @@ impl RunStore {
             if backup.exists() && !path.exists() {
                 let _ = std::fs::rename(&backup, &path);
             }
-            return Err(error)
-                .with_context(|| format!("Failed to activate {}", path.display()));
+            return Err(error).with_context(|| format!("Failed to activate {}", path.display()));
         }
 
         if backup.exists() {
