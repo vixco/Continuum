@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import {
@@ -88,6 +89,10 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
 ];
 
 const FLAT_NAV: NavEntry[] = NAV_GROUPS.flatMap((g) => g.items);
+const COMMAND_ENTRIES: NavEntry[] = [
+  ...FLAT_NAV,
+  { id: "settings", label: "Settings", icon: SettingsIcon },
+];
 
 type UpdatePhase = "idle" | "checking" | "current" | "available" | "downloading" | "error";
 
@@ -342,7 +347,15 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
     <div className="titlebar" role="banner" data-tauri-drag-region>
       <div className="tb-brand" data-tauri-drag-region>
         <span className="tb-mark">
-          <img src="/continuum-mark.png" alt="" width={18} height={18} draggable={false} />
+          <Image
+            src="/continuum-mark.png"
+            alt=""
+            width={18}
+            height={18}
+            draggable={false}
+            unoptimized
+            priority
+          />
         </span>
         Continuum
         <span className="tb-status no-drag">
@@ -358,12 +371,12 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
           type="button"
           onClick={onCommand}
           className="press flex items-center gap-2 rounded-md border border-bg-border bg-bg-elevated px-2.5 py-1.5 text-[11px] text-ink-muted hover:border-bg-hover hover:text-ink"
-          title="Ask Continuum (Ctrl+K)"
+          title="Ask Continuum (Ctrl/⌘ K)"
         >
           <Search size={12} />
           <span className="hidden sm:inline">Ask</span>
           <kbd className="rounded border border-bg-border bg-bg-elevated px-1.5 font-mono text-[10px] text-ink-dim">
-            ⌘K
+            Ctrl/⌘ K
           </kbd>
         </button>
 
@@ -571,16 +584,13 @@ function CommandPalette({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
 
-  const allEntries: NavEntry[] = [
-    ...FLAT_NAV,
-    { id: "settings", label: "Settings", icon: SettingsIcon },
-  ];
-
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return allEntries;
-    return allEntries.filter((e) => e.label.toLowerCase().includes(q) || e.id.includes(q));
-  }, [query, allEntries]);
+    if (!q) return COMMAND_ENTRIES;
+    return COMMAND_ENTRIES.filter(
+      (entry) => entry.label.toLowerCase().includes(q) || entry.id.includes(q)
+    );
+  }, [query]);
 
   // Reset highlight when the filter changes so the user never lands on a
   // hidden row. Clamp on the way down too — if `filtered` shrinks below
