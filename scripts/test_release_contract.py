@@ -226,6 +226,19 @@ class ContractTests(unittest.TestCase):
             )
             release_contract.verify_published_release(release_json, version)
             payload = json.loads(release_json.read_text(encoding="utf-8"))
+            payload["draft"] = True
+            release_json.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(release_contract.ContractError):
+                release_contract.verify_published_release(release_json, version)
+            release_contract.verify_published_release(
+                release_json, version, allow_draft=True
+            )
+            payload["draft"] = False
+            payload["prerelease"] = True
+            release_json.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(release_contract.ContractError):
+                release_contract.verify_published_release(release_json, version)
+            payload["prerelease"] = False
             payload["assets"] = [
                 asset
                 for asset in payload["assets"]
