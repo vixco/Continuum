@@ -397,6 +397,11 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
         .collect();
+
+    // Destructive is deliberately broader than literal deletion. Money
+    // movement, credential rotation, account moderation and irreversible
+    // lifecycle actions must hit the deny-by-default capability even when an
+    // upstream toolkit uses a less obvious verb such as REFUND or TRASH.
     if tokens.iter().any(|token| {
         matches!(
             *token,
@@ -411,6 +416,28 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
                 | "ARCHIVE"
                 | "DISCONNECT"
                 | "UNSUBSCRIBE"
+                | "TRASH"
+                | "ERASE"
+                | "WIPE"
+                | "CLEAR"
+                | "REFUND"
+                | "CHARGE"
+                | "PAY"
+                | "PAYMENT"
+                | "PAYOUT"
+                | "TRANSFER"
+                | "WITHDRAW"
+                | "WITHDRAWAL"
+                | "PURCHASE"
+                | "BUY"
+                | "SELL"
+                | "LIQUIDATE"
+                | "BAN"
+                | "SUSPEND"
+                | "DEACTIVATE"
+                | "RESET"
+                | "ROTATE"
+                | "REGENERATE"
         )
     }) {
         return RiskLevel::Destructive;
@@ -442,6 +469,19 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
                 | "MARK"
                 | "REPLY"
                 | "FORWARD"
+                | "MERGE"
+                | "APPROVE"
+                | "ACCEPT"
+                | "DECLINE"
+                | "SUBMIT"
+                | "SIGN"
+                | "SHARE"
+                | "GRANT"
+                | "ASSIGN"
+                | "COMMENT"
+                | "SCHEDULE"
+                | "BOOK"
+                | "RESERVE"
         )
     }) {
         return RiskLevel::Write;
@@ -491,9 +531,17 @@ pub fn classify_meta_tool(meta_tool: &str, arguments: &Value) -> RiskLevel {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if ["remove", "delete", "disconnect", "revoke"]
-                .iter()
-                .any(|candidate| action.contains(candidate))
+            if [
+                "remove",
+                "delete",
+                "disconnect",
+                "revoke",
+                "reset",
+                "rotate",
+                "deactivate",
+            ]
+            .iter()
+            .any(|candidate| action.contains(candidate))
             {
                 RiskLevel::Destructive
             } else if ["list", "get", "status"]
@@ -511,12 +559,20 @@ pub fn classify_meta_tool(meta_tool: &str, arguments: &Value) -> RiskLevel {
             .map(|tools| {
                 tools
                     .iter()
-                    .filter_map(|tool| {
+                    .map(|tool| {
+                        if tool
+                            .get("enable_auto_workbench_offload")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            return RiskLevel::Destructive;
+                        }
                         tool.get("tool_slug")
                             .or_else(|| tool.get("slug"))
                             .and_then(Value::as_str)
+                            .map(classify_tool_slug)
+                            .unwrap_or(RiskLevel::Write)
                     })
-                    .map(classify_tool_slug)
                     .max()
                     .unwrap_or(RiskLevel::Write)
             })
@@ -757,6 +813,36 @@ mod tests {
     }
 
     #[test]
+    fn financial_and_account_security_mutations_are_destructive() {
+        for slug in [
+            "STRIPE_REFUND_PAYMENT",
+            "WISE_TRANSFER_MONEY",
+            "SHOPIFY_PURCHASE_ORDER",
+            "GITHUB_ROTATE_DEPLOY_KEY",
+            "SLACK_DEACTIVATE_USER",
+            "GMAIL_TRASH_THREAD",
+        ] {
+            assert_eq!(
+                classify_tool_slug(slug),
+                RiskLevel::Destructive,
+                "{slug} must use the deny-by-default capability"
+            );
+        }
+    }
+
+    #[test]
+    fn consequential_non_destructive_mutations_are_writes() {
+        for slug in [
+            "GITHUB_MERGE_PULL_REQUEST",
+            "DOCUSIGN_SIGN_DOCUMENT",
+            "CALENDAR_BOOK_EVENT",
+            "SLACK_SHARE_FILE",
+        ] {
+            assert_eq!(classify_tool_slug(slug), RiskLevel::Write, "{slug}");
+        }
+    }
+
+    #[test]
     fn workbench_offload_is_destructive_even_for_read_slug() {
         let request = ComposioExecuteRequest {
             tool_slug: "GMAIL_LIST_THREADS".into(),
@@ -775,6 +861,22 @@ mod tests {
                 {"tool_slug":"GMAIL_LIST_THREADS"},
                 {"tool_slug":"GITHUB_CREATE_AN_ISSUE"},
                 {"tool_slug":"SLACK_DELETE_MESSAGE"}
+            ]
+        });
+        assert_eq!(
+            classify_meta_tool("COMPOSIO_MULTI_EXECUTE_TOOL", &arguments),
+            RiskLevel::Destructive
+        );
+    }
+
+    #[test]
+    fn multi_execute_treats_workbench_offload_as_destructive() {
+        let arguments = serde_json::json!({
+            "tools": [
+                {
+                    "tool_slug":"GMAIL_LIST_THREADS",
+                    "enable_auto_workbench_offload": true
+                }
             ]
         });
         assert_eq!(
