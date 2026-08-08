@@ -6,6 +6,15 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Timed privacy power control**: the desktop title bar now has a circular
+  power button for pausing all AI observation for 15 minutes, 1 hour, 4 hours,
+  until tomorrow at 08:00, or until manually resumed. The control turns red
+  while paused, persists its deadline locally across restarts, clears current
+  live/process projections, and resumes automatically when a timed lease ends.
+  The master pause now gates screen, microphone, window context, files, Git,
+  process activity, buffered frames, and agent-bound processing rather than
+  changing dashboard state only.
+
 - **Durable task and evidence tools**: atomic task plans with explicit step
   statuses and evidence links, plus bounded source-attributed agent evidence
   records for verified handoff and continuation.

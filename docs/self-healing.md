@@ -218,6 +218,25 @@ CI compilation/integration tests validate wiring. Actual simultaneous cadence
 across multiple physical Windows monitors requires a live machine with multiple
 displays and is not established by unit tests alone.
 
+### Observation privacy pause
+
+- Component: `observation_pause`; logs use `layer = "privacy"` and
+  `component = "observation_pause"`.
+- Health: `privacy_pause::read_status` validates the small local lease and
+  `privacy_pause::should_restart` reports malformed/unreadable state. A corrupt
+  lease fails closed: the runtime keeps `pause_all` enabled and reports an
+  error instead of guessing that observation may resume.
+- Recovery: while Continuum is paused, inspect
+  `<data_dir>/observation-pause.json`. Restore valid JSON by selecting a new
+  duration in the desktop, or use the red power button to resume, which removes
+  the lease and queues a durable `pause_all = false` intent. If the file cannot
+  be replaced because of filesystem permissions, repair those permissions and
+  retry; do not delete it while the runtime is active unless the user has
+  explicitly chosen to resume.
+- Restart rule: the lease store has no process to restart. Restarting the
+  Continuum runtime is safe and preserves the deadline; watcher tasks start
+  parked and can resume live after boot without losing user data.
+
 ---
 
 ## Context Engine Components
@@ -229,10 +248,9 @@ curator precedent). Each entry is a uniform summary:
 `{ healthy, enabled, should_restart, detail }`. Per spec §7,
 disabled-with-reason states report `healthy: true, enabled: false` with the
 reason in `detail` and never request a restart. `RuntimeSnapshot.paused`
-mirrors `[privacy.toggles].pause_all`; when the runtime *booted* paused, the
-three watcher entries (`context_watcher`, `git_watcher`, `file_watcher`) report
-`"not running (pause_all set in [privacy.toggles])"` because those tasks were
-never spawned — that is deliberate, not a failure. `live_context` and
+mirrors the live shared `pause_all` atomic. Watchers always spawn, including on
+a paused boot, but park before observation and report disabled-with-reason;
+this is deliberate and lets them resume without a restart. `live_context` and
 `events_writer` always have a real handle.
 
 The seven published keys are `idle` (a plain bool from the cadence

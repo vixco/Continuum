@@ -118,11 +118,16 @@ change writes a `toggle_change` system event.
 | `screen` | Stops screen capture and captioning | `true` |
 | `files` | Stops the file watcher | `true` |
 | `git` | Stops the git collector (no subprocess is spawned) | `true` |
-| `pause_all` | Gates the whole frame loop; every collector reports "not running" | `false` |
+| `pause_all` | Gates every collector, buffered frame processing, and process activity | `false` |
 
 A toggle flipped from the Context page takes effect within one loop iteration
 (one poll cycle, one flush tick, one capture discovery tick) — the capture is
-genuinely stopped, not filtered afterwards.
+genuinely stopped, not filtered afterwards. The circular desktop power control
+sets the same `pause_all` choke point. It offers 15 minutes, 1 hour, 4 hours,
+until tomorrow at 08:00 local time, and indefinite. Its local
+`observation-pause.json` lease survives a restart and timed leases resume
+automatically. Buffered frames are discarded before persistence/triage and the
+current live-context/process projections are cleared when pausing.
 
 **Three limitations are stated rather than hidden:**
 
@@ -130,10 +135,7 @@ genuinely stopped, not filtered afterwards.
    transcribed, stored or sent, but the cpal input stream itself was opened at
    startup and stays open, so Windows keeps showing "microphone in use" until
    the runtime restarts.
-2. **`pause_all` at boot needs a restart to undo.** Pausing a *running* runtime
-   works live. But a runtime that *booted* with `pause_all = true` never spawned
-   its watchers at all, so unpausing that process requires a restart.
-3. **Persisting a toggle drops comments from `config.toml`.** Toggle changes are
+2. **Persisting a toggle drops comments from `config.toml`.** Toggle changes are
    written back through the config editor, which rewrites the file and does not
    preserve comments.
 

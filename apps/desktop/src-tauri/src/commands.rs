@@ -18,6 +18,7 @@ use continuum_core::permissions::{
     GrantScope, PermissionGateway, PermissionGrant, PermissionPolicyEntry, PermissionRequest,
     PermissionTier,
 };
+use continuum_core::privacy_pause::{self, ObservationPausePreset, ObservationPauseStatus};
 use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
 use continuum_core::state::{ComponentHealth, ComponentStatus, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
@@ -1098,9 +1099,89 @@ pub async fn update_voice_frontend_mode(
 
 // --- Runtime control ---
 
+fn queue_pause_all(dev_dir: &std::path::Path, paused: bool) -> Result<(), String> {
+    let action = continuum_core::context::intents::ContextAction::SetToggle {
+        name: continuum_core::context::intents::ToggleName::PauseAll,
+        value: paused,
+    };
+    let intent = continuum_core::context::intents::ContextIntent::new(action);
+    continuum_core::context::intents::write_intent(dev_dir, &intent)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Returns the durable privacy-pause state. Corrupt records fail closed.
+#[tauri::command]
+pub async fn get_observation_pause(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ObservationPauseStatus, String> {
+    match privacy_pause::read_status(&app.runtime.dev_dir(), chrono::Utc::now()) {
+        Ok(mut status) => {
+            if !status.paused && app.runtime.state.snapshot().await.system.paused {
+                status.paused = true;
+                status.until = None;
+            }
+            Ok(status)
+        }
+        Err(error) => {
+            tracing::error!(
+                layer = "privacy",
+                component = "observation_pause",
+                error = %error,
+                "Privacy pause record could not be read; reporting paused"
+            );
+            Ok(ObservationPauseStatus {
+                paused: true,
+                until: None,
+            })
+        }
+    }
+}
+
+/// Pauses all observation for a trusted, bounded preset or indefinitely.
+#[tauri::command]
+pub async fn pause_observation(
+    app: State<'_, Arc<AppState>>,
+    preset: ObservationPausePreset,
+) -> Result<ObservationPauseStatus, String> {
+    let dev_dir = app.runtime.dev_dir();
+    let status = privacy_pause::pause(&dev_dir, preset, chrono::Utc::now())
+        .map_err(|error| error.to_string())?;
+    queue_pause_all(&dev_dir, true)?;
+    app.runtime.set_paused(true).await;
+    tracing::info!(
+        layer = "privacy",
+        component = "observation_pause",
+        until = ?status.until,
+        "All observation pause requested"
+    );
+    Ok(status)
+}
+
+/// Resumes every individually enabled observation source.
+#[tauri::command]
+pub async fn resume_observation(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ObservationPauseStatus, String> {
+    let dev_dir = app.runtime.dev_dir();
+    let status = privacy_pause::resume(&dev_dir).map_err(|error| error.to_string())?;
+    queue_pause_all(&dev_dir, false)?;
+    app.runtime.set_paused(false).await;
+    tracing::info!(
+        layer = "privacy",
+        component = "observation_pause",
+        "All observation resume requested"
+    );
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn set_paused(app: State<'_, Arc<AppState>>, paused: bool) -> Result<(), String> {
-    app.runtime.set_paused(paused).await;
+    if paused {
+        pause_observation(app, ObservationPausePreset::Indefinite).await?;
+    } else {
+        resume_observation(app).await?;
+    }
     Ok(())
 }
 
