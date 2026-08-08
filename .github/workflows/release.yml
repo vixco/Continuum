@@ -37,12 +37,13 @@ jobs:
     name: Plan release
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.current.outputs.should_release }}
+      should_release: ${{ steps.gate.outputs.should_release }}
       source_sha: ${{ steps.current.outputs.source_sha }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       recovering: ${{ steps.version.outputs.recovering }}
       release_commit: ${{ steps.version.outputs.release_commit }}
+      already_published: ${{ steps.version.outputs.already_published }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,14 +82,26 @@ jobs:
             exit 1
           }
 
-      - name: Read published release tags
+      - name: Read complete and partial GitHub Releases
         if: steps.current.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq '.[].tag_name' | sort -u > "$RUNNER_TEMP/published-release-tags.txt"
+          : > "$RUNNER_TEMP/releases.ndjson"
+          page=1
+          while true; do
+            response="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100&page=$page")"
+            count="$(jq 'length' <<< "$response")"
+            jq -c '.[]' <<< "$response" >> "$RUNNER_TEMP/releases.ndjson"
+            if [ "$count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+          python3 scripts/release_contract.py complete-tags \
+            --release-json-lines "$RUNNER_TEMP/releases.ndjson" \
+            --output "$RUNNER_TEMP/complete-release-tags.txt"
 
       - name: Select or recover release version
         if: steps.current.outputs.should_release == 'true'
@@ -102,13 +115,26 @@ jobs:
             next-version
             --repo-root .
             --source-sha "$SOURCE_SHA"
-            --published-tags-file "$RUNNER_TEMP/published-release-tags.txt"
+            --published-tags-file "$RUNNER_TEMP/complete-release-tags.txt"
             --github-output "$GITHUB_OUTPUT"
           )
           if [ -n "${EXPLICIT_VERSION:-}" ]; then
             args+=(--version "$EXPLICIT_VERSION")
           fi
           python3 scripts/release_contract.py "${args[@]}"
+
+      - name: Decide whether publication work is needed
+        id: gate
+        if: always()
+        env:
+          CURRENT: ${{ steps.current.outputs.should_release }}
+          ALREADY_PUBLISHED: ${{ steps.version.outputs.already_published }}
+        run: |
+          if [ "$CURRENT" = "true" ] && [ "$ALREADY_PUBLISHED" != "true" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Release plan summary
         if: steps.current.outputs.should_release == 'true'
@@ -120,6 +146,7 @@ jobs:
             echo "- Version: \`${{ steps.version.outputs.version }}\`"
             echo "- Tag: \`${{ steps.version.outputs.tag }}\`"
             echo "- Recovering existing tag: \`${{ steps.version.outputs.recovering }}\`"
+            echo "- Already completely published: \`${{ steps.version.outputs.already_published }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-windows:
