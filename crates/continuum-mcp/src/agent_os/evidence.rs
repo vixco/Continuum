@@ -221,9 +221,7 @@ pub fn sanitize_value(tool: &str, value: &Value) -> Value {
     match tool {
         "computer_type" => redact_text_field(&mut sanitized),
         "composio_search" => redact_composio_search(&mut sanitized),
-        "composio_execute" | "composio_execute_meta" => {
-            redact_composio_surface(&mut sanitized)
-        }
+        "composio_execute" | "composio_execute_meta" => redact_composio_surface(&mut sanitized),
         _ => {}
     }
     redact_nested_agent_steps(&mut sanitized);
@@ -590,11 +588,11 @@ mod tests {
     #[test]
     fn third_party_errors_are_not_persisted_verbatim() {
         let sanitized = sanitize_error("composio_execute", "recipient person@example.com failed");
+        assert_eq!(sanitized, "[redacted third-party error; chars=35]");
         assert_eq!(
-            sanitized,
-            "[redacted third-party error; chars=35]"
+            sanitize_error("computer_click", "normal error"),
+            "normal error"
         );
-        assert_eq!(sanitize_error("computer_click", "normal error"), "normal error");
     }
 
     #[test]
