@@ -5,6 +5,17 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+#[cfg(windows)]
+use windows::{
+    core::w,
+    Win32::{
+        Foundation::{LocalFree, HLOCAL},
+        Security::Cryptography::{
+            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
+            CRYPT_INTEGER_BLOB,
+        },
+    },
+};
 
 use super::composio::{classify_execute_request, classify_meta_tool};
 use super::types::{
@@ -12,6 +23,10 @@ use super::types::{
 };
 
 const RUN_LEASE_TTL: Duration = Duration::from_secs(30 * 60);
+#[cfg(windows)]
+const DPAPI_MAGIC: &[u8] = b"CONTINUUM-RUN-DPAPI-V1\0";
+#[cfg(windows)]
+const DPAPI_ENTROPY: &[u8] = b"Continuum Agent OS run record v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionOwner {
@@ -124,7 +139,7 @@ impl RunStore {
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
-        let payload = serde_json::to_vec_pretty(record)?;
+        let payload = encode_run_record(record)?;
         if let Err(error) = write_synced_new_file(&temporary, &payload) {
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
@@ -544,12 +559,143 @@ fn step_risk(step: &PlanStep) -> Result<RiskLevel> {
     }
 }
 
+fn encode_run_record(record: &RunRecord) -> Result<Vec<u8>> {
+    let mut plaintext = serde_json::to_vec_pretty(record)?;
+    let result = protect_run_payload(&mut plaintext);
+    plaintext.fill(0);
+    result
+}
+
 fn decode_run_record(path: &Path, payload: &[u8]) -> Result<RunRecord> {
-    let record: RunRecord = serde_json::from_slice(payload)
-        .with_context(|| format!("Invalid run record at {}", path.display()))?;
+    let mut plaintext = unprotect_run_payload(payload)
+        .with_context(|| format!("Failed to decrypt Agent OS run record {}", path.display()))?;
+    let parsed = serde_json::from_slice::<RunRecord>(&plaintext)
+        .with_context(|| format!("Invalid run record at {}", path.display()));
+    plaintext.fill(0);
+    let record = parsed?;
     validate_run_record(&record)
         .with_context(|| format!("Invalid run invariants at {}", path.display()))?;
     Ok(record)
+}
+
+#[cfg(windows)]
+fn protect_run_payload(plaintext: &mut [u8]) -> Result<Vec<u8>> {
+    let input = crypto_blob(plaintext, "run record")?;
+    let mut entropy_bytes = DPAPI_ENTROPY.to_vec();
+    let entropy = crypto_blob(&mut entropy_bytes, "DPAPI entropy")?;
+    let mut output = LocalCryptoBlob::default();
+
+    unsafe {
+        CryptProtectData(
+            &input,
+            w!("Continuum Agent OS run record"),
+            Some(&entropy as *const CRYPT_INTEGER_BLOB),
+            None,
+            None,
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output.0,
+        )
+    }
+    .context("Windows DPAPI could not protect the Agent OS run record")?;
+
+    let protected = output.copy_bytes("protected run record")?;
+    let mut envelope = Vec::with_capacity(DPAPI_MAGIC.len() + protected.len());
+    envelope.extend_from_slice(DPAPI_MAGIC);
+    envelope.extend_from_slice(&protected);
+    Ok(envelope)
+}
+
+#[cfg(not(windows))]
+fn protect_run_payload(plaintext: &mut [u8]) -> Result<Vec<u8>> {
+    Ok(plaintext.to_vec())
+}
+
+#[cfg(windows)]
+fn unprotect_run_payload(payload: &[u8]) -> Result<Vec<u8>> {
+    let Some(ciphertext) = payload.strip_prefix(DPAPI_MAGIC) else {
+        // Compatibility with records written before DPAPI protection. The next
+        // successful save transparently migrates the record to the new envelope.
+        return Ok(payload.to_vec());
+    };
+    if ciphertext.is_empty() {
+        bail!("DPAPI run-record envelope contains no ciphertext");
+    }
+
+    let mut ciphertext = ciphertext.to_vec();
+    let input = crypto_blob(&mut ciphertext, "encrypted run record")?;
+    let mut entropy_bytes = DPAPI_ENTROPY.to_vec();
+    let entropy = crypto_blob(&mut entropy_bytes, "DPAPI entropy")?;
+    let mut output = LocalCryptoBlob::default();
+
+    let result = unsafe {
+        CryptUnprotectData(
+            &input,
+            None,
+            Some(&entropy as *const CRYPT_INTEGER_BLOB),
+            None,
+            None,
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output.0,
+        )
+    }
+    .context("Windows DPAPI could not decrypt the Agent OS run record");
+    ciphertext.fill(0);
+    result?;
+    output.copy_bytes("decrypted run record")
+}
+
+#[cfg(not(windows))]
+fn unprotect_run_payload(payload: &[u8]) -> Result<Vec<u8>> {
+    Ok(payload.to_vec())
+}
+
+#[cfg(windows)]
+fn crypto_blob(bytes: &mut [u8], label: &str) -> Result<CRYPT_INTEGER_BLOB> {
+    let length = u32::try_from(bytes.len())
+        .with_context(|| format!("{label} is too large for Windows DPAPI"))?;
+    if length == 0 {
+        bail!("{label} is empty");
+    }
+    Ok(CRYPT_INTEGER_BLOB {
+        cbData: length,
+        pbData: bytes.as_mut_ptr(),
+    })
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct LocalCryptoBlob(CRYPT_INTEGER_BLOB);
+
+#[cfg(windows)]
+impl LocalCryptoBlob {
+    fn copy_bytes(&self, label: &str) -> Result<Vec<u8>> {
+        if self.0.cbData == 0 || self.0.pbData.is_null() {
+            bail!("Windows DPAPI returned an empty {label}");
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(self.0.pbData.cast_const(), self.0.cbData as usize)
+        };
+        Ok(bytes.to_vec())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for LocalCryptoBlob {
+    fn drop(&mut self) {
+        if self.0.pbData.is_null() {
+            return;
+        }
+        let remaining = unsafe { LocalFree(HLOCAL(self.0.pbData.cast())) };
+        if !remaining.0.is_null() {
+            tracing::warn!(
+                layer = "mcp",
+                component = "agent_os_runs",
+                "Windows LocalFree could not release a DPAPI output buffer"
+            );
+        }
+        self.0.pbData = std::ptr::null_mut();
+        self.0.cbData = 0;
+    }
 }
 
 fn write_synced_new_file(path: &Path, payload: &[u8]) -> Result<()> {
@@ -828,6 +974,49 @@ mod tests {
             state.active.get("run-stale").expect("active").owner,
             current_execution_owner()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_run_records_are_dpapi_protected_at_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        let secret = "private email body for DPAPI test";
+        store
+            .save(&record("run-private", secret))
+            .expect("save protected record");
+
+        let raw = std::fs::read(store.path("run-private")).expect("read raw record");
+        assert!(raw.starts_with(DPAPI_MAGIC));
+        assert!(!raw
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes()));
+        assert_eq!(
+            store.load("run-private").expect("load").unwrap().goal,
+            secret
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_loads_legacy_plaintext_and_migrates_on_save() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        let legacy = record("run-legacy", "legacy private payload");
+        std::fs::write(
+            store.path("run-legacy"),
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy record"),
+        )
+        .expect("write legacy record");
+
+        let loaded = store
+            .load("run-legacy")
+            .expect("load legacy")
+            .expect("record");
+        assert_eq!(loaded.goal, legacy.goal);
+        store.save(&loaded).expect("migrate legacy record");
+        let migrated = std::fs::read(store.path("run-legacy")).expect("read migrated record");
+        assert!(migrated.starts_with(DPAPI_MAGIC));
     }
 
     #[cfg(unix)]
