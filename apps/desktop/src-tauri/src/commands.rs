@@ -1798,6 +1798,17 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "git_rollback".into(),
             description: "Recoverably restore a confirmed checkpoint".into(),
         },
+        // --- terminal ---
+        McpTool {
+            namespace: "terminal".into(),
+            name: "terminal_run".into(),
+            description: "Run a restricted confirmed program + args invocation".into(),
+        },
+        McpTool {
+            namespace: "terminal".into(),
+            name: "terminal_verify".into(),
+            description: "Run a verifier and persist bounded evidence".into(),
+        },
         // --- web ---
         McpTool {
             namespace: "web".into(),

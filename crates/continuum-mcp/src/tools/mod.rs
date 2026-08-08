@@ -13,5 +13,6 @@ pub mod git;
 pub mod memory;
 pub mod repair;
 pub mod system;
+pub mod terminal;
 pub mod web;
 pub mod workers;

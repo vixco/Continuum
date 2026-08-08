@@ -14,6 +14,7 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct McpServerConfig {
     pub fs: McpFsConfig,
+    pub terminal: McpTerminalConfig,
 }
 
 /// Filesystem-allowlist expansion settings.
@@ -36,6 +37,37 @@ impl Default for McpFsConfig {
             extra_paths: Vec::new(),
             max_write_bytes: 1024 * 1024,
             max_patch_replacements: 100,
+        }
+    }
+}
+
+/// Terminal broker limits and executable allowlist.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct McpTerminalConfig {
+    /// Executable basenames the broker may launch. Paths and shells are rejected.
+    pub allowed_programs: Vec<String>,
+    /// Maximum command runtime.
+    pub max_timeout_secs: u64,
+    /// Combined stdout/stderr byte cap returned and persisted.
+    pub max_output_bytes: usize,
+    /// Maximum number of arguments in one invocation.
+    pub max_args: usize,
+}
+
+impl Default for McpTerminalConfig {
+    fn default() -> Self {
+        Self {
+            allowed_programs: vec![
+                "cargo".into(),
+                "git".into(),
+                "dotnet".into(),
+                "rustc".into(),
+                "rustfmt".into(),
+            ],
+            max_timeout_secs: 900,
+            max_output_bytes: 512 * 1024,
+            max_args: 128,
         }
     }
 }
