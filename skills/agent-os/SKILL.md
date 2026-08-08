@@ -63,7 +63,8 @@ Do not ask the user to repeat configuration that `agent_status` or
   the original action did not take effect.
 - Use `continue_on_error` only for genuinely independent, non-destructive steps.
   A dependent, financial, publishing, account-security, or irreversible step
-  must halt the plan on error.
+  must halt the plan on error. The runtime rejects destructive steps that try to
+  opt into continuation.
 - Keep expectations observable and specific. Prefer “a window titled X is
   foreground” or “record Y exists with status Z” over subjective success text.
 - Stop and report the exact unresolved state when verification is unavailable or
@@ -121,7 +122,11 @@ Use only these action names in `agent_run_plan`:
 
 The plan is immutable for a given `run_id`. A native approval for the exact plan
 can satisfy `ask` steps in that run once, but explicit `deny` rules still win.
-Successful steps are skipped when the run is resumed.
+Successful steps are skipped when the run is resumed. Checkpoint records are
+validated on every save and load; duplicate step IDs, inconsistent results and
+invalid terminal states are rejected. On Windows, checkpoint contents are
+protected at rest with the current user's DPAPI key. Existing plaintext records
+remain readable and are migrated the next time they are saved.
 
 ## Evidence and data minimization
 
