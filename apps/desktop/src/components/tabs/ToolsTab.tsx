@@ -555,7 +555,9 @@ function McpNamespace({
                 <div className="truncate text-xs text-ink-muted">{tool.description}</div>
               </div>
               <div className="flex items-center gap-2">
-                {saving.has(tool.name) && <Loader2 size={12} className="animate-spin text-ink-dim" />}
+                {saving.has(tool.name) && (
+                  <Loader2 size={12} className="animate-spin text-ink-dim" />
+                )}
                 <Select
                   value={permissions[tool.name] ?? "blocked"}
                   options={PERMISSION_PRESETS}
