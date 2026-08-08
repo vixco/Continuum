@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use super::types::RunRecord;
+use super::composio::{classify_execute_request, classify_meta_tool};
+use super::types::{
+    ComposioExecuteRequest, ComposioMetaExecuteRequest, PlanStep, RiskLevel, RunRecord,
+};
 
 const RUN_LEASE_TTL: Duration = Duration::from_secs(30 * 60);
 
@@ -45,6 +48,7 @@ impl RunStore {
         let runs_dir = root.join("runs");
         std::fs::create_dir_all(&runs_dir)
             .with_context(|| format!("Failed to create run directory {}", runs_dir.display()))?;
+        restrict_directory_permissions(&runs_dir)?;
         Ok(Self {
             runs_dir,
             gate: Mutex::new(RunStoreState::default()),
@@ -57,16 +61,14 @@ impl RunStore {
         self.recover_interrupted_replace(run_id)?;
         let path = self.path(run_id);
         match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("Invalid run record at {}", path.display()))
-                .map(Some),
+            Ok(bytes) => decode_run_record(&path, &bytes).map(Some),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).with_context(|| format!("Failed to read {}", path.display())),
         }
     }
 
     pub fn save(&self, record: &RunRecord) -> Result<()> {
-        validate_run_id(&record.run_id)?;
+        validate_run_record(record)?;
         let mut state = self.lock()?;
         self.recover_interrupted_replace(&record.run_id)?;
         let transition = prepare_execution_transition(&mut state, record)?;
@@ -97,14 +99,14 @@ impl RunStore {
             }
             match std::fs::read(&path)
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<RunRecord>(&bytes).ok())
+                .and_then(|bytes| decode_run_record(&path, &bytes).ok())
             {
                 Some(record) => records.push(record),
                 None => tracing::warn!(
                     layer = "mcp",
                     component = "agent_os_runs",
                     path = %path.display(),
-                    "Skipping unreadable agent run record"
+                    "Skipping unreadable Agent OS run record"
                 ),
             }
         }
@@ -128,9 +130,6 @@ impl RunStore {
             return Err(error);
         }
 
-        // A backup that survived with no canonical record is recovered before
-        // this method is called. If both exist and the stale backup cannot be
-        // removed, stop before touching the known-good canonical record.
         if backup.exists() {
             std::fs::remove_file(&backup)
                 .with_context(|| format!("Failed to remove stale {}", backup.display()))?;
@@ -153,10 +152,8 @@ impl RunStore {
             return Err(error).with_context(|| format!("Failed to activate {}", path.display()));
         }
 
-        // From this point the new canonical record is active. Cleanup and a
-        // directory fsync may improve durability, but they must not report the
-        // already-committed save as failed: a caller retry could replay an
-        // external side effect even though its checkpoint is safely readable.
+        // The canonical checkpoint is active. Cleanup failures must not turn a
+        // committed side effect into a reported save failure and provoke a retry.
         if backup.exists() {
             if let Err(error) = std::fs::remove_file(&backup) {
                 tracing::warn!(
@@ -260,6 +257,31 @@ fn current_execution_owner() -> ExecutionOwner {
         .unwrap_or_else(|| ExecutionOwner::Thread(std::thread::current().id()))
 }
 
+fn record_holds_execution_lease(record: &RunRecord) -> bool {
+    if record.status == "running" {
+        return true;
+    }
+    if record.status != "failed" {
+        return false;
+    }
+
+    // execute_plan persists a failed step before inspecting continue_on_error.
+    // Keep ownership while a continued plan still has later steps, otherwise a
+    // second task could enter between those two checkpoints and repeat effects.
+    record
+        .results
+        .iter()
+        .filter(|result| result.status == "error")
+        .max_by_key(|result| result.index)
+        .and_then(|result| {
+            record
+                .steps
+                .get(result.index)
+                .map(|step| (result.index, step))
+        })
+        .is_some_and(|(index, step)| step.continue_on_error && index + 1 < record.steps.len())
+}
+
 fn prepare_execution_transition(
     state: &mut RunStoreState,
     record: &RunRecord,
@@ -268,7 +290,7 @@ fn prepare_execution_transition(
     let now = Instant::now();
     let previous = state.active.get(&record.run_id).copied();
 
-    if record.status == "running" {
+    if record_holds_execution_lease(record) {
         if let Some(active) = previous {
             let age = now.saturating_duration_since(active.last_seen);
             if active.owner != owner && age < RUN_LEASE_TTL {
@@ -352,16 +374,214 @@ fn rollback_execution_transition(
     }
 }
 
+fn validate_run_record(record: &RunRecord) -> Result<()> {
+    validate_run_id(&record.run_id)?;
+    if record.goal.trim().is_empty() || record.goal.chars().count() > 4_000 {
+        bail!(
+            "run_id {} goal must contain between 1 and 4,000 characters",
+            record.run_id
+        );
+    }
+    if !matches!(
+        record.status.as_str(),
+        "running" | "failed" | "completed" | "completed_with_errors"
+    ) {
+        bail!(
+            "run_id {} has invalid status {:?}",
+            record.run_id,
+            record.status
+        );
+    }
+    if record.updated_at < record.created_at {
+        bail!("run_id {} has updated_at before created_at", record.run_id);
+    }
+
+    let mut step_ids = BTreeSet::new();
+    for (index, step) in record.steps.iter().enumerate() {
+        let step_id = effective_step_id(step, index);
+        validate_step_id(&step_id)?;
+        if !step_ids.insert(step_id.clone()) {
+            bail!(
+                "run_id {} contains duplicate step id {step_id:?}",
+                record.run_id
+            );
+        }
+        let action = step.action.trim();
+        if action.is_empty() || action.len() > 128 {
+            bail!("step {step_id:?} has an invalid action name");
+        }
+        if step
+            .expectation
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 4_000)
+        {
+            bail!("step {step_id:?} expectation exceeds 4,000 characters");
+        }
+        if step.continue_on_error && step_risk(step)? == RiskLevel::Destructive {
+            bail!("destructive step {step_id:?} cannot set continue_on_error=true");
+        }
+    }
+
+    let mut result_indices = BTreeSet::new();
+    for result in &record.results {
+        let Some(step) = record.steps.get(result.index) else {
+            bail!(
+                "run_id {} contains a result for missing step index {}",
+                record.run_id,
+                result.index
+            );
+        };
+        if !result_indices.insert(result.index) {
+            bail!(
+                "run_id {} contains duplicate results for step index {}",
+                record.run_id,
+                result.index
+            );
+        }
+        let expected_id = effective_step_id(step, result.index);
+        if result.id != expected_id || result.action != step.action {
+            bail!(
+                "run_id {} result metadata does not match immutable step {}",
+                record.run_id,
+                result.index
+            );
+        }
+        match result.status.as_str() {
+            "success" if result.error.is_none() => {}
+            "error" if result.error.as_deref().is_some_and(|value| !value.is_empty()) => {}
+            "success" => bail!(
+                "run_id {} success result {} unexpectedly contains an error",
+                record.run_id,
+                result.index
+            ),
+            "error" => bail!(
+                "run_id {} error result {} has no error message",
+                record.run_id,
+                result.index
+            ),
+            other => bail!(
+                "run_id {} result {} has invalid status {other:?}",
+                record.run_id,
+                result.index
+            ),
+        }
+    }
+
+    match record.status.as_str() {
+        "completed" => {
+            if record.results.len() != record.steps.len()
+                || record
+                    .results
+                    .iter()
+                    .any(|result| result.status != "success")
+            {
+                bail!(
+                    "completed run_id {} must contain one successful result per step",
+                    record.run_id
+                );
+            }
+        }
+        "completed_with_errors" => {
+            if record.results.len() != record.steps.len()
+                || !record
+                    .results
+                    .iter()
+                    .any(|result| result.status == "error")
+            {
+                bail!(
+                    "completed_with_errors run_id {} must contain all step results and at least one error",
+                    record.run_id
+                );
+            }
+        }
+        "failed"
+            if !record
+                .results
+                .iter()
+                .any(|result| result.status == "error") =>
+        {
+            bail!("failed run_id {} has no failed step result", record.run_id);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn effective_step_id(step: &PlanStep, index: usize) -> String {
+    step.id
+        .clone()
+        .unwrap_or_else(|| format!("step_{}", index + 1))
+}
+
+fn validate_step_id(step_id: &str) -> Result<()> {
+    if step_id.is_empty()
+        || step_id.len() > 96
+        || !step_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!(
+            "step ids may contain only letters, numbers, '-' or '_' (maximum 96 characters)"
+        );
+    }
+    Ok(())
+}
+
+fn step_risk(step: &PlanStep) -> Result<RiskLevel> {
+    match step.action.trim() {
+        "composio_execute" => {
+            let request: ComposioExecuteRequest = serde_json::from_value(step.arguments.clone())
+                .context("Invalid composio_execute arguments in persisted plan")?;
+            Ok(classify_execute_request(&request))
+        }
+        "composio_execute_meta" => {
+            let request: ComposioMetaExecuteRequest =
+                serde_json::from_value(step.arguments.clone())
+                    .context("Invalid composio_execute_meta arguments in persisted plan")?;
+            Ok(classify_meta_tool(&request.meta_tool, &request.arguments))
+        }
+        _ => Ok(RiskLevel::Write),
+    }
+}
+
+fn decode_run_record(path: &Path, payload: &[u8]) -> Result<RunRecord> {
+    let record: RunRecord = serde_json::from_slice(payload)
+        .with_context(|| format!("Invalid run record at {}", path.display()))?;
+    validate_run_record(&record)
+        .with_context(|| format!("Invalid run invariants at {}", path.display()))?;
+    Ok(record)
+}
+
 fn write_synced_new_file(path: &Path, payload: &[u8]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(path)
         .with_context(|| format!("Failed to create {}", path.display()))?;
     file.write_all(payload)
         .with_context(|| format!("Failed to write {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("Failed to sync {}", path.display()))
+}
+
+#[cfg(unix)]
+fn restrict_directory_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("Failed to restrict {} permissions", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_directory_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -384,7 +604,9 @@ pub fn validate_run_id(run_id: &str) -> Result<()> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        bail!("run_id must contain only letters, numbers, '-' or '_' (maximum 96 characters)");
+        bail!(
+            "run_id must contain only letters, numbers, '-' or '_' (maximum 96 characters)"
+        );
     }
     Ok(())
 }
@@ -394,7 +616,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent_os::types::RunRecord;
+    use crate::agent_os::types::{PlanStepResult, RunRecord};
 
     fn record(run_id: &str, goal: &str) -> RunRecord {
         let now = chrono::Utc::now();
@@ -409,12 +631,25 @@ mod tests {
         }
     }
 
+    fn wait_step(id: &str, continue_on_error: bool) -> PlanStep {
+        PlanStep {
+            id: Some(id.into()),
+            action: "computer_wait".into(),
+            arguments: serde_json::json!({"milliseconds": 1}),
+            expectation: None,
+            continue_on_error,
+        }
+    }
+
     #[test]
     fn save_and_load_roundtrip() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = RunStore::new(temp.path()).expect("store");
         store.save(&record("run-test", "test")).expect("save");
-        assert_eq!(store.load("run-test").expect("load").unwrap().goal, "test");
+        assert_eq!(
+            store.load("run-test").expect("load").unwrap().goal,
+            "test"
+        );
     }
 
     #[test]
@@ -423,7 +658,10 @@ mod tests {
         let store = RunStore::new(temp.path()).expect("store");
         store.save(&record("run-test", "before")).expect("first");
         store.save(&record("run-test", "after")).expect("second");
-        assert_eq!(store.load("run-test").expect("load").unwrap().goal, "after");
+        assert_eq!(
+            store.load("run-test").expect("load").unwrap().goal,
+            "after"
+        );
         assert!(!store.backup_path("run-test").exists());
     }
 
@@ -431,7 +669,9 @@ mod tests {
     fn interrupted_replace_recovers_last_complete_record() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = RunStore::new(temp.path()).expect("store");
-        store.save(&record("run-test", "durable")).expect("save");
+        store
+            .save(&record("run-test", "durable"))
+            .expect("save");
         std::fs::rename(store.path("run-test"), store.backup_path("run-test"))
             .expect("simulate interrupted replace");
         assert_eq!(
@@ -486,6 +726,83 @@ mod tests {
         assert!(resumed_result.is_ok());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn continued_error_keeps_lease_until_final_checkpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RunStore::new(temp.path()).expect("store"));
+        let mut active = record("run-continued", "continue independent work");
+        active.steps = vec![wait_step("first", true), wait_step("second", false)];
+        store.save(&active).expect("claim run");
+
+        active.status = "failed".into();
+        active.results.push(PlanStepResult {
+            index: 0,
+            id: "first".into(),
+            action: "computer_wait".into(),
+            status: "error".into(),
+            evidence_id: None,
+            result: serde_json::Value::Null,
+            error: Some("independent wait failed".into()),
+        });
+        active.updated_at = chrono::Utc::now();
+        store.save(&active).expect("persist continued error");
+
+        let contender = Arc::clone(&store);
+        let contender_record = active.clone();
+        let result = tokio::spawn(async move { contender.save(&contender_record) })
+            .await
+            .expect("join contender");
+        assert!(result
+            .expect_err("continued plan must retain the lease")
+            .to_string()
+            .contains("already executing"));
+
+        active.results.push(PlanStepResult {
+            index: 1,
+            id: "second".into(),
+            action: "computer_wait".into(),
+            status: "success".into(),
+            evidence_id: None,
+            result: serde_json::json!({"waited_ms": 1}),
+            error: None,
+        });
+        active.status = "completed_with_errors".into();
+        active.updated_at = chrono::Utc::now();
+        store.save(&active).expect("release at final checkpoint");
+    }
+
+    #[test]
+    fn destructive_steps_cannot_continue_after_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        let mut unsafe_record = record("run-unsafe", "delete and continue");
+        unsafe_record.steps.push(PlanStep {
+            id: Some("delete".into()),
+            action: "composio_execute".into(),
+            arguments: serde_json::json!({
+                "tool_slug": "SLACK_DELETE_MESSAGE",
+                "arguments": {}
+            }),
+            expectation: None,
+            continue_on_error: true,
+        });
+        assert!(store
+            .save(&unsafe_record)
+            .expect_err("destructive continuation must fail")
+            .to_string()
+            .contains("destructive step"));
+    }
+
+    #[test]
+    fn duplicate_step_ids_are_rejected() {
+        let mut invalid = record("run-duplicate", "unique step ids");
+        invalid.steps = vec![wait_step("same", false), wait_step("same", false)];
+        assert!(validate_run_record(&invalid)
+            .expect_err("duplicate ids must fail")
+            .to_string()
+            .contains("duplicate step id"));
+    }
+
     #[test]
     fn expired_lease_can_be_reclaimed() {
         let other_thread = std::thread::spawn(|| std::thread::current().id())
@@ -511,6 +828,30 @@ mod tests {
             state.active.get("run-stale").expect("active").owner,
             current_execution_owner()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_run_records_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RunStore::new(temp.path()).expect("store");
+        store
+            .save(&record("run-private", "private"))
+            .expect("save record");
+        let directory_mode = std::fs::metadata(&store.runs_dir)
+            .expect("directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(store.path("run-private"))
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(directory_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
     }
 
     #[test]
