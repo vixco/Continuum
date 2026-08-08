@@ -559,6 +559,8 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     connect_timeout_secs: 600,
     api_timeout_secs: 30,
     max_response_bytes: 524288,
+    max_mutation_body_bytes: 65536,
+    max_title_chars: 256,
   },
   vision: {
     name: "SmolVLM-256M",

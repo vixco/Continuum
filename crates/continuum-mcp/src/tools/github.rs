@@ -50,6 +50,49 @@ pub struct GitHubGetFileRequest {
     pub git_ref: Option<String>,
 }
 
+/// Input for creating a GitHub issue.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GitHubCreateIssueRequest {
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue title.
+    pub title: String,
+    /// Markdown issue body.
+    pub body: String,
+}
+
+/// Input for commenting on an issue or pull request.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GitHubCommentRequest {
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue or pull request number.
+    pub issue_number: u64,
+    /// Markdown comment body.
+    pub body: String,
+}
+
+/// Input for opening a pull request from an existing remote branch.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GitHubCreatePullRequest {
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Pull request title.
+    pub title: String,
+    /// Head branch or `owner:branch`.
+    pub head: String,
+    /// Base branch.
+    pub base: String,
+    /// Markdown pull request body.
+    pub body: String,
+}
+
 /// Decoded repository file response.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GitHubFileResponse {
@@ -186,6 +229,69 @@ pub async fn get_file(
     })
 }
 
+/// Creates an issue after bounded input validation.
+pub async fn create_issue(
+    request: &GitHubCreateIssueRequest,
+    config: &GitHubConfig,
+) -> Result<Value, GitHubToolError> {
+    validate_repo(&request.owner, &request.repo)?;
+    validate_title_body(&request.title, &request.body, config)?;
+    post_json(
+        &format!("/repos/{}/{}/issues", request.owner, request.repo),
+        &[
+            ("title", request.title.clone()),
+            ("body", request.body.clone()),
+        ],
+        config,
+    )
+    .await
+}
+
+/// Adds a comment to an issue or pull request.
+pub async fn comment_issue(
+    request: &GitHubCommentRequest,
+    config: &GitHubConfig,
+) -> Result<Value, GitHubToolError> {
+    validate_repo(&request.owner, &request.repo)?;
+    if request.issue_number == 0 {
+        return Err(GitHubToolError::InvalidInput(
+            "issue_number must be positive".into(),
+        ));
+    }
+    validate_body(&request.body, config)?;
+    post_json(
+        &format!(
+            "/repos/{}/{}/issues/{}/comments",
+            request.owner, request.repo, request.issue_number
+        ),
+        &[("body", request.body.clone())],
+        config,
+    )
+    .await
+}
+
+/// Opens a pull request from an existing remote branch.
+pub async fn create_pull_request(
+    request: &GitHubCreatePullRequest,
+    config: &GitHubConfig,
+) -> Result<Value, GitHubToolError> {
+    validate_repo(&request.owner, &request.repo)?;
+    validate_title_body(&request.title, &request.body, config)?;
+    validate_branch(&request.head)?;
+    validate_branch(&request.base)?;
+    post_json(
+        &format!("/repos/{}/{}/pulls", request.owner, request.repo),
+        &[
+            ("title", request.title.clone()),
+            ("head", request.head.clone()),
+            ("base", request.base.clone()),
+            ("body", request.body.clone()),
+        ],
+        config,
+    )
+    .await
+}
+
 async fn get_json(
     endpoint: &str,
     fields: &[(&str, String)],
@@ -198,6 +304,30 @@ async fn get_json(
         continuum_core::github_cli::api_get(endpoint, fields, config.api_timeout_secs, None)
             .await
             .map_err(|error| GitHubToolError::Cli(error.to_string()))?;
+    if bytes.len() > config.max_response_bytes {
+        return Err(GitHubToolError::ResponseTooLarge(bytes.len()));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| GitHubToolError::InvalidResponse(error.to_string()))
+}
+
+async fn post_json(
+    endpoint: &str,
+    fields: &[(&str, String)],
+    config: &GitHubConfig,
+) -> Result<Value, GitHubToolError> {
+    if !config.enabled {
+        return Err(GitHubToolError::Disabled);
+    }
+    let bytes = continuum_core::github_cli::api_request(
+        "POST",
+        endpoint,
+        fields,
+        config.api_timeout_secs,
+        None,
+    )
+    .await
+    .map_err(|error| GitHubToolError::Cli(error.to_string()))?;
     if bytes.len() > config.max_response_bytes {
         return Err(GitHubToolError::ResponseTooLarge(bytes.len()));
     }
@@ -244,6 +374,45 @@ fn validate_path(path: &str) -> Result<String, GitHubToolError> {
     Ok(url.path().trim_start_matches('/').to_string())
 }
 
+fn validate_title_body(
+    title: &str,
+    body: &str,
+    config: &GitHubConfig,
+) -> Result<(), GitHubToolError> {
+    if title.trim().is_empty() || title.chars().count() > config.max_title_chars.max(1) {
+        return Err(GitHubToolError::InvalidInput(
+            "title is empty or above the configured character limit".into(),
+        ));
+    }
+    validate_body(body, config)
+}
+
+fn validate_body(body: &str, config: &GitHubConfig) -> Result<(), GitHubToolError> {
+    if body.len() > config.max_mutation_body_bytes.max(1) {
+        return Err(GitHubToolError::InvalidInput(
+            "body exceeds github.max_mutation_body_bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_branch(branch: &str) -> Result<(), GitHubToolError> {
+    if branch.is_empty()
+        || branch.len() > 255
+        || branch.starts_with('-')
+        || branch.contains("..")
+        || branch.contains(['\r', '\n', '\\', ' '])
+        || !branch.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/' | ':')
+        })
+    {
+        return Err(GitHubToolError::InvalidInput(
+            "invalid GitHub branch name".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Read-only GitHub tool error.
 #[derive(Debug, thiserror::Error)]
 pub enum GitHubToolError {
@@ -278,5 +447,7 @@ mod tests {
         assert_eq!(validate_path("src/main.rs").unwrap(), "src/main.rs");
         assert!(validate_path("../secret").is_err());
         assert!(validate_path("a//b").is_err());
+        assert!(validate_branch("feature/safe").is_ok());
+        assert!(validate_branch("../../main").is_err());
     }
 }

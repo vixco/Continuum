@@ -183,6 +183,9 @@ Continuum does not accept, read, log, or persist access tokens and deliberately
 removes `GH_TOKEN`/`GITHUB_TOKEN` overrides before every call. A connection is
 valid only when `gh auth status` identifies OS-keyring storage. Read tools are
 session-approved; network activity begins only after explicit user connection.
+Issue creation, comments, and pull-request creation are repository-scoped,
+bounded, and always-confirm. Mutation bodies are redacted from audit metadata;
+pull-request creation references an existing remote branch and never pushes.
 
 ## Context package contract
 

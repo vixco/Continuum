@@ -668,6 +668,8 @@ export interface ContinuumConfig {
     connect_timeout_secs: number;
     api_timeout_secs: number;
     max_response_bytes: number;
+    max_mutation_body_bytes: number;
+    max_title_chars: number;
   };
   vision: {
     name: string;

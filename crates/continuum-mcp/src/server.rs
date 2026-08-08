@@ -50,7 +50,8 @@ use crate::tools::git::{
     GitCheckpointListRequest, GitCheckpointRequest, GitDiffRequest, GitRollbackRequest,
 };
 use crate::tools::github::{
-    GitHubGetFileRequest, GitHubListIssuesRequest, GitHubListReposRequest, GitHubRepoRequest,
+    GitHubCommentRequest, GitHubCreateIssueRequest, GitHubCreatePullRequest, GitHubGetFileRequest,
+    GitHubListIssuesRequest, GitHubListReposRequest, GitHubRepoRequest,
 };
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
@@ -1606,6 +1607,51 @@ impl ContinuumMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("github_get_file", &req, || async {
             crate::tools::github::get_file(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Create a GitHub issue in one exact repository. Title/body are bounded and body is redacted from local tool audit details. Requires a fresh user confirmation every call."
+    )]
+    async fn github_create_issue(
+        &self,
+        Parameters(req): Parameters<GitHubCreateIssueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_create_issue", &req, || async {
+            crate::tools::github::create_issue(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Post a bounded GitHub comment to one issue or pull request. Comment body is redacted from local tool audit details. Requires a fresh user confirmation every call."
+    )]
+    async fn github_comment_issue(
+        &self,
+        Parameters(req): Parameters<GitHubCommentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_comment_issue", &req, || async {
+            crate::tools::github::comment_issue(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open a GitHub pull request from an existing remote head branch to a base branch. Does not push code. Title/body/refs are validated and bounded. Requires a fresh user confirmation every call."
+    )]
+    async fn github_create_pull_request(
+        &self,
+        Parameters(req): Parameters<GitHubCreatePullRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_create_pull_request", &req, || async {
+            crate::tools::github::create_pull_request(&req, &self.state.github_config)
                 .await
                 .map_err(github_err_to_mcp)
         })

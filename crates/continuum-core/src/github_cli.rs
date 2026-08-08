@@ -150,6 +150,20 @@ pub async fn api_get(
     timeout_secs: u64,
     cwd: Option<&Path>,
 ) -> Result<Vec<u8>> {
+    api_request("GET", endpoint, fields, timeout_secs, cwd).await
+}
+
+/// Executes an authenticated API request through `gh api`.
+pub async fn api_request(
+    method: &str,
+    endpoint: &str,
+    fields: &[(&str, String)],
+    timeout_secs: u64,
+    cwd: Option<&Path>,
+) -> Result<Vec<u8>> {
+    if !["GET", "POST", "PATCH", "DELETE"].contains(&method) {
+        return Err(anyhow!("unsupported GitHub API method"));
+    }
     if !endpoint.starts_with('/') || endpoint.contains("..") || endpoint.contains(['\r', '\n']) {
         return Err(anyhow!("invalid GitHub API endpoint"));
     }
@@ -161,7 +175,7 @@ pub async fn api_get(
     let mut owned = vec![
         "api".to_string(),
         "--method".to_string(),
-        "GET".to_string(),
+        method.to_string(),
         endpoint.to_string(),
     ];
     for (name, value) in fields {
