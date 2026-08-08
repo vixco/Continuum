@@ -527,7 +527,11 @@ def assemble_release(
 
 def release_has_complete_assets(payload: dict[str, object]) -> bool:
     tag = str(payload.get("tag_name") or "")
-    if payload.get("draft") is True or not tag.startswith("v"):
+    if (
+        payload.get("draft") is True
+        or payload.get("prerelease") is True
+        or not tag.startswith("v")
+    ):
         return False
     try:
         version = str(SemVer.parse(tag.removeprefix("v")))
@@ -575,11 +579,17 @@ def write_complete_release_tags(release_json_lines: Path, output: Path) -> None:
     )
 
 
-def verify_published_release(release_json: Path, version: str) -> None:
+def verify_published_release(
+    release_json: Path, version: str, allow_draft: bool = False
+) -> None:
     SemVer.parse(version)
     payload = json.loads(release_json.read_text(encoding="utf-8"))
-    if payload.get("draft") is True:
+    if payload.get("draft") is True and not allow_draft:
         raise ContractError("GitHub Release is still a draft")
+    if payload.get("prerelease") is True:
+        raise ContractError(
+            "GitHub Release is marked as a prerelease and cannot back /releases/latest"
+        )
     tag = payload.get("tag_name")
     if tag != f"v{version}":
         raise ContractError(
@@ -646,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser = subparsers.add_parser("verify-published")
     verify_parser.add_argument("--release-json", type=Path, required=True)
     verify_parser.add_argument("--version", required=True)
+    verify_parser.add_argument("--allow-draft", action="store_true")
 
     return parser
 
@@ -689,7 +700,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output.resolve(),
             )
         elif args.command == "verify-published":
-            verify_published_release(args.release_json.resolve(), args.version)
+            verify_published_release(
+                args.release_json.resolve(),
+                args.version,
+                allow_draft=args.allow_draft,
+            )
         else:
             raise ContractError(f"Unknown command: {args.command}")
     except (ContractError, OSError, json.JSONDecodeError) as error:
