@@ -17,13 +17,27 @@ pub struct McpServerConfig {
 }
 
 /// Filesystem-allowlist expansion settings.
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct McpFsConfig {
     /// Extra absolute paths the user opts in to beyond the hardcoded defaults.
     /// `~` is expanded at load time. Denied dirs/patterns still apply even
     /// inside these roots.
     pub extra_paths: Vec<PathBuf>,
+    /// Maximum UTF-8 bytes accepted by create/patch actions.
+    pub max_write_bytes: usize,
+    /// Maximum substitutions in one replace-all patch.
+    pub max_patch_replacements: usize,
+}
+
+impl Default for McpFsConfig {
+    fn default() -> Self {
+        Self {
+            extra_paths: Vec::new(),
+            max_write_bytes: 1024 * 1024,
+            max_patch_replacements: 100,
+        }
+    }
 }
 
 /// Loads the `[mcp]` section from `<data_dir>/config.toml`. Returns defaults
@@ -96,6 +110,7 @@ mod tests {
         .unwrap();
         let cfg = load(dir.path());
         assert_eq!(cfg.fs.extra_paths.len(), 2);
+        assert_eq!(cfg.fs.max_write_bytes, 1024 * 1024);
     }
 
     #[test]

@@ -41,6 +41,20 @@ files to `.git/continuum-recovery/<safety-checkpoint>/untracked/` and copies
 modified sensitive tracked files to the sibling `sensitive-tracked/` folder
 before `git reset --hard`. Ignored files are not altered.
 
+### Filesystem actions
+
+| Tool | Default tier | Safety contract |
+|---|---|---|
+| `fs_create_file` | session-approved | Existing parent must be allowlisted; atomic create-new; never overwrites. |
+| `fs_apply_patch` | session-approved | Exact `old_text` precondition; one match unless `replace_all`; original moved to recovery first. |
+| `fs_move` | session-approved | Source and destination parent are allowlisted; destination must not exist. |
+| `fs_delete_to_trash` | always-confirm | Moves the target to `<data_dir>/recovery/files/<date>/`; returns its recovery path. |
+
+All content is UTF-8. `mcp.fs.max_write_bytes` defaults to 1 MiB and
+`mcp.fs.max_patch_replacements` defaults to 100. New nested directories are not
+created implicitly: the direct destination parent must already exist. Directory
+moves across volumes are refused rather than copied recursively.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

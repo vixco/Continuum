@@ -1757,6 +1757,26 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             name: "fs_list_dir".into(),
             description: "List up to 500 entries of a directory".into(),
         },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_create_file".into(),
+            description: "Atomically create a new allowlisted UTF-8 file".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_apply_patch".into(),
+            description: "Apply an exact-text patch and preserve the original".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_move".into(),
+            description: "Move without overwriting the destination".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_delete_to_trash".into(),
+            description: "Move a file or directory into recovery storage".into(),
+        },
         // --- git ---
         McpTool {
             namespace: "git".into(),

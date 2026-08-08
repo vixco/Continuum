@@ -41,6 +41,21 @@ Component: `git_tools`
 - Restart rule: restart the MCP process after a command timeout. Git
   subprocesses use `git_context.command_timeout_secs` and are killed on drop.
 
+## Filesystem action broker
+
+Component: `file_actions`
+
+- Health check: verify `<data_dir>/recovery/files/` is creatable and perform an
+  atomic create/rename/delete probe inside that directory only.
+- Logs: tool and permission audit records in `logs/actions.jsonl`; mutation
+  responses include their recovery path.
+- Recovery: originals from patches and recoverable deletes live below
+  `<data_dir>/recovery/files/<date>/`. Move them back only after confirming the
+  destination does not exist.
+- Restart rule: retry after filesystem locks are released. Temporary sibling
+  files named `.continuum-write-*.tmp` or `.continuum-patch-*.tmp` may be
+  quarantined after verifying no MCP file action is active.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):
