@@ -197,8 +197,8 @@ jobs:
           .\scripts\bump-version.ps1 -NewVersion "${{ needs.prepare.outputs.version }}"
           python scripts/release_contract.py validate-version --repo-root . --version "${{ needs.prepare.outputs.version }}"
 
-      - name: Build runtime and MCP binaries
-        run: cargo build --release --locked --bin continuum --bin continuum-mcp
+      - name: Build runtime and both MCP binaries
+        run: cargo build --release --locked --bin continuum --bin continuum-mcp --bin continuum-agent-os
 
       - name: Stage runtime resources
         shell: pwsh
@@ -207,6 +207,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $binDir | Out-Null
           Copy-Item "target/release/continuum.exe" "$binDir/continuum.exe" -Force
           Copy-Item "target/release/continuum-mcp.exe" "$binDir/continuum-mcp.exe" -Force
+          Copy-Item "target/release/continuum-agent-os.exe" "$binDir/continuum-agent-os.exe" -Force
 
       - name: Build signed NSIS installer
         working-directory: apps/desktop
@@ -224,10 +225,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $assets,$stage | Out-Null
           Copy-Item "target/release/continuum.exe" "$stage/"
           Copy-Item "target/release/continuum-mcp.exe" "$stage/"
+          Copy-Item "target/release/continuum-agent-os.exe" "$stage/"
           Copy-Item "config" "$stage/config" -Recurse
           Copy-Item "prompts" "$stage/prompts" -Recurse
           Copy-Item "skills" "$stage/skills" -Recurse
-          Copy-Item "README.md","LICENSE","KNOWN_ISSUES.md" "$stage/"
+          Copy-Item "README.md","LICENSE","KNOWN_ISSUES.md","SECURITY.md" "$stage/"
           Copy-Item "scripts/install.ps1" "$stage/install.ps1"
           Compress-Archive -Path "$stage/*" -DestinationPath "$assets/continuum-$version-windows-x64.zip" -Force
 
@@ -307,15 +309,19 @@ jobs:
           ./scripts/bump-version.ps1 -NewVersion "${{ needs.prepare.outputs.version }}"
           python3 scripts/release_contract.py validate-version --repo-root . --version "${{ needs.prepare.outputs.version }}"
 
-      - name: Build runtime and MCP binaries
-        run: cargo build --release --locked --target "${{ matrix.target }}" --bin continuum --bin continuum-mcp
+      - name: Build runtime and both MCP binaries
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bin continuum --bin continuum-mcp --bin continuum-agent-os
 
       - name: Stage runtime resources
         run: |
           mkdir -p apps/desktop/src-tauri/resources/bin
           cp "target/${{ matrix.target }}/release/continuum" apps/desktop/src-tauri/resources/bin/continuum
           cp "target/${{ matrix.target }}/release/continuum-mcp" apps/desktop/src-tauri/resources/bin/continuum-mcp
-          chmod +x apps/desktop/src-tauri/resources/bin/continuum apps/desktop/src-tauri/resources/bin/continuum-mcp
+          cp "target/${{ matrix.target }}/release/continuum-agent-os" apps/desktop/src-tauri/resources/bin/continuum-agent-os
+          chmod +x \
+            apps/desktop/src-tauri/resources/bin/continuum \
+            apps/desktop/src-tauri/resources/bin/continuum-mcp \
+            apps/desktop/src-tauri/resources/bin/continuum-agent-os
 
       - name: Build signed DMG and updater archive
         working-directory: apps/desktop
@@ -335,10 +341,11 @@ jobs:
           mkdir -p "$assets" "$stage"
           cp "target/$target/release/continuum" "$stage/"
           cp "target/$target/release/continuum-mcp" "$stage/"
+          cp "target/$target/release/continuum-agent-os" "$stage/"
           cp -R config "$stage/config"
           cp -R prompts "$stage/prompts"
           cp -R skills "$stage/skills"
-          cp README.md LICENSE KNOWN_ISSUES.md "$stage/"
+          cp README.md LICENSE KNOWN_ISSUES.md SECURITY.md "$stage/"
           tar -C staging -czf "$assets/continuum-$version-macos-$arch.tar.gz" "continuum-$version-macos-$arch"
 
           dmg_count="$(find "target/$target/release/bundle/dmg" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
@@ -469,6 +476,9 @@ jobs:
             - **macOS Apple Silicon:** `continuum-${{ needs.prepare.outputs.version }}-macos-aarch64.dmg`
             - **macOS Intel:** `continuum-${{ needs.prepare.outputs.version }}-macos-x86_64.dmg`
 
+            All desktop packages include the Continuum runtime, context MCP server,
+            and the policy-gated `continuum-agent-os` execution server.
+
             The updater archives are independently signed; `latest.json` carries their signatures.
             `release-manifest.json` and `SHA256SUMS.txt` describe the complete cross-platform asset set.
 
@@ -516,4 +526,5 @@ jobs:
             echo "- Source commit: \`${{ needs.prepare.outputs.source_sha }}\`"
             echo "- Release commit: \`${{ steps.tag.outputs.release_commit }}\`"
             echo "- Windows x64, macOS Apple Silicon and macOS Intel assets verified."
+            echo "- Runtime, context MCP and Agent OS binaries bundled on every platform."
           } >> "$GITHUB_STEP_SUMMARY"
