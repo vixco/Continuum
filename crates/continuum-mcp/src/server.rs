@@ -49,6 +49,9 @@ use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
 use crate::tools::git::{
     GitCheckpointListRequest, GitCheckpointRequest, GitDiffRequest, GitRollbackRequest,
 };
+use crate::tools::github::{
+    GitHubGetFileRequest, GitHubListIssuesRequest, GitHubListReposRequest, GitHubRepoRequest,
+};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
     MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultDeleteRequest,
@@ -76,6 +79,7 @@ pub(crate) struct ServerState {
     pub(crate) fs_max_write_bytes: usize,
     pub(crate) fs_max_patch_replacements: usize,
     pub(crate) terminal_config: crate::config::McpTerminalConfig,
+    pub(crate) github_config: continuum_core::config::GitHubConfig,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
@@ -161,6 +165,7 @@ impl ContinuumMcpServer {
         let git_context = full_cfg.git_context.clone();
         let package_config = full_cfg.context_package.clone();
         let process_watcher_enabled = full_cfg.process_watcher.enabled;
+        let github_config = full_cfg.github.clone();
         // Honour the configured `[storage] db_path` when there is a real
         // config file to honour; otherwise fall back to this process's
         // data dir, because the config *defaults* point at the standard
@@ -215,6 +220,7 @@ impl ContinuumMcpServer {
                 fs_max_write_bytes: mcp_cfg.fs.max_write_bytes,
                 fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
                 terminal_config: mcp_cfg.terminal,
+                github_config,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
@@ -1513,6 +1519,100 @@ impl ContinuumMcpServer {
     }
 
     // -----------------------------------------------------------------------
+    // Optional read-only GitHub integration
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Return the active GitHub account and scopes through the official gh CLI. Tokens are never returned and environment-token overrides are ignored; only OS-keyring-backed auth is accepted."
+    )]
+    async fn github_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_status", &Value::Null, || async {
+            if !self.state.github_config.enabled {
+                return Ok(continuum_core::github_cli::GitHubAuthStatus {
+                    detail: "GitHub integration is disabled in config".to_string(),
+                    ..continuum_core::github_cli::GitHubAuthStatus::default()
+                });
+            }
+            Ok::<_, McpError>(
+                continuum_core::github_cli::status(self.state.github_config.api_timeout_secs).await,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Return the connected GitHub user's profile. Read-only and keyring-authenticated through the official gh CLI."
+    )]
+    async fn github_me(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_me", &Value::Null, || async {
+            crate::tools::github::me(&self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List repositories visible to the connected GitHub account, with bounded page size and optional visibility filter."
+    )]
+    async fn github_list_repos(
+        &self,
+        Parameters(req): Parameters<GitHubListReposRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_list_repos", &req, || async {
+            crate::tools::github::list_repos(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read metadata for one owner/repository visible to the connected GitHub account."
+    )]
+    async fn github_get_repo(
+        &self,
+        Parameters(req): Parameters<GitHubRepoRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_get_repo", &req, || async {
+            crate::tools::github::get_repo(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List issues and pull requests for one GitHub repository. Read-only; state and page size are validated and bounded."
+    )]
+    async fn github_list_issues(
+        &self,
+        Parameters(req): Parameters<GitHubListIssuesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_list_issues", &req, || async {
+            crate::tools::github::list_issues(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read one UTF-8 file or list one directory at an optional GitHub branch, tag, or commit. Traversal and oversized/binary content are rejected."
+    )]
+    async fn github_get_file(
+        &self,
+        Parameters(req): Parameters<GitHubGetFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_get_file", &req, || async {
+            crate::tools::github::get_file(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
     // Web fetch (GET only, no redirects)
     // -----------------------------------------------------------------------
 
@@ -1746,6 +1846,12 @@ fn permission_resource(args: &Value) -> Option<String> {
         "component",
     ];
     let object = args.as_object()?;
+    if let (Some(owner), Some(repo)) = (
+        object.get("owner").and_then(Value::as_str),
+        object.get("repo").and_then(Value::as_str),
+    ) {
+        return Some(format!("github:{owner}/{repo}"));
+    }
     for key in RESOURCE_KEYS {
         if let Some(value) = object.get(*key).and_then(Value::as_str) {
             return Some(value.chars().take(500).collect());
@@ -1791,6 +1897,16 @@ fn terminal_err_to_mcp(error: crate::tools::terminal::TerminalError) -> McpError
     use crate::tools::terminal::TerminalError;
     match error {
         TerminalError::Spawn(_) | TerminalError::Evidence(_) | TerminalError::EvidencePath => {
+            McpError::internal_error(error.to_string(), None)
+        }
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn github_err_to_mcp(error: crate::tools::github::GitHubToolError) -> McpError {
+    use crate::tools::github::GitHubToolError;
+    match error {
+        GitHubToolError::Cli(_) | GitHubToolError::InvalidResponse(_) => {
             McpError::internal_error(error.to_string(), None)
         }
         _ => McpError::invalid_params(error.to_string(), None),
@@ -1861,6 +1977,7 @@ mod repair_authorization_tests {
                 fs_max_write_bytes: 1024 * 1024,
                 fs_max_patch_replacements: 100,
                 terminal_config: crate::config::McpTerminalConfig::default(),
+                github_config: continuum_core::config::GitHubConfig::default(),
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),

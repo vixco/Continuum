@@ -19,6 +19,7 @@ import type {
   ConversationSummary,
   LogEntry,
   InstallMcpServerInput,
+  GitHubAuthStatus,
   McpServerRegistration,
   McpTool,
   PermissionGrant,
@@ -372,6 +373,18 @@ export const continuum = {
   providerRemove: (id: string) => invoke<void>("provider_remove", { id }),
   providerSetDefaultModel: (id: string, model: string) =>
     invoke<void>("provider_set_default_model", { id, model }),
+  githubStatus: () =>
+    invoke<GitHubAuthStatus>("github_status", undefined, {
+      installed: false,
+      connected: false,
+      login: null,
+      token_source: null,
+      scopes: [],
+      secure_storage: false,
+      detail: "GitHub status is available in the desktop app.",
+    }),
+  githubConnect: () => invoke<GitHubAuthStatus>("github_connect"),
+  githubDisconnect: () => invoke<GitHubAuthStatus>("github_disconnect"),
   chatListConversations: () =>
     invoke<ConversationSummary[]>("chat_list_conversations", undefined, []),
   chatGetConversation: (id: string) =>
@@ -540,6 +553,12 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     cli_timeout_secs: 120,
     model_refresh_interval_secs: 300,
     system_prompt_path: null,
+  },
+  github: {
+    enabled: true,
+    connect_timeout_secs: 600,
+    api_timeout_secs: 30,
+    max_response_bytes: 524288,
   },
   vision: {
     name: "SmolVLM-256M",

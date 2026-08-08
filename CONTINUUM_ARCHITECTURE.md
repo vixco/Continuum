@@ -178,6 +178,12 @@ argument count are configurable. Cwd passes the project allowlist, stdin is
 closed, sensitive environment variables are removed, and verifier runs persist
 bounded evidence for later handoff.
 
+GitHub is an optional external boundary mediated by the official `gh` CLI.
+Continuum does not accept, read, log, or persist access tokens and deliberately
+removes `GH_TOKEN`/`GITHUB_TOKEN` overrides before every call. A connection is
+valid only when `gh auth status` identifies OS-keyring storage. Read tools are
+session-approved; network activity begins only after explicit user connection.
+
 ## Context package contract
 
 `continuum context --project current` will produce a versioned package with:

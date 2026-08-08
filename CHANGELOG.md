@@ -31,6 +31,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   Stdin is closed, sensitive environment variables and credential-like
   arguments are excluded, and runtime/output limits are configurable.
   Verifier results are atomically persisted under `evidence/terminal/`.
+- **Optional GitHub connection and read tools**: Settings now exposes an
+  explicit Connect/Disconnect card backed by the official `gh` browser/device
+  flow. Continuum never reads tokens, strips token environment overrides, and
+  accepts only OS-keyring-backed CLI auth. New session-approved MCP reads cover
+  the current user, repositories, repository metadata, issues/PRs, and bounded
+  UTF-8 file/directory content. GitHub remains idle until the user opts in.
 
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained

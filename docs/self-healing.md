@@ -70,6 +70,19 @@ Component: `terminal_tools`
 - Restart rule: restart the MCP process after repeated spawn failures; first
   verify PATH and `mcp.terminal.allowed_programs` configuration.
 
+## GitHub CLI bridge
+
+Component: `github`
+
+- Health check: `github_status` verifies `gh.exe`, active github.com auth, and
+  OS-keyring token storage without showing a token or making repository calls.
+- Logs: connect/disconnect and MCP permission/tool audits; tokens are excluded.
+- Recovery: install/update the official GitHub CLI, then reconnect from
+  Settings. Plaintext-file token storage is rejected. Disconnect locally and
+  revoke the GitHub CLI OAuth grant remotely if compromise is suspected.
+- Restart rule: restart the MCP process after repeated CLI spawn/timeouts; auth
+  failures require reconnect rather than restart.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):

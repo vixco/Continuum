@@ -104,6 +104,15 @@ git_rollback        = "always-confirm"
 terminal_verify = "session-approved"
 terminal_run    = "always-confirm"
 
+# --- Optional GitHub connection (official gh CLI, keyring auth only) ---
+[github]
+github_status      = "auto"
+github_me          = "session-approved"
+github_list_repos  = "session-approved"
+github_get_repo    = "session-approved"
+github_list_issues = "session-approved"
+github_get_file    = "session-approved"
+
 # --- Web fetch (GET only, public-IP only, no redirects) ---
 [web]
 web_fetch = "auto"

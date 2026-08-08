@@ -10,6 +10,7 @@ pub mod context;
 pub mod file_actions;
 pub mod fs;
 pub mod git;
+pub mod github;
 pub mod memory;
 pub mod repair;
 pub mod system;

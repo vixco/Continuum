@@ -663,6 +663,12 @@ export interface ContinuumConfig {
     model_refresh_interval_secs: number;
     system_prompt_path: string | null;
   };
+  github: {
+    enabled: boolean;
+    connect_timeout_secs: number;
+    api_timeout_secs: number;
+    max_response_bytes: number;
+  };
   vision: {
     name: string;
     model_path: string;
@@ -869,6 +875,16 @@ export interface ProviderConnection {
   requires_key: boolean;
   last_tested_at: string | null;
   last_test_ok: boolean | null;
+}
+
+export interface GitHubAuthStatus {
+  installed: boolean;
+  connected: boolean;
+  login: string | null;
+  token_source: string | null;
+  scopes: string[];
+  secure_storage: boolean;
+  detail: string;
 }
 
 export interface CatalogEntry {
