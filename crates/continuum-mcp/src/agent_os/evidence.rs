@@ -90,7 +90,7 @@ impl EvidenceStore {
                 80,
                 4000,
             ),
-            error: draft.error.map(|value| truncate(value, 2000)),
+            error: draft.error.map(|value| sanitize_error(draft.tool, value)),
         };
         let payload = serde_json::to_vec(&event)?;
         let mut file = OpenOptions::new()
@@ -218,32 +218,70 @@ impl EvidenceStore {
 
 pub fn sanitize_value(tool: &str, value: &Value) -> Value {
     let mut sanitized = redact_secrets(value, 0);
-    if tool == "computer_type" {
-        redact_text_field(&mut sanitized);
+    match tool {
+        "computer_type" => redact_text_field(&mut sanitized),
+        "composio_search" => redact_composio_search(&mut sanitized),
+        "composio_execute" | "composio_execute_meta" => redact_composio_surface(&mut sanitized),
+        _ => {}
     }
-    redact_nested_type_steps(&mut sanitized);
+    redact_nested_agent_steps(&mut sanitized);
     sanitized
 }
 
-fn redact_nested_type_steps(value: &mut Value) {
+fn sanitize_error(tool: &str, value: &str) -> String {
+    if matches!(
+        tool,
+        "composio_configure"
+            | "composio_create_session"
+            | "composio_search"
+            | "composio_execute"
+            | "composio_execute_meta"
+    ) {
+        format!(
+            "[redacted third-party error; chars={}]",
+            value.chars().count()
+        )
+    } else {
+        truncate(value, 2000)
+    }
+}
+
+fn redact_nested_agent_steps(value: &mut Value) {
     match value {
         Value::Object(object) => {
-            let is_type_step = object
+            let action = object
                 .get("action")
                 .and_then(Value::as_str)
-                .is_some_and(|action| action == "computer_type");
-            if is_type_step {
-                if let Some(arguments) = object.get_mut("arguments") {
-                    redact_text_field(arguments);
+                .map(str::to_owned);
+            match action.as_deref() {
+                Some("computer_type") => {
+                    if let Some(arguments) = object.get_mut("arguments") {
+                        redact_text_field(arguments);
+                    }
                 }
+                Some("composio_search") => {
+                    if let Some(arguments) = object.get_mut("arguments") {
+                        redact_composio_search(arguments);
+                    }
+                    redact_object_field(object, "result");
+                    redact_object_field(object, "error");
+                }
+                Some("composio_execute") | Some("composio_execute_meta") => {
+                    if let Some(arguments) = object.get_mut("arguments") {
+                        redact_composio_surface(arguments);
+                    }
+                    redact_object_field(object, "result");
+                    redact_object_field(object, "error");
+                }
+                _ => {}
             }
             for child in object.values_mut() {
-                redact_nested_type_steps(child);
+                redact_nested_agent_steps(child);
             }
         }
         Value::Array(items) => {
             for item in items {
-                redact_nested_type_steps(item);
+                redact_nested_agent_steps(item);
             }
         }
         _ => {}
@@ -265,6 +303,54 @@ fn redact_text_field(value: &mut Value) {
     }
 }
 
+fn redact_composio_search(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        redact_object_field(object, "queries");
+    }
+}
+
+fn redact_composio_surface(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        for field in ["arguments", "account", "intent", "response"] {
+            redact_object_field(object, field);
+        }
+    }
+}
+
+fn redact_object_field(object: &mut serde_json::Map<String, Value>, field: &str) {
+    if let Some(value) = object.remove(field) {
+        object.insert(field.to_string(), redacted_shape(&value));
+    }
+}
+
+fn redacted_shape(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys = map.keys().take(80).cloned().collect::<Vec<_>>();
+            keys.sort();
+            serde_json::json!({
+                "redacted": true,
+                "kind": "object",
+                "fields": map.len(),
+                "keys": keys
+            })
+        }
+        Value::Array(items) => serde_json::json!({
+            "redacted": true,
+            "kind": "array",
+            "items": items.len()
+        }),
+        Value::String(text) => serde_json::json!({
+            "redacted": true,
+            "kind": "string",
+            "chars": text.chars().count()
+        }),
+        Value::Null => serde_json::json!({ "redacted": true, "kind": "null" }),
+        Value::Bool(_) => serde_json::json!({ "redacted": true, "kind": "boolean" }),
+        Value::Number(_) => serde_json::json!({ "redacted": true, "kind": "number" }),
+    }
+}
+
 fn redact_secrets(value: &Value, depth: usize) -> Value {
     if depth > 12 {
         return Value::String("[depth-limited]".to_string());
@@ -283,6 +369,15 @@ fn redact_secrets(value: &Value, depth: usize) -> Value {
                     "authorization",
                     "credential",
                     "cookie",
+                    "session_id",
+                    "user_id",
+                    "mcp_url",
+                    "oauth",
+                    "signed_url",
+                    "presigned",
+                    "redirect_url",
+                    "callback_url",
+                    "connection_url",
                 ]
                 .iter()
                 .any(|needle| normalized.contains(needle));
@@ -399,6 +494,105 @@ mod tests {
         assert!(!serde_json::to_string(&sanitized)
             .expect("json")
             .contains("secret payload"));
+    }
+
+    #[test]
+    fn direct_composio_payload_and_response_are_minimized() {
+        let value = serde_json::json!({
+            "session_id": "trs_private",
+            "tool_slug": "GMAIL_SEND_EMAIL",
+            "arguments": {
+                "recipient": "person@example.com",
+                "subject": "private subject",
+                "body": "private body"
+            },
+            "account": "sender@example.com",
+            "intent": "send a confidential email",
+            "response": {
+                "data": { "message_id": "msg_private", "body": "private body" },
+                "error": null
+            }
+        });
+        let sanitized = sanitize_value("composio_execute", &value);
+        assert_eq!(sanitized["tool_slug"], "GMAIL_SEND_EMAIL");
+        assert_eq!(sanitized["session_id"], "[redacted]");
+        assert_eq!(sanitized["arguments"]["redacted"], true);
+        assert_eq!(sanitized["arguments"]["fields"], 3);
+        assert_eq!(sanitized["account"]["redacted"], true);
+        assert_eq!(sanitized["intent"]["redacted"], true);
+        assert_eq!(sanitized["response"]["redacted"], true);
+        let rendered = serde_json::to_string(&sanitized).expect("json");
+        for secret in [
+            "person@example.com",
+            "sender@example.com",
+            "private subject",
+            "private body",
+            "confidential email",
+            "msg_private",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn nested_plan_composio_payload_and_result_are_minimized() {
+        let value = serde_json::json!({
+            "steps": [{
+                "action": "composio_execute",
+                "arguments": {
+                    "tool_slug": "SLACK_SEND_MESSAGE",
+                    "arguments": { "channel": "private-channel", "text": "private text" },
+                    "intent": "tell the private team"
+                },
+                "result": { "message": "private text" },
+                "error": "private upstream failure"
+            }]
+        });
+        let sanitized = sanitize_value("agent_run_plan", &value);
+        assert_eq!(
+            sanitized["steps"][0]["arguments"]["tool_slug"],
+            "SLACK_SEND_MESSAGE"
+        );
+        assert_eq!(
+            sanitized["steps"][0]["arguments"]["arguments"]["redacted"],
+            true
+        );
+        assert_eq!(sanitized["steps"][0]["result"]["redacted"], true);
+        assert_eq!(sanitized["steps"][0]["error"]["redacted"], true);
+        let rendered = serde_json::to_string(&sanitized).expect("json");
+        for secret in [
+            "private-channel",
+            "private text",
+            "private team",
+            "private upstream failure",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn composio_search_queries_are_counted_not_logged() {
+        let value = serde_json::json!({
+            "queries": ["find invoices for private customer", "email a private person"],
+            "model": "provider/model"
+        });
+        let sanitized = sanitize_value("composio_search", &value);
+        assert_eq!(sanitized["queries"]["redacted"], true);
+        assert_eq!(sanitized["queries"]["items"], 2);
+        assert_eq!(sanitized["model"], "provider/model");
+        assert!(!serde_json::to_string(&sanitized)
+            .expect("json")
+            .contains("private customer"));
+    }
+
+    #[test]
+    fn third_party_errors_are_not_persisted_verbatim() {
+        let sanitized = sanitize_error("composio_execute", "recipient person@example.com failed");
+        assert_eq!(sanitized, "[redacted third-party error; chars=35]");
+        assert_eq!(
+            sanitize_error("computer_click", "normal error"),
+            "normal error"
+        );
     }
 
     #[test]

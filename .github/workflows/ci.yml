@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Compiler version validated against the committed Cargo.lock.
@@ -22,7 +26,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
@@ -36,7 +40,7 @@ jobs:
     name: Clippy (light path — no native deps)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
@@ -44,7 +48,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -68,7 +72,7 @@ jobs:
     name: Clippy (full workspace — with native deps)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
@@ -93,9 +97,8 @@ jobs:
         run: choco install ninja --no-progress --confirm
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: choco install protoc --no-progress --confirm
 
       - name: Verify native build prerequisites
         shell: pwsh
@@ -110,7 +113,7 @@ jobs:
           }
 
       - name: Cache cargo artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -134,7 +137,7 @@ jobs:
     runs-on: windows-latest
     needs: [fmt, clippy-light]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
@@ -154,9 +157,8 @@ jobs:
         run: choco install ninja --no-progress --confirm
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: choco install protoc --no-progress --confirm
 
       - name: Verify native build prerequisites
         shell: pwsh
@@ -174,7 +176,7 @@ jobs:
       # test job runs in parallel and must only restore it; otherwise both jobs
       # can spend many minutes compressing/uploading the same multi-GB target.
       - name: Restore cargo artifacts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -192,42 +194,40 @@ jobs:
         run: cargo test -p continuum-core --no-default-features --lib
 
       - name: Run tests (full workspace)
-        # The memory-precision benchmark drives frame writes and the async
-        # context-events writer against the same SQLite file. Under a heavily
-        # parallel Windows test run its deliberately short SQLite busy timeout
-        # can make the benchmark miss its writer-drain deadline even though the
-        # same test is stable when given its own scheduling window. Keep the
-        # workspace parallel, but run this integration-style benchmark
-        # immediately afterwards in isolation instead of hiding/skipping it.
-        run: cargo test --workspace -- --skip bench::score::tests::memory_is_precise_and_not_duplicated
+        # The score module contains integration-style benchmarks that drive
+        # concurrent frame and event writes against one SQLite database. They
+        # remain mandatory, but receive their own single-thread scheduling
+        # window below so runner load cannot turn commit timing into a flaky
+        # product signal. Every other workspace test remains parallel here.
+        run: "cargo test --workspace -- --skip bench::score::tests::"
 
-      - name: Run memory precision benchmark (isolated)
-        run: cargo test -p continuum-core bench::score::tests::memory_is_precise_and_not_duplicated -- --exact --test-threads=1
+      - name: Run context-engine benchmark gates (isolated)
+        run: "cargo test -p continuum-core bench::score::tests:: -- --test-threads=1"
 
   build-desktop:
     name: Build desktop
     runs-on: windows-latest
     needs: [fmt, clippy-light]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.11.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Cache cargo artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -263,37 +263,40 @@ jobs:
         run: cargo build -p continuum-desktop
 
   build-desktop-macos:
-    name: Build desktop (macOS)
-    runs-on: macos-14
+    name: Build desktop (macOS arm64)
+    runs-on: macos-15
     needs: [fmt, clippy-light]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "arm64"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.11.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Cache cargo artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-desktop-
 
       - name: Install frontend dependencies (pnpm workspace root)
         run: pnpm install --frozen-lockfile
@@ -322,17 +325,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [fmt, clippy-light]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.11.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 

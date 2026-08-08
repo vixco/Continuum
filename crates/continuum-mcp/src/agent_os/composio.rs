@@ -212,7 +212,7 @@ impl ComposioClient {
             "session_id": session_id,
             "tool_slug": request.tool_slug.trim().to_ascii_uppercase(),
             "intent": request.intent,
-            "verification": { "source": "composio_tool_response", "accepted": true },
+            "verification": { "source": "composio_response_envelope", "accepted": true },
             "response": result
         }))
     }
@@ -235,7 +235,7 @@ impl ComposioClient {
             "session_id": session_id,
             "meta_tool": request.meta_tool.trim().to_ascii_uppercase(),
             "intent": request.intent,
-            "verification": { "source": "composio_tool_response", "accepted": true },
+            "verification": { "source": "composio_response_envelope", "accepted": true },
             "response": result
         }))
     }
@@ -397,6 +397,11 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
         .collect();
+
+    // Destructive is deliberately broader than literal deletion. Money
+    // movement, credential rotation, account moderation and irreversible
+    // lifecycle actions must hit the deny-by-default capability even when an
+    // upstream toolkit uses a less obvious verb such as REFUND or TRASH.
     if tokens.iter().any(|token| {
         matches!(
             *token,
@@ -411,6 +416,28 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
                 | "ARCHIVE"
                 | "DISCONNECT"
                 | "UNSUBSCRIBE"
+                | "TRASH"
+                | "ERASE"
+                | "WIPE"
+                | "CLEAR"
+                | "REFUND"
+                | "CHARGE"
+                | "PAY"
+                | "PAYMENT"
+                | "PAYOUT"
+                | "TRANSFER"
+                | "WITHDRAW"
+                | "WITHDRAWAL"
+                | "PURCHASE"
+                | "BUY"
+                | "SELL"
+                | "LIQUIDATE"
+                | "BAN"
+                | "SUSPEND"
+                | "DEACTIVATE"
+                | "RESET"
+                | "ROTATE"
+                | "REGENERATE"
         )
     }) {
         return RiskLevel::Destructive;
@@ -442,6 +469,19 @@ pub fn classify_tool_slug(tool_slug: &str) -> RiskLevel {
                 | "MARK"
                 | "REPLY"
                 | "FORWARD"
+                | "MERGE"
+                | "APPROVE"
+                | "ACCEPT"
+                | "DECLINE"
+                | "SUBMIT"
+                | "SIGN"
+                | "SHARE"
+                | "GRANT"
+                | "ASSIGN"
+                | "COMMENT"
+                | "SCHEDULE"
+                | "BOOK"
+                | "RESERVE"
         )
     }) {
         return RiskLevel::Write;
@@ -491,9 +531,17 @@ pub fn classify_meta_tool(meta_tool: &str, arguments: &Value) -> RiskLevel {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if ["remove", "delete", "disconnect", "revoke"]
-                .iter()
-                .any(|candidate| action.contains(candidate))
+            if [
+                "remove",
+                "delete",
+                "disconnect",
+                "revoke",
+                "reset",
+                "rotate",
+                "deactivate",
+            ]
+            .iter()
+            .any(|candidate| action.contains(candidate))
             {
                 RiskLevel::Destructive
             } else if ["list", "get", "status"]
@@ -511,12 +559,20 @@ pub fn classify_meta_tool(meta_tool: &str, arguments: &Value) -> RiskLevel {
             .map(|tools| {
                 tools
                     .iter()
-                    .filter_map(|tool| {
+                    .map(|tool| {
+                        if tool
+                            .get("enable_auto_workbench_offload")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            return RiskLevel::Destructive;
+                        }
                         tool.get("tool_slug")
                             .or_else(|| tool.get("slug"))
                             .and_then(Value::as_str)
+                            .map(classify_tool_slug)
+                            .unwrap_or(RiskLevel::Write)
                     })
-                    .map(classify_tool_slug)
                     .max()
                     .unwrap_or(RiskLevel::Write)
             })
@@ -665,28 +721,64 @@ fn is_supported_meta_tool(slug: &str) -> bool {
 }
 
 fn ensure_tool_response_success(value: &Value) -> Result<()> {
-    let Some(error) = value.get("error") else {
-        return Ok(());
-    };
-    let failed = match error {
-        Value::Null => false,
-        Value::String(message) => !message.trim().is_empty(),
-        Value::Object(map) => !map.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Bool(value) => *value,
-        Value::Number(_) => true,
-    };
+    if !value.is_object() {
+        bail!("Composio tool execution returned a malformed response envelope");
+    }
+
+    let failed = response_envelope_failed(value)
+        || value
+            .pointer("/data/results")
+            .and_then(Value::as_array)
+            .is_some_and(|results| results.iter().any(response_envelope_failed));
     if failed {
         bail!("Composio tool execution failed: {}", compact_error(value));
     }
     Ok(())
 }
 
+fn response_envelope_failed(value: &Value) -> bool {
+    let explicit_error = value.get("error").is_some_and(response_error_is_present);
+    let explicit_failure = [
+        "/successful",
+        "/success",
+        "/data/successful",
+        "/data/success",
+    ]
+    .iter()
+    .any(|pointer| value.pointer(pointer).and_then(Value::as_bool) == Some(false));
+    let failed_status = ["/status", "/data/status"].iter().any(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                ["error", "failed", "failure"]
+                    .iter()
+                    .any(|candidate| status.trim().eq_ignore_ascii_case(candidate))
+            })
+    });
+    explicit_error || explicit_failure || failed_status
+}
+
+fn response_error_is_present(error: &Value) -> bool {
+    match error {
+        Value::Null => false,
+        Value::String(message) => !message.trim().is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Bool(value) => *value,
+        Value::Number(_) => true,
+    }
+}
+
 fn compact_error(value: &Value) -> String {
     let candidate = value
         .pointer("/error/message")
+        .or_else(|| value.pointer("/data/error/message"))
         .or_else(|| value.get("error"))
-        .or_else(|| value.get("message"));
+        .or_else(|| value.pointer("/data/message"))
+        .or_else(|| value.get("message"))
+        .or_else(|| value.pointer("/data/status"))
+        .or_else(|| value.get("status"));
     match candidate {
         Some(Value::String(message)) => message.chars().take(2_000).collect(),
         Some(other) => serde_json::to_string(other)
@@ -757,6 +849,36 @@ mod tests {
     }
 
     #[test]
+    fn financial_and_account_security_mutations_are_destructive() {
+        for slug in [
+            "STRIPE_REFUND_PAYMENT",
+            "WISE_TRANSFER_MONEY",
+            "SHOPIFY_PURCHASE_ORDER",
+            "GITHUB_ROTATE_DEPLOY_KEY",
+            "SLACK_DEACTIVATE_USER",
+            "GMAIL_TRASH_THREAD",
+        ] {
+            assert_eq!(
+                classify_tool_slug(slug),
+                RiskLevel::Destructive,
+                "{slug} must use the deny-by-default capability"
+            );
+        }
+    }
+
+    #[test]
+    fn consequential_non_destructive_mutations_are_writes() {
+        for slug in [
+            "GITHUB_MERGE_PULL_REQUEST",
+            "DOCUSIGN_SIGN_DOCUMENT",
+            "CALENDAR_BOOK_EVENT",
+            "SLACK_SHARE_FILE",
+        ] {
+            assert_eq!(classify_tool_slug(slug), RiskLevel::Write, "{slug}");
+        }
+    }
+
+    #[test]
     fn workbench_offload_is_destructive_even_for_read_slug() {
         let request = ComposioExecuteRequest {
             tool_slug: "GMAIL_LIST_THREADS".into(),
@@ -781,6 +903,78 @@ mod tests {
             classify_meta_tool("COMPOSIO_MULTI_EXECUTE_TOOL", &arguments),
             RiskLevel::Destructive
         );
+    }
+
+    #[test]
+    fn multi_execute_treats_workbench_offload_as_destructive() {
+        let arguments = serde_json::json!({
+            "tools": [
+                {
+                    "tool_slug":"GMAIL_LIST_THREADS",
+                    "enable_auto_workbench_offload": true
+                }
+            ]
+        });
+        assert_eq!(
+            classify_meta_tool("COMPOSIO_MULTI_EXECUTE_TOOL", &arguments),
+            RiskLevel::Destructive
+        );
+    }
+
+    #[test]
+    fn accepts_supported_success_envelopes() {
+        for response in [
+            serde_json::json!({"data":{"id":"item_1"},"error":null,"log_id":"log_1"}),
+            serde_json::json!({"data":{},"successful":true}),
+            serde_json::json!({"data":{"status":"success"}}),
+            serde_json::json!({
+                "data": {
+                    "results": [
+                        {"data":{"id":"one"},"error":null},
+                        {"data":{"id":"two"},"successful":true}
+                    ]
+                }
+            }),
+        ] {
+            assert!(
+                ensure_tool_response_success(&response).is_ok(),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_explicit_failure_envelopes() {
+        for response in [
+            serde_json::json!({"data":null,"error":{"message":"upstream failed"}}),
+            serde_json::json!({"data":{},"successful":false}),
+            serde_json::json!({"data":{"success":false}}),
+            serde_json::json!({"data":{"status":"failed"}}),
+            serde_json::json!({
+                "data": {
+                    "results": [
+                        {"data":{"id":"one"},"error":null},
+                        {"data":null,"error":"second action failed"}
+                    ]
+                }
+            }),
+        ] {
+            assert!(
+                ensure_tool_response_success(&response).is_err(),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_non_object_execution_response() {
+        for response in [
+            Value::Null,
+            Value::String("ok".into()),
+            Value::Array(vec![]),
+        ] {
+            assert!(ensure_tool_response_success(&response).is_err());
+        }
     }
 
     #[test]
