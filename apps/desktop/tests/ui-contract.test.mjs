@@ -45,6 +45,7 @@ test("MCP permission controls read and persist the enforced native policy", asyn
   const tools = await read("src/components/tabs/ToolsTab.tsx");
   const tauriMain = await read("src-tauri/src/main.rs");
   const broker = await readRoot("crates/continuum-mcp/src/permission_broker.rs");
+  const chatTools = await read("src-tauri/src/chat_tools.rs");
 
   assert.match(tools, /invoke<ToolPermissionView\[]>\("list_tool_permissions"\)/);
   assert.match(tools, /invoke<ToolPermissionView\[]>\("set_tool_permission"/);
@@ -53,13 +54,15 @@ test("MCP permission controls read and persist the enforced native policy", asyn
   assert.match(tauriMain, /permissions::set_tool_permission/);
   assert.match(broker, /unwrap_or\(ToolPermission::AlwaysConfirm\)/);
   assert.match(broker, /self\.broker\.authorize\(&tool, &arguments\)\.await/);
+  assert.match(chatTools, /authorize_in_process_tool\(name, input\)\.await/);
+  assert.match(chatTools, /Sensitive memory body withheld/);
 });
 
 test("release publication requires Windows and both macOS architectures", async () => {
   const workflow = await readRoot(".github/workflows/publish.yml");
 
-  assert.match(workflow, /runner: macos-15\n\s+uname: arm64/);
-  assert.match(workflow, /runner: macos-15-intel\n\s+uname: x86_64/);
+  assert.match(workflow, /runner: macos-15[\s\S]*?uname: arm64/);
+  assert.match(workflow, /runner: macos-15-intel[\s\S]*?uname: x86_64/);
   assert.match(workflow, /pnpm tauri build --bundles app,dmg/);
   assert.match(workflow, /continuum-agent-os/);
   assert.match(workflow, /continuum-\$version-macos-aarch64\.dmg/);
