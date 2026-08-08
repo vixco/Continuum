@@ -287,7 +287,7 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
 /// pointed at the chat's vault dir + dev dir, with the memory tool family
 /// allowed. Returns `None` (log once) when the binary cannot be found —
 /// the chat then degrades to running without memory tools.
-pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path) -> Option<McpSpec> {
+pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path, session_id: &str) -> Option<McpSpec> {
     let server_command = resolve_mcp_binary()?;
     Some(McpSpec {
         server_command,
@@ -300,6 +300,7 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path) -> Option<McpSpec> {
                 "CONTINUUM_DATA_DIR".into(),
                 dev_dir.to_string_lossy().into_owned(),
             ),
+            ("CONTINUUM_SESSION_ID".into(), format!("chat-{session_id}")),
         ],
         allowed_tools: [
             "mcp__continuum__memory_vault_search",

@@ -13,6 +13,21 @@ The dashboard's **Fix Issues** button spawns a dedicated Claude Opus 4.6 session
 
 Output streams live to the Health tab via `continuum:repair` events (text deltas, tool calls, tool results, stderr, final status).
 
+## Permission gateway
+
+Component: `permissions`
+
+- Health check: `PermissionGateway::health()` validates bundled defaults and
+  user overrides and counts malformed request/grant records.
+- Logs: structured `component = "permissions"` warnings plus durable
+  permission decisions in `<data_dir>/logs/actions.jsonl`.
+- Recovery: a malformed `permissions.toml` causes fail-closed denial. Restore
+  it from the latest Continuum backup or remove only the malformed override
+  after preserving a copy; bundled defaults then take effect. Malformed
+  request/grant JSON can be quarantined individually without changing policy.
+- Restart rule: `PermissionHealth::should_restart()` is true when effective
+  policy cannot be parsed. Restarting alone does not weaken or bypass policy.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):

@@ -22,6 +22,7 @@ use continuum_core::config::{
 };
 use continuum_core::health::repair::RepairSessionGrant;
 use continuum_core::memory::{episodic::EpisodicStore, semantic::SemanticStore};
+use continuum_core::permissions::{PermissionDecision, PermissionGateway};
 use continuum_core::senses::privacy::PrivacyFilter;
 use continuum_memory::Vault;
 use rmcp::{
@@ -69,6 +70,7 @@ pub(crate) struct ServerState {
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
     pub(crate) repair_grant: Option<RepairSessionGrant>,
+    pub(crate) permissions: PermissionGateway,
     /// The privacy choke point every observation tool routes through
     /// (context engine spec §5.1). Built from the **same** `config.toml`
     /// the runtime loads, so a zone the user configured binds this process
@@ -174,6 +176,13 @@ impl ContinuumMcpServer {
                     }
                 }
             });
+        let permission_session_id = std::env::var("CONTINUUM_SESSION_ID")
+            .unwrap_or_else(|_| format!("mcp-{}", uuid::Uuid::new_v4()));
+        let permissions = PermissionGateway::new(
+            data_dir.clone(),
+            permission_session_id,
+            include_str!("../../../config/default-permissions.toml"),
+        );
 
         // web_fetch is the only consumer of `http`, and redirect-SSRF is a
         // real concern (a host we DNS-verified as public could redirect us to
@@ -197,6 +206,7 @@ impl ContinuumMcpServer {
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                permissions,
                 privacy,
                 context_tools,
                 toggles,
@@ -577,6 +587,39 @@ impl ContinuumMcpServer {
         Fut: Future<Output = Result<T, McpError>>,
     {
         let args_json = serde_json::to_value(&args).unwrap_or(Value::Null);
+        let repair_capability_authorized =
+            name.starts_with("repair_") && self.state.repair_grant.is_some();
+        if !repair_capability_authorized {
+            let resource = permission_resource(&args_json);
+            match self.state.permissions.check(
+                name,
+                resource.as_deref(),
+                &format!("Continuum wants to run {name}"),
+            ) {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Ask { request } => {
+                    return Err(McpError::invalid_request(
+                        format!(
+                            "permission_required: request_id={} action={}{}; approve it in Continuum Settings > Tools and retry",
+                            request.id,
+                            request.action,
+                            request
+                                .resource
+                                .as_deref()
+                                .map(|value| format!(" resource={value}"))
+                                .unwrap_or_default()
+                        ),
+                        Some(serde_json::json!({ "permission_request": request })),
+                    ));
+                }
+                PermissionDecision::Deny { reason } => {
+                    return Err(McpError::invalid_request(
+                        format!("permission_denied: {name}: {reason}"),
+                        Some(serde_json::json!({ "action": name, "reason": reason })),
+                    ));
+                }
+            }
+        }
         let outcome = body().await;
         let summary = match &outcome {
             Ok(_) => "ok".to_string(),
@@ -1488,6 +1531,17 @@ impl ContinuumMcpServer {
     }
 }
 
+fn permission_resource(args: &Value) -> Option<String> {
+    const RESOURCE_KEYS: &[&str] = &["path", "cwd", "repo", "repository", "url", "component"];
+    let object = args.as_object()?;
+    for key in RESOURCE_KEYS {
+        if let Some(value) = object.get(*key).and_then(Value::as_str) {
+            return Some(value.chars().take(500).collect());
+        }
+    }
+    None
+}
+
 fn fs_err_to_mcp(e: &crate::tools::fs::FsError) -> McpError {
     use crate::tools::fs::FsError;
     match e {
@@ -1525,7 +1579,7 @@ impl ServerHandler for ContinuumMcpServer {
             .with_instructions(
                 "Continuum MCP server — exposes memory (facts + the memory vault), system info, \
                  filesystem (read-only), web fetch, and notification tools to the orchestrator. \
-                 Every tool call is audited to episodic memory.",
+                 Every tool call passes the local permission gateway and is audited.",
             )
     }
 }
@@ -1549,6 +1603,11 @@ mod repair_authorization_tests {
             .unwrap();
         }
         let raw_log_path = data_dir.join("raw_log.sqlite");
+        let permissions = PermissionGateway::new(
+            data_dir.clone(),
+            "repair-test",
+            include_str!("../../../config/default-permissions.toml"),
+        );
         ContinuumMcpServer {
             state: Arc::new(ServerState {
                 data_dir,
@@ -1558,6 +1617,7 @@ mod repair_authorization_tests {
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                permissions,
                 privacy: PrivacyFilter::from_config(
                     &continuum_core::config::ContextConfig::default(),
                     &continuum_core::config::PrivacyConfig::default(),
@@ -1617,5 +1677,17 @@ mod repair_authorization_tests {
         let server = server_with_grant(tmp.path().to_path_buf(), Some(grant));
         assert!(server.require_repair_restart_component("vision").is_ok());
         assert!(server.require_repair_restart_component("triage").is_err());
+    }
+
+    #[test]
+    fn permission_resource_uses_only_known_scope_fields() {
+        assert_eq!(
+            permission_resource(&serde_json::json!({ "path": "C:/repo/file.rs", "token": "no" })),
+            Some("C:/repo/file.rs".to_string())
+        );
+        assert_eq!(
+            permission_resource(&serde_json::json!({ "query": "hello" })),
+            None
+        );
     }
 }

@@ -10,25 +10,20 @@ import type {
   InstallMcpServerInput,
   McpServerRegistration,
   McpTool,
+  PermissionGrant,
+  PermissionRequest,
+  PermissionTier,
   SaveSkillInput,
   Skill,
 } from "@/lib/types";
 
-/**
- * Permission presets surfaced in the per-tool dropdown. The wire-up against
- * `default-permissions.toml` is intentionally NOT live yet — toggling
- * here updates component state only, with a small banner telling the user
- * that the runtime is unaware of the change. That avoids a silent "save
- * but nothing happens" footgun while the in-memory state exists.
- */
-const PERMISSION_PRESETS: Array<{ value: Permission; label: string }> = [
+/** Permission presets persisted and enforced by the shared gateway. */
+const PERMISSION_PRESETS: Array<{ value: PermissionTier; label: string }> = [
   { value: "auto", label: "Auto" },
-  { value: "session", label: "Session" },
-  { value: "confirm", label: "Confirm" },
+  { value: "session-approved", label: "Session" },
+  { value: "always-confirm", label: "Confirm" },
   { value: "blocked", label: "Blocked" },
 ];
-
-type Permission = "auto" | "session" | "confirm" | "blocked";
 
 export function ToolsTab() {
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -44,7 +39,9 @@ export function ToolsTab() {
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [showServerInstaller, setShowServerInstaller] = useState(false);
-  const [toolPermissions, setToolPermissions] = useState<Record<string, Permission>>({});
+  const [toolPermissions, setToolPermissions] = useState<Record<string, PermissionTier>>({});
+  const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
+  const [permissionGrants, setPermissionGrants] = useState<PermissionGrant[]>([]);
 
   async function refresh() {
     setLoading(true);
@@ -61,12 +58,18 @@ export function ToolsTab() {
   async function refreshMcpTools() {
     setMcpLoading(true);
     try {
-      const [tools, servers] = await Promise.all([
+      const [tools, servers, policies, requests, grants] = await Promise.all([
         continuum.listMcpTools(),
         continuum.listInstalledMcpServers(),
+        continuum.listToolPermissions(),
+        continuum.listPermissionRequests(),
+        continuum.listPermissionGrants(),
       ]);
       setMcpTools(tools);
       setMcpServers(servers);
+      setToolPermissions(Object.fromEntries(policies.map((row) => [row.action, row.tier])));
+      setPermissionRequests(requests);
+      setPermissionGrants(grants);
       setMcpError(null);
     } catch (e) {
       setMcpError(`Failed to load MCP tools: ${e}`);
@@ -75,9 +78,24 @@ export function ToolsTab() {
     }
   }
 
+  async function refreshPermissionActivity() {
+    try {
+      const [requests, grants] = await Promise.all([
+        continuum.listPermissionRequests(),
+        continuum.listPermissionGrants(),
+      ]);
+      setPermissionRequests(requests);
+      setPermissionGrants(grants);
+    } catch (cause) {
+      setMcpError(`Failed to refresh permission activity: ${cause}`);
+    }
+  }
+
   useEffect(() => {
     refresh();
     refreshMcpTools();
+    const timer = window.setInterval(refreshPermissionActivity, 2_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   // Group MCP tools by namespace, preserve the order returned by the backend.
@@ -96,8 +114,35 @@ export function ToolsTab() {
     return out;
   }, [mcpTools]);
 
-  function setToolPermission(name: string, value: Permission) {
-    setToolPermissions((prev) => ({ ...prev, [name]: value }));
+  async function setToolPermission(name: string, value: PermissionTier) {
+    const previous = toolPermissions[name];
+    setToolPermissions((current) => ({ ...current, [name]: value }));
+    try {
+      await continuum.setToolPermission(name, value);
+      setMcpNotice(`${name} is now ${value}.`);
+    } catch (cause) {
+      setToolPermissions((current) => ({ ...current, [name]: previous ?? "blocked" }));
+      setMcpError(`Failed to save ${name}: ${cause}`);
+    }
+  }
+
+  async function decideRequest(requestId: string, decision: "once" | "session" | "deny") {
+    try {
+      if (decision === "deny") await continuum.denyPermissionRequest(requestId);
+      else await continuum.approvePermissionRequest(requestId, decision);
+      await refreshMcpTools();
+    } catch (cause) {
+      setMcpError(`Permission decision failed: ${cause}`);
+    }
+  }
+
+  async function revokeGrant(grantId: string) {
+    try {
+      await continuum.revokePermissionGrant(grantId);
+      await refreshMcpTools();
+    } catch (cause) {
+      setMcpError(`Failed to revoke grant: ${cause}`);
+    }
   }
 
   async function handleInstallServer(input: InstallMcpServerInput) {
@@ -147,11 +192,6 @@ export function ToolsTab() {
     }
   }
 
-  const dirtyPermissionCount = useMemo(
-    () => Object.keys(toolPermissions).length,
-    [toolPermissions]
-  );
-
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <Card
@@ -171,15 +211,66 @@ export function ToolsTab() {
           </Button>
         }
       >
-        {dirtyPermissionCount > 0 && (
-          <div
-            className="mb-3 rounded-md border border-state-warn/40 bg-state-warn/10 px-3 py-2 text-xs text-state-warn"
-            role="status"
-          >
-            {dirtyPermissionCount} permission change
-            {dirtyPermissionCount === 1 ? "" : "s"} held in memory only. The runtime does not yet
-            read the dashboard&apos;s per-tool permissions — this UI exists so the
-            orchestrator&apos;s eventual permission policy is visible and reviewable.
+        {permissionRequests.length > 0 && (
+          <div className="mb-4 rounded-md border border-state-warn/40 bg-state-warn/10 p-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-state-warn">
+              Waiting for approval
+            </div>
+            <ul className="space-y-2">
+              {permissionRequests.map((request) => (
+                <li key={request.id} className="rounded border border-bg-border bg-bg-elevated p-2">
+                  <div className="font-mono text-xs text-ink">{request.action}</div>
+                  <div className="mt-0.5 text-xs text-ink-muted">{request.summary}</div>
+                  {request.resource && (
+                    <div className="mt-0.5 truncate font-mono text-[11px] text-ink-dim">
+                      {request.resource}
+                    </div>
+                  )}
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" onClick={() => decideRequest(request.id, "once")}>
+                      Allow once
+                    </Button>
+                    {request.tier === "session-approved" && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        onClick={() => decideRequest(request.id, "session")}
+                      >
+                        Allow session
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => decideRequest(request.id, "deny")}
+                    >
+                      Deny
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {permissionGrants.length > 0 && (
+          <div className="mb-4 rounded-md border border-bg-border bg-bg-elevated p-3">
+            <div className="mb-2 text-[11px] uppercase tracking-wide text-ink-dim">
+              Active grants
+            </div>
+            <ul className="space-y-1">
+              {permissionGrants.map((grant) => (
+                <li key={grant.id} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="min-w-0 truncate font-mono text-ink-muted">
+                    {grant.action} · {grant.scope}
+                    {grant.resource ? ` · ${grant.resource}` : ""}
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={() => revokeGrant(grant.id)}>
+                    Revoke
+                  </Button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -504,8 +595,8 @@ function McpNamespace({
   onPermissionChange,
 }: {
   ns: { namespace: string; tools: McpTool[] };
-  permissions: Record<string, Permission>;
-  onPermissionChange: (name: string, value: Permission) => void;
+  permissions: Record<string, PermissionTier>;
+  onPermissionChange: (name: string, value: PermissionTier) => void;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -535,9 +626,9 @@ function McpNamespace({
               <Select
                 value={permissions[tool.name] ?? "auto"}
                 options={PERMISSION_PRESETS}
-                onChange={(v) => onPermissionChange(tool.name, v as Permission)}
+                onChange={(v) => onPermissionChange(tool.name, v as PermissionTier)}
                 className="w-28"
-                title="Per-tool permission is in-memory only — the runtime reads default-permissions.toml on startup."
+                title="Saved immediately and enforced by continuum-mcp."
               />
             </li>
           ))}
