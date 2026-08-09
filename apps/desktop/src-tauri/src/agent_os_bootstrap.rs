@@ -36,8 +36,12 @@ pub(crate) fn ensure_registered(state: &AppState) -> Result<BootstrapOutcome> {
             searched: candidates,
         });
     };
-    let binary = std::fs::canonicalize(&binary)
-        .with_context(|| format!("Failed to resolve bundled Agent OS binary {}", binary.display()))?;
+    let binary = std::fs::canonicalize(&binary).with_context(|| {
+        format!(
+            "Failed to resolve bundled Agent OS binary {}",
+            binary.display()
+        )
+    })?;
     let command = binary.to_string_lossy().into_owned();
     let args = vec![
         "--data-dir".to_string(),
@@ -54,19 +58,16 @@ pub(crate) fn ensure_registered(state: &AppState) -> Result<BootstrapOutcome> {
         return Ok(BootstrapOutcome::AlreadyCurrent { binary });
     }
 
-    mcp_registry::install_server(
-        state.runtime.dev_dir(),
-        SERVER_NAME,
-        &command,
-        &args,
-        &[],
-    )
-    .context("Failed to register the bundled Agent OS MCP server")?;
+    mcp_registry::install_server(state.runtime.dev_dir(), SERVER_NAME, &command, &args, &[])
+        .context("Failed to register the bundled Agent OS MCP server")?;
     Ok(BootstrapOutcome::Registered { binary })
 }
 
 fn first_regular_file(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates.iter().find(|path| is_regular_file(path)).cloned()
+    candidates
+        .iter()
+        .find(|path| is_regular_file(path))
+        .cloned()
 }
 
 fn is_regular_file(path: &Path) -> bool {
