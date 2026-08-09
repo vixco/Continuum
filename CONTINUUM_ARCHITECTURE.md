@@ -1,7 +1,7 @@
 # Continuum Architecture
 
 Status: Phase 0 architecture contract
-Last updated: 2026-08-01
+Last updated: 2026-08-09
 
 ## Product contract
 
@@ -204,12 +204,16 @@ state and must not be presented as a live integration. The visual language is:
 - dense but legible cards, 4/8px spacing rhythm, Lucide vector icons
 - keyboard-visible focus, reduced-motion support, and no hover-only actions
 
-Desktop distribution uses Tauri's signed updater for Windows. Release metadata
-is a public `latest.json` projection committed by the release workflow; the
-private signing key remains a GitHub Actions secret. The UI checks for updates
-at startup, exposes a manual check in Settings, and stores the user's automatic
-installation preference locally. Update installation is only delegated to the
-Tauri updater after its artifact signature has been verified.
+Desktop distribution uses Tauri's signed updater on Windows and both supported
+macOS architectures. `latest.json` is generated from the exact validated
+release assets and attached to the latest complete GitHub Release; it is not a
+mutable file committed to `main`. The publication gate requires Windows x64,
+macOS Apple Silicon, and macOS Intel artifacts, uploads them to a draft Release,
+verifies the complete draft through the GitHub API, and publishes only after the
+full asset contract passes. The private updater key remains a GitHub Actions
+secret. The UI checks for updates at startup, exposes a manual check in Settings,
+and stores the user's automatic installation preference locally. Installation
+is delegated to the Tauri updater only after artifact signature verification.
 
 ## Migration sequence
 

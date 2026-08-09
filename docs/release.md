@@ -1,179 +1,198 @@
 # Releasing Continuum
 
-This document is the canonical runbook for cutting a Continuum release. It's written for the maintainer, but contributors are welcome to read it so they know what's going to happen to their merged PR.
+This is the canonical release runbook for Continuum. The release workflow and
+`scripts/release_contract.py` are the executable source of truth; this document
+explains the invariants they enforce.
 
-## Cadence
+## Release invariant
 
-- **Alpha and beta releases**: cut whenever a phase milestone lands and stabilises. No fixed cadence.
-- **Stable releases (post-1.0)**: target roughly every 6–8 weeks, plus out-of-band patch releases for security issues.
+A Continuum release is complete only when one GitHub Release contains every
+required, non-empty asset for all supported desktop targets:
+
+- Windows x64 NSIS installer, updater signature, and portable ZIP.
+- macOS Apple Silicon DMG, updater archive/signature, and runtime archive.
+- macOS Intel DMG, updater archive/signature, and runtime archive.
+- `latest.json`, `release-manifest.json`, and `SHA256SUMS.txt`.
+
+A tag by itself is not a release. A draft, a GitHub prerelease, or a Release
+missing even one required asset is incomplete and may be recovered by a later
+workflow run.
 
 ## Versioning
 
-Continuum uses [SemVer](https://semver.org/) with explicit pre-release tags:
+Continuum uses SemVer with numbered prerelease channels:
 
-- `0.1.0-alpha.N` — first public releases. Expect breaking changes between alphas.
-- `0.1.0-beta.N` — feature-stable, bug-fixing phase. Config compatibility is preserved across betas.
-- `0.1.0` — first stable. `0.x.y` is still pre-1.0 in spirit; breaking changes are allowed between minors with a deprecation window.
-- `1.0.0` — stable API. MCP tool schemas frozen. Config backward compatible within majors.
+- `0.1.0-alpha.N` — early public releases; breaking changes are expected.
+- `0.1.0-beta.N` — feature-stable validation phase.
+- `0.1.0` — first stable pre-1.0 product milestone.
+- `1.0.0` — stable public API and MCP schema contract.
 
-## Pre-release checklist
+The source tree keeps a base version. The release planner inspects existing tags
+and complete GitHub Releases and chooses the first safe version. It never moves
+an existing tag.
 
-Run through this on a **clean Windows 10 or 11 VM** (or at least a fresh `~/.continuum/`) before tagging.
+For a normal new source commit:
 
-### 1. Code readiness
+1. If the source version has never been used, that version is selected.
+2. If older tags already occupy that prerelease series, the numeric suffix is
+   incremented.
+3. If an incomplete same-source release already exists, that exact tag is
+   resumed instead of burning another version.
+4. If a complete same-source release already exists, the rerun is a no-op.
 
-- [ ] `cargo fmt --all -- --check` is clean.
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` is clean.
-- [ ] `cargo test --workspace` passes (note any flaky tests; if anything is newly flaky, stop).
-- [ ] `pnpm --filter desktop build` succeeds.
-- [ ] `pnpm --filter desktop lint` is clean (once lint is configured).
-- [ ] `docs-site/` builds without errors (if docs changes landed).
+A release-only version commit is created and tagged, but is **not** pushed back
+to `main`. This prevents recursive CI while preserving an immutable versioned
+source snapshot for every binary release.
 
-### 2. Version bump
+## Automatic release flow
 
-- [ ] Run `scripts\bump-version.ps1 -NewVersion 0.1.0-alpha.N`.
-- [ ] Verify `Cargo.toml`, `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src/lib/tauri.ts` (`DEFAULT_STATE.system.version`) all match.
-- [ ] Run `cargo check --workspace` to regenerate `Cargo.lock` with the new version.
+Every push to `main` runs the ordinary CI graph. Publication is the final job and
+is callable only after all of these gates succeed:
 
-### 3. Changelog
+- Rust formatting.
+- Release-contract unit tests and Tauri packaging validation.
+- Light and full native Clippy.
+- Complete Rust workspace tests plus isolated context-engine benchmark gates.
+- Windows x64 desktop build.
+- macOS Apple Silicon desktop build.
+- macOS Intel desktop build.
+- Documentation build.
 
-- [ ] Move all `## [Unreleased]` items under a new `## [0.1.0-alpha.N] — YYYY-MM-DD` section.
-- [ ] Leave `## [Unreleased]` empty (or delete it — either is fine).
-- [ ] Make sure user-visible changes are actually mentioned, not just internal refactors.
+The release workflow then:
 
-### 4. Documentation
+1. Confirms the tested commit is still the current `main` head.
+2. Confirms the updater signing key is available.
+3. Classifies existing GitHub Releases as complete or incomplete.
+4. Selects or recovers a release version deterministically.
+5. Builds Windows x64, macOS arm64, and macOS x86_64 artifacts on native
+   GitHub-hosted runners.
+6. Verifies the full 11-asset platform set before publication.
+7. Generates signed-updater metadata, a release manifest, and checksums.
+8. Creates or reuses the immutable release tag.
+9. Uploads all assets to a **draft** GitHub Release.
+10. Reads that draft back through the GitHub API and verifies every required
+    asset and size.
+11. Publishes the complete draft and marks it latest.
+12. Reads the public Release back through the API and verifies it again.
 
-- [ ] Update `ROADMAP.md` phase statuses and bump the "last updated" line.
-- [ ] Update `KNOWN_ISSUES.md` with anything discovered late.
-- [ ] Update `README.md` status badge and table row for the released phase.
-- [ ] Spot-check the docs site — build locally, click through every top-level page, no 404s.
+A failed upload therefore stays draft and cannot become a visible half-release.
+A later run resumes the same tag.
 
-### 5. Install test
+## GitHub Actions secrets
 
-On a clean VM:
+The release pipeline requires:
 
-- [ ] `irm https://raw.githubusercontent.com/vixco/continuum-ai/<tag>/scripts/install.ps1 | iex`
-  - Pick a moment when the release is already published so the tag URL resolves.
-- [ ] Onboarding wizard completes end-to-end (Claude check → models → voice → permissions → diagnostics → done).
-- [ ] `continuum setup` reports all green.
-- [ ] Runtime starts, senses produce frames, triage decisions flow.
-- [ ] Say "hey continuum" — wake + orchestrator + voice reply works.
-- [ ] Dashboard opens, Home tab renders live state.
-- [ ] Trigger "Fix Issues" from the Health tab — repair agent starts.
+- `TAURI_SIGNING_PRIVATE_KEY` — private updater key generated by Tauri.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — password when the private key is
+  encrypted.
 
-### 6. Uninstall test (optional but recommended)
+The matching public key is committed in
+`apps/desktop/src-tauri/tauri.conf.json`. Never commit the private key. Losing
+it prevents installed clients from accepting future updater artifacts.
 
-Run `scripts\uninstall.ps1` if present. Verify:
+## Updater contract
 
-- [ ] `%LOCALAPPDATA%\Continuum` is removed.
-- [ ] `~/.continuum/` is preserved (we never destroy user data without explicit confirmation).
-- [ ] Start Menu shortcut is gone.
-- [ ] Registry `Run` entry is gone (if auto-start was enabled).
+Installed desktop clients read metadata from the latest complete GitHub Release:
 
-## Release steps
-
-Every push to `main` starts the Windows release workflow after the ordinary
-repository checks have started. The workflow increments the numeric suffix of
-the version in `Cargo.toml` (for example `0.1.0-alpha.2` →
-`0.1.0-alpha.3`), runs the release verification/build, commits the bumped
-version plus `latest.json` back to `main`, tags that commit, and publishes a
-non-draft GitHub release. The generated release commit is marked `[skip ci]`
-so it cannot recursively publish another release.
-
-The release job requires these GitHub Actions secrets:
-
-- `TAURI_SIGNING_PRIVATE_KEY` — the private key generated by `tauri signer generate`.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — optional password for that key.
-
-The matching public key is committed in `apps/desktop/src-tauri/tauri.conf.json`.
-Never commit the private key. Losing the key makes already-installed updater
-clients unable to verify future releases.
-
-The updater reads signed Windows metadata from
-`https://raw.githubusercontent.com/vixco/Continuum/main/latest.json`. This
-keeps pre-release channels updateable even though GitHub's `releases/latest`
-endpoint excludes pre-releases.
-
-### Manual tag fallback
-
-For an exceptional, explicitly reviewed release, tag locally:
-
-```powershell
-# From a clean checkout of main at the commit you want to release
-git tag -a v0.1.0-alpha.N -m "Continuum 0.1.0-alpha.N"
+```text
+https://github.com/vixco/Continuum/releases/latest/download/latest.json
 ```
 
-Do **not** push the tag yet.
+There is intentionally no mutable root-level `latest.json` in the repository.
+The release asset is generated from the exact validated binaries and published
+atomically with them.
 
-### 2. Review before pushing
+`latest.json` contains platform-specific URLs and updater signatures for:
 
-- [ ] `git log v<previous>..v0.1.0-alpha.N --oneline` — is the commit list what you expected?
-- [ ] `git show v0.1.0-alpha.N` — does the signed tag point at the right commit with the right message?
+- `windows-x86_64`
+- `darwin-aarch64`
+- `darwin-x86_64`
 
-### 3. Push the tag
+Tauri verifies the downloaded updater artifact with the committed public key
+before installation.
+
+## Local pre-release checks
+
+CI is authoritative, but maintainers should still run the fastest deterministic
+checks before merging a release-affecting change:
 
 ```powershell
-git push origin main
-git push origin v0.1.0-alpha.N
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+python scripts/release_contract.py validate-config --repo-root .
+python -m unittest -v scripts/test_release_contract.py
+pnpm install --frozen-lockfile
+pnpm --dir apps/desktop typecheck
+pnpm --dir apps/desktop lint
+pnpm --dir apps/desktop build
 ```
 
-Pushing a manually-created tag is a fallback for the normal `main` push flow.
-The release workflow currently watches `main`; to use a manual tag fallback,
-run the workflow manually after the tag exists. A successful run:
+For release workflow changes, add or update a contract test. Do not rely on a
+shell glob or a successful upload action as proof that all platforms were
+published.
 
-1. Builds `continuum.exe`, `continuum-mcp.exe`, and the Tauri desktop bundle in release mode on Windows Server 2022.
-2. Runs the full test suite (last-chance verification).
-3. Produces:
-   - `continuum-<version>-windows-x64.zip` (portable) — `continuum.exe`, `continuum-mcp.exe`, `continuum-desktop.exe`, default configs.
-   - `continuum-<version>-windows-x64-setup.exe` (Tauri 2 NSIS installer and signed updater artifact).
-4. Creates and publishes a GitHub release with auto-generated changelog from commits since the previous tag.
+## Manual recovery
 
-### 4. Finalise the release
+Use the `Release` workflow's manual dispatch only for an exceptional recovery.
+Leave `version` empty to let the contract select or resume the correct version.
+Set an explicit version only after checking that the tag either does not exist
+or belongs to the exact source commit being recovered.
 
-- [ ] Open the published release on GitHub and verify its assets.
-- [ ] Paste the relevant `CHANGELOG.md` section into the release notes.
-- [ ] Call out breaking changes explicitly.
-- [ ] Link to [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
-- [ ] Mark as pre-release for alpha and beta tags.
-- [ ] Publish.
+Never delete or move an existing tag to make a rerun pass. The recovery contract
+will either reuse the valid same-source tag or choose a new version.
 
-### 5. Post-release
+## Clean-install verification
 
-- [ ] Announce in the Discord / Matrix community (once set up).
-- [ ] Post a summary in the repo's Discussions tab.
-- [ ] Update the docs site's "latest version" banner if applicable.
-- [ ] Open a new `## [Unreleased]` section at the top of `CHANGELOG.md` for the next cycle.
-- [ ] Close any `backport/<version>` milestone.
+Before calling an alpha broadly usable, test at least one clean Windows machine
+and both Mac architectures when available.
 
-## Code signing
+### Windows
 
-As of 0.1.0-alpha.1, Continuum binaries are **not signed**. Windows SmartScreen will warn on first launch. The release notes should say this explicitly.
+- Installer starts and completes.
+- Onboarding completes end to end.
+- Runtime and bundled MCP process start.
+- Dashboard renders live state.
+- Update check reads the Release asset and rejects an invalid signature.
+- Uninstall removes application files but preserves user data unless explicitly
+  requested otherwise.
 
-### Signing setup (when we have a cert)
+### macOS Apple Silicon and Intel
 
-1. Obtain an EV or OV Windows code-signing certificate from a CA (DigiCert, Sectigo, SSL.com).
-2. Store the `.pfx` or hardware-token PIN in the repo's GitHub Actions secrets as `WINDOWS_CODE_SIGN_CERT` and `WINDOWS_CODE_SIGN_PASSWORD` (never commit the cert).
-3. Wire `signtool.exe` into the release workflow — see [`scripts/sign-release.ps1`](../scripts/sign-release.ps1) for the placeholder script.
-4. Update `apps/desktop/src-tauri/tauri.conf.json` → `bundle.windows.certificateThumbprint` with the thumbprint for Tauri's built-in signing.
-5. Re-run the release build locally on a signed-cert-equipped machine to verify before publishing.
+- Correct DMG mounts.
+- Application copies and starts.
+- Runtime and bundled MCP binaries have the expected architecture.
+- Update check selects the matching `darwin-*` updater entry.
+- Gatekeeper behavior matches the signing/notarization status documented in the
+  Release notes.
 
-Timestamp server: `http://timestamp.digicert.com` (or the equivalent for your CA).
+## Code signing and notarization
+
+Tauri updater signatures protect update artifacts, but they are not a substitute
+for operating-system publisher identity.
+
+Current external credential gaps:
+
+- Windows Authenticode requires an OV/EV code-signing certificate and timestamp
+  service.
+- macOS frictionless distribution requires an Apple Developer ID Application
+  certificate, hardened runtime signing, notarization, and stapling.
+
+Until those credentials are configured, release notes must state the expected
+SmartScreen/Gatekeeper behavior. Do not claim the DMG or EXE is notarized or
+publisher-signed merely because the Tauri updater archive has a valid signature.
 
 ## Rollback
 
-If a release turns out to be bad:
+When a release is bad:
 
-1. **Mark the GitHub release as "pre-release"** (or delete it entirely) so the installer no longer picks it as `latest`.
-2. **Do not delete the tag** — tags are cheap history and someone may already have built from it.
-3. **Cut a new patch release** with the fix. Don't try to move the tag or amend history.
+1. Do not move or delete its tag.
+2. Mark the Release non-latest or draft only when removing it from the update
+   channel is immediately necessary.
+3. Fix forward with a new version.
+4. Keep the original manifest and checksums available for incident analysis.
+5. Document the affected versions and remediation in the Release notes and
+   `KNOWN_ISSUES.md`.
 
-For critical security fixes, prefer shipping a new patch release within 24 hours over quietly editing the bad one.
-
-## Post-1.0 changes to this runbook
-
-Once Continuum hits 1.0:
-
-- Add a mandatory signed-build step.
-- Add `winget` publication (`winget submit`).
-- Keep the signed Tauri updater endpoint and startup/manual update checks healthy.
-- Consider an `msix` build for Microsoft Store distribution.
+For security issues, prefer a new signed patch release over silently replacing
+published binaries under the same asset name.
