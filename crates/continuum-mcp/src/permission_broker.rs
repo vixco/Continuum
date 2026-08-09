@@ -220,6 +220,7 @@ impl ServerHandler for PermissionedMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let tool = request.name.to_string();
+        tracing::debug!(tool = %tool, "permission wrapper received tool call");
         let arguments = request
             .arguments
             .as_ref()
@@ -229,9 +230,13 @@ impl ServerHandler for PermissionedMcpServer {
         if let Err(message) = self.broker.authorize(&tool, &arguments).await {
             return Ok(CallToolResult::error(vec![Content::text(message)]));
         }
+        tracing::debug!(tool = %tool, "permission wrapper authorized tool call");
 
         let result = self.inner.call_tool(request, context).await?;
-        Ok(apply_egress_policy(&tool, result))
+        tracing::debug!(tool = %tool, "inner tool handler completed");
+        let result = apply_egress_policy(&tool, result);
+        tracing::debug!(tool = %tool, "tool response passed egress policy");
+        Ok(result)
     }
 }
 
