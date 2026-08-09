@@ -142,12 +142,18 @@ impl std::fmt::Display for DenyReason {
 
 /// The single gatekeeper. Returns the canonicalized path on success.
 ///
+/// A leading `~` is expanded to the current user's home directory before
+/// canonicalization. This is intentionally done *inside* the gatekeeper so
+/// every read/write tool gets identical behavior and the expanded target still
+/// has to pass the normal allowed-root + hard-deny checks.
+///
 /// The deny-dir check runs on components **below** the matched allowed root —
 /// if the user opts in to a root, everything in its ancestry is implicitly
 /// approved (the user's home might legitimately contain a path component like
 /// `AppData` on Windows, and the intent of allowlisting is to trust the root).
 pub fn is_path_allowed(path: &Path, cfg: &AllowlistConfig) -> Result<PathBuf, DenyReason> {
-    let canonical = canonicalize(path).map_err(|e| DenyReason::InvalidPath(e.to_string()))?;
+    let expanded = expand_home(path);
+    let canonical = canonicalize(&expanded).map_err(|e| DenyReason::InvalidPath(e.to_string()))?;
 
     // 1. Root check — find the first root this path is inside.
     let matched_root = cfg
@@ -228,20 +234,45 @@ pub fn is_relative_path_denied(path: &Path) -> Result<(), DenyReason> {
 /// target itself. The parent must already exist and be allowlisted, and the
 /// new filename still passes the hard deny rules.
 pub fn resolve_new_path_allowed(path: &Path, cfg: &AllowlistConfig) -> Result<PathBuf, DenyReason> {
-    if path.exists() {
+    let expanded = expand_home(path);
+    if expanded.exists() {
         return Err(DenyReason::InvalidPath(
             "destination already exists".to_string(),
         ));
     }
-    let parent = path.parent().ok_or_else(|| {
+    let parent = expanded.parent().ok_or_else(|| {
         DenyReason::InvalidPath("new path must have an existing parent".to_string())
     })?;
     let parent = is_path_allowed(parent, cfg)?;
-    let name = path
+    let name = expanded
         .file_name()
         .ok_or_else(|| DenyReason::InvalidPath("new path must have a filename".to_string()))?;
     is_relative_path_denied(Path::new(name))?;
     Ok(parent.join(name))
+}
+
+/// Expand only a leading standalone `~` path component. `~other` and tildes in
+/// later components are treated literally. Falling back to the original path
+/// keeps error reporting honest when the process has no discoverable home dir.
+fn expand_home(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return path.to_path_buf();
+    };
+    if first != "~" {
+        return path.to_path_buf();
+    }
+
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    let Some(mut expanded) = home else {
+        return path.to_path_buf();
+    };
+    for component in components {
+        expanded.push(component.as_os_str());
+    }
+    expanded
 }
 
 /// Canonicalize a path and strip the Windows `\\?\` verbatim prefix if present
@@ -429,5 +460,21 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let cfg = AllowlistConfig::from_roots([dir.path()]);
         assert!(is_path_allowed(&file, &cfg).is_ok());
+    }
+
+    #[test]
+    fn expands_leading_tilde_to_home() {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        if let Some(home) = home {
+            let expanded = expand_home(Path::new("~/.continuum-dev/config.toml"));
+            assert!(expanded.starts_with(PathBuf::from(home)));
+            assert!(expanded.ends_with(Path::new(".continuum-dev/config.toml")));
+        }
+    }
+
+    #[test]
+    fn does_not_expand_nonleading_tilde() {
+        assert_eq!(expand_home(Path::new("project/~/file")), PathBuf::from("project/~/file"));
+        assert_eq!(expand_home(Path::new("~other/file")), PathBuf::from("~other/file"));
     }
 }
