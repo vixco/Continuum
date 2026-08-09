@@ -147,6 +147,10 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- Context-event batches now retry transient SQLite write-lock contention from
+  concurrent frame persistence instead of dropping the batch and stalling the
+  context-engine benchmark drain gate.
+
 Completion defects found in the final context-engine review (fix wave 3b):
 
 - `context_package.sections_present` now describes the headings that actually
