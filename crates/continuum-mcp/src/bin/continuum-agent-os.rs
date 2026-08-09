@@ -1,14 +1,14 @@
 //! Standalone stdio MCP server for Continuum's action plane.
 //!
 //! Register this binary as the `agent-os` user-managed MCP server. It shares
-//! the Continuum data directory but keeps its own policy, evidence and run
-//! records under `<data-dir>/agent-os/`.
+//! the Continuum data directory but keeps policy, evidence and reliable run
+//! journals under `<data-dir>/agent-os/`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use continuum_core::config::{continuum_dev_dir, env_or_legacy};
-use continuum_mcp::agent_os::AgentOsServer;
+use continuum_mcp::{agent_os::AgentOsServer, ReliableAgentOsServer};
 use rmcp::{transport::stdio, ServiceExt};
 use tracing_subscriber::EnvFilter;
 
@@ -42,9 +42,10 @@ fn main() -> Result<()> {
             component = "agent_os",
             data_dir = %data_dir.display(),
             version = env!("CARGO_PKG_VERSION"),
-            "continuum-agent-os starting"
+            "continuum-agent-os starting with durable execution governance"
         );
-        let server = AgentOsServer::new(data_dir)?;
+        let server = AgentOsServer::new(data_dir.clone())?;
+        let server = ReliableAgentOsServer::new(server, &data_dir)?;
         let service = server.serve(stdio()).await.inspect_err(|error| {
             tracing::error!(
                 layer = "mcp",
