@@ -173,7 +173,10 @@ async fn protocol_handshake_and_one_tool_call() {
         .env("RUST_LOG", "warn") // silence info logs during the test
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Do not leave an unread stderr pipe attached to the child. Lazy
+        // model initialization can fill the OS pipe after the first audited
+        // tool call and deadlock the server before its next response.
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
@@ -396,7 +399,7 @@ memory_wipe_all = "auto"
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
@@ -673,7 +676,7 @@ async fn memory_get_fact_falls_back_when_vault_is_unopenable() {
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
