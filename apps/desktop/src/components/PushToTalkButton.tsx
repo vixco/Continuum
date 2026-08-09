@@ -1,70 +1,76 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
-import { Mic } from "lucide-react";
+import { Mic, MicOff } from "lucide-react";
 
 import { continuum } from "@/lib/tauri";
-import type { VoiceMode } from "@/lib/types";
+import type { ContinuumState, VoiceMode } from "@/lib/types";
 
 const RUNTIME_READY_TIMEOUT_MS = 20_000;
+const VOICE_READY_TIMEOUT_MS = 12_000;
 const RUNTIME_POLL_MS = 250;
-const ARMED_FEEDBACK_MS = 12_000;
+const REARM_DELAY_MS = 300;
 
 /**
- * Push-to-talk button — gives users a one-click alternative to the wake
- * word and the global hotkey.
+ * One-click conversational voice.
  *
- * A talk intent is only useful while the headless runtime is alive. The
- * previous implementation wrote `talk_now` even when the runtime was off,
- * which succeeded from Tauri's point of view but left nobody to consume the
- * intent. That made the button look functional while effectively doing
- * nothing. We now make an explicit PTT click self-healing: start the runtime
- * when needed, resume/unmute an intentionally requested voice turn, wait
- * until the runtime is actually alive, and only then arm the next utterance.
+ * This deliberately reuses Continuum's native voice stack instead of browser
+ * speech APIs: Windows default microphone -> CPAL/VAD -> local Whisper ->
+ * orchestrator -> Piper/Kokoros. After one completed turn reaches idle, the
+ * button automatically arms the next turn, so the user can keep talking
+ * without clicking again or repeating the wake word.
+ *
+ * The button is also the stop control. Stopping prevents the next turn from
+ * being armed; an already-running model/TTS turn is allowed to finish safely.
  */
 export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
-  const [isPressed, setIsPressed] = useState(false);
-  const [isSending, setIsSending] = useState(false);
+  const [liveActive, setLiveActive] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [isArming, setIsArming] = useState(false);
   const [isArmed, setIsArmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const armedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(
-    () => () => {
-      if (pressTimer.current) clearTimeout(pressTimer.current);
-      if (armedTimer.current) clearTimeout(armedTimer.current);
+  const liveRef = useRef(false);
+  const armedRef = useRef(false);
+  const armingRef = useRef(false);
+  const hadRuntimeActivityRef = useRef(false);
+  const previousModeRef = useRef<VoiceMode>(mode);
+  const rearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearRearmTimer = useCallback(() => {
+    if (rearmTimerRef.current) {
+      clearTimeout(rearmTimerRef.current);
+      rearmTimerRef.current = null;
+    }
+  }, []);
+
+  const stopLive = useCallback(() => {
+    liveRef.current = false;
+    armedRef.current = false;
+    armingRef.current = false;
+    hadRuntimeActivityRef.current = false;
+    clearRearmTimer();
+    setLiveActive(false);
+    setIsStarting(false);
+    setIsArming(false);
+    setIsArmed(false);
+  }, [clearRearmTimer]);
+
+  const failLive = useCallback(
+    (message: string) => {
+      stopLive();
+      setError(message);
     },
-    []
+    [stopLive]
   );
 
-  // Once the runtime reports a real voice state, the optimistic "speak now"
-  // state is no longer needed. It mainly bridges the state-poller delay after
-  // the intent has been accepted.
-  useEffect(() => {
-    if (mode !== "listening" && mode !== "thinking" && mode !== "speaking") return;
-    setIsArmed(false);
-    if (armedTimer.current) {
-      clearTimeout(armedTimer.current);
-      armedTimer.current = null;
-    }
-  }, [mode]);
+  const armNextTurn = useCallback(async () => {
+    if (!liveRef.current || armingRef.current || armedRef.current) return;
 
-  const runtimeListening = mode === "listening";
-  const isListening = runtimeListening || isArmed;
-  const isBusy = mode === "thinking" || mode === "speaking";
-  const disabled = isSending || isBusy || isArmed;
-
-  async function onClick() {
-    if (disabled || runtimeListening) return;
-
+    armingRef.current = true;
+    setIsArming(true);
     setError(null);
-    setIsPressed(true);
-    setIsSending(true);
-    if (pressTimer.current) clearTimeout(pressTimer.current);
-    pressTimer.current = setTimeout(() => setIsPressed(false), 180);
 
     try {
       let runtime = await continuum.getRuntimeStatus();
@@ -75,89 +81,176 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       }
 
       if (!runtime.alive) {
-        throw new Error("Continuum runtime did not become ready for voice input");
+        throw new Error(
+          "Voice could not start because the Continuum runtime did not become ready."
+        );
       }
 
-      // A direct click is an explicit request to interact. Resume/unmute here
-      // instead of accepting an intent that the runtime would ignore.
-      const state = await continuum.getState();
+      const state = await waitForVoiceReady();
+      const readinessError = voiceReadinessError(state);
+      if (readinessError) throw new Error(readinessError);
+
+      // A live-voice click is an explicit interaction request. Do not leave a
+      // deliberately started conversation blocked behind pause/mute state.
       if (state.system.paused) await continuum.setPaused(false);
       if (state.voice.muted) await continuum.setVoiceMuted(false);
 
+      if (!liveRef.current) return;
+
       await continuum.talkNow();
+      armedRef.current = true;
+      hadRuntimeActivityRef.current = false;
       setIsArmed(true);
-      if (armedTimer.current) clearTimeout(armedTimer.current);
-      armedTimer.current = setTimeout(() => {
-        setIsArmed(false);
-        armedTimer.current = null;
-      }, ARMED_FEEDBACK_MS);
     } catch (err) {
-      setIsArmed(false);
-      setError(toErrorMessage(err));
+      failLive(toErrorMessage(err));
     } finally {
+      armingRef.current = false;
       setIsStarting(false);
-      setIsSending(false);
+      setIsArming(false);
     }
+  }, [failLive]);
+
+  useEffect(() => {
+    return () => {
+      liveRef.current = false;
+      clearRearmTimer();
+    };
+  }, [clearRearmTimer]);
+
+  // Drive the continuous turn loop from the *native runtime's* real state.
+  // `talk_now` is initially optimistic (runtime stays idle until Whisper has
+  // a transcript); once any real listening/thinking/speaking state arrives,
+  // the armed flag clears. After that turn finishes and returns to idle, we
+  // arm exactly one next turn.
+  useEffect(() => {
+    const previous = previousModeRef.current;
+    previousModeRef.current = mode;
+
+    if (!liveRef.current) return;
+
+    if (mode === "error") {
+      failLive(
+        "The native voice runtime reported an error. Check your microphone, Whisper model and TTS setup, then retry."
+      );
+      return;
+    }
+
+    const activeRuntimeMode =
+      mode === "listening" || mode === "thinking" || mode === "speaking";
+
+    if (activeRuntimeMode) {
+      hadRuntimeActivityRef.current = true;
+      if (armedRef.current) {
+        armedRef.current = false;
+        setIsArmed(false);
+      }
+      return;
+    }
+
+    const previousWasActive =
+      previous === "listening" || previous === "thinking" || previous === "speaking";
+
+    if (
+      mode === "idle" &&
+      previousWasActive &&
+      hadRuntimeActivityRef.current &&
+      !armedRef.current &&
+      !armingRef.current
+    ) {
+      hadRuntimeActivityRef.current = false;
+      clearRearmTimer();
+      rearmTimerRef.current = setTimeout(() => {
+        rearmTimerRef.current = null;
+        void armNextTurn();
+      }, REARM_DELAY_MS);
+    }
+  }, [armNextTurn, clearRearmTimer, failLive, mode]);
+
+  async function onClick() {
+    if (liveRef.current) {
+      stopLive();
+      setError(null);
+      return;
+    }
+
+    liveRef.current = true;
+    setLiveActive(true);
+    setError(null);
+    await armNextTurn();
   }
 
-  const hint = isStarting
-    ? "Starting voice…"
-    : isArmed
-      ? "Speak now…"
-      : error
-        ? "Voice unavailable"
-        : hintFor(mode);
+  const phase = livePhase(mode, liveActive, isStarting, isArming, isArmed, error);
+  const visuallyListening = liveActive && (isArmed || mode === "listening");
+  const visuallyBusy = liveActive && (mode === "thinking" || mode === "speaking");
 
   return (
-    <div className="flex flex-col items-center gap-2">
+    <div className="flex max-w-56 flex-col items-center gap-2">
       <button
         type="button"
-        onClick={onClick}
-        disabled={disabled}
-        aria-label={isListening ? "Listening" : "Click to talk to Continuum"}
-        aria-busy={isSending || undefined}
+        onClick={() => void onClick()}
+        disabled={isStarting || isArming}
+        aria-label={liveActive ? "Stop live voice" : "Start live voice"}
+        aria-pressed={liveActive}
+        aria-busy={isStarting || isArming || undefined}
         title={
           error
-            ? error
-            : isStarting
-              ? "Starting the Continuum runtime for voice input"
-              : isListening
-                ? "Listening - speak now"
-                : isBusy
-                  ? "Continuum is busy"
-                  : "Click to talk (or say 'hey Continuum' / Ctrl+Shift+K)"
+            ? `Voice error: ${error}`
+            : liveActive
+              ? "Stop live voice"
+              : "Start live voice — keep talking without repeating the wake word"
         }
         className={clsx(
           "relative flex h-20 w-20 items-center justify-center rounded-full",
           "border transition-[transform,background-color,border-color,color] duration-150 ease-[var(--ease-out)]",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60",
-          "disabled:cursor-not-allowed",
-          isListening
+          "disabled:cursor-wait disabled:opacity-70",
+          visuallyListening
             ? "animate-pulse-slow border-accent-blue bg-accent-blue/15 text-accent-blue"
-            : isBusy
-              ? "border-bg-border bg-bg-elevated text-ink-dim opacity-60"
-              : error
-                ? "border-state-error/50 bg-state-error/10 text-state-error"
-                : "border-bg-border bg-bg-elevated text-ink-muted hover:border-accent-blue/40 hover:bg-accent-blue/10 hover:text-accent-blue",
-          isPressed && "scale-95"
+            : visuallyBusy
+              ? "border-accent-amber/50 bg-accent-amber/10 text-accent-amber"
+              : liveActive
+                ? "border-state-healthy/50 bg-state-healthy/10 text-state-healthy"
+                : error
+                  ? "border-state-error/50 bg-state-error/10 text-state-error"
+                  : "border-bg-border bg-bg-elevated text-ink-muted hover:border-accent-blue/40 hover:bg-accent-blue/10 hover:text-accent-blue"
         )}
       >
-        {isListening ? <ListeningBars /> : <Mic size={28} strokeWidth={1.6} />}
+        {liveActive ? (
+          visuallyListening ? (
+            <ListeningBars />
+          ) : (
+            <MicOff size={27} strokeWidth={1.6} />
+          )
+        ) : (
+          <Mic size={28} strokeWidth={1.6} />
+        )}
       </button>
+
       <span
         className={clsx(
-          "max-w-32 text-center text-xs",
+          "text-center text-xs",
           error
             ? "text-state-error"
-            : isListening
+            : visuallyListening
               ? "text-accent-blue"
-              : isBusy
-                ? "text-ink-dim"
-                : "text-ink-muted"
+              : visuallyBusy
+                ? "text-accent-amber"
+                : liveActive
+                  ? "text-state-healthy"
+                  : "text-ink-muted"
         )}
       >
-        {hint}
+        {phase}
       </span>
+
+      {error && (
+        <div
+          role="alert"
+          className="rounded-md border border-state-error/35 bg-state-error/[0.08] px-2.5 py-2 text-center text-[11px] leading-relaxed text-state-error"
+        >
+          {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -174,6 +267,62 @@ async function waitForRuntime() {
   return status;
 }
 
+async function waitForVoiceReady(): Promise<ContinuumState> {
+  const deadline = Date.now() + VOICE_READY_TIMEOUT_MS;
+  let state = await continuum.getState();
+
+  while (
+    Date.now() < deadline &&
+    (!state.system.stt_loaded || !state.system.tts_loaded || !state.system.orchestrator_ready)
+  ) {
+    await delay(RUNTIME_POLL_MS);
+    state = await continuum.getState();
+  }
+
+  return state;
+}
+
+function voiceReadinessError(state: ContinuumState): string | null {
+  const missing: string[] = [];
+  if (!state.system.stt_loaded) missing.push("speech-to-text (Whisper)");
+  if (!state.system.tts_loaded) missing.push("text-to-speech (Piper/Kokoros)");
+  if (!state.system.orchestrator_ready) missing.push("the voice model/orchestrator");
+
+  if (missing.length === 0) return null;
+
+  return `Live voice is not ready: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} unavailable. Open Voice/Setup and fix the reported component before retrying.`;
+}
+
+function livePhase(
+  mode: VoiceMode,
+  liveActive: boolean,
+  isStarting: boolean,
+  isArming: boolean,
+  isArmed: boolean,
+  error: string | null
+): string {
+  if (error) return "Voice error — click to retry";
+  if (isStarting) return "Starting voice runtime…";
+  if (isArming) return "Preparing microphone…";
+  if (!liveActive) return "Start live voice";
+  if (isArmed) return "Listening — speak now…";
+
+  switch (mode) {
+    case "listening":
+      return "Listening…";
+    case "thinking":
+      return "Thinking…";
+    case "speaking":
+      return "Speaking — next turn starts automatically";
+    case "muted":
+      return "Unmuting voice…";
+    case "error":
+      return "Voice error";
+    default:
+      return "Live voice active";
+  }
+}
+
 function delay(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
@@ -181,27 +330,9 @@ function delay(ms: number) {
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message;
   const message = String(error ?? "").trim();
-  return message || "Voice input could not be started";
+  return message || "Live voice could not be started.";
 }
 
-function hintFor(mode: VoiceMode): string {
-  switch (mode) {
-    case "listening":
-      return "Listening…";
-    case "thinking":
-      return "Thinking…";
-    case "speaking":
-      return "Speaking…";
-    case "muted":
-      return "Click to unmute & talk";
-    case "error":
-      return "Retry voice";
-    default:
-      return "Click to talk";
-  }
-}
-
-/** Three thin vertical bars that animate while Continuum is listening. CSS-only. */
 function ListeningBars() {
   return (
     <div className="flex items-end gap-1">
