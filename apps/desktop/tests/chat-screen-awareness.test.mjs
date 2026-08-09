@@ -16,12 +16,25 @@ test("chat prompt knows Continuum can inspect live screens", async () => {
   assert.match(prompt, /unavailable, disabled by a privacy toggle, stale, or a tool call fails/i);
 });
 
-test("desktop chat keeps live screen and window tools wired", async () => {
+test("desktop chat wires live screen and window tools for CLI and HTTP providers", async () => {
   const tools = await read("src-tauri/src/chat_tools.rs");
+  const permissionsSource = await read("src-tauri/src/permissions.rs");
   const permissions = await readRoot("config/default-permissions.toml");
 
+  // Claude CLI / MCP path.
   assert.match(tools, /mcp__continuum__context_screen/);
   assert.match(tools, /mcp__continuum__context_window/);
+
+  // OpenAI-compatible / Anthropic in-process path.
+  assert.match(tools, /name:\s*"context_screen"/);
+  assert.match(tools, /name:\s*"context_window"/);
+  assert.match(tools, /"context_screen"\s*=>\s*self\.context_screen\(\)/);
+  assert.match(tools, /"context_window"\s*=>\s*self\.context_window\(\)/);
+  assert.match(tools, /state\.cloud_view\(&filter\)/);
+
+  // Same enforced permission policy on both paths.
+  assert.match(permissionsSource, /"context_screen"\s*=>\s*Some\("context_screen"\)/);
+  assert.match(permissionsSource, /"context_window"\s*=>\s*Some\("context_window"\)/);
   assert.match(permissions, /context_screen\s*=\s*"auto"/);
   assert.match(permissions, /context_window\s*=\s*"auto"/);
 });
