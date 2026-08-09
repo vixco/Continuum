@@ -839,7 +839,7 @@ Defects the context engine work closed along the way:
   through the `main` push release workflow.
 - **Redesigned dashboard**: frameless window with a single custom titlebar (the
   duplicate OS menu bar is gone), click/press animations on every control, a
-  minimal Hermes/Buzz.xyz-style sidebar grouped into Daily/Configure/Advanced,
+  minimal native agent-workspace sidebar grouped into Daily/Configure/Advanced,
   and a Ctrl+K command palette. All mockup screens removed; the live tabs
   (Home, Voice, Memory, Brain, Tools, Automations, Health, Logs, Settings) are
   now wired to the Zustand store, which is hydrated by `bootstrapStore()` and

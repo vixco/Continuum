@@ -2,7 +2,7 @@
 
 Continuum should feel like a native agent workspace, not a web dashboard placed in a desktop frame.
 
-This contract complements the repository Hallmark preflight and the shared tokens in `tokens.css`. It intentionally adopts the strongest interaction principles seen in mature agent desktops such as Hermes while keeping Continuum's own indigo identity and information architecture.
+This contract defines Continuum's native desktop interaction language and complements the shared tokens in `tokens.css`. It keeps the product's indigo identity and information architecture consistent across every surface.
 
 ## Product feeling
 
@@ -15,7 +15,7 @@ This contract complements the repository Hallmark preflight and the shared token
 ## Visual rules
 
 1. **Flat over boxed.** Prefer whitespace and hierarchy. Do not create card-in-card layouts.
-2. **Hairlines over frames.** Use `--ui-stroke-*` tokens for separation. Floating surfaces use `--stroke-nous` with the shared shadow tokens.
+2. **Hairlines over frames.** Use `--ui-stroke-*` tokens for separation. Floating surfaces use `--stroke-overlay` with the shared shadow tokens.
 3. **Tokens over literals.** Feature components must not introduce raw hex/rgb colors or bespoke shadows.
 4. **One accent.** Continuum's indigo accent marks selection, focus, progress, and primary intent. Functional green/yellow/red remain status colors only.
 5. **Quiet chrome.** Titlebar, sidebar, conversation rail, and status chrome should be visually subordinate to the active work surface.

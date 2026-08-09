@@ -1,4 +1,4 @@
-/* Foundry · "the next step in AGI"
+/* Continuum UI · "the next step in AGI"
  * genre: modern-minimal · macrostructure: Workbench · nav: N3 side rail · footer: none
  * philosophy: flat-not-boxed · hairlines over borders · one restrained electric indigo accent · downward-weighted layered shadows
  * contrast: pass · chrome: native · viewport: desktop-native
@@ -24,7 +24,7 @@
   --border-strong: var(--color-rule-2);
   --accent: var(--color-accent);
   --accent-dim: var(--color-accent-dim);
-  --glass-highlight: var(--stroke-nous);
+  --glass-highlight: var(--stroke-overlay);
   --glass-shadow: oklch(var(--paper-channels) / 0.5);
   --motion-fluid: var(--ease-out);
   /* color-scheme is set per-theme in tokens.css (:root dark, [data-theme=light] light). */
@@ -379,7 +379,7 @@ a:focus-visible {
   width: 100%;
   max-width: 1440px;
   margin-inline: auto;
-  animation: hallmark-tab-crossfade var(--dur-short) var(--ease-out);
+  animation: continuum-tab-crossfade var(--dur-short) var(--ease-out);
 }
 /* Chat + memory tabs fill the whole main area edge-to-edge: no page padding,
    no centered max-width column. They carry their own internal layout. */
@@ -390,7 +390,7 @@ a:focus-visible {
   max-width: none;
   margin-inline: 0;
 }
-@keyframes hallmark-tab-crossfade {
+@keyframes continuum-tab-crossfade {
   from {
     opacity: 0;
   }
@@ -413,7 +413,7 @@ a:focus-visible {
   color: var(--color-ink-2);
 }
 
-/* Command palette — Hermes overlay: shadow-nous + currentColor hairline. */
+/* Command palette — floating overlay with shared elevation and a hairline border. */
 .command-scrim {
   position: fixed;
   inset: 0;
@@ -424,15 +424,15 @@ a:focus-visible {
   background: oklch(var(--paper-channels) / 0.86);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  animation: hallmark-tab-crossfade var(--dur-short) var(--ease-out);
+  animation: continuum-tab-crossfade var(--dur-short) var(--ease-out);
 }
 .command-palette {
   width: min(560px, calc(100vw - 40px));
   overflow: hidden;
-  border: 1px solid var(--stroke-nous);
+  border: 1px solid var(--stroke-overlay);
   border-radius: var(--radius-card);
   background: var(--color-paper-3);
-  box-shadow: var(--shadow-nous);
+  box-shadow: var(--shadow-overlay);
 }
 .command-palette kbd {
   border: 1px solid var(--color-rule);

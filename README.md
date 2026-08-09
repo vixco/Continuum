@@ -4,9 +4,8 @@
 
 **A local context and action operating system for persistent AI assistants.**
 
-Continuum is evolving from the Apache-2.0 donor codebase into a local control
-plane for Codex, Claude Code, local models, and future agents. The product
-promise is:
+Continuum is an Apache-2.0 local control plane for Codex, Claude Code, local
+models, and future agents. The product promise is:
 
 > Every agent starts with the right context. Every important action passes a
 > real permission boundary. Every claimed outcome has evidence.
@@ -74,7 +73,7 @@ semantic green/orange/red status colors.
 
 ## Run the desktop UI
 
-Prerequisites: Node.js 20+ and pnpm 10.11.1.
+Prerequisites: Node.js 22+ and pnpm 10.11.1.
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -105,14 +104,14 @@ computer-use behavior additionally requires real Windows smoke tests.
 
 ```text
 apps/desktop/              Tauri + Next.js Continuum desktop app
-apps/docs/                 Existing donor documentation
+apps/docs/                 Documentation site
 crates/continuum-core/     Runtime, memory, senses, workers, and health
 crates/continuum-mcp/      Context MCP plus Agent OS action MCP
 crates/continuum-llm/      Local LLM wrapper
 crates/continuum-vision/   Local vision wrapper
 config/                    Runtime and permission defaults
 skills/                    Bundled reusable agent procedures
-docs/                      Engineering, research, and provenance documentation
+docs/                      Product and engineering documentation
 ```
 
 ## Safety boundary
@@ -128,10 +127,9 @@ untrusted input and must be treated as possible prompt injection.
 
 ## License and provenance
 
-Continuum is Apache License 2.0. Retain the donor license and attribution.
+Continuum is licensed under the Apache License 2.0. Retain all required upstream license and attribution notices.
 Model, voice, binary, service, and transitive dependency licensing requires
-separate release review; see [docs/PROVENANCE.md](./docs/PROVENANCE.md) and
-[docs/AGENT_OS_PROVENANCE.md](./docs/AGENT_OS_PROVENANCE.md).
+separate release review; see [docs/PROVENANCE.md](./docs/PROVENANCE.md).
 
 ## License
 

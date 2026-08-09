@@ -37,7 +37,7 @@ the full two-model architecture.
   reverse-engineer subscription auth); Claude subscription access goes through
   the official `claude` CLI instead. Any future OAuth provider needs its own
   review.
-- Cloud-platform auth (AWS Bedrock, Google Vertex, Azure Foundry).
+- Cloud-platform auth (AWS Bedrock, Google Vertex, Azure Continuum).
 - Model router / role-based selection (§15) — the data model reserves a
   `roles` field; no routing logic in v1.
 - Tool use / function calling, vision input, file attachments in chat.

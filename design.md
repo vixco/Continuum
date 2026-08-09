@@ -20,7 +20,7 @@ instrument panel: dense enough for real work, quiet enough to leave running.
 - Content/settings pages: Workbench document lane — one readable column with
   sections divided by spacing and surface lightness.
 
-## Theme — Foundry
+## Theme — Continuum
 
 The palette is **cool slate paper with a single electric indigo accent**.
 Hue 260 for surfaces and ink, hue 277 for the accent. The accent class
@@ -92,7 +92,7 @@ not all use the same spacing value.
 ## What pages MUST share
 
 - Continuum wordmark and mark.
-- Foundry palette (cool slate paper, indigo accent) and native type system.
+- Continuum palette (cool slate paper, indigo accent) and native type system.
 - Button, input, card, badge, modal, focus, and spacing language.
 - Real sidebar navigation and `Ctrl+K` command access.
 - Explicit live, hybrid, unavailable, disabled, error, and fixture meaning.

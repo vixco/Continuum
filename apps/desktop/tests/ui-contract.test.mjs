@@ -5,17 +5,17 @@ import test from "node:test";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const readRoot = (path) => readFile(new URL(`../../../${path}`, import.meta.url), "utf8");
 
-test("Hallmark polish loads after the base token stylesheet", async () => {
+test("Workspace refinement loads after the base token stylesheet", async () => {
   const layout = await read("src/app/layout.tsx");
   const globalsIndex = layout.indexOf('import "./globals.css"');
-  const hermesIndex = layout.indexOf('import "./hermes.css"');
+  const workspaceIndex = layout.indexOf('import "./workspace.css"');
 
   assert.ok(globalsIndex >= 0, "base globals stylesheet must be loaded");
-  assert.ok(hermesIndex > globalsIndex, "polish layer must load after globals.css");
+  assert.ok(workspaceIndex > globalsIndex, "workspace refinement layer must load after globals.css");
 });
 
-test("Hermes-inspired layer stays token-driven and reduced-motion safe", async () => {
-  const css = await read("src/app/hermes.css");
+test("Workspace refinement layer stays token-driven and reduced-motion safe", async () => {
+  const css = await read("src/app/workspace.css");
 
   assert.match(css, /var\(--color-paper\)/);
   assert.match(css, /var\(--ui-stroke-tertiary\)/);

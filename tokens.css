@@ -1,4 +1,4 @@
-/* Foundry · "the next step in AGI"
+/* Continuum UI · "the next step in AGI"
  * genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app
  * vibe: "calm AGI console — cool slate paper, one restrained electric indigo accent that earns its place"
  * philosophy: flat-not-boxed · hairlines over borders · one accent · downward-weighted layered shadows
@@ -68,8 +68,8 @@
   --voice-channels: 70% 0.12 250;
   --voice-dim-channels: 54% 0.10 250;
 
-  /* ---------- Hermes-style hairlines (currentColor-tinted, theme-adaptive) ---------- */
-  --stroke-nous: oklch(96% 0.004 260 / 0.10);
+  /* ---------- Continuum-style hairlines (currentColor-tinted, theme-adaptive) ---------- */
+  --stroke-overlay: oklch(96% 0.004 260 / 0.10);
   --ui-stroke-primary: oklch(96% 0.004 260 / 0.14);
   --ui-stroke-secondary: oklch(96% 0.004 260 / 0.10);
   --ui-stroke-tertiary: oklch(96% 0.004 260 / 0.06);
@@ -117,9 +117,9 @@
   --radius-pill: 999px;
   --radius-input: 7px;
 
-  /* ---------- Elevation: downward-weighted, layered (shadow-nous family) ---------- */
+  /* ---------- Elevation: downward-weighted, layered (shadow-overlay family) ---------- */
   --shadow-card: 0 1px 0 oklch(96% 0.004 260 / 0.025), 0 1px 2px oklch(3% 0.006 260 / 0.10);
-  --shadow-nous: 0 1px 1px oklch(3% 0.006 260 / 0.04), 0 4px 10px oklch(3% 0.006 260 / 0.12), 0 14px 32px oklch(3% 0.006 260 / 0.20);
+  --shadow-overlay: 0 1px 1px oklch(3% 0.006 260 / 0.04), 0 4px 10px oklch(3% 0.006 260 / 0.12), 0 14px 32px oklch(3% 0.006 260 / 0.20);
   --shadow-modal: 0 2px 4px oklch(3% 0.006 260 / 0.12), 0 18px 44px oklch(3% 0.006 260 / 0.52), 0 40px 90px oklch(3% 0.006 260 / 0.36);
 
   /* ---------- Z-index ---------- */
@@ -132,7 +132,7 @@
   --z-tooltip: 600;
 }
 
-/* ---------- Light theme · "Foundry · day" ----------
+/* ---------- Light theme ----------
  * Premium cool paper white, same single indigo accent tuned darker for
  * contrast on light. Hairlines become dark-tinted; shadows soften downward.
  * Every token name mirrors :root so nothing downstream needs branching. */
@@ -184,7 +184,7 @@
   --voice-dim-channels: 38% 0.10 250;
 
   /* Hairlines: dark-tinted on light (currentColor = ink). */
-  --stroke-nous: oklch(24% 0.016 260 / 0.10);
+  --stroke-overlay: oklch(24% 0.016 260 / 0.10);
   --ui-stroke-primary: oklch(24% 0.016 260 / 0.14);
   --ui-stroke-secondary: oklch(24% 0.016 260 / 0.10);
   --ui-stroke-tertiary: oklch(24% 0.016 260 / 0.06);
@@ -192,6 +192,6 @@
 
   /* Shadows: soft, downward, dark-on-light. */
   --shadow-card: 0 1px 0 oklch(24% 0.016 260 / 0.03), 0 1px 2px oklch(24% 0.016 260 / 0.05);
-  --shadow-nous: 0 1px 1px oklch(24% 0.016 260 / 0.04), 0 6px 14px oklch(24% 0.016 260 / 0.08), 0 18px 40px oklch(24% 0.016 260 / 0.12);
+  --shadow-overlay: 0 1px 1px oklch(24% 0.016 260 / 0.04), 0 6px 14px oklch(24% 0.016 260 / 0.08), 0 18px 40px oklch(24% 0.016 260 / 0.12);
   --shadow-modal: 0 2px 4px oklch(24% 0.016 260 / 0.08), 0 18px 44px oklch(24% 0.016 260 / 0.18), 0 40px 90px oklch(24% 0.016 260 / 0.22);
 }

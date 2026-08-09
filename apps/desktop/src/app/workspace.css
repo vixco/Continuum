@@ -1,5 +1,5 @@
 /*
- * Continuum Desktop — Hallmark × Hermes polish layer
+ * Continuum Desktop — workspace refinement layer
  *
  * This file intentionally sits after globals.css. The existing design tokens
  * remain the source of truth; these rules only refine macro-structure,
@@ -241,9 +241,9 @@
 
 .command-palette {
   width: min(620px, calc(100vw - 48px));
-  border-color: var(--stroke-nous);
+  border-color: var(--stroke-overlay);
   background: color-mix(in oklch, var(--color-paper-3) 93%, var(--color-paper));
-  box-shadow: var(--shadow-nous);
+  box-shadow: var(--shadow-overlay);
 }
 
 /* ---------- Controls ---------- */
@@ -273,7 +273,7 @@ input[type="search"]:hover {
 /* ---------- Overlays ---------- */
 
 .continuum-modal {
-  border-color: var(--stroke-nous) !important;
+  border-color: var(--stroke-overlay) !important;
   background: var(--color-paper-3) !important;
   box-shadow: var(--shadow-modal) !important;
 }
@@ -283,11 +283,11 @@ input[type="search"]:hover {
 @media (prefers-reduced-motion: no-preference) {
   .nav-item.is-active svg,
   .tb-status > :first-child {
-    animation: continuum-hermes-settle 180ms var(--ease-out);
+    animation: continuum-ui-settle 180ms var(--ease-out);
   }
 }
 
-@keyframes continuum-hermes-settle {
+@keyframes continuum-ui-settle {
   from {
     opacity: 0.72;
     transform: translateY(1px);

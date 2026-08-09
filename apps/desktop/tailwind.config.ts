@@ -1,6 +1,6 @@
 import type { Config } from "tailwindcss";
 
-// Hallmark · Foundry Amber runtime mapping. Full values live in /tokens.css;
+// Continuum accent runtime mapping. Full values live in /tokens.css;
 // channel tokens retain Tailwind 3 opacity modifiers such as bg-bg-surface/70.
 
 const config: Config = {
