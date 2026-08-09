@@ -27,6 +27,15 @@ memory_vault_resolve  = "session-approved"
 memory_vault_delete   = "always-confirm"
 memory_wipe_all       = "always-confirm"
 
+# Desktop chat may inspect typed settings automatically. Mutations are still
+# gated once per chat/MCP session and can only target fields that already exist
+# in ContinuumConfig; the settings backend validates the full candidate config
+# and backs up config.toml before writing it.
+[settings]
+settings_list = "auto"
+settings_get  = "auto"
+settings_set  = "session-approved"
+
 [system]
 system_current_time   = "auto"
 system_active_window  = "auto"
