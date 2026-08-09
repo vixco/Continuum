@@ -1,4 +1,4 @@
-//! # Continuum voice intent-file protocol
+//! # Voice intent-file protocol
 //!
 //! The dashboard process and the daemon process are separate, so dashboard
 //! commands that need to influence live daemon behavior (like push-to-talk)
