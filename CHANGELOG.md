@@ -86,6 +86,12 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **Local runtime start on Windows**: `scripts/dev.ps1` now resolves and
+  validates ONNX Runtime 1.23+ before launching Tauri, sets the exact
+  `ORT_DYLIB_PATH` inherited by the title-bar runtime process, and fails early
+  with an actionable error instead of letting `ort` load Windows' incompatible
+  System32 1.17 DLL and panic.
+
 Completion defects found in the final context-engine review (fix wave 3b):
 
 - `context_package.sections_present` now describes the headings that actually

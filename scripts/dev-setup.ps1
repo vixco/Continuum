@@ -4,6 +4,8 @@
 $ErrorActionPreference = "Stop"
 $requiredRustVersion = "1.94.0"
 $allGood = $true
+$repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot "lib\onnx-runtime.ps1")
 
 function Write-CheckResult {
     param(
@@ -119,6 +121,17 @@ if ($libclangPath -and $env:LIBCLANG_PATH -ne $libclangPath) {
 } elseif (-not $libclangPath) {
     Write-Host "  Install: winget install --id LLVM.LLVM --exact" -ForegroundColor Yellow
     Write-Host "  Then set LIBCLANG_PATH to LLVM's bin directory." -ForegroundColor Yellow
+}
+
+$onnxRuntime = $null
+try {
+    $onnxRuntime = Resolve-ContinuumOnnxRuntime -RepoRoot $repoRoot
+} catch {
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+}
+Write-CheckResult -Name "ONNX Runtime >= 1.23" -Ok ($null -ne $onnxRuntime) -Detail $(if ($onnxRuntime) { "$($onnxRuntime.Version) at $($onnxRuntime.Path)" } else { "" })
+if ($onnxRuntime -and $env:ORT_DYLIB_PATH -ne $onnxRuntime.Path) {
+    Write-Host "  Current shell: `$env:ORT_DYLIB_PATH = '$($onnxRuntime.Path)'" -ForegroundColor Yellow
 }
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
