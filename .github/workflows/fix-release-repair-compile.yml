@@ -1,0 +1,79 @@
+name: Fix release repair compile errors
+
+on:
+  push:
+    branches: [fix/release-actions-final]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-release-repair-compile
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/release-actions-final
+          fetch-depth: 0
+
+      - name: Apply exact compile fixes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $runsPath = "crates/continuum-mcp/src/agent_os/runs.rs"
+          $runs = Get-Content $runsPath -Raw
+          $beforeRuns = 'LocalFree(HLOCAL(self.0.pbData.cast()))'
+          $afterRuns = 'LocalFree(Some(HLOCAL(self.0.pbData.cast())))'
+          if (-not $runs.Contains($beforeRuns)) { throw "Expected LocalFree call was not found" }
+          $runs = $runs.Replace($beforeRuns, $afterRuns)
+          Set-Content -Path $runsPath -Value $runs -NoNewline
+
+          $mainPath = "apps/desktop/src-tauri/src/main.rs"
+          $main = Get-Content $mainPath -Raw
+          if (-not $main.Contains('mod agent_os_registration;')) { throw "Expected legacy registration module declaration was not found" }
+          $main = $main.Replace('mod agent_os_registration;', 'mod agent_os_bootstrap;')
+          $legacyBlock = '(?ms)^    if let Err\(error\) = agent_os_registration::ensure_bundled\(&dev_dir\) \{.*?^    \}\r?\n(?=    let backups_dir)'
+          $updatedMain = [regex]::Replace($main, $legacyBlock, '')
+          if ($updatedMain -eq $main) { throw "Expected duplicate Agent OS registration block was not removed" }
+          if (-not $updatedMain.Contains('match agent_os_bootstrap::ensure_registered(&app_state)')) { throw "Bootstrap call is missing" }
+          Set-Content -Path $mainPath -Value $updatedMain -NoNewline
+
+          $chatPath = "apps/desktop/src-tauri/src/chat.rs"
+          $chat = Get-Content $chatPath -Raw
+          $legacyField = '(?m)^\s*include_sensitive: chat_cfg\.include_sensitive_memory,\r?\n'
+          $updatedChat = [regex]::Replace($chat, $legacyField, '')
+          if ($updatedChat -eq $chat) { throw "Expected removed VaultToolExecutor field was not found" }
+          Set-Content -Path $chatPath -Value $updatedChat -NoNewline
+
+      - name: Install pinned Rust formatter
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+
+      - name: Format and verify patch
+        shell: pwsh
+        run: |
+          cargo fmt --all
+          git diff --check
+          if (Select-String -Path "crates/continuum-mcp/src/agent_os/runs.rs" -SimpleMatch 'LocalFree(HLOCAL(' -Quiet) { throw "Old LocalFree signature remains" }
+          if (Select-String -Path "apps/desktop/src-tauri/src/main.rs" -SimpleMatch 'agent_os_registration::' -Quiet) { throw "Duplicate registration path remains" }
+          if (Select-String -Path "apps/desktop/src-tauri/src/chat.rs" -SimpleMatch 'include_sensitive: chat_cfg.include_sensitive_memory' -Quiet) { throw "Removed executor field remains" }
+
+      - name: Commit targeted repairs
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            crates/continuum-mcp/src/agent_os/runs.rs \
+            apps/desktop/src-tauri/src/main.rs \
+            apps/desktop/src-tauri/src/chat.rs
+          if (git diff --cached --quiet) { throw "No compile repair changes were produced" }
+          git commit -m "fix: repair Windows Agent OS and desktop integration"
+          git push origin HEAD:fix/release-actions-final
