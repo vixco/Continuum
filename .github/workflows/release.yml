@@ -2,6 +2,11 @@ name: Legacy release workflow (retired)
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Optional explicit SemVer; leave empty for automatic selection
+        required: false
+        type: string
 
 permissions:
   contents: read
