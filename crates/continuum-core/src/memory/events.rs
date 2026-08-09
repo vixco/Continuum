@@ -962,12 +962,12 @@ impl EventWriterHandle {
             && !self.status.stopped_cleanly.load(Ordering::Relaxed)
     }
 
-    /// Fresh rows inserted since start (tests, health detail).
+    /// Fresh rows committed since start (tests, health detail).
     pub fn rows_written(&self) -> u64 {
         self.status.rows_written.load(Ordering::Relaxed)
     }
 
-    /// Collapse bumps applied since start (tests, health detail).
+    /// Collapse bumps committed since start (tests, health detail).
     pub fn rows_collapsed(&self) -> u64 {
         self.status.rows_collapsed.load(Ordering::Relaxed)
     }
@@ -984,6 +984,14 @@ struct EventWriter {
     project: Option<CurrentProjectHandle>,
     dropped: Arc<DropCounters>,
     status: Arc<WriterStatus>,
+}
+
+/// One row-level effect inside an events transaction. Health counters are
+/// updated from these outcomes only after the surrounding transaction commits.
+#[derive(Debug, Clone, Copy)]
+enum WriteOutcome {
+    Inserted,
+    Collapsed,
 }
 
 impl EventWriter {
@@ -1058,13 +1066,25 @@ impl EventWriter {
             }
         };
         let mut result = Ok(());
+        let mut rows_written = 0u64;
+        let mut rows_collapsed = 0u64;
         for event in &batch {
-            if let Err(error) = self.write_one(&mut conn, event).await {
-                result = Err(error);
-                break;
+            match self.write_one(&mut conn, event).await {
+                Ok(WriteOutcome::Inserted) => rows_written += 1,
+                Ok(WriteOutcome::Collapsed) => rows_collapsed += 1,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
             }
         }
         RawLog::finish_write(conn, result).await?;
+        self.status
+            .rows_written
+            .fetch_add(rows_written, Ordering::Relaxed);
+        self.status
+            .rows_collapsed
+            .fetch_add(rows_collapsed, Ordering::Relaxed);
         self.mark_flush();
         Ok(())
     }
@@ -1074,7 +1094,7 @@ impl EventWriter {
         &mut self,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         event: &ContextEvent,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<WriteOutcome> {
         let key = dedupe_key(event);
         let candidate = match self.lru.get(&key) {
             Some(candidate) => Some(candidate),
@@ -1101,9 +1121,8 @@ impl EventWriter {
                         count: row.count + 1,
                     },
                 );
-                self.status.rows_collapsed.fetch_add(1, Ordering::Relaxed);
                 Self::mark_source_frame(conn, event).await?;
-                return Ok(());
+                return Ok(WriteOutcome::Collapsed);
             }
             // Stale LRU entry (row rotated away) — fall through to insert.
         }
@@ -1117,9 +1136,8 @@ impl EventWriter {
                 count: 1,
             },
         );
-        self.status.rows_written.fetch_add(1, Ordering::Relaxed);
         Self::mark_source_frame(conn, event).await?;
-        Ok(())
+        Ok(WriteOutcome::Inserted)
     }
 
     /// Records that this event's source frame has become a context event
