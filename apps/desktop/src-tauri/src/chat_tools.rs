@@ -1,6 +1,6 @@
-//! Provider-neutral memory + live-context tools for the desktop chat surface.
+//! Provider-neutral memory + live-context + settings tools for the desktop chat surface.
 //!
-//! HTTP providers execute these tools in-process; Claude CLI receives the same
+//! HTTP providers execute these tools in-process; Claude CLI receives equivalent
 //! capabilities through `continuum-mcp`. Both paths obey the effective native
 //! permission policy and the same privacy/egress boundaries.
 
@@ -14,6 +14,9 @@ use continuum_core::senses::privacy::{source_enabled, ObservedSource, PrivacyFil
 use continuum_gateway::{McpSpec, ToolDef, ToolExecutor};
 use continuum_memory::{NodeStatus, NodeSummary, NodeType, NoteDraft, Sensitivity, Source, Vault};
 use serde_json::json;
+
+#[path = "settings_tools.rs"]
+mod settings_tools;
 
 const SEARCH_LIMIT_MAX: u64 = 25;
 const SEARCH_LIMIT_DEFAULT: u64 = 10;
@@ -47,8 +50,11 @@ impl ToolExecutor for VaultToolExecutor {
             "memory_delete" => self.delete(input).await,
             "context_screen" => self.context_screen(),
             "context_window" => self.context_window(),
+            "settings_list" => settings_tools::list(input),
+            "settings_get" => settings_tools::get(input),
+            "settings_set" => settings_tools::set(input),
             other => Err(format!(
-                "unknown chat tool {other:?} (expected memory_search|memory_get|memory_save|memory_delete|context_screen|context_window)"
+                "unknown chat tool {other:?} (expected memory_search|memory_get|memory_save|memory_delete|context_screen|context_window|settings_list|settings_get|settings_set)"
             )),
         };
         if let Err(error) = &result {
@@ -404,6 +410,43 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
                 .into(),
             input_schema: json!({"type": "object", "properties": {}}),
         },
+        ToolDef {
+            name: "settings_list".into(),
+            description: "Discover Continuum runtime settings by typed dotted path. Use this when the user asks to change a setting and you do not already know the exact path. Results include current/default values and never expose secret values."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional path keyword such as screen, voice, privacy, resources, chat, github, or memory."},
+                    "limit": {"type": "integer", "description": "Maximum matches (default 80, max 250)."}
+                }
+            }),
+        },
+        ToolDef {
+            name: "settings_get".into(),
+            description: "Read one exact Continuum setting by dotted path, including its default and where it appears in the UI. Secret-like values are redacted."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Exact dotted setting path discovered with settings_list."}
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "settings_set".into(),
+            description: "Change one existing typed Continuum setting. Use only when the user's current request explicitly asks to change that setting. The candidate config is fully deserialized and validated before being written, and the previous config is backed up."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Exact dotted setting path discovered with settings_list/settings_get."},
+                    "value": {"description": "New JSON value. It must match the setting's typed config field."}
+                },
+                "required": ["path", "value"]
+            }),
+        },
     ]
 }
 
@@ -444,6 +487,8 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path, session_id: &str) -> Option<Mc
             "mcp__continuum__context_files",
             "mcp__continuum__context_git",
             "mcp__continuum__context_package",
+            "mcp__continuum__fs_read_file",
+            "mcp__continuum__fs_apply_patch",
         ]
         .into_iter()
         .map(String::from)
@@ -736,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_cover_memory_and_live_context() {
+    fn tool_definitions_cover_memory_live_context_and_settings() {
         let names = memory_tool_defs()
             .into_iter()
             .map(|tool| tool.name)
@@ -749,7 +794,10 @@ mod tests {
                 "memory_save",
                 "memory_delete",
                 "context_screen",
-                "context_window"
+                "context_window",
+                "settings_list",
+                "settings_get",
+                "settings_set"
             ]
         );
     }
