@@ -585,7 +585,6 @@ pub async fn chat_send_message(
                 tools = chat_tools::memory_tool_defs();
                 executor = Some(Arc::new(chat_tools::VaultToolExecutor {
                     vault: vault.clone(),
-                    include_sensitive: chat_cfg.include_sensitive_memory,
                 }) as Arc<dyn ToolExecutor>);
                 tools_section = Some(memory_tools_section(conn.kind));
             }

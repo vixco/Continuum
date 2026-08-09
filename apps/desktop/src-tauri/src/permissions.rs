@@ -92,10 +92,8 @@ pub(crate) async fn authorize_in_process_tool(
         format!("Unknown in-process chat tool {local_tool:?}; permission denied by default")
     })?;
     let data_dir = continuum_core::config::continuum_dev_dir();
-    let permission = effective_permission_for_tool(
-        &data_dir.join("permissions.toml"),
-        canonical_tool,
-    )?;
+    let permission =
+        effective_permission_for_tool(&data_dir.join("permissions.toml"), canonical_tool)?;
 
     match permission {
         NativeToolPermission::Auto => Ok(()),
@@ -167,10 +165,7 @@ fn effective_permissions(path: &Path) -> Result<Vec<ToolPermissionView>, String>
     Ok(output)
 }
 
-fn effective_permission_for_tool(
-    path: &Path,
-    tool: &str,
-) -> Result<NativeToolPermission, String> {
+fn effective_permission_for_tool(path: &Path, tool: &str) -> Result<NativeToolPermission, String> {
     let defaults = parse_permissions(DEFAULTS, "bundled defaults")?;
     let default = defaults
         .values()
@@ -208,9 +203,9 @@ fn parse_permissions(
         })?;
         let mut tools = BTreeMap::new();
         for (tool, value) in table {
-            let permission = value.as_str().ok_or_else(|| {
-                format!("Permission for {tool:?} in {source} must be a string")
-            })?;
+            let permission = value
+                .as_str()
+                .ok_or_else(|| format!("Permission for {tool:?} in {source} must be a string"))?;
             canonical_permission(permission)?;
             tools.insert(tool.clone(), permission.to_string());
         }
@@ -256,11 +251,7 @@ fn in_process_session_grants() -> &'static Mutex<HashSet<String>> {
 }
 
 #[cfg(not(test))]
-async fn require_native_approval(
-    tool: &str,
-    arguments: &Value,
-    scope: &str,
-) -> Result<(), String> {
+async fn require_native_approval(tool: &str, arguments: &Value, scope: &str) -> Result<(), String> {
     if std::env::var("CONTINUUM_MCP_HEADLESS")
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
     {
@@ -353,9 +344,7 @@ fn redacted_shape(value: &Value) -> Value {
 fn sanitize_dialog_text(value: &str) -> String {
     value
         .chars()
-        .filter(|character| {
-            !character.is_control() || matches!(character, '\n' | '\t')
-        })
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
         .filter(|character| {
             !matches!(
                 character,
@@ -553,11 +542,8 @@ mod tests {
     fn effective_permission_uses_override() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("permissions.toml");
-        std::fs::write(
-            &path,
-            "[memory]\nmemory_vault_get = \"blocked\"\n",
-        )
-        .expect("write override");
+        std::fs::write(&path, "[memory]\nmemory_vault_get = \"blocked\"\n")
+            .expect("write override");
         assert_eq!(
             effective_permission_for_tool(&path, "memory_vault_get").expect("permission"),
             NativeToolPermission::Blocked
@@ -569,8 +555,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("permissions.toml");
         let document: toml::Value =
-            toml::from_str("[memory]\nmemory_vault_get = \"blocked\"\n")
-                .expect("document");
+            toml::from_str("[memory]\nmemory_vault_get = \"blocked\"\n").expect("document");
         persist_document(&path, &document).expect("persist");
         let effective = effective_permissions(&path).expect("effective");
         let selected = effective
