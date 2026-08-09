@@ -70,8 +70,8 @@ test("release publication requires Windows and both macOS architectures", async 
   assert.match(workflow, /continuum-\$version-macos-\$arch\.app\.tar\.gz/);
   assert.match(workflow, /test -s "\$updater\.sig"/);
   assert.match(workflow, /release-manifest\.json/);
-  assert.match(workflow, /Validate uploaded draft assets/);
-  assert.match(workflow, /Publish verified draft/);
+  assert.match(workflow, /Verify the draft release has every asset/);
+  assert.match(workflow, /Publish the fully assembled draft atomically/);
   assert.match(workflow, /fail_on_unmatched_files: true/);
 });
 
