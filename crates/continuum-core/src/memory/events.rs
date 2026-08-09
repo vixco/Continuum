@@ -67,6 +67,16 @@ pub const DEDUPE_LRU_CAPACITY: usize = 256;
 /// The writer flushes a pending batch at least this often.
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Number of times the dedicated writer retries taking SQLite's write lock.
+/// Frame persistence shares the raw-log database and can briefly own that
+/// lock; dropping a whole event batch after one 250 ms busy timeout would turn
+/// routine contention into permanent context loss.
+const WRITE_LOCK_RETRY_LIMIT: usize = 8;
+
+/// Small yield between write-lock attempts. Each attempt already observes the
+/// raw log's busy timeout, so this only prevents a tight retry loop.
+const WRITE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+
 /// A batch this large flushes immediately instead of waiting for the tick.
 const BATCH_FLUSH_THRESHOLD: usize = 32;
 
@@ -952,12 +962,12 @@ impl EventWriterHandle {
             && !self.status.stopped_cleanly.load(Ordering::Relaxed)
     }
 
-    /// Fresh rows inserted since start (tests, health detail).
+    /// Fresh rows committed since start (tests, health detail).
     pub fn rows_written(&self) -> u64 {
         self.status.rows_written.load(Ordering::Relaxed)
     }
 
-    /// Collapse bumps applied since start (tests, health detail).
+    /// Collapse bumps committed since start (tests, health detail).
     pub fn rows_collapsed(&self) -> u64 {
         self.status.rows_collapsed.load(Ordering::Relaxed)
     }
@@ -974,6 +984,14 @@ struct EventWriter {
     project: Option<CurrentProjectHandle>,
     dropped: Arc<DropCounters>,
     status: Arc<WriterStatus>,
+}
+
+/// One row-level effect inside an events transaction. Health counters are
+/// updated from these outcomes only after the surrounding transaction commits.
+#[derive(Debug, Clone, Copy)]
+enum WriteOutcome {
+    Inserted,
+    Collapsed,
 }
 
 impl EventWriter {
@@ -1028,15 +1046,45 @@ impl EventWriter {
                 fill_project_id_from_handle(event, Some(&handle));
             }
         }
-        let mut conn = self.raw_log.immediate_conn().await?;
+        let mut retries = 0usize;
+        let mut conn = loop {
+            match self.raw_log.immediate_conn().await {
+                Ok(conn) => break conn,
+                Err(error) if retries < WRITE_LOCK_RETRY_LIMIT => {
+                    retries += 1;
+                    tracing::debug!(
+                        layer = "memory",
+                        component = "events",
+                        attempt = retries,
+                        retry_limit = WRITE_LOCK_RETRY_LIMIT,
+                        error = %error,
+                        "raw-log write lock busy; retrying events batch"
+                    );
+                    tokio::time::sleep(WRITE_LOCK_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let mut result = Ok(());
+        let mut rows_written = 0u64;
+        let mut rows_collapsed = 0u64;
         for event in &batch {
-            if let Err(error) = self.write_one(&mut conn, event).await {
-                result = Err(error);
-                break;
+            match self.write_one(&mut conn, event).await {
+                Ok(WriteOutcome::Inserted) => rows_written += 1,
+                Ok(WriteOutcome::Collapsed) => rows_collapsed += 1,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
             }
         }
         RawLog::finish_write(conn, result).await?;
+        self.status
+            .rows_written
+            .fetch_add(rows_written, Ordering::Relaxed);
+        self.status
+            .rows_collapsed
+            .fetch_add(rows_collapsed, Ordering::Relaxed);
         self.mark_flush();
         Ok(())
     }
@@ -1046,7 +1094,7 @@ impl EventWriter {
         &mut self,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         event: &ContextEvent,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<WriteOutcome> {
         let key = dedupe_key(event);
         let candidate = match self.lru.get(&key) {
             Some(candidate) => Some(candidate),
@@ -1073,9 +1121,8 @@ impl EventWriter {
                         count: row.count + 1,
                     },
                 );
-                self.status.rows_collapsed.fetch_add(1, Ordering::Relaxed);
                 Self::mark_source_frame(conn, event).await?;
-                return Ok(());
+                return Ok(WriteOutcome::Collapsed);
             }
             // Stale LRU entry (row rotated away) — fall through to insert.
         }
@@ -1089,9 +1136,8 @@ impl EventWriter {
                 count: 1,
             },
         );
-        self.status.rows_written.fetch_add(1, Ordering::Relaxed);
         Self::mark_source_frame(conn, event).await?;
-        Ok(())
+        Ok(WriteOutcome::Inserted)
     }
 
     /// Records that this event's source frame has become a context event
@@ -2408,6 +2454,45 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!handle.is_healthy());
         assert!(!handle.should_restart(), "clean shutdown never restarts");
+        log.close().await;
+    }
+
+    #[tokio::test]
+    async fn spawned_writer_retries_a_transient_raw_log_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = open_log(&dir).await;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (sender, handle) = spawn_event_writer_with_interval(
+            log.clone(),
+            &EventsConfig::default(),
+            None,
+            shutdown_rx,
+            Duration::from_millis(50),
+        );
+
+        // Let the interval's immediate rotation tick finish, then emulate a
+        // concurrent frame write that owns SQLite's write lock longer than
+        // one busy timeout. The event batch must wait, not disappear.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let lock = log.immediate_conn().await.unwrap();
+        sender.send(template_event(
+            "screen paused during frame write",
+            Utc::now(),
+        ));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        RawLog::finish_write(lock, Ok::<(), anyhow::Error>(()))
+            .await
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while handle.rows_written() < 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(handle.rows_written(), 1, "the locked batch must be retried");
+        assert_eq!(log.context_event_count().await.unwrap(), 1);
+
+        shutdown_tx.send(true).unwrap();
+        assert!(handle.wait_for_stop(Duration::from_secs(5)).await);
         log.close().await;
     }
 

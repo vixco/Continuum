@@ -13,6 +13,128 @@ The dashboard's **Fix Issues** button spawns a dedicated Claude Opus 4.6 session
 
 Output streams live to the Health tab via `continuum:repair` events (text deltas, tool calls, tool results, stderr, final status).
 
+## Permission gateway
+
+Component: `permissions`
+
+- Health check: `PermissionGateway::health()` validates bundled defaults and
+  user overrides and counts malformed request/grant records.
+- Logs: structured `component = "permissions"` warnings plus durable
+  permission decisions in `<data_dir>/logs/actions.jsonl`.
+- Recovery: a malformed `permissions.toml` causes fail-closed denial. Restore
+  it from the latest Continuum backup or remove only the malformed override
+  after preserving a copy; bundled defaults then take effect. Malformed
+  request/grant JSON can be quarantined individually without changing policy.
+- Restart rule: `PermissionHealth::should_restart()` is true when effective
+  policy cannot be parsed. Restarting alone does not weaken or bypass policy.
+
+## Git checkpoint broker
+
+Component: `git_tools`
+
+- Health check: run `git --version`, then a read-only `git rev-parse
+  --show-toplevel` in an allowlisted confirmed project.
+- Logs: MCP tool audit plus permission decisions in `logs/actions.jsonl`.
+- Recovery: orphaned files in `.git/continuum-tmp/` are temporary indexes and
+  can be removed when no MCP Git call is active. Never delete
+  `.git/continuum-recovery/`; it contains rollback recovery copies.
+- Restart rule: restart the MCP process after a command timeout. Git
+  subprocesses use `git_context.command_timeout_secs` and are killed on drop.
+
+## Filesystem action broker
+
+Component: `file_actions`
+
+- Health check: verify `<data_dir>/recovery/files/` is creatable and perform an
+  atomic create/rename/delete probe inside that directory only.
+- Logs: tool and permission audit records in `logs/actions.jsonl`; mutation
+  responses include their recovery path.
+- Recovery: originals from patches and recoverable deletes live below
+  `<data_dir>/recovery/files/<date>/`. Move them back only after confirming the
+  destination does not exist.
+- Restart rule: retry after filesystem locks are released. Temporary sibling
+  files named `.continuum-write-*.tmp` or `.continuum-patch-*.tmp` may be
+  quarantined after verifying no MCP file action is active.
+
+## Terminal broker
+
+Component: `terminal_tools`
+
+- Health check: run an allowed program's version command through
+  `terminal_verify` in an allowlisted project and verify its evidence JSON can
+  be read back.
+- Logs: MCP/permission audit plus immutable per-run JSON under
+  `<data_dir>/evidence/terminal/`.
+- Recovery: a timed-out child is killed on drop. If evidence persistence fails,
+  the verifier call fails instead of claiming success without proof.
+- Restart rule: restart the MCP process after repeated spawn failures; first
+  verify PATH and `mcp.terminal.allowed_programs` configuration.
+
+## Native IDE bridge
+
+Component: `ide`
+
+- Health check: `ide_status` resolves configured editor aliases to native
+  executables without opening files or inspecting editor state.
+- Logs: every MCP handoff is audited with its editor and canonical target path.
+- Recovery: ensure VS Code, VS Code Insiders, or VSCodium is installed and its
+  command is on PATH; adjust `mcp.ide.allowed_editors` if needed, then restart
+  the MCP process and call `ide_status` again.
+- Restart rule: restart after repeated spawn/timeouts. A missing executable or
+  denied path is a configuration/permission issue and should not be retried.
+
+## Browser DOM bridge
+
+Component: `browser`
+
+- Health check: `browser_status` probes only the configured loopback port.
+- Logs: MCP permission and action audits; fill content is redacted.
+- Recovery: verify `mcp.browser.enabled`, the dedicated Chromium
+  `--remote-debugging-port`, and exact host allowlist. Restart the browser with
+  its dedicated profile if CDP is unavailable, then restart the MCP process.
+- Restart rule: protocol disconnects/timeouts may be retried after one status
+  check. Host denials and password-field blocks require configuration/user
+  action and are never auto-retried.
+
+## Windows UI Automation
+
+Component: `windows_ui`
+
+- Health check: `windows_ui_focused_element` performs a live focused-element
+  probe after permission and privacy checks.
+- Recovery: refocus a stable semantic control and retry inspection once.
+  Unsupported patterns, password controls, and privacy-zone denials are policy
+  results, not restartable failures.
+- Restart rule: restart the MCP process only after repeated COM initialization
+  failures; never auto-repeat InvokePattern or ValuePattern mutations.
+
+## Task and evidence records
+
+Component: `task_evidence`
+
+- Health check: list operations parse bounded recent records; malformed or
+  oversized files fail visibly rather than being treated as proof.
+- Recovery: atomic writes leave only hidden temporary files on interruption;
+  remove an orphan `.tmp` after inspection and retry the write. Existing JSON
+  records are not auto-deleted.
+
+## GitHub CLI bridge
+
+Component: `github`
+
+- Health check: `github_status` verifies `gh.exe`, active github.com auth, and
+  OS-keyring token storage without showing a token or making repository calls.
+- Logs: connect/disconnect and MCP permission/tool audits; tokens are excluded.
+- Recovery: install/update the official GitHub CLI, then reconnect from
+  Settings. Plaintext-file token storage is rejected. Disconnect locally and
+  revoke the GitHub CLI OAuth grant remotely if compromise is suspected.
+- Restart rule: restart the MCP process after repeated CLI spawn/timeouts; auth
+  failures require reconnect rather than restart.
+- Mutation failures are non-retriable by default: inspect the returned GitHub
+  response, correct the request or permissions, and ask for a new confirmation.
+  Continuum never automatically repeats an issue, comment, or pull-request
+  creation because duplicate external writes are not safely recoverable.
+
 ## Repair MCP tools
 
 All under the `repair_*` namespace (routed via `continuum-mcp`):
@@ -96,6 +218,25 @@ CI compilation/integration tests validate wiring. Actual simultaneous cadence
 across multiple physical Windows monitors requires a live machine with multiple
 displays and is not established by unit tests alone.
 
+### Observation privacy pause
+
+- Component: `observation_pause`; logs use `layer = "privacy"` and
+  `component = "observation_pause"`.
+- Health: `privacy_pause::read_status` validates the small local lease and
+  `privacy_pause::should_restart` reports malformed/unreadable state. A corrupt
+  lease fails closed: the runtime keeps `pause_all` enabled and reports an
+  error instead of guessing that observation may resume.
+- Recovery: while Continuum is paused, inspect
+  `<data_dir>/observation-pause.json`. Restore valid JSON by selecting a new
+  duration in the desktop, or use the red power button to resume, which removes
+  the lease and queues a durable `pause_all = false` intent. If the file cannot
+  be replaced because of filesystem permissions, repair those permissions and
+  retry; do not delete it while the runtime is active unless the user has
+  explicitly chosen to resume.
+- Restart rule: the lease store has no process to restart. Restarting the
+  Continuum runtime is safe and preserves the deadline; watcher tasks start
+  parked and can resume live after boot without losing user data.
+
 ---
 
 ## Context Engine Components
@@ -107,10 +248,9 @@ curator precedent). Each entry is a uniform summary:
 `{ healthy, enabled, should_restart, detail }`. Per spec §7,
 disabled-with-reason states report `healthy: true, enabled: false` with the
 reason in `detail` and never request a restart. `RuntimeSnapshot.paused`
-mirrors `[privacy.toggles].pause_all`; when the runtime *booted* paused, the
-three watcher entries (`context_watcher`, `git_watcher`, `file_watcher`) report
-`"not running (pause_all set in [privacy.toggles])"` because those tasks were
-never spawned — that is deliberate, not a failure. `live_context` and
+mirrors the live shared `pause_all` atomic. Watchers always spawn, including on
+a paused boot, but park before observation and report disabled-with-reason;
+this is deliberate and lets them resume without a restart. `live_context` and
 `events_writer` always have a real handle.
 
 The seven published keys are `idle` (a plain bool from the cadence

@@ -206,11 +206,13 @@ pub async fn run_dedupe(
     let result = replay(lines, labels, &options, &sender).await?;
     let drained = wait_for_writer(&writer, result.emitted.len() as u64, DRAIN_TIMEOUT).await;
     let _ = shutdown_tx.send(true);
+    let stopped = writer.wait_for_stop(DRAIN_TIMEOUT).await;
     anyhow::ensure!(
         drained,
         "the events writer did not drain {} events in {DRAIN_TIMEOUT:?}",
         result.emitted.len()
     );
+    anyhow::ensure!(stopped, "the events writer did not stop after draining");
 
     let rows = raw_log.list_context_events().await?;
     raw_log.close().await;
@@ -380,7 +382,9 @@ pub async fn run_memory_precision(
     let result = replay(lines, labels, &options, &sender).await?;
     let drained = wait_for_writer(&writer, result.emitted.len() as u64, DRAIN_TIMEOUT).await;
     let _ = shutdown_tx.send(true);
+    let stopped = writer.wait_for_stop(DRAIN_TIMEOUT).await;
     anyhow::ensure!(drained, "the events writer did not drain in time");
+    anyhow::ensure!(stopped, "the events writer did not stop after draining");
 
     // --- Distillation ---------------------------------------------------
     let memory_cfg = &options.config.memory;

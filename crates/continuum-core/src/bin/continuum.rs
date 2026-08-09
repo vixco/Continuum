@@ -35,7 +35,9 @@ use continuum_core::context::apply::{
 use continuum_core::context::continuation::{
     self, ContinuationInputs, ContinuationOutcome, MAX_ASK_CANDIDATES,
 };
-use continuum_core::context::intents::{self as context_intent, IntentDrainer, SessionField};
+use continuum_core::context::intents::{
+    self as context_intent, IntentDrainer, SessionField, ToggleName,
+};
 use continuum_core::context::package::{parse_wake_trailer, NextStep, ToolsSection};
 use continuum_core::context::project::{
     CurrentProject, CurrentProjectHandle, FrameInput, ProjectEntry, ProjectResolver, ProjectStatus,
@@ -134,6 +136,34 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&dev_dir).context("Failed to create ~/.continuum-dev/")?;
     let config_path = dev_dir.join("config.toml");
     let mut config = load_config(&config_path).context("Failed to load configuration")?;
+    let pause_file_exists = continuum_core::privacy_pause::pause_path(&dev_dir).exists();
+    match continuum_core::privacy_pause::read_status(&dev_dir, Utc::now()) {
+        Ok(status) if status.paused => config.privacy.toggles.pause_all = true,
+        Ok(_) if pause_file_exists => {
+            config.privacy.toggles.pause_all = false;
+            let _ = continuum_core::privacy_pause::clear(&dev_dir);
+            if let Err(error) =
+                continuum_core::config_edit::set_toggle(&config_path, ToggleName::PauseAll, false)
+            {
+                tracing::warn!(
+                    layer = "privacy",
+                    component = "observation_pause",
+                    error = %error,
+                    "Expired privacy pause could not normalize config"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            config.privacy.toggles.pause_all = true;
+            tracing::error!(
+                layer = "privacy",
+                component = "observation_pause",
+                error = %error,
+                "Privacy pause record is invalid; failing closed"
+            );
+        }
+    }
 
     // --- Adaptive resource policy ---
     // Probe the host once and resolve concrete resource knobs from the
@@ -563,11 +593,8 @@ async fn main() -> Result<()> {
     // same boot config the watchers get; `set_toggle` intents store into
     // it and persist the value to config.toml.
     //
-    // Documented limitation: when `pause_all` is already set at boot no
-    // watcher is spawned at all (below), so *unpausing* from the page
-    // needs a restart. Pausing live works; unpausing a never-started
-    // pipeline cannot, and pretending otherwise would be the dishonest
-    // half of an honest toggle.
+    // Watchers always spawn and park behind these atomics while paused, so
+    // pause and resume both work live, including after a paused boot.
     let toggle_control = ToggleControl::new(&observation_toggles);
     // --- Action audit log (Task C5, spec §4.13) ---
     // Append-only JSONL of wakes, toggle changes, corrections and
@@ -628,33 +655,19 @@ async fn main() -> Result<()> {
     let moshi_tap: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> = None;
 
     // Health-snapshot registration (Task A8, spec §7): shared health
-    // handles grabbed before each watcher is moved into its task. `None`
-    // under pause_all, where no watcher spawns — the publisher reports
-    // those components as disabled-with-reason.
-    let mut context_watch_health: Option<SharedContextWatchHealth> = None;
-    let mut git_watch_health: Option<SharedGitWatchHealth> = None;
-    let mut file_watch_health: Option<SharedFileWatchHealth> = None;
-    let mut process_watch_health: Option<SharedProcessWatchHealth> = None;
+    // handles grabbed before each watcher is moved into its task.
+    let context_watch_health: Option<SharedContextWatchHealth>;
+    let git_watch_health: Option<SharedGitWatchHealth>;
+    let file_watch_health: Option<SharedFileWatchHealth>;
+    let process_watch_health: Option<SharedProcessWatchHealth>;
 
     if observation_toggles.pause_all {
-        // pause_all gates the entire frame loop (spec §4.1): no watchers,
-        // no frame builder — frames are neither built nor persisted, and no
-        // source emits. Dropping the senders closes the frame channel, so
-        // the main loop's frame arm simply never fires. The paused flag is
-        // published into RuntimeSnapshot (Task A8, closing the A2 seam)
-        // and mirrored into the dashboard's SystemState by the bridge.
         emit_system_event(
             "toggle_change",
-            "pause_all set in [privacy.toggles]; observation fully paused — no frames will be built",
+            "pause_all set in [privacy.toggles]; observation workers parked",
         );
-        drop(screen_tx);
-        drop(audio_tx);
-        drop(ctx_tx);
-        drop(screen_rx);
-        drop(audio_rx);
-        drop(ctx_rx);
-        drop(frame_tx);
-    } else {
+    }
+    {
         // --- Vision ---
         let vision_model = init_vision_model(&config, &resource_plan).await;
 
@@ -753,6 +766,7 @@ async fn main() -> Result<()> {
         // read. A compact current snapshot backs `context_processes`.
         let process_watcher = ProcessWatcher::new(config.process_watcher.clone(), dev_dir.clone())
             .with_privacy(privacy_filter.clone())
+            .with_toggle_control(toggle_control.clone())
             .with_event_sender(event_sender.clone());
         process_watch_health = Some(process_watcher.health_handle());
         let process_shutdown = shutdown_rx.clone();
@@ -767,6 +781,88 @@ async fn main() -> Result<()> {
             frame_builder
                 .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
                 .await;
+        });
+    }
+
+    // Expire timed privacy pauses even when the dashboard is closed.
+    {
+        let pause_dir = dev_dir.clone();
+        let pause_config = config_path.clone();
+        let pause_toggles = toggle_control.clone();
+        let pause_hub = live_context.clone();
+        let mut pause_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut was_paused = false;
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let currently_paused = pause_toggles.paused();
+                        if currently_paused && !was_paused {
+                            pause_hub.clear_observed_data();
+                        }
+                        was_paused = currently_paused;
+                        let file_exists = continuum_core::privacy_pause::pause_path(&pause_dir).exists();
+                        match continuum_core::privacy_pause::read_status(&pause_dir, Utc::now()) {
+                            Ok(status) if status.paused && !pause_toggles.paused() => {
+                                if let Err(error) = continuum_core::config_edit::set_toggle(
+                                    &pause_config,
+                                    ToggleName::PauseAll,
+                                    true,
+                                ) {
+                                    tracing::error!(
+                                        layer = "privacy",
+                                        component = "observation_pause",
+                                        error = %error,
+                                        "Privacy pause could not be persisted; live observation still stopping"
+                                    );
+                                }
+                                pause_toggles.set(ToggleName::PauseAll, true);
+                                pause_hub.clear_observed_data();
+                                emit_system_event(
+                                    "toggle_change",
+                                    "Durable privacy pause applied; all observation stopped",
+                                );
+                            }
+                            Ok(status) if file_exists && !status.paused && pause_toggles.paused() => {
+                                if let Err(error) = continuum_core::config_edit::set_toggle(
+                                    &pause_config,
+                                    ToggleName::PauseAll,
+                                    false,
+                                ) {
+                                    tracing::warn!(
+                                        layer = "privacy",
+                                        component = "observation_pause",
+                                        error = %error,
+                                        "Timed pause expired but config could not be normalized"
+                                    );
+                                    continue;
+                                }
+                                pause_toggles.set(ToggleName::PauseAll, false);
+                                let _ = continuum_core::privacy_pause::clear(&pause_dir);
+                                emit_system_event(
+                                    "toggle_change",
+                                    "Timed privacy pause expired; observation resumed",
+                                );
+                            }
+                            Err(error) => {
+                                pause_toggles.set(ToggleName::PauseAll, true);
+                                tracing::error!(
+                                    layer = "privacy",
+                                    component = "observation_pause",
+                                    error = %error,
+                                    "Privacy pause record became unreadable; failing closed"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = pause_shutdown.changed() => {
+                        if *pause_shutdown.borrow() { break; }
+                    }
+                }
+            }
         });
     }
 
@@ -1021,7 +1117,7 @@ async fn main() -> Result<()> {
         // publish closure IS the context-engine health registration.
         // Every tick it reads the shared health handles and folds them
         // into `RuntimeSnapshot.context_engine` for the repair agent.
-        let paused = observation_toggles.pause_all;
+        let pause_for_publisher = toggle_control.clone();
         let health_cadence = cadence.clone();
         let health_hub = live_context.clone();
         let health_context = context_watch_health.clone();
@@ -1031,7 +1127,7 @@ async fn main() -> Result<()> {
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
         let triage_enabled = triage.is_some();
-        let screen_capture_enabled = config.screen.enabled && !paused;
+        let screen_capture_configured = config.screen.enabled;
         let context_poll_interval = Duration::from_secs(config.context.poll_interval_secs.max(1));
         // Task C1 (spec §4.8 consumers): publish the live session state on
         // every tick. Three consumers read this key straight out of
@@ -1103,6 +1199,7 @@ async fn main() -> Result<()> {
                     curator_status_for_publisher.as_ref(),
                     curator_enabled,
                 ));
+                let paused = pause_for_publisher.paused();
                 snap.paused = Some(paused);
                 snap.session_state = Some(session_for_publisher.snapshot());
                 snap.context_page = Some(context_page_for_publisher.read().clone());
@@ -1116,7 +1213,7 @@ async fn main() -> Result<()> {
                     &health_writer,
                     &health_triage,
                     triage_enabled,
-                    screen_capture_enabled,
+                    screen_capture_configured && !paused,
                     context_poll_interval,
                 ));
                 snap
@@ -1336,6 +1433,12 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             Some(frame) = frame_rx.recv() => {
+                // A frame admitted just before the user's click may still be
+                // buffered. Drop it at the central consumer while paused so
+                // it cannot reach persistence, triage, or an agent.
+                if toggle_control.paused() {
+                    continue;
+                }
                 frame_count += 1;
                 // M2: read the four counters through the cheap accessors
                 // BEFORE taking the `runtime_state` mutex. `snapshot()`

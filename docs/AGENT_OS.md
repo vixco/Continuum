@@ -1,7 +1,7 @@
 # Continuum Agent OS
 
-Status: **governed alpha execution plane**  
-Binary: `continuum-agent-os`  
+Status: **governed alpha execution plane**
+Binary: `continuum-agent-os`
 Primary desktop target: Windows; the MCP contract remains provider-neutral.
 
 Agent OS lets Continuum operate the desktop and connected apps without treating

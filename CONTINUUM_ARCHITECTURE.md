@@ -95,6 +95,15 @@ sensitive applications/titles are redacted before vision or publication, and
 no key values, pointer coordinates, clipboard contents, or terminal text enter
 the live-context contract.
 
+The desktop shell exposes a persistent master privacy control. Pausing creates
+a local durable lease, gates every observation source before new data is
+collected, drops already-buffered frames before persistence or triage, clears
+the current live/process projections, and marks the control red. Leases may be
+timed or indefinite; timed leases survive restarts and the runtime resumes the
+individually enabled sources when the trusted local deadline expires. A corrupt
+lease fails closed. This control never starts an offline runtime merely to
+apply a privacy choice.
+
 Background-process activity is a separate opt-in source. It publishes a
 bounded `processes.json` snapshot and change-only lifecycle/resource-pressure
 events; it never captures command lines, environment variables, process
@@ -151,6 +160,66 @@ represented by a scoped, expiring grant rather than a prompt convention.
 Agent-native shell and filesystem tools cannot be intercepted by MCP alone.
 Continuum may claim enforced permissions only when it launches the agent with
 matching sandbox/tool restrictions or routes execution through its own broker.
+
+The brokered MCP boundary is implemented by
+`continuum_core::permissions::PermissionGateway`. It evaluates the bundled
+defaults plus `<data_dir>/permissions.toml` before each MCP handler body runs,
+fails closed for unknown or malformed policy, and coordinates durable approval
+requests and scoped grants with the desktop. This enforcement applies only to
+Continuum-brokered MCP calls; native agent shell/filesystem access remains
+outside this claim until those actions are routed through Continuum brokers.
+
+Git state changes use the same broker. Continuum checkpoints are commit objects
+under `refs/continuum/checkpoints/` created with an isolated temporary index;
+they do not stage or clean the user's working tree. Rollback is always-confirm,
+creates a pre-rollback safety checkpoint, and moves recoverable loose files
+under the repository's Git directory before restoring tracked state.
+
+Brokered filesystem mutations are explicit and recoverable: create refuses
+overwrite, patch requires an exact old-text precondition, move refuses an
+existing destination, and delete moves the target into Continuum recovery
+storage. Existing targets and new-path parents pass the same canonical
+allowlist and hard secret deny rules as filesystem reads.
+
+Terminal actions are brokered as executable plus literal argument vector; a
+shell never parses model input. Executable basenames, timeout, output size, and
+argument count are configurable. Cwd passes the project allowlist, stdin is
+closed, sensitive environment variables are removed, and verifier runs persist
+bounded evidence for later handoff.
+
+GitHub is an optional external boundary mediated by the official `gh` CLI.
+Continuum does not accept, read, log, or persist access tokens and deliberately
+removes `GH_TOKEN`/`GITHUB_TOKEN` overrides before every call. A connection is
+valid only when `gh auth status` identifies OS-keyring storage. Read tools are
+session-approved; network activity begins only after explicit user connection.
+Issue creation, comments, and pull-request creation are repository-scoped,
+bounded, and always-confirm. Mutation bodies are redacted from audit metadata;
+pull-request creation references an existing remote branch and never pushes.
+
+IDE actions prefer a direct native integration. The first bridge supports VS
+Code-compatible executables through `ide_status`, `ide_open_file`, and
+`ide_open_diff`. It canonicalizes every file through the project allowlist,
+uses only fixed CLI switches, launches the native executable without a shell,
+and strips credential-bearing environment variables. It does not claim access
+to live editor buffers, diagnostics, selections, terminals, or debug state;
+those require a separately consented extension protocol.
+
+Browser DOM access is disabled by default and connects only to a user-started
+Chromium DevTools endpoint on loopback. Tabs and navigation are limited to
+exact configured hosts (localhost only by default). Snapshot expressions are
+fixed and bounded, omit password fields and all form values, and no tool accepts
+arbitrary JavaScript. Navigate, click, and fill require fresh confirmation.
+
+Windows UI control begins with a narrow focused-element boundary. Continuum
+may inspect bounded accessibility metadata and, after fresh confirmation,
+invoke or set the value of only the element focused at execution. Password
+elements and non-cloud privacy zones are blocked. There is no coordinate input,
+global input injection, or arbitrary accessibility-tree search in this slice.
+
+Task plans and normalized agent evidence are durable JSON records under the
+Continuum data directory, written atomically and bounded on input/read. Plans
+carry explicit task/step status and evidence links; evidence carries kind,
+summary, source reference, outcome, and optional task association.
 
 ## Context package contract
 

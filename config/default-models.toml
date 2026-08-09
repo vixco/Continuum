@@ -340,6 +340,33 @@ conversation_followup_seconds = 5
 # fs_list_dir. Paths support ~ expansion.
 [mcp.fs]
 extra_paths = []
+max_write_bytes = 1048576
+max_patch_replacements = 100
+
+[mcp.terminal]
+allowed_programs = ["cargo", "git", "dotnet", "rustc", "rustfmt"]
+max_timeout_secs = 900
+max_output_bytes = 524288
+max_args = 128
+
+[mcp.ide]
+allowed_editors = ["code", "code-insiders", "codium"]
+launch_timeout_secs = 15
+
+[mcp.browser]
+enabled = false
+port = 9222
+allowed_hosts = ["localhost", "127.0.0.1"]
+max_text_bytes = 131072
+timeout_secs = 10
+
+[github]
+enabled = true
+connect_timeout_secs = 600
+api_timeout_secs = 30
+max_response_bytes = 524288
+max_mutation_body_bytes = 65536
+max_title_chars = 256
 
 # Adaptive resource policy. Probed once at boot (CPU cores, RAM, GPU/VRAM,
 # laptop-vs-desktop, AC-vs-battery) and resolved into concrete knobs applied

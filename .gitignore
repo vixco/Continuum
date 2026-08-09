@@ -17,6 +17,10 @@ dist/
 next-env.d.ts
 tsconfig.tsbuildinfo
 
+# Python test/build caches
+__pycache__/
+*.py[cod]
+
 # Tauri
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/

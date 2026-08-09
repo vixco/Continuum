@@ -14,6 +14,10 @@ use continuum_core::config::{ContinuumConfig, ProfileMode, ResourceConfig};
 use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
 use continuum_core::health::{self, repair::RepairInput};
 use continuum_core::logs::{LogEntry, LogFilter};
+use continuum_core::permissions::{
+    GrantScope, PermissionGateway, PermissionGrant, PermissionRequest,
+};
+use continuum_core::privacy_pause::{self, ObservationPausePreset, ObservationPauseStatus};
 use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
 use continuum_core::state::{ComponentHealth, ComponentStatus, ContinuumState};
 use continuum_core::workers::intent::{self as worker_intent};
@@ -1094,9 +1098,89 @@ pub async fn update_voice_frontend_mode(
 
 // --- Runtime control ---
 
+fn queue_pause_all(dev_dir: &std::path::Path, paused: bool) -> Result<(), String> {
+    let action = continuum_core::context::intents::ContextAction::SetToggle {
+        name: continuum_core::context::intents::ToggleName::PauseAll,
+        value: paused,
+    };
+    let intent = continuum_core::context::intents::ContextIntent::new(action);
+    continuum_core::context::intents::write_intent(dev_dir, &intent)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Returns the durable privacy-pause state. Corrupt records fail closed.
+#[tauri::command]
+pub async fn get_observation_pause(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ObservationPauseStatus, String> {
+    match privacy_pause::read_status(&app.runtime.dev_dir(), chrono::Utc::now()) {
+        Ok(mut status) => {
+            if !status.paused && app.runtime.state.snapshot().await.system.paused {
+                status.paused = true;
+                status.until = None;
+            }
+            Ok(status)
+        }
+        Err(error) => {
+            tracing::error!(
+                layer = "privacy",
+                component = "observation_pause",
+                error = %error,
+                "Privacy pause record could not be read; reporting paused"
+            );
+            Ok(ObservationPauseStatus {
+                paused: true,
+                until: None,
+            })
+        }
+    }
+}
+
+/// Pauses all observation for a trusted, bounded preset or indefinitely.
+#[tauri::command]
+pub async fn pause_observation(
+    app: State<'_, Arc<AppState>>,
+    preset: ObservationPausePreset,
+) -> Result<ObservationPauseStatus, String> {
+    let dev_dir = app.runtime.dev_dir();
+    let status = privacy_pause::pause(&dev_dir, preset, chrono::Utc::now())
+        .map_err(|error| error.to_string())?;
+    queue_pause_all(&dev_dir, true)?;
+    app.runtime.set_paused(true).await;
+    tracing::info!(
+        layer = "privacy",
+        component = "observation_pause",
+        until = ?status.until,
+        "All observation pause requested"
+    );
+    Ok(status)
+}
+
+/// Resumes every individually enabled observation source.
+#[tauri::command]
+pub async fn resume_observation(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ObservationPauseStatus, String> {
+    let dev_dir = app.runtime.dev_dir();
+    let status = privacy_pause::resume(&dev_dir).map_err(|error| error.to_string())?;
+    queue_pause_all(&dev_dir, false)?;
+    app.runtime.set_paused(false).await;
+    tracing::info!(
+        layer = "privacy",
+        component = "observation_pause",
+        "All observation resume requested"
+    );
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn set_paused(app: State<'_, Arc<AppState>>, paused: bool) -> Result<(), String> {
-    app.runtime.set_paused(paused).await;
+    if paused {
+        pause_observation(app, ObservationPausePreset::Indefinite).await?;
+    } else {
+        resume_observation(app).await?;
+    }
     Ok(())
 }
 
@@ -1521,6 +1605,64 @@ pub async fn list_mcp_tools() -> Result<Vec<McpTool>, String> {
     Ok(mcp_tool_manifest())
 }
 
+fn permission_gateway(app: &AppState) -> PermissionGateway {
+    PermissionGateway::new(
+        app.runtime.dev_dir(),
+        "desktop",
+        include_str!("../../../../config/default-permissions.toml"),
+    )
+}
+
+/// Return permission requests waiting for a user decision.
+#[tauri::command]
+pub async fn list_permission_requests(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<PermissionRequest>, String> {
+    Ok(permission_gateway(&app).list_requests())
+}
+
+/// Return active permission grants so the user can revoke them.
+#[tauri::command]
+pub async fn list_permission_grants(
+    app: State<'_, Arc<AppState>>,
+) -> Result<Vec<PermissionGrant>, String> {
+    Ok(permission_gateway(&app).list_grants())
+}
+
+/// Approve a pending permission request.
+#[tauri::command]
+pub async fn approve_permission_request(
+    app: State<'_, Arc<AppState>>,
+    request_id: String,
+    scope: GrantScope,
+) -> Result<PermissionGrant, String> {
+    permission_gateway(&app)
+        .approve(&request_id, scope, 8 * 60 * 60)
+        .map_err(|error| error.to_string())
+}
+
+/// Deny a pending permission request.
+#[tauri::command]
+pub async fn deny_permission_request(
+    app: State<'_, Arc<AppState>>,
+    request_id: String,
+) -> Result<(), String> {
+    permission_gateway(&app)
+        .deny_request(&request_id)
+        .map_err(|error| error.to_string())
+}
+
+/// Revoke an active permission grant.
+#[tauri::command]
+pub async fn revoke_permission_grant(
+    app: State<'_, Arc<AppState>>,
+    grant_id: String,
+) -> Result<(), String> {
+    permission_gateway(&app)
+        .revoke(&grant_id)
+        .map_err(|error| error.to_string())
+}
+
 /// Input accepted by the local MCP-server registration flow.
 #[derive(Debug, Deserialize)]
 pub struct InstallMcpServerInput {
@@ -1672,6 +1814,191 @@ fn mcp_tool_manifest() -> Vec<McpTool> {
             namespace: "fs".into(),
             name: "fs_list_dir".into(),
             description: "List up to 500 entries of a directory".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_create_file".into(),
+            description: "Atomically create a new allowlisted UTF-8 file".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_apply_patch".into(),
+            description: "Apply an exact-text patch and preserve the original".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_move".into(),
+            description: "Move without overwriting the destination".into(),
+        },
+        McpTool {
+            namespace: "fs".into(),
+            name: "fs_delete_to_trash".into(),
+            description: "Move a file or directory into recovery storage".into(),
+        },
+        // --- git ---
+        McpTool {
+            namespace: "git".into(),
+            name: "git_checkpoint".into(),
+            description: "Checkpoint tracked and safe untracked repository state".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_diff".into(),
+            description: "Show bounded status and unified diff".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_checkpoint_list".into(),
+            description: "List durable Continuum checkpoint refs".into(),
+        },
+        McpTool {
+            namespace: "git".into(),
+            name: "git_rollback".into(),
+            description: "Recoverably restore a confirmed checkpoint".into(),
+        },
+        // --- terminal ---
+        McpTool {
+            namespace: "terminal".into(),
+            name: "terminal_run".into(),
+            description: "Run a restricted confirmed program + args invocation".into(),
+        },
+        McpTool {
+            namespace: "terminal".into(),
+            name: "terminal_verify".into(),
+            description: "Run a verifier and persist bounded evidence".into(),
+        },
+        // --- native IDE bridge ---
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_status".into(),
+            description: "Check configured native editor availability".into(),
+        },
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_open_file".into(),
+            description: "Open an allowlisted file at a source location".into(),
+        },
+        McpTool {
+            namespace: "ide".into(),
+            name: "ide_open_diff".into(),
+            description: "Show two allowlisted files in the native IDE diff view".into(),
+        },
+        // --- opt-in browser DOM bridge ---
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_status".into(),
+            description: "Check loopback Chromium bridge status".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_list_tabs".into(),
+            description: "List explicitly allowed Chromium tabs".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_dom_snapshot".into(),
+            description: "Read bounded visible DOM text and form structure".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_navigate".into(),
+            description: "Navigate a tab to an allowed host after confirmation".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_click".into(),
+            description: "Click a DOM element after confirmation".into(),
+        },
+        McpTool {
+            namespace: "browser".into(),
+            name: "browser_fill".into(),
+            description: "Fill a non-password field after confirmation".into(),
+        },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_focused_element".into(),
+            description: "Inspect focused accessibility metadata".into(),
+        },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_invoke_focused".into(),
+            description: "Invoke the focused semantic control after confirmation".into(),
+        },
+        McpTool {
+            namespace: "windows_ui".into(),
+            name: "windows_ui_set_focused_value".into(),
+            description: "Fill the focused non-password control after confirmation".into(),
+        },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_write".into(),
+            description: "Create or update a durable task plan".into(),
+        },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_get".into(),
+            description: "Read a durable task plan".into(),
+        },
+        McpTool {
+            namespace: "tasks".into(),
+            name: "task_plan_list".into(),
+            description: "List durable task plans".into(),
+        },
+        McpTool {
+            namespace: "evidence".into(),
+            name: "evidence_record".into(),
+            description: "Persist bounded agent evidence".into(),
+        },
+        McpTool {
+            namespace: "evidence".into(),
+            name: "evidence_list".into(),
+            description: "List durable agent evidence".into(),
+        },
+        // --- github (optional connection) ---
+        McpTool {
+            namespace: "github".into(),
+            name: "github_status".into(),
+            description: "Check secure official GitHub CLI auth status".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_me".into(),
+            description: "Read the connected GitHub user profile".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_list_repos".into(),
+            description: "List repositories visible to the connected account".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_get_repo".into(),
+            description: "Read repository metadata".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_list_issues".into(),
+            description: "List repository issues and pull requests".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_get_file".into(),
+            description: "Read a UTF-8 repository file or directory listing".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_create_issue".into(),
+            description: "Create a bounded issue after explicit confirmation".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_comment_issue".into(),
+            description: "Comment after explicit confirmation".into(),
+        },
+        McpTool {
+            namespace: "github".into(),
+            name: "github_create_pull_request".into(),
+            description: "Open a pull request after explicit confirmation".into(),
         },
         // --- web ---
         McpTool {

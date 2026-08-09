@@ -576,7 +576,9 @@ pub async fn chat_send_message(
                 // CLI path: tool traffic travels over MCP; continuum-mcp
                 // opens the same vault directory this process uses. A
                 // missing binary means no tools this turn (logged once).
-                if let Some(spec) = chat_tools::mcp_spec(memory.vault_dir(), &dev_dir) {
+                if let Some(spec) =
+                    chat_tools::mcp_spec(memory.vault_dir(), &dev_dir, &conversation_id)
+                {
                     mcp = Some(spec);
                     tools_section = Some(memory_tools_section(conn.kind));
                 }

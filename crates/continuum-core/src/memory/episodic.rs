@@ -525,7 +525,13 @@ impl EpisodicStore {
     ///
     /// Also initializes the embedding model (first call may download ~66 MB).
     pub async fn open(db_dir: &str) -> Result<Self> {
-        Self::open_with_embedder(db_dir, Embedder::new()?).await
+        // fastembed performs synchronous model discovery/download and ONNX
+        // initialization. Running it on an async worker can starve unrelated
+        // MCP requests when the runtime has only one or two worker threads.
+        let embedder = tokio::task::spawn_blocking(Embedder::new)
+            .await
+            .context("Embedding model initialization task failed")??;
+        Self::open_with_embedder(db_dir, embedder).await
     }
 
     async fn open_with_embedder(db_dir: &str, embedder: Embedder) -> Result<Self> {

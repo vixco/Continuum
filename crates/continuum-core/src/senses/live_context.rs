@@ -718,6 +718,23 @@ impl LiveContextHub {
         self.idle.store(idle, Ordering::Release);
     }
 
+    /// Removes the current observed projection and event ring immediately.
+    /// Used by the master privacy pause so read-only consumers cannot mistake
+    /// pre-pause context for something Continuum is still observing live.
+    pub fn clear_observed_data(&self) {
+        let mut inner = self.inner.write();
+        inner.connected_monitors.clear();
+        inner.monitors.clear();
+        inner.monitor_zones.clear();
+        inner.window = None;
+        inner.input_activity = None;
+        inner.project = None;
+        inner.session_state = None;
+        inner.events.clear();
+        drop(inner);
+        self.bump_content_version();
+    }
+
     /// Cheap clone of the health counters only (Task A8 health snapshot
     /// registration — avoids cloning the full projection every publish
     /// tick).
@@ -1436,6 +1453,23 @@ mod tests {
             snapshot.health.dropped_capture_events
         );
         assert_eq!(health.last_capture_at, snapshot.health.last_capture_at);
+    }
+
+    #[test]
+    fn privacy_clear_removes_current_projection_but_keeps_health_counters() {
+        let hub = LiveContextHub::new(4);
+        hub.set_connected_monitors(["display-1".into()]);
+        hub.record_monitor_capture(monitor("display-1", 1));
+        let capture_events = hub.health().capture_events;
+
+        hub.clear_observed_data();
+
+        let snapshot = hub.snapshot();
+        assert!(snapshot.monitors.is_empty());
+        assert!(snapshot.window.is_none());
+        assert!(snapshot.recent_events.is_empty());
+        assert_eq!(snapshot.health.capture_events, capture_events);
+        assert_eq!(hub.monitor_count(), 0);
     }
 
     #[test]

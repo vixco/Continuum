@@ -425,9 +425,12 @@ fn write_mcp_config(
     }
 
     let env_block = if let Some(dir) = &config.mcp_data_dir {
-        serde_json::json!({ "CONTINUUM_DATA_DIR": dir.to_string_lossy() })
+        serde_json::json!({
+            "CONTINUUM_DATA_DIR": dir.to_string_lossy(),
+            "CONTINUUM_SESSION_ID": format!("wake-{suffix}"),
+        })
     } else {
-        serde_json::json!({})
+        serde_json::json!({ "CONTINUUM_SESSION_ID": format!("wake-{suffix}") })
     };
 
     let mut servers = serde_json::Map::new();
