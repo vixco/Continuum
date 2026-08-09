@@ -59,16 +59,19 @@ test("MCP permission controls read and persist the enforced native policy", asyn
 });
 
 test("release publication requires Windows and both macOS architectures", async () => {
-  const workflow = await readRoot(".github/workflows/publish.yml");
+  const workflow = await readRoot(".github/workflows/release.yml");
 
-  assert.match(workflow, /runner: macos-15[\s\S]*?uname: arm64/);
-  assert.match(workflow, /runner: macos-15-intel[\s\S]*?uname: x86_64/);
-  assert.match(workflow, /pnpm tauri build --bundles app,dmg/);
+  assert.match(workflow, /workflow_call:/);
+  assert.match(workflow, /runner: macos-15[\s\S]*?expected_uname: arm64/);
+  assert.match(workflow, /runner: macos-15-intel[\s\S]*?expected_uname: x86_64/);
+  assert.match(workflow, /pnpm tauri build --bundles dmg --target/);
   assert.match(workflow, /continuum-agent-os/);
-  assert.match(workflow, /continuum-\$version-macos-aarch64\.dmg/);
-  assert.match(workflow, /continuum-\$version-macos-x86_64\.dmg/);
-  assert.match(workflow, /continuum-\$version-macos-aarch64\.app\.tar\.gz\.sig/);
-  assert.match(workflow, /continuum-\$version-macos-x86_64\.app\.tar\.gz\.sig/);
+  assert.match(workflow, /continuum-\$version-macos-\$arch\.dmg/);
+  assert.match(workflow, /continuum-\$version-macos-\$arch\.app\.tar\.gz/);
+  assert.match(workflow, /test -s "\$updater\.sig"/);
+  assert.match(workflow, /release-manifest\.json/);
+  assert.match(workflow, /Verify the draft release has every asset/);
+  assert.match(workflow, /Publish the fully assembled draft atomically/);
   assert.match(workflow, /fail_on_unmatched_files: true/);
 });
 
