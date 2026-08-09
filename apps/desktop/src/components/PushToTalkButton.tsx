@@ -116,7 +116,11 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       // pause/mute flags and pretend the daemon changed.
       const toggles = state.context.page?.toggles;
       if (toggles?.pause_all) {
-        await continuum.contextWriteIntent({ kind: "set_toggle", name: "pause_all", value: false });
+        await continuum.contextWriteIntent({
+          kind: "set_toggle",
+          name: "pause_all",
+          value: false,
+        });
       }
       if (toggles && !toggles.mic) {
         await continuum.contextWriteIntent({ kind: "set_toggle", name: "mic", value: true });
