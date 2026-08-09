@@ -1,0 +1,100 @@
+name: Apply autonomous settings hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-autonomous-settings-hardening.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: apply-autonomous-settings-hardening
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Configure native build prerequisites
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) {
+            choco install llvm --no-progress --confirm
+          }
+          echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
+          choco install ninja --no-progress --confirm
+          choco install protoc --no-progress --confirm
+
+      - name: Apply generated implementation
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/fix_agent_autonomous_settings_patch.py
+          python -m py_compile scripts/agent_autonomous_settings_patch.py
+          python scripts/fix_agent_autonomous_settings_patch.py
+          python scripts/agent_autonomous_settings_patch.py
+
+      - name: Format Rust
+        run: cargo fmt --all
+
+      - name: Verify formatting and patch hygiene
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Test shared typed settings backend
+        run: cargo test -p continuum-core --no-default-features settings --lib
+
+      - name: Lint lightweight core
+        run: cargo clippy -p continuum-core --no-default-features --lib --tests -- -D warnings
+
+      - name: Lint desktop chat integration
+        run: cargo clippy -p continuum-desktop --no-deps -- -D warnings
+
+      - name: Test memory-independent desktop settings tools
+        shell: pwsh
+        run: |
+          cargo test -p continuum-desktop base_chat_tools_remain_available_without_memory
+          cargo test -p continuum-desktop claude_base_allowlist_uses_typed_settings_without_generic_fs_writes
+
+      - name: Check MCP settings integration
+        run: cargo check -p continuum-mcp --all-targets
+
+      - name: Verify MCP tool registry
+        run: cargo test -p continuum-mcp --test protocol protocol_handshake_and_one_tool_call -- --exact
+
+      - name: Remove temporary generator files
+        shell: pwsh
+        run: |
+          Remove-Item scripts/agent_autonomous_settings_patch.py
+          Remove-Item scripts/fix_agent_autonomous_settings_patch.py
+          Remove-Item .github/workflows/apply-autonomous-settings-hardening.yml
+
+      - name: Commit verified implementation
+        shell: pwsh
+        run: |
+          git config user.name "Continuum Agent"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git add -A
+          git commit -m "harden autonomous settings across chat providers"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
