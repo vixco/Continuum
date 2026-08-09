@@ -9,6 +9,7 @@ import type { ContinuumState, VoiceMode } from "@/lib/types";
 
 const RUNTIME_READY_TIMEOUT_MS = 20_000;
 const VOICE_READY_TIMEOUT_MS = 12_000;
+const CONTROL_APPLY_TIMEOUT_MS = 4_000;
 const FIRST_SPEECH_TIMEOUT_MS = 25_000;
 const RUNTIME_POLL_MS = 250;
 const REARM_DELAY_MS = 300;
@@ -21,9 +22,6 @@ const REARM_DELAY_MS = 300;
  * orchestrator -> Piper/Kokoros. After one completed turn reaches idle, the
  * button automatically arms the next turn, so the user can keep talking
  * without clicking again or repeating the wake word.
- *
- * The button is also the stop control. Stopping prevents the next turn from
- * being armed; an already-running model/TTS turn is allowed to finish safely.
  */
 export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
   const [liveActive, setLiveActive] = useState(false);
@@ -96,14 +94,42 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         );
       }
 
-      const state = await waitForVoiceReady();
+      let state = await waitForVoiceReady();
       const readinessError = voiceReadinessError(state);
       if (readinessError) throw new Error(readinessError);
 
-      // A live-voice click is an explicit interaction request. Do not leave a
-      // deliberately started conversation blocked behind pause/mute state.
-      if (state.system.paused) await continuum.setPaused(false);
-      if (state.voice.muted) await continuum.setVoiceMuted(false);
+      const config = await continuum.getConfig();
+      if (!config.audio.enabled) {
+        throw new Error(
+          "Live voice is disabled because audio capture is off. Enable audio in Continuum setup/config and restart the runtime."
+        );
+      }
+      if (!config.voice.enabled) {
+        throw new Error(
+          "Live voice is disabled in Voice settings. Enable voice and restart the runtime before retrying."
+        );
+      }
+
+      // The Context privacy toggles are the actual live control plane for the
+      // separate headless runtime. An explicit live-voice click is permission
+      // to resume observation and enable the mic; do not mutate dashboard-only
+      // pause/mute flags and pretend the daemon changed.
+      const toggles = state.context.page?.toggles;
+      if (toggles?.pause_all) {
+        await continuum.contextWriteIntent({ kind: "set_toggle", name: "pause_all", value: false });
+      }
+      if (toggles && !toggles.mic) {
+        await continuum.contextWriteIntent({ kind: "set_toggle", name: "mic", value: true });
+      }
+      if (toggles?.pause_all || (toggles && !toggles.mic)) {
+        state = await waitForMicControl();
+        const applied = state.context.page?.toggles;
+        if (applied?.pause_all || applied?.mic === false) {
+          throw new Error(
+            "Continuum could not enable the microphone in the running voice runtime. Check Context privacy controls and retry."
+          );
+        }
+      }
 
       if (!liveRef.current) return;
 
@@ -137,11 +163,10 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     };
   }, [clearRearmTimer, clearSpeechWatchdog]);
 
-  // Drive the continuous turn loop from the *native runtime's* real state.
+  // Drive the continuous turn loop from the native runtime's real state.
   // `talk_now` is initially optimistic (runtime stays idle until Whisper has
-  // a transcript); once any real listening/thinking/speaking state arrives,
-  // the armed flag clears. After that turn finishes and returns to idle, we
-  // arm exactly one next turn.
+  // a transcript). After a real listening/thinking/speaking cycle returns to
+  // idle, arm exactly one next turn.
   useEffect(() => {
     const previous = previousModeRef.current;
     previousModeRef.current = mode;
@@ -303,6 +328,20 @@ async function waitForVoiceReady(): Promise<ContinuumState> {
   return state;
 }
 
+async function waitForMicControl(): Promise<ContinuumState> {
+  const deadline = Date.now() + CONTROL_APPLY_TIMEOUT_MS;
+  let state = await continuum.getState();
+
+  while (Date.now() < deadline) {
+    const toggles = state.context.page?.toggles;
+    if (toggles && !toggles.pause_all && toggles.mic) return state;
+    await delay(RUNTIME_POLL_MS);
+    state = await continuum.getState();
+  }
+
+  return state;
+}
+
 function voiceReadinessError(state: ContinuumState): string | null {
   const missing: string[] = [];
   if (!state.system.stt_loaded) missing.push("speech-to-text (Whisper)");
@@ -336,7 +375,7 @@ function livePhase(
     case "speaking":
       return "Speaking — next turn starts automatically";
     case "muted":
-      return "Unmuting voice…";
+      return "Preparing voice…";
     case "error":
       return "Voice error";
     default:
