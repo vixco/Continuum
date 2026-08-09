@@ -369,15 +369,23 @@ impl Vault {
     /// Load a note by id: resolves its path via the index, reads and
     /// parses the markdown file, and attaches its current backlinks.
     pub async fn get(&self, id: &str) -> Result<Note> {
+        tracing::debug!(layer = "memory", component = "vault", "resolving note path");
         let rel = self
             .index
             .get_node_path(id)
             .await?
             .ok_or_else(|| MemoryError::NotFound(id.to_string()))?;
+        tracing::debug!(layer = "memory", component = "vault", "reading note file");
         let path = self.dir.join(&rel);
         let content = std::fs::read_to_string(&path).map_err(|e| MemoryError::io(&path, e))?;
         let parsed = parse_document(&content)?;
+        tracing::debug!(
+            layer = "memory",
+            component = "vault",
+            "loading note backlinks"
+        );
         let backlinks = self.index.backlinks(id).await?;
+        tracing::debug!(layer = "memory", component = "vault", "note load completed");
         Ok(Note {
             frontmatter: parsed.frontmatter,
             body: parsed.body,

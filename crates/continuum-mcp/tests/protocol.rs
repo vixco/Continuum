@@ -396,10 +396,13 @@ memory_wipe_all = "auto"
 
     let mut child = Command::new(&bin)
         .env("CONTINUUM_DATA_DIR", data_dir.path())
-        .env("RUST_LOG", "warn")
+        .env(
+            "RUST_LOG",
+            "warn,continuum_mcp::permission_broker=debug,continuum_mcp::server=debug,continuum_memory::vault=debug",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn continuum-mcp");
 
