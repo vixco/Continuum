@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::process::Command as TokioCommand;
 
-use continuum_core::config::env_or_legacy;
+use continuum_core::config::{env_or_legacy, ContinuumConfig};
 
 use crate::AppState;
 
@@ -96,6 +96,22 @@ pub struct OnboardingPayload {
     /// means the built-in default Qwen3-8B-Q4_K_M.
     #[serde(default)]
     pub qwen_url: String,
+}
+
+/// Current model storage selection and the concrete Whisper file it resolves to.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ModelsDirectoryInfo {
+    pub path: String,
+    pub whisper_model_path: String,
+    pub whisper_present: bool,
+}
+
+/// Persisted model-directory update returned to Settings.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ModelsDirectoryUpdate {
+    pub config: ContinuumConfig,
+    pub info: ModelsDirectoryInfo,
+    pub restart_required: bool,
 }
 
 // ---- Commands --------------------------------------------------------------
@@ -516,28 +532,48 @@ fn enumerate_audio_devices(_input: bool) -> std::result::Result<Vec<AudioDevice>
 /// `qwen_url` overrides the Qwen 3 8B triage model source URL
 /// (`CONTINUUM_QWEN_URL`), letting the user pick a custom HuggingFace GGUF.
 /// Both are optional; when absent the script uses its built-in defaults.
+fn download_script_candidates(executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(exe_dir) = executable.parent() {
+        candidates.push(exe_dir.join("scripts").join("download-models.ps1"));
+        candidates.push(
+            exe_dir
+                .join("resources")
+                .join("scripts")
+                .join("download-models.ps1"),
+        );
+        for ancestor in exe_dir.ancestors().take(5) {
+            candidates.push(ancestor.join("scripts").join("download-models.ps1"));
+        }
+    }
+    candidates
+}
+
+fn locate_download_script() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    download_script_candidates(&executable)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
 #[tauri::command]
 pub async fn download_model(
     app: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
     name: String,
     _url: String,
     models_dir: Option<String>,
     qwen_url: Option<String>,
 ) -> Result<(), String> {
-    let repo_root = app.runtime.dev_dir().parent().map(PathBuf::from);
-    let script = repo_root
-        .as_ref()
-        .map(|p| p.join("scripts").join("download-models.ps1"));
-
     let default_models_dir = app.runtime.dev_dir().join("models");
     let effective_models_dir = models_dir
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or(default_models_dir);
-    let script_path = match script.filter(|p| p.exists()) {
+    let script_path = match locate_download_script() {
         Some(p) => p,
         None => {
-            return Err("scripts/download-models.ps1 not found. Run it manually.".into());
+            return Err("The bundled model downloader is missing; reinstall Continuum.".into());
         }
     };
 
@@ -565,6 +601,9 @@ pub async fn download_model(
             "download-models.ps1 exited with status {}",
             output.status
         ));
+    }
+    if is_complete(&app) && !crate::components::runtime_alive(&app.runtime.dev_dir()) {
+        crate::commands::spawn_automatic_runtime_start(app.inner().clone(), app_handle);
     }
     Ok(())
 }
@@ -735,6 +774,11 @@ fn marker_path(app: &AppState) -> PathBuf {
         .join("onboarding-complete")
 }
 
+/// Whether this installation has completed first-run setup.
+pub(crate) fn is_complete(app: &AppState) -> bool {
+    marker_path(app).exists()
+}
+
 /// Returns the user's saved response-language preference.
 ///
 /// Missing, malformed, blank, or unsupported values safely fall back to
@@ -759,12 +803,56 @@ fn preferred_language_from_path(path: &Path) -> String {
 
 #[tauri::command]
 pub async fn is_onboarding_complete(app: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    Ok(marker_path(&app).exists())
+    Ok(is_complete(&app))
+}
+
+#[tauri::command]
+pub async fn get_models_directory(
+    app: State<'_, Arc<AppState>>,
+) -> Result<ModelsDirectoryInfo, String> {
+    Ok(models_directory_info(
+        &app.runtime.config_snapshot(),
+        &app.runtime.dev_dir(),
+    ))
+}
+
+#[tauri::command]
+pub async fn update_models_directory(
+    app: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
+    models_dir: String,
+) -> Result<ModelsDirectoryUpdate, String> {
+    let path = PathBuf::from(models_dir.trim());
+    if !path.is_absolute() {
+        return Err("Choose an absolute models directory.".into());
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "Models directory does not exist: {}",
+            path.display()
+        ));
+    }
+
+    let config = app
+        .runtime
+        .update_config(|config| apply_models_directory(config, &path, None))
+        .map_err(|error| error.to_string())?;
+    let info = models_directory_info(&config, &app.runtime.dev_dir());
+    let restart_required = crate::components::runtime_alive(&app.runtime.dev_dir());
+    if !restart_required && is_complete(&app) {
+        crate::commands::spawn_automatic_runtime_start(app.inner().clone(), app_handle);
+    }
+    Ok(ModelsDirectoryUpdate {
+        config,
+        info,
+        restart_required,
+    })
 }
 
 #[tauri::command]
 pub async fn complete_onboarding(
     app: State<'_, Arc<AppState>>,
+    app_handle: AppHandle,
     payload: OnboardingPayload,
 ) -> Result<(), String> {
     let path = marker_path(&app);
@@ -794,7 +882,71 @@ pub async fn complete_onboarding(
     // the chosen directory and uses the chosen Qwen model. The runtime reads
     // config from the same file on its next start.
     apply_model_overrides(&app, &payload);
+    crate::commands::spawn_automatic_runtime_start(app.inner().clone(), app_handle);
     Ok(())
+}
+
+fn models_directory_info(config: &ContinuumConfig, dev_dir: &Path) -> ModelsDirectoryInfo {
+    let whisper_path = PathBuf::from(&config.audio.whisper_model_path);
+    let base = whisper_path
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "stt"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dev_dir.join("models"));
+
+    ModelsDirectoryInfo {
+        path: base.to_string_lossy().into_owned(),
+        whisper_model_path: whisper_path.to_string_lossy().into_owned(),
+        whisper_present: whisper_path.is_file(),
+    }
+}
+
+fn apply_models_directory(
+    config: &mut ContinuumConfig,
+    base: &Path,
+    qwen_filename_override: Option<&str>,
+) {
+    let current_triage_name = Path::new(&config.triage.model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("qwen3-8b-q4_k_m.gguf");
+    let triage_name = qwen_filename_override.unwrap_or(current_triage_name);
+    let whisper_name = Path::new(&config.audio.whisper_model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("whisper-medium.bin");
+    let tts_dir = base.join("tts");
+
+    config.triage.model_path = base
+        .join("triage")
+        .join(triage_name)
+        .to_string_lossy()
+        .into_owned();
+    config.vision.model_path = base
+        .join("vision")
+        .join("smolvlm-256m")
+        .to_string_lossy()
+        .into_owned();
+    config.audio.whisper_model_path = base
+        .join("stt")
+        .join(whisper_name)
+        .to_string_lossy()
+        .into_owned();
+    config.tts.espeak_data_dir = tts_dir
+        .join("espeak-ng-data")
+        .to_string_lossy()
+        .into_owned();
+    for voice in config.tts.voices.values_mut() {
+        if let Some(name) = Path::new(&voice.model_path).file_name() {
+            voice.model_path = tts_dir.join(name).to_string_lossy().into_owned();
+        }
+        if let Some(name) = Path::new(&voice.config_path).file_name() {
+            voice.config_path = tts_dir.join(name).to_string_lossy().into_owned();
+        }
+    }
 }
 
 /// Derive the Qwen triage GGUF filename from the custom URL, mirroring the
@@ -828,39 +980,16 @@ fn apply_model_overrides(app: &State<'_, Arc<AppState>>, payload: &OnboardingPay
     } else {
         PathBuf::from(models_dir)
     };
-    let triage_path = base.join("triage").join(qwen_filename(qwen_url));
-    let custom_dir = models_dir.to_string();
-    let tts_dir = PathBuf::from(&custom_dir).join("tts");
-
-    let result = app.runtime.update_config(|c| {
-        c.triage.model_path = triage_path.to_string_lossy().into_owned();
-        if !custom_dir.is_empty() {
-            let dir = PathBuf::from(&custom_dir);
-            c.vision.model_path = dir
-                .join("vision")
-                .join("smolvlm-256m")
+    let qwen_name = qwen_filename(qwen_url);
+    let result = app.runtime.update_config(|config| {
+        if models_dir.is_empty() {
+            config.triage.model_path = base
+                .join("triage")
+                .join(&qwen_name)
                 .to_string_lossy()
                 .into_owned();
-            c.audio.whisper_model_path = dir
-                .join("stt")
-                .join("whisper-medium.bin")
-                .to_string_lossy()
-                .into_owned();
-            c.tts.espeak_data_dir = dir
-                .join("tts")
-                .join("espeak-ng-data")
-                .to_string_lossy()
-                .into_owned();
-            // Relocate each existing voice's files into the custom tts dir,
-            // preserving the per-voice filenames.
-            for v in c.tts.voices.values_mut() {
-                if let Some(name) = Path::new(&v.model_path).file_name() {
-                    v.model_path = tts_dir.join(name).to_string_lossy().into_owned();
-                }
-                if let Some(name) = Path::new(&v.config_path).file_name() {
-                    v.config_path = tts_dir.join(name).to_string_lossy().into_owned();
-                }
-            }
+        } else {
+            apply_models_directory(config, &base, Some(&qwen_name));
         }
     });
 
@@ -889,6 +1018,47 @@ async fn seed_semantic_memory(_app: &AppState, payload: &OnboardingPayload) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_directory_rewrites_every_local_model_family() {
+        let mut config = ContinuumConfig::default();
+        let root = PathBuf::from("D:/ContinuumModels");
+
+        apply_models_directory(&mut config, &root, None);
+
+        assert_eq!(
+            PathBuf::from(config.audio.whisper_model_path),
+            root.join("stt").join("whisper-medium.bin")
+        );
+        assert_eq!(
+            PathBuf::from(config.triage.model_path),
+            root.join("triage").join("qwen3-8b-q4_k_m.gguf")
+        );
+        assert_eq!(
+            PathBuf::from(config.vision.model_path),
+            root.join("vision").join("smolvlm-256m")
+        );
+        assert_eq!(
+            PathBuf::from(config.tts.espeak_data_dir),
+            root.join("tts").join("espeak-ng-data")
+        );
+        assert!(config
+            .tts
+            .voices
+            .values()
+            .all(|voice| Path::new(&voice.model_path).starts_with(root.join("tts"))));
+    }
+
+    #[test]
+    fn model_downloader_candidates_cover_dev_and_packaged_layouts() {
+        let executable = Path::new("F:/repo/target/debug/continuum-desktop.exe");
+        let candidates = download_script_candidates(executable);
+
+        assert!(candidates.contains(&PathBuf::from("F:/repo/scripts/download-models.ps1")));
+        assert!(candidates.contains(&PathBuf::from(
+            "F:/repo/target/debug/scripts/download-models.ps1"
+        )));
+    }
 
     #[test]
     fn preferred_language_reads_supported_saved_value() {

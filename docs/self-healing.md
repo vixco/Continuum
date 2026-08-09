@@ -147,7 +147,13 @@ All under the `repair_*` namespace (routed via `continuum-mcp`):
 | `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`; it is not live recovery proof. |
 | `repair_escalate`          | Published MCP compatibility boundary; denied because escalation intents have no dashboard consumer. |
 
-The one automatic Health fix that is implemented end-to-end is starting an offline runtime. The desktop verifies the one-time preview, creates and re-verifies a backup, starts the packaged runtime once, and waits for a fresh `state.json` heartbeat up to `health.runtime_start_timeout_secs` (90 seconds by default, clamped to 10–300 seconds). A timeout stops the process and reports failure. Component restart intent files are not consumed in this release and must never be presented as successful repair.
+The desktop now runs that same guarded startup path automatically after onboarding: it creates and re-verifies a backup, refuses duplicate runtime processes, starts the packaged runtime once, and keeps the UI in a loading state until a fresh `state.json` heartbeat arrives (90 seconds by default, clamped to 10–300 seconds). A timeout stops the child process and the title bar preserves the concrete startup error. The Health preview can still request the same idempotent repair, but there is no manual Start runtime control. Component restart intent files are not consumed in this release and must never be presented as successful repair.
+
+Missing local models do not stop the rest of the runtime, but the affected
+component degrades visibly. Settings → Local model storage selects one shared
+base directory for Whisper, vision, triage, and TTS and can run the bundled,
+idempotent downloader. Model-path changes take effect on the next automatic
+runtime start.
 
 ## Backup rotation
 

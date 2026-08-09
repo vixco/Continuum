@@ -84,14 +84,11 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       let runtime = await continuum.getRuntimeStatus();
       if (!runtime.alive) {
         setIsStarting(true);
-        await continuum.startRuntime();
         runtime = await waitForRuntime();
       }
 
       if (!runtime.alive) {
-        throw new Error(
-          "Voice could not start because the Continuum runtime did not become ready."
-        );
+        throw new Error(runtime.error ?? "The automatic Continuum runtime did not become ready.");
       }
 
       let state = await waitForVoiceReady();
@@ -184,8 +181,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       return;
     }
 
-    const activeRuntimeMode =
-      mode === "listening" || mode === "thinking" || mode === "speaking";
+    const activeRuntimeMode = mode === "listening" || mode === "thinking" || mode === "speaking";
 
     if (activeRuntimeMode) {
       hadRuntimeActivityRef.current = true;

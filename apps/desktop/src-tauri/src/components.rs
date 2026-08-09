@@ -148,7 +148,7 @@ impl HealthCheck for RuntimeCheck {
     }
     fn recovery_note(&self) -> Option<String> {
         Some(
-            "Start the Continuum runtime: launch `continuum.exe` (it lives next to continuum-desktop.exe)."
+            "The desktop starts the runtime automatically. Inspect the startup error in the title bar and verify the configured model directory in Settings."
                 .into(),
         )
     }
@@ -157,7 +157,7 @@ impl HealthCheck for RuntimeCheck {
             HealthResult::healthy(1)
         } else {
             HealthResult::unknown(
-                "runtime process is not publishing state — start continuum.exe",
+                "runtime process is not publishing state — automatic startup is pending or failed",
                 1,
             )
         }

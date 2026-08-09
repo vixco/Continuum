@@ -23,7 +23,7 @@ The ten tabs are grouped as:
 | Automations        | live           | `list_automations` + `create_/update_/delete_/toggle_`        | Fully live.                                                                     |
 | Health             | live           | `get_health`, `preview_repair`, `trigger_repair`               | Live probes; guarded repair requires a one-time preview and verified backup.    |
 | Logs               | live           | `get_logs` + `continuum:log` stream                           | Fully live; layer filter updated to real emitters in this PR.                  |
-| Settings (system)  | live           | `get_config`, `update_*`, provider secrets, GitHub CLI connect/disconnect | Fully live; AI keys use the OS credential store and GitHub accepts only keyring-backed official CLI auth. |
+| Settings (system)  | live           | `get_config`, `update_*`, model-directory picker/downloader, provider secrets, GitHub CLI connect/disconnect | Fully live; model storage rewrites the configured local-model paths together, AI keys use the OS credential store, and GitHub accepts only keyring-backed official CLI auth. |
 
 The shell-level circular privacy power control is live on every tab. It writes
 a durable local pause lease and the real `pause_all` runtime intent; red means

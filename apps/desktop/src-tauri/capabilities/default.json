@@ -26,6 +26,7 @@
     "core:app:allow-name",
     "core:app:allow-version",
     "process:default",
+    "dialog:allow-open",
     "opener:default",
     "opener:allow-open-path",
     "updater:default"
