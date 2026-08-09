@@ -6,6 +6,67 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Timed privacy power control**: the desktop title bar now has a circular
+  power button for pausing all AI observation for 15 minutes, 1 hour, 4 hours,
+  until tomorrow at 08:00, or until manually resumed. The control turns red
+  while paused, persists its deadline locally across restarts, clears current
+  live/process projections, and resumes automatically when a timed lease ends.
+  The master pause now gates screen, microphone, window context, files, Git,
+  process activity, buffered frames, and agent-bound processing rather than
+  changing dashboard state only.
+
+- **Durable task and evidence tools**: atomic task plans with explicit step
+  statuses and evidence links, plus bounded source-attributed agent evidence
+  records for verified handoff and continuation.
+- **Focused Windows UI Automation**: semantic focused-element inspection,
+  InvokePattern, and non-password ValuePattern actions. Mutations are
+  always-confirm, privacy zones are enforced, and no coordinate or arbitrary
+  accessibility-tree input is exposed.
+- **Opt-in browser DOM bridge**: six `browser_*` tools connect only to a
+  user-started loopback Chromium DevTools endpoint. Exact host allowlisting,
+  bounded snapshots, password-field exclusion, fixed JavaScript, redacted fill
+  content, and per-call confirmation protect browser actions.
+- **Native IDE bridge**: `ide_status`, `ide_open_file`, and `ide_open_diff`
+  detect and launch configured VS Code-compatible native executables. File
+  targets use the project allowlist, editor input never reaches a shell, and
+  open actions require session approval.
+- **Confirmed GitHub mutations**: `github_create_issue`,
+  `github_comment_issue`, and `github_create_pull_request` are bounded to one
+  validated repository and require a fresh confirmation on every call. Bodies
+  are redacted from local audit metadata, and pull-request creation never
+  pushes code.
+- **Enforced action permission gateway**: MCP calls now pass through the
+  bundled and user-overridden `auto` / `session-approved` /
+  `always-confirm` / `blocked` policy before execution. Approval requests,
+  scoped grants, denial, revocation, expiry, and one-use consumption are
+  durable across the desktop and MCP processes and audited to
+  `logs/actions.jsonl`. The Tools tab now reads and saves the real policy and
+  lets users approve pending calls or revoke active grants.
+- **Recoverable Git tools**: `git_checkpoint`, `git_diff`,
+  `git_checkpoint_list`, and `git_rollback` operate only in allowlisted
+  repositories. Checkpoints use an isolated index and dedicated refs, exclude
+  hard-denied secret paths, and never disturb the user's index. Rollback
+  requires per-call confirmation, creates a safety checkpoint, and preserves
+  loose/sensitive files under `.git/continuum-recovery/` before resetting.
+- **Safe filesystem actions**: `fs_create_file`, `fs_apply_patch`, `fs_move`,
+  and `fs_delete_to_trash` enforce the existing canonical allowlist and secret
+  deny rules. Creates refuse overwrite, patches require exact current text and
+  preserve the original, moves refuse overwrite, and delete is a recoverable
+  move under `<data_dir>/recovery/files/`. Write size and replacement caps are
+  configurable under `[mcp.fs]`.
+- **Restricted terminal and verifier broker**: `terminal_run` and
+  `terminal_verify` launch only configured executable basenames with literal
+  argument vectors—never shell strings—in allowlisted working directories.
+  Stdin is closed, sensitive environment variables and credential-like
+  arguments are excluded, and runtime/output limits are configurable.
+  Verifier results are atomically persisted under `evidence/terminal/`.
+- **Optional GitHub connection and read tools**: Settings now exposes an
+  explicit Connect/Disconnect card backed by the official `gh` browser/device
+  flow. Continuum never reads tokens, strips token environment overrides, and
+  accepts only OS-keyring-backed CLI auth. New session-approved MCP reads cover
+  the current user, repositories, repository metadata, issues/PRs, and bounded
+  UTF-8 file/directory content. GitHub remains idle until the user opts in.
+
 - **Opt-in background-process context**: a change-driven process collector now
   records configured developer/model process starts and stops plus sustained
   CPU or memory pressure, publishes a bounded privacy-classified

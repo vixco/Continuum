@@ -23,6 +23,7 @@ mod chat_tools;
 mod commands;
 mod components;
 mod events;
+mod github;
 mod memory;
 mod onboarding;
 #[cfg_attr(test, allow(dead_code))]
@@ -239,6 +240,9 @@ fn main() {
             commands::run_backup_now,
             commands::rollback_config,
             commands::set_paused,
+            commands::get_observation_pause,
+            commands::pause_observation,
+            commands::resume_observation,
             commands::set_voice_muted,
             commands::talk_now,
             commands::context_write_intent,
@@ -263,6 +267,11 @@ fn main() {
             commands::pipe_health,
             commands::start_runtime,
             commands::list_mcp_tools,
+            commands::list_permission_requests,
+            commands::list_permission_grants,
+            commands::approve_permission_request,
+            commands::deny_permission_request,
+            commands::revoke_permission_grant,
             commands::list_installed_mcp_servers,
             commands::install_mcp_server,
             permissions::list_tool_permissions,
@@ -274,6 +283,9 @@ fn main() {
             providers::provider_refresh_models,
             providers::provider_remove,
             providers::provider_set_default_model,
+            github::github_status,
+            github::github_connect,
+            github::github_disconnect,
             chat::chat_list_conversations,
             chat::chat_get_conversation,
             chat::chat_create_conversation,

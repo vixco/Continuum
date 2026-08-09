@@ -2,6 +2,158 @@
 
 Continuum's orchestrator (Claude Opus 4.6 via the `claude` CLI) can call Rust-native MCP tools at wake time. The tool server is a separate binary, `continuum-mcp`, spawned by the CLI via `--mcp-config`.
 
+## Permission gateway
+
+Every tool handler is evaluated before its body runs. Effective policy is the
+bundled `config/default-permissions.toml` overlaid by the user's
+`<data_dir>/permissions.toml`:
+
+- `auto`: execute immediately.
+- `session-approved`: create an approval request unless a matching, unexpired
+  session or one-use grant exists.
+- `always-confirm`: require a fresh one-use grant for every call.
+- `blocked`: refuse the call.
+
+Requests and grants are stored as separate atomic JSON records under
+`permission-requests/` and `permission-grants/`. They are scoped to the exact
+tool, agent session, and—where available—the path, repository, URL, working
+directory, or component. The desktop Tools tab persists policy overrides,
+approves or denies requests, and revokes grants. Decisions are written to
+`logs/actions.jsonl`; raw tool arguments are not stored in permission records.
+
+Unknown tools and malformed policy fail closed. The Health repair MCP process
+retains its separate short-lived, component-scoped capability and cannot use
+that exception to reach repair operations excluded by its preview.
+
+### Git checkpoints
+
+| Tool | Tier | Effect |
+|---|---|---|
+| `git_diff` | auto | Bounded tracked unified diff plus porcelain status; optional checkpoint comparison. |
+| `git_checkpoint_list` | auto | Lists refs below `refs/continuum/checkpoints/`. |
+| `git_checkpoint` | session-approved | Creates a checkpoint commit through a temporary index without touching the real index/worktree. |
+| `git_rollback` | always-confirm | Creates a safety checkpoint, preserves loose/sensitive files, then restores the requested checkpoint. |
+
+All repository paths pass the filesystem allowlist. Checkpoints include
+tracked and untracked files except hard-denied paths (`.env`, private keys,
+credential directories, and the other deny rules). Rollback moves untracked
+files to `.git/continuum-recovery/<safety-checkpoint>/untracked/` and copies
+modified sensitive tracked files to the sibling `sensitive-tracked/` folder
+before `git reset --hard`. Ignored files are not altered.
+
+### Filesystem actions
+
+| Tool | Default tier | Safety contract |
+|---|---|---|
+| `fs_create_file` | session-approved | Existing parent must be allowlisted; atomic create-new; never overwrites. |
+| `fs_apply_patch` | session-approved | Exact `old_text` precondition; one match unless `replace_all`; original moved to recovery first. |
+| `fs_move` | session-approved | Source and destination parent are allowlisted; destination must not exist. |
+| `fs_delete_to_trash` | always-confirm | Moves the target to `<data_dir>/recovery/files/<date>/`; returns its recovery path. |
+
+All content is UTF-8. `mcp.fs.max_write_bytes` defaults to 1 MiB and
+`mcp.fs.max_patch_replacements` defaults to 100. New nested directories are not
+created implicitly: the direct destination parent must already exist. Directory
+moves across volumes are refused rather than copied recursively.
+
+### Terminal and verifier
+
+`terminal_run` (always-confirm) and `terminal_verify` (session-approved) share
+one restricted subprocess broker. Requests contain `cwd`, `program`, `args[]`,
+optional `timeout_secs`, and an optional display `label`. The broker:
+
+- accepts only executable basenames listed in `mcp.terminal.allowed_programs`;
+- passes arguments directly, with no shell interpolation;
+- requires an allowlisted existing cwd and closes stdin;
+- removes environment variables whose names indicate tokens, passwords,
+  secrets, auth, cookies, credentials, or private keys;
+- rejects credential-like arguments and caps argument count, timeout, and
+  captured output.
+
+`terminal_verify` writes the complete bounded result to
+`<data_dir>/evidence/terminal/<id>.json` and returns the evidence id/path.
+Batch, `.cmd`, and PowerShell script programs remain hard-blocked because they
+would reintroduce shell parsing. The default native-program allowlist is
+`cargo`, `git`, `dotnet`, `rustc`, and `rustfmt`; users can narrow or expand it
+in config.
+
+### Native IDE bridge
+
+| Tool | Default tier | Effect |
+|---|---|---|
+| `ide_status` | auto | Lists configured VS Code-compatible editors whose native executable is available. |
+| `ide_open_file` | session-approved | Opens one existing allowlisted file at an optional one-based line/column. |
+| `ide_open_diff` | session-approved | Opens two existing allowlisted files in the editor's native diff view. |
+
+The bridge accepts only aliases from `mcp.ide.allowed_editors` (`code`,
+`code-insiders`, and `codium` by default), resolves a native executable, and
+passes fixed arguments directly without a shell. `.cmd` launchers are never
+executed; on Windows they are used only as a location hint for the adjacent
+native editor executable. This bridge does not read unsaved buffers,
+diagnostics, selections, terminal output, or debug state.
+
+### Browser DOM bridge (optional)
+
+`browser_status`, `browser_list_tabs`, and `browser_dom_snapshot` provide the
+read boundary; `browser_navigate`, `browser_click`, and `browser_fill` are
+always-confirm. Set `mcp.browser.enabled = true`, explicitly configure exact
+`allowed_hosts`, and start Chromium with a dedicated profile and a loopback
+remote-debugging port matching `mcp.browser.port`. Defaults expose only
+`localhost` and `127.0.0.1`.
+
+The bridge never accepts arbitrary JavaScript. Its fixed snapshot omits field
+values and password controls; fill refuses password inputs and its content is
+redacted from audit details. Incognito, banking, and unrelated tabs remain
+inaccessible unless the user deliberately adds their exact host.
+
+### Windows UI Automation
+
+`windows_ui_focused_element` reads the focused element's name, automation id,
+control type, and password flag. `windows_ui_invoke_focused` and
+`windows_ui_set_focused_value` are always-confirm and act only on the element
+focused when the call executes. Password values, coordinates, global input,
+and arbitrary tree queries are unavailable. The same foreground privacy zone
+used by observation tools blocks local-only and excluded applications.
+
+### Tasks and agent evidence
+
+`task_plan_write`, `task_plan_get`, and `task_plan_list` maintain bounded,
+atomic plans under `<data_dir>/task-plans/`. Steps use explicit statuses and
+link evidence ids. `evidence_record` and `evidence_list` store bounded outcome,
+test, log, or agent evidence under `<data_dir>/evidence/agent/`; detailed
+content is redacted from tool audit metadata.
+
+### GitHub (optional)
+
+Settings → Integrations contains a GitHub card. Connect launches the official
+GitHub CLI browser/device flow; Continuum never receives the OAuth token. It
+accepts the connection only when `gh auth status --json hosts` reports
+`tokenSource: keyring`, and removes environment token overrides on every CLI
+call. Disconnect removes local CLI auth; remote revocation remains available
+on GitHub's Authorized OAuth Apps page.
+
+Read tools are session-approved except `github_status` (auto):
+
+- `github_me`
+- `github_list_repos`
+- `github_get_repo`
+- `github_list_issues`
+- `github_get_file`
+
+Owner/repository/path inputs are validated, traversal is rejected, list sizes
+are bounded, binary files are rejected, and `github.max_response_bytes` caps
+JSON and decoded file responses. `github.enabled = false` is a hard kill switch.
+
+Mutation tools always require a fresh confirmation:
+
+- `github_create_issue`
+- `github_comment_issue`
+- `github_create_pull_request`
+
+Each mutation is scoped to one validated `owner/repo`. Titles, bodies, issue
+numbers, and branch refs are bounded or validated before the official `gh api`
+call. Issue and pull-request bodies are omitted from audit details. Pull-request
+creation expects the head branch to exist remotely and does not push it.
+
 This doc describes:
 
 1. [The tools](#tools) — what they do, their schemas, and example calls

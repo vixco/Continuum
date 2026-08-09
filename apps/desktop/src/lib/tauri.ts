@@ -19,8 +19,11 @@ import type {
   ConversationSummary,
   LogEntry,
   InstallMcpServerInput,
+  GitHubAuthStatus,
   McpServerRegistration,
   McpTool,
+  PermissionGrant,
+  PermissionRequest,
   MemoryEvent,
   MemoryEventPayload,
   MemoryEventRange,
@@ -35,6 +38,8 @@ import type {
   MemoryVaultInfo,
   ProviderAddInput,
   ProviderConnection,
+  ObservationPausePreset,
+  ObservationPauseStatus,
   RepairEvent,
   RepairPreview,
   ResourceConfig,
@@ -305,6 +310,14 @@ export const continuum = {
   runBackupNow: () => invoke<string>("run_backup_now"),
   rollbackConfig: (date: string) => invoke<void>("rollback_config", { date }),
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
+  getObservationPause: () =>
+    invoke<ObservationPauseStatus>("get_observation_pause", undefined, {
+      paused: false,
+      until: null,
+    }),
+  pauseObservation: (preset: ObservationPausePreset) =>
+    invoke<ObservationPauseStatus>("pause_observation", { preset }),
+  resumeObservation: () => invoke<ObservationPauseStatus>("resume_observation"),
   setVoiceMuted: (muted: boolean) => invoke<void>("set_voice_muted", { muted }),
   talkNow: () => invoke<void>("talk_now"),
   contextWriteIntent: (intent: ContextIntentInput) =>
@@ -331,6 +344,14 @@ export const continuum = {
     invoke<ContinuumConfig>("toggle_skill", { name, enabled }),
   installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
   listMcpTools: () => invoke<McpTool[]>("list_mcp_tools", undefined, []),
+  listPermissionRequests: () =>
+    invoke<PermissionRequest[]>("list_permission_requests", undefined, []),
+  listPermissionGrants: () => invoke<PermissionGrant[]>("list_permission_grants", undefined, []),
+  approvePermissionRequest: (requestId: string, scope: "once" | "session") =>
+    invoke<PermissionGrant>("approve_permission_request", { requestId, scope }),
+  denyPermissionRequest: (requestId: string) =>
+    invoke<void>("deny_permission_request", { requestId }),
+  revokePermissionGrant: (grantId: string) => invoke<void>("revoke_permission_grant", { grantId }),
   listInstalledMcpServers: () =>
     invoke<McpServerRegistration[]>("list_installed_mcp_servers", undefined, []),
   installMcpServer: (input: InstallMcpServerInput) =>
@@ -356,6 +377,18 @@ export const continuum = {
   providerRemove: (id: string) => invoke<void>("provider_remove", { id }),
   providerSetDefaultModel: (id: string, model: string) =>
     invoke<void>("provider_set_default_model", { id, model }),
+  githubStatus: () =>
+    invoke<GitHubAuthStatus>("github_status", undefined, {
+      installed: false,
+      connected: false,
+      login: null,
+      token_source: null,
+      scopes: [],
+      secure_storage: false,
+      detail: "GitHub status is available in the desktop app.",
+    }),
+  githubConnect: () => invoke<GitHubAuthStatus>("github_connect"),
+  githubDisconnect: () => invoke<GitHubAuthStatus>("github_disconnect"),
   chatListConversations: () =>
     invoke<ConversationSummary[]>("chat_list_conversations", undefined, []),
   chatGetConversation: (id: string) =>
@@ -524,6 +557,14 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     cli_timeout_secs: 120,
     model_refresh_interval_secs: 300,
     system_prompt_path: null,
+  },
+  github: {
+    enabled: true,
+    connect_timeout_secs: 600,
+    api_timeout_secs: 30,
+    max_response_bytes: 524288,
+    max_mutation_body_bytes: 65536,
+    max_title_chars: 256,
   },
   vision: {
     name: "SmolVLM-256M",

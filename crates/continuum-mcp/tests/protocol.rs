@@ -36,6 +36,44 @@ const EXPECTED_TOOLS: &[&str] = &[
     "system_clipboard_get",
     "fs_read_file",
     "fs_list_dir",
+    "fs_create_file",
+    "fs_apply_patch",
+    "fs_move",
+    "fs_delete_to_trash",
+    // Local action tooling
+    "git_diff",
+    "git_checkpoint_list",
+    "git_checkpoint",
+    "git_rollback",
+    "terminal_run",
+    "terminal_verify",
+    "ide_status",
+    "ide_open_file",
+    "ide_open_diff",
+    "browser_status",
+    "browser_list_tabs",
+    "browser_dom_snapshot",
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "windows_ui_focused_element",
+    "windows_ui_invoke_focused",
+    "windows_ui_set_focused_value",
+    "task_plan_write",
+    "task_plan_get",
+    "task_plan_list",
+    "evidence_record",
+    "evidence_list",
+    // Optional GitHub connection
+    "github_status",
+    "github_me",
+    "github_list_repos",
+    "github_get_repo",
+    "github_list_issues",
+    "github_get_file",
+    "github_create_issue",
+    "github_comment_issue",
+    "github_create_pull_request",
     "web_fetch",
     "system_notification",
     // Phase 7 — repair
@@ -102,10 +140,18 @@ fn mcp_bin() -> std::path::PathBuf {
 }
 
 async fn read_response(reader: &mut BufReader<ChildStdout>) -> Value {
+    read_response_with_timeout(reader, Duration::from_secs(10), "MCP response").await
+}
+
+async fn read_response_with_timeout(
+    reader: &mut BufReader<ChildStdout>,
+    wait: Duration,
+    context: &str,
+) -> Value {
     let mut line = String::new();
-    let n = timeout(Duration::from_secs(10), reader.read_line(&mut line))
+    let n = timeout(wait, reader.read_line(&mut line))
         .await
-        .expect("response timeout")
+        .unwrap_or_else(|_| panic!("response timeout while waiting for {context}"))
         .expect("read error");
     assert!(n > 0, "unexpected EOF from MCP server");
     serde_json::from_str(line.trim_end()).expect("server emitted non-JSON line")
@@ -127,7 +173,10 @@ async fn protocol_handshake_and_one_tool_call() {
         .env("RUST_LOG", "warn") // silence info logs during the test
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Do not leave an unread stderr pipe attached to the child. Lazy
+        // model initialization can fill the OS pipe after the first audited
+        // tool call and deadlock the server before its next response.
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
@@ -277,7 +326,10 @@ async fn call_tool(
         }),
     )
     .await;
-    read_response(reader).await
+    // Opening and rebuilding the vault on the first memory tool call can
+    // exceed ten seconds on a cold Windows CI runner. Keep the handshake
+    // timeout strict, but give real tool execution enough time to finish.
+    read_response_with_timeout(reader, Duration::from_secs(30), name).await
 }
 
 /// Parses a successful tool call's `content[0].text` (itself a JSON string)
@@ -310,6 +362,22 @@ async fn vault_tools_round_trip() {
 
     let data_dir = tempdir().expect("tempdir");
 
+    // This test exercises the vault tools' JSON-RPC contract, not the
+    // interactive permission workflow. Keep production defaults intact and
+    // opt only this isolated temporary data directory into automatic writes.
+    std::fs::write(
+        data_dir.path().join("permissions.toml"),
+        r#"[memory]
+memory_vault_search = "auto"
+memory_vault_get = "auto"
+memory_vault_save = "auto"
+memory_vault_resolve = "auto"
+memory_vault_delete = "auto"
+memory_wipe_all = "auto"
+"#,
+    )
+    .expect("write test permission overrides");
+
     // Plant a `candidate` note directly on disk, before the server (and
     // therefore the vault) ever starts — the MCP server has no live
     // file-watcher, so the vault only ever learns about this file via the
@@ -333,7 +401,7 @@ async fn vault_tools_round_trip() {
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
@@ -610,7 +678,7 @@ async fn memory_get_fact_falls_back_when_vault_is_unopenable() {
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 

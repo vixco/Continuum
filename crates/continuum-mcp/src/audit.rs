@@ -85,6 +85,14 @@ fn audit_sensitivity(tool: &str) -> continuum_core::memory::events::EventSensiti
 
     if tool.starts_with("memory_")
         || tool.starts_with("fs_")
+        || tool.starts_with("git_")
+        || tool.starts_with("terminal_")
+        || tool.starts_with("ide_")
+        || tool.starts_with("browser_")
+        || tool.starts_with("windows_ui_")
+        || tool.starts_with("github_")
+        || tool.starts_with("task_")
+        || tool.starts_with("evidence_")
         || tool.starts_with("workers_")
         || matches!(
             tool,
@@ -112,6 +120,15 @@ fn sanitize_for_tool(tool: &str, value: &Value) -> Value {
             &mut sanitized,
             &["task", "cwd", "allowed_tools", "requested_by", "skills"],
         ),
+        "terminal_run" => redact_fields(&mut sanitized, &["args", "cwd", "env"]),
+        "fs_create_file" => redact_fields(&mut sanitized, &["content"]),
+        "fs_apply_patch" => redact_fields(&mut sanitized, &["old_text", "new_text"]),
+        "browser_fill" | "windows_ui_set_focused_value" => {
+            redact_fields(&mut sanitized, &["value"])
+        }
+        "github_create_issue" | "github_comment_issue" | "github_create_pull_request" => {
+            redact_fields(&mut sanitized, &["body"])
+        }
         "fs_read_file" | "fs_list_dir" => redact_path_field(&mut sanitized),
         "web_fetch" => minimize_url_field(&mut sanitized),
         _ => {}
@@ -250,6 +267,7 @@ fn is_sensitive_key(key: &str) -> bool {
         "token",
         "apikey",
         "api_key",
+        "auth",
         "authorization",
         "credential",
         "cookie",
@@ -258,6 +276,10 @@ fn is_sensitive_key(key: &str) -> bool {
         "signed_url",
         "session_id",
         "mcp_url",
+        "body",
+        "content",
+        "old_text",
+        "new_text",
     ];
     NEEDLES.iter().any(|needle| lower.contains(needle))
 }

@@ -52,6 +52,61 @@ context_package   = "auto"
 [fs]
 fs_read_file = "auto"
 fs_list_dir  = "auto"
+fs_create_file = "session-approved"
+fs_apply_patch = "session-approved"
+fs_move = "session-approved"
+fs_delete_to_trash = "always-confirm"
+
+# --- Git checkpoints (allowlisted repositories only) ---
+# Checkpoint writes an isolated ref but leaves the worktree/index untouched.
+# Rollback changes tracked files, so it always requires a fresh confirmation.
+[git]
+git_diff            = "auto"
+git_checkpoint_list = "auto"
+git_checkpoint      = "session-approved"
+git_rollback        = "always-confirm"
+
+# --- Restricted terminal broker ---
+[terminal]
+terminal_verify = "session-approved"
+
+# --- Native IDE bridge ---
+ide_status    = "auto"
+ide_open_file = "session-approved"
+ide_open_diff = "session-approved"
+
+# --- Opt-in browser DOM bridge ---
+browser_status       = "auto"
+browser_list_tabs    = "session-approved"
+browser_dom_snapshot = "session-approved"
+browser_navigate     = "always-confirm"
+browser_click        = "always-confirm"
+browser_fill         = "always-confirm"
+
+# --- Focused-element Windows UI Automation ---
+windows_ui_focused_element   = "session-approved"
+windows_ui_invoke_focused    = "always-confirm"
+windows_ui_set_focused_value = "always-confirm"
+
+# --- Durable task and evidence records ---
+task_plan_write = "session-approved"
+task_plan_get    = "auto"
+task_plan_list   = "auto"
+evidence_record  = "session-approved"
+evidence_list    = "auto"
+terminal_run    = "always-confirm"
+
+# --- Optional GitHub connection (official gh CLI, keyring auth only) ---
+[github]
+github_status      = "auto"
+github_me          = "session-approved"
+github_list_repos  = "session-approved"
+github_get_repo    = "session-approved"
+github_list_issues = "session-approved"
+github_get_file    = "session-approved"
+github_create_issue        = "always-confirm"
+github_comment_issue       = "always-confirm"
+github_create_pull_request = "always-confirm"
 
 [web]
 web_fetch = "auto"

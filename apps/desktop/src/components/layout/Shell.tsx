@@ -13,7 +13,7 @@ import {
   MessagesSquare,
   Mic,
   Minus,
-  Pause,
+  Power,
   Play,
   RefreshCw,
   Search,
@@ -39,7 +39,7 @@ import { SettingsPage } from "@/components/layout/SettingsPage";
 import { StatusOrb } from "@/components/ui/primitives";
 import { bootstrapStore, teardownStore, useStore } from "@/lib/store";
 import { continuum, type RuntimeStatus, type UpdateInfo, windowControls } from "@/lib/tauri";
-import type { VoiceMode } from "@/lib/types";
+import type { ObservationPausePreset, ObservationPauseStatus, VoiceMode } from "@/lib/types";
 
 type TabId =
   | "home"
@@ -325,12 +325,11 @@ export function Shell() {
 function TitleBar({ onCommand }: { onCommand: () => void }) {
   const voice = useStore((s) => s.state.voice);
   const orchestrator = useStore((s) => s.state.orchestrator);
-  const paused = useStore((s) => s.state.system.paused);
   const version = useStore((s) => s.state.system.version);
 
   const mode: VoiceMode = voice.muted ? "muted" : orchestrator.active ? "thinking" : voice.mode;
 
-  const { runtime, startRuntime, togglePause } = useRuntime();
+  const { runtime, startRuntime } = useRuntime();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -380,39 +379,27 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
           </kbd>
         </button>
 
-        <button
-          type="button"
-          onClick={runtime.alive ? togglePause : startRuntime}
-          disabled={runtime.starting}
-          className={clsx("press tb-runtime", runtime.alive ? "alive" : "offline")}
-          title={
-            runtime.alive
-              ? paused
-                ? "Resume Continuum"
-                : "Pause Continuum"
-              : "Start the Continuum runtime"
-          }
-        >
-          {runtime.starting ? (
-            <>
-              <RefreshCw size={11} className="animate-spin" /> Starting
-            </>
-          ) : runtime.alive ? (
-            paused ? (
+        {!runtime.alive && (
+          <button
+            type="button"
+            onClick={startRuntime}
+            disabled={runtime.starting}
+            className="press tb-runtime offline"
+            title="Start the Continuum runtime"
+          >
+            {runtime.starting ? (
               <>
-                <Play size={11} /> Paused
+                <RefreshCw size={11} className="animate-spin" /> Starting
               </>
             ) : (
               <>
-                <Pause size={11} /> Running
+                <Play size={11} /> Start runtime
               </>
-            )
-          ) : (
-            <>
-              <Play size={11} /> Start runtime
-            </>
-          )}
-        </button>
+            )}
+          </button>
+        )}
+
+        <ObservationPowerButton />
 
         <span className="mx-1 hidden text-[10px] text-ink-dim md:inline">{version}</span>
 
@@ -479,16 +466,133 @@ function useRuntime() {
     }
   }, [refresh]);
 
-  const togglePause = useCallback(async () => {
-    const paused = useStore.getState().state.system.paused;
+  return { runtime, startRuntime, refresh };
+}
+
+const PAUSE_OPTIONS: Array<{ preset: ObservationPausePreset; label: string; detail: string }> = [
+  { preset: "fifteen_minutes", label: "15 minutes", detail: "Resume automatically" },
+  { preset: "one_hour", label: "1 hour", detail: "Resume automatically" },
+  { preset: "four_hours", label: "4 hours", detail: "Resume automatically" },
+  { preset: "until_tomorrow", label: "Until tomorrow", detail: "Resume at 08:00" },
+  { preset: "indefinite", label: "Until I turn it on", detail: "No automatic resume" },
+];
+
+function ObservationPowerButton() {
+  const runtimePaused = useStore((s) => s.state.system.paused);
+  const [status, setStatus] = useState<ObservationPauseStatus>({
+    paused: runtimePaused,
+    until: null,
+  });
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  const refresh = useCallback(async () => {
     try {
-      await continuum.setPaused(!paused);
-    } catch {
-      /* dev: ignore */
+      setStatus(await continuum.getObservationPause());
+      setError(null);
+    } catch (cause) {
+      setStatus((current) => ({ ...current, paused: true }));
+      setError(cause instanceof Error ? cause.message : "Privacy status unavailable");
     }
   }, []);
 
-  return { runtime, startRuntime, togglePause, refresh };
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  const resume = async () => {
+    setBusy(true);
+    try {
+      setStatus(await continuum.resumeObservation());
+      setOpen(false);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not resume observation");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pause = async (preset: ObservationPausePreset) => {
+    setBusy(true);
+    try {
+      setStatus(await continuum.pauseObservation(preset));
+      setOpen(false);
+      setError(null);
+    } catch (cause) {
+      setStatus((current) => ({ ...current, paused: true }));
+      setError(cause instanceof Error ? cause.message : "Could not pause observation");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const title = status.paused
+    ? "AI observation is paused. Click to turn it back on."
+    : "Pause AI observation";
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-label={title}
+        aria-expanded={open}
+        disabled={busy}
+        onClick={() => (status.paused ? void resume() : setOpen((value) => !value))}
+        className={clsx("press privacy-power", status.paused && "paused")}
+        title={title}
+      >
+        {busy ? <RefreshCw size={17} className="animate-spin" /> : <Power size={19} />}
+      </button>
+
+      {open && !status.paused && (
+        <div className="privacy-popover" role="dialog" aria-label="Pause AI observation">
+          <div className="border-b border-bg-border px-3 py-2.5">
+            <div className="text-xs font-semibold text-ink">Pause AI observation</div>
+            <p className="mt-1 text-[10px] leading-4 text-ink-muted">
+              Screen, microphone, files, Git, windows and process activity stop being observed.
+            </p>
+          </div>
+          <div className="p-1.5">
+            {PAUSE_OPTIONS.map((option) => (
+              <button
+                key={option.preset}
+                type="button"
+                className="privacy-option"
+                onClick={() => void pause(option.preset)}
+              >
+                <span>{option.label}</span>
+                <span>{option.detail}</span>
+              </button>
+            ))}
+          </div>
+          {error && (
+            <p className="border-t border-red-400/30 px-3 py-2 text-[10px] text-red-300">{error}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () => void }) {

@@ -22,7 +22,8 @@ use continuum_core::config::{
 };
 use continuum_core::health::repair::RepairSessionGrant;
 use continuum_core::memory::{episodic::EpisodicStore, semantic::SemanticStore};
-use continuum_core::senses::privacy::PrivacyFilter;
+use continuum_core::permissions::{PermissionDecision, PermissionGateway};
+use continuum_core::senses::privacy::{PrivacyFilter, Zone};
 use continuum_memory::Vault;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -36,12 +37,26 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 
+use crate::tools::browser::{
+    BrowserClickRequest, BrowserFillRequest, BrowserNavigateRequest, BrowserTargetRequest,
+};
 use crate::tools::context::{
     self as ctxtool, ContextFilesRequest, ContextGitRequest, ContextPackageRequest,
     ContextProcessesRequest, ContextSearchRequest, ContextTimelineRequest, ContextWindowRequest,
     PackageMemory,
 };
+use crate::tools::file_actions::{
+    FsApplyPatchRequest, FsCreateFileRequest, FsDeleteRequest, FsMoveRequest,
+};
 use crate::tools::fs::{FsListDirRequest, FsReadFileRequest};
+use crate::tools::git::{
+    GitCheckpointListRequest, GitCheckpointRequest, GitDiffRequest, GitRollbackRequest,
+};
+use crate::tools::github::{
+    GitHubCommentRequest, GitHubCreateIssueRequest, GitHubCreatePullRequest, GitHubGetFileRequest,
+    GitHubListIssuesRequest, GitHubListReposRequest, GitHubRepoRequest,
+};
+use crate::tools::ide::{IdeOpenDiffRequest, IdeOpenFileRequest};
 use crate::tools::memory::{
     self as memtool, EpisodicHit, FactView, MemoryGetFactRequest, MemoryListFactsRequest,
     MemoryQueryEpisodicRequest, MemorySetFactRequest, MemoryVaultDeleteRequest,
@@ -53,7 +68,12 @@ use crate::tools::repair::{
     TestRequest,
 };
 use crate::tools::system::{self as systool, NotificationRequest};
+use crate::tools::task_evidence::{
+    EvidenceWriteRequest, RecordIdRequest, RecordListRequest, TaskPlanWriteRequest,
+};
+use crate::tools::terminal::TerminalRunRequest;
 use crate::tools::web::WebFetchRequest;
+use crate::tools::windows_ui::WindowsUiSetValueRequest;
 use crate::tools::workers::{
     self as workertool, SpawnWorkerRequest, WorkerIdRequest, WorkerListRequest, WorkerWaitRequest,
 };
@@ -65,10 +85,17 @@ pub(crate) struct ServerState {
     #[allow(dead_code)]
     pub(crate) http: reqwest::Client,
     pub(crate) fs_extra_paths: Vec<PathBuf>,
+    pub(crate) fs_max_write_bytes: usize,
+    pub(crate) fs_max_patch_replacements: usize,
+    pub(crate) terminal_config: crate::config::McpTerminalConfig,
+    pub(crate) ide_config: crate::config::McpIdeConfig,
+    pub(crate) browser_config: crate::config::McpBrowserConfig,
+    pub(crate) github_config: continuum_core::config::GitHubConfig,
     pub(crate) semantic: OnceCell<SemanticStore>,
     pub(crate) episodic: OnceCell<Mutex<EpisodicStore>>,
     pub(crate) vault: OnceCell<Vault>,
     pub(crate) repair_grant: Option<RepairSessionGrant>,
+    pub(crate) permissions: PermissionGateway,
     /// The privacy choke point every observation tool routes through
     /// (context engine spec §5.1). Built from the **same** `config.toml`
     /// the runtime loads, so a zone the user configured binds this process
@@ -149,6 +176,7 @@ impl ContinuumMcpServer {
         let git_context = full_cfg.git_context.clone();
         let package_config = full_cfg.context_package.clone();
         let process_watcher_enabled = full_cfg.process_watcher.enabled;
+        let github_config = full_cfg.github.clone();
         // Honour the configured `[storage] db_path` when there is a real
         // config file to honour; otherwise fall back to this process's
         // data dir, because the config *defaults* point at the standard
@@ -174,6 +202,13 @@ impl ContinuumMcpServer {
                     }
                 }
             });
+        let permission_session_id = std::env::var("CONTINUUM_SESSION_ID")
+            .unwrap_or_else(|_| format!("mcp-{}", uuid::Uuid::new_v4()));
+        let permissions = PermissionGateway::new(
+            data_dir.clone(),
+            permission_session_id,
+            include_str!("../../../config/default-permissions.toml"),
+        );
 
         // web_fetch is the only consumer of `http`, and redirect-SSRF is a
         // real concern (a host we DNS-verified as public could redirect us to
@@ -193,10 +228,17 @@ impl ContinuumMcpServer {
                 data_dir,
                 http,
                 fs_extra_paths: mcp_cfg.fs.extra_paths,
+                fs_max_write_bytes: mcp_cfg.fs.max_write_bytes,
+                fs_max_patch_replacements: mcp_cfg.fs.max_patch_replacements,
+                terminal_config: mcp_cfg.terminal,
+                ide_config: mcp_cfg.ide,
+                browser_config: mcp_cfg.browser,
+                github_config,
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                permissions,
                 privacy,
                 context_tools,
                 toggles,
@@ -231,6 +273,17 @@ impl ContinuumMcpServer {
                     None,
                 )
             })
+    }
+
+    fn require_cloud_allowed_focus(&self) -> Result<(), McpError> {
+        let (title, process) = continuum_core::senses::context::foreground_window();
+        if self.state.privacy.resolve_zone(&process, &title) != Zone::CloudAllowed {
+            return Err(McpError::invalid_request(
+                "focused application privacy zone blocks cloud-bound UI Automation",
+                None,
+            ));
+        }
+        Ok(())
     }
 
     fn require_repair_component(&self, component: &str) -> Result<RepairSessionGrant, McpError> {
@@ -497,6 +550,13 @@ impl ContinuumMcpServer {
         )
     }
 
+    fn git_timeout_ms(&self) -> u64 {
+        self.state
+            .git_context
+            .command_timeout_secs
+            .saturating_mul(1_000)
+    }
+
     /// Returns a reference to the semantic store, opening it if not yet opened.
     pub(crate) async fn semantic(&self) -> Result<&SemanticStore> {
         self.state
@@ -577,6 +637,39 @@ impl ContinuumMcpServer {
         Fut: Future<Output = Result<T, McpError>>,
     {
         let args_json = serde_json::to_value(&args).unwrap_or(Value::Null);
+        let repair_capability_authorized =
+            name.starts_with("repair_") && self.state.repair_grant.is_some();
+        if !repair_capability_authorized {
+            let resource = permission_resource(&args_json);
+            match self.state.permissions.check(
+                name,
+                resource.as_deref(),
+                &format!("Continuum wants to run {name}"),
+            ) {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Ask { request } => {
+                    return Err(McpError::invalid_request(
+                        format!(
+                            "permission_required: request_id={} action={}{}; approve it in Continuum Settings > Tools and retry",
+                            request.id,
+                            request.action,
+                            request
+                                .resource
+                                .as_deref()
+                                .map(|value| format!(" resource={value}"))
+                                .unwrap_or_default()
+                        ),
+                        Some(serde_json::json!({ "permission_request": request })),
+                    ));
+                }
+                PermissionDecision::Deny { reason } => {
+                    return Err(McpError::invalid_request(
+                        format!("permission_denied: {name}: {reason}"),
+                        Some(serde_json::json!({ "action": name, "reason": reason })),
+                    ));
+                }
+            }
+        }
         let outcome = body().await;
         let summary = match &outcome {
             Ok(_) => "ok".to_string(),
@@ -1266,6 +1359,558 @@ impl ContinuumMcpServer {
         .await
     }
 
+    #[tool(
+        description = "Atomically create a new UTF-8 file inside an allowlisted existing directory. Refuses overwrite, denied secret names, symlink escapes, and content above mcp.fs.max_write_bytes."
+    )]
+    async fn fs_create_file(
+        &self,
+        Parameters(req): Parameters<FsCreateFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_create_file", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::create_file(&req, &allowlist, self.state.fs_max_write_bytes)
+                .await
+                .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Patch an existing allowlisted UTF-8 file by exact old_text precondition. A non-replace-all patch must match exactly once. The original is preserved under Continuum recovery storage before replacement."
+    )]
+    async fn fs_apply_patch(
+        &self,
+        Parameters(req): Parameters<FsApplyPatchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_apply_patch", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::apply_patch(
+                &req,
+                &allowlist,
+                &self.state.data_dir.join("recovery").join("files"),
+                self.state.fs_max_write_bytes,
+                self.state.fs_max_patch_replacements,
+            )
+            .await
+            .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Move an allowlisted file or directory to a new allowlisted destination. The destination parent must exist and overwrite is never allowed."
+    )]
+    async fn fs_move(
+        &self,
+        Parameters(req): Parameters<FsMoveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_move", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::move_path(&req, &allowlist)
+                .await
+                .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Recoverably delete an allowlisted file or directory by moving it under <data_dir>/recovery/files. Returns the recovery path; no recursive erase command is used."
+    )]
+    async fn fs_delete_to_trash(
+        &self,
+        Parameters(req): Parameters<FsDeleteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("fs_delete_to_trash", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::file_actions::delete_to_trash(
+                &req,
+                &allowlist,
+                &self.state.data_dir.join("recovery").join("files"),
+            )
+            .await
+            .map_err(file_action_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Git checkpoint tools
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Create a durable checkpoint under refs/continuum/checkpoints without changing the user's real index or worktree. Captures tracked and untracked non-secret files; hard-denied paths such as .env and private keys are excluded."
+    )]
+    async fn git_checkpoint(
+        &self,
+        Parameters(req): Parameters<GitCheckpointRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_checkpoint", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::checkpoint(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Show porcelain status and a bounded unified diff for an allowlisted repository. Optionally compare the working tree against an exact Continuum checkpoint id. Read-only; untracked names appear in status but their contents are not returned."
+    )]
+    async fn git_diff(
+        &self,
+        Parameters(req): Parameters<GitDiffRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_diff", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::diff(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List durable Continuum checkpoints for an allowlisted repository, newest first."
+    )]
+    async fn git_checkpoint_list(
+        &self,
+        Parameters(req): Parameters<GitCheckpointListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_checkpoint_list", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::list_checkpoints(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Restore an exact Continuum checkpoint. Always creates a pre-rollback safety checkpoint, moves untracked files into .git/continuum-recovery, and copies modified sensitive tracked files there before reset. Requires confirmation every call."
+    )]
+    async fn git_rollback(
+        &self,
+        Parameters(req): Parameters<GitRollbackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("git_rollback", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::git::rollback(&req, &allowlist, self.git_timeout_ms())
+                .await
+                .map_err(git_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Restricted terminal broker
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Run a configured executable as program + literal args in an allowlisted cwd. No shell is involved, stdin is closed, credential-like args are rejected, sensitive environment variables are stripped, and timeout/output are capped. Requires confirmation every call."
+    )]
+    async fn terminal_run(
+        &self,
+        Parameters(req): Parameters<TerminalRunRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("terminal_run", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::terminal::run(&req, &allowlist, &self.state.terminal_config)
+                .await
+                .map_err(terminal_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Run a configured verification command under the restricted terminal broker and persist its exit code, bounded output, duration, cwd, and command as durable JSON evidence."
+    )]
+    async fn terminal_verify(
+        &self,
+        Parameters(req): Parameters<TerminalRunRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("terminal_verify", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::terminal::verify(
+                &req,
+                &allowlist,
+                &self.state.terminal_config,
+                &self.state.data_dir,
+            )
+            .await
+            .map_err(terminal_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Native IDE bridge
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Report which configured VS Code-compatible native editor executables are available. Does not open an editor or inspect editor content."
+    )]
+    async fn ide_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_status", &Value::Null, || async {
+            Ok::<_, McpError>(crate::tools::ide::status(&self.state.ide_config))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open one existing allowlisted file in a configured VS Code-compatible editor at an optional one-based line and column. Uses a native executable directly; no shell or arbitrary editor command is exposed."
+    )]
+    async fn ide_open_file(
+        &self,
+        Parameters(req): Parameters<IdeOpenFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_open_file", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::ide::open_file(&req, &allowlist, &self.state.ide_config)
+                .await
+                .map_err(ide_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open two existing allowlisted files in a configured VS Code-compatible editor's native diff view. Uses a native executable directly and does not modify either file."
+    )]
+    async fn ide_open_diff(
+        &self,
+        Parameters(req): Parameters<IdeOpenDiffRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("ide_open_diff", &req, || async {
+            let allowlist = self.compute_fs_allowlist().await;
+            crate::tools::ide::open_diff(&req, &allowlist, &self.state.ide_config)
+                .await
+                .map_err(ide_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Opt-in Chromium DOM bridge
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Report whether the opt-in loopback Chromium DevTools bridge is enabled and reachable. Does not return page content."
+    )]
+    async fn browser_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_status", &Value::Null, || async {
+            Ok::<_, McpError>(
+                crate::tools::browser::status(&self.state.http, &self.state.browser_config).await,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List only page tabs whose exact host is explicitly allowed in mcp.browser.allowed_hosts."
+    )]
+    async fn browser_list_tabs(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_list_tabs", &Value::Null, || async {
+            crate::tools::browser::list_tabs(&self.state.http, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Return bounded visible text and form structure for one allowlisted Chromium tab. Password fields and all field values are excluded."
+    )]
+    async fn browser_dom_snapshot(
+        &self,
+        Parameters(req): Parameters<BrowserTargetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_dom_snapshot", &req, || async {
+            crate::tools::browser::snapshot(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Navigate one Chromium tab to an exact allowlisted HTTP(S) host. Requires a fresh confirmation every call."
+    )]
+    async fn browser_navigate(
+        &self,
+        Parameters(req): Parameters<BrowserNavigateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_navigate", &req, || async {
+            crate::tools::browser::navigate(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Click one CSS-selected non-password element in an allowlisted Chromium tab. Arbitrary JavaScript is not accepted. Requires fresh confirmation."
+    )]
+    async fn browser_click(
+        &self,
+        Parameters(req): Parameters<BrowserClickRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_click", &req, || async {
+            crate::tools::browser::click(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Fill one CSS-selected non-password field in an allowlisted Chromium tab and dispatch input/change events. Content is audit-redacted. Requires fresh confirmation."
+    )]
+    async fn browser_fill(
+        &self,
+        Parameters(req): Parameters<BrowserFillRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("browser_fill", &req, || async {
+            crate::tools::browser::fill(&self.state.http, &req, &self.state.browser_config)
+                .await
+                .map_err(browser_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read bounded metadata for the currently focused Windows accessibility element. Local-only and excluded privacy zones are blocked."
+    )]
+    async fn windows_ui_focused_element(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_focused_element", &Value::Null, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::focused_element().map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Invoke only the currently focused Windows UI Automation element through InvokePattern. No coordinates or arbitrary search. Requires fresh confirmation."
+    )]
+    async fn windows_ui_invoke_focused(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_invoke_focused", &Value::Null, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::invoke_focused().map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Set only the currently focused non-password, writable Windows UI Automation ValuePattern. Content is audit-redacted and requires fresh confirmation."
+    )]
+    async fn windows_ui_set_focused_value(
+        &self,
+        Parameters(req): Parameters<WindowsUiSetValueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("windows_ui_set_focused_value", &req, || async {
+            self.require_cloud_allowed_focus()?;
+            crate::tools::windows_ui::set_focused_value(&req).map_err(windows_ui_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Create or atomically update a bounded durable task plan with explicit step statuses and evidence links."
+    )]
+    async fn task_plan_write(
+        &self,
+        Parameters(req): Parameters<TaskPlanWriteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_write", &req, || async {
+            crate::tools::task_evidence::write_task(&self.state.data_dir, &req)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "Read one durable task plan by id.")]
+    async fn task_plan_get(
+        &self,
+        Parameters(req): Parameters<RecordIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_get", &req, || async {
+            crate::tools::task_evidence::get_task(&self.state.data_dir, &req.id)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "List recent durable task plans, newest first.")]
+    async fn task_plan_list(
+        &self,
+        Parameters(req): Parameters<RecordListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("task_plan_list", &req, || async {
+            crate::tools::task_evidence::list_tasks(&self.state.data_dir, req.limit)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(
+        description = "Persist bounded source-attributed agent/test/outcome evidence and optionally link it to a task. Content is audit-redacted."
+    )]
+    async fn evidence_record(
+        &self,
+        Parameters(req): Parameters<EvidenceWriteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("evidence_record", &req, || async {
+            crate::tools::task_evidence::write_evidence(&self.state.data_dir, &req)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+    #[tool(description = "List recent durable agent evidence records, newest first.")]
+    async fn evidence_list(
+        &self,
+        Parameters(req): Parameters<RecordListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("evidence_list", &req, || async {
+            crate::tools::task_evidence::list_evidence(&self.state.data_dir, req.limit)
+                .map_err(record_err_to_mcp)
+        })
+        .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Optional read-only GitHub integration
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Return the active GitHub account and scopes through the official gh CLI. Tokens are never returned and environment-token overrides are ignored; only OS-keyring-backed auth is accepted."
+    )]
+    async fn github_status(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_status", &Value::Null, || async {
+            if !self.state.github_config.enabled {
+                return Ok(continuum_core::github_cli::GitHubAuthStatus {
+                    detail: "GitHub integration is disabled in config".to_string(),
+                    ..continuum_core::github_cli::GitHubAuthStatus::default()
+                });
+            }
+            Ok::<_, McpError>(
+                continuum_core::github_cli::status(self.state.github_config.api_timeout_secs).await,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Return the connected GitHub user's profile. Read-only and keyring-authenticated through the official gh CLI."
+    )]
+    async fn github_me(&self) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_me", &Value::Null, || async {
+            crate::tools::github::me(&self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List repositories visible to the connected GitHub account, with bounded page size and optional visibility filter."
+    )]
+    async fn github_list_repos(
+        &self,
+        Parameters(req): Parameters<GitHubListReposRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_list_repos", &req, || async {
+            crate::tools::github::list_repos(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read metadata for one owner/repository visible to the connected GitHub account."
+    )]
+    async fn github_get_repo(
+        &self,
+        Parameters(req): Parameters<GitHubRepoRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_get_repo", &req, || async {
+            crate::tools::github::get_repo(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List issues and pull requests for one GitHub repository. Read-only; state and page size are validated and bounded."
+    )]
+    async fn github_list_issues(
+        &self,
+        Parameters(req): Parameters<GitHubListIssuesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_list_issues", &req, || async {
+            crate::tools::github::list_issues(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read one UTF-8 file or list one directory at an optional GitHub branch, tag, or commit. Traversal and oversized/binary content are rejected."
+    )]
+    async fn github_get_file(
+        &self,
+        Parameters(req): Parameters<GitHubGetFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_get_file", &req, || async {
+            crate::tools::github::get_file(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Create a GitHub issue in one exact repository. Title/body are bounded and body is redacted from local tool audit details. Requires a fresh user confirmation every call."
+    )]
+    async fn github_create_issue(
+        &self,
+        Parameters(req): Parameters<GitHubCreateIssueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_create_issue", &req, || async {
+            crate::tools::github::create_issue(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Post a bounded GitHub comment to one issue or pull request. Comment body is redacted from local tool audit details. Requires a fresh user confirmation every call."
+    )]
+    async fn github_comment_issue(
+        &self,
+        Parameters(req): Parameters<GitHubCommentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_comment_issue", &req, || async {
+            crate::tools::github::comment_issue(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Open a GitHub pull request from an existing remote head branch to a base branch. Does not push code. Title/body/refs are validated and bounded. Requires a fresh user confirmation every call."
+    )]
+    async fn github_create_pull_request(
+        &self,
+        Parameters(req): Parameters<GitHubCreatePullRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("github_create_pull_request", &req, || async {
+            crate::tools::github::create_pull_request(&req, &self.state.github_config)
+                .await
+                .map_err(github_err_to_mcp)
+        })
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Web fetch (GET only, no redirects)
     // -----------------------------------------------------------------------
@@ -1488,6 +2133,33 @@ impl ContinuumMcpServer {
     }
 }
 
+fn permission_resource(args: &Value) -> Option<String> {
+    const RESOURCE_KEYS: &[&str] = &[
+        "path",
+        "source",
+        "destination",
+        "cwd",
+        "repo",
+        "repository",
+        "url",
+        "component",
+        "target_id",
+    ];
+    let object = args.as_object()?;
+    if let (Some(owner), Some(repo)) = (
+        object.get("owner").and_then(Value::as_str),
+        object.get("repo").and_then(Value::as_str),
+    ) {
+        return Some(format!("github:{owner}/{repo}"));
+    }
+    for key in RESOURCE_KEYS {
+        if let Some(value) = object.get(*key).and_then(Value::as_str) {
+            return Some(value.chars().take(500).collect());
+        }
+    }
+    None
+}
+
 fn fs_err_to_mcp(e: &crate::tools::fs::FsError) -> McpError {
     use crate::tools::fs::FsError;
     match e {
@@ -1495,6 +2167,76 @@ fn fs_err_to_mcp(e: &crate::tools::fs::FsError) -> McpError {
             McpError::invalid_params(e.to_string(), None)
         }
         FsError::Io(_) => McpError::internal_error(e.to_string(), None),
+    }
+}
+
+fn file_action_err_to_mcp(error: crate::tools::file_actions::FileActionError) -> McpError {
+    use crate::tools::file_actions::FileActionError;
+    match error {
+        FileActionError::Io(_) => McpError::internal_error(error.to_string(), None),
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn ide_err_to_mcp(error: crate::tools::ide::IdeError) -> McpError {
+    use crate::tools::ide::IdeError;
+    match error {
+        IdeError::Spawn(_) | IdeError::Timeout => McpError::internal_error(error.to_string(), None),
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn browser_err_to_mcp(error: crate::tools::browser::BrowserError) -> McpError {
+    match error {
+        crate::tools::browser::BrowserError::Unavailable(_)
+        | crate::tools::browser::BrowserError::Protocol(_)
+        | crate::tools::browser::BrowserError::Timeout => {
+            McpError::internal_error(error.to_string(), None)
+        }
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn windows_ui_err_to_mcp(error: crate::tools::windows_ui::WindowsUiError) -> McpError {
+    McpError::invalid_params(error.to_string(), None)
+}
+
+fn record_err_to_mcp(error: crate::tools::task_evidence::RecordError) -> McpError {
+    McpError::invalid_params(error.to_string(), None)
+}
+
+fn git_err_to_mcp(error: crate::tools::git::GitToolError) -> McpError {
+    use crate::tools::git::GitToolError;
+    match error {
+        GitToolError::Denied(_)
+        | GitToolError::Git(_)
+        | GitToolError::NonUtf8
+        | GitToolError::InvalidCheckpointId
+        | GitToolError::UnknownCheckpoint
+        | GitToolError::UnsafePath => McpError::invalid_params(error.to_string(), None),
+        GitToolError::Timeout | GitToolError::Io(_) => {
+            McpError::internal_error(error.to_string(), None)
+        }
+    }
+}
+
+fn terminal_err_to_mcp(error: crate::tools::terminal::TerminalError) -> McpError {
+    use crate::tools::terminal::TerminalError;
+    match error {
+        TerminalError::Spawn(_) | TerminalError::Evidence(_) | TerminalError::EvidencePath => {
+            McpError::internal_error(error.to_string(), None)
+        }
+        _ => McpError::invalid_params(error.to_string(), None),
+    }
+}
+
+fn github_err_to_mcp(error: crate::tools::github::GitHubToolError) -> McpError {
+    use crate::tools::github::GitHubToolError;
+    match error {
+        GitHubToolError::Cli(_) | GitHubToolError::InvalidResponse(_) => {
+            McpError::internal_error(error.to_string(), None)
+        }
+        _ => McpError::invalid_params(error.to_string(), None),
     }
 }
 
@@ -1524,8 +2266,8 @@ impl ServerHandler for ContinuumMcpServer {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "Continuum MCP server — exposes memory (facts + the memory vault), system info, \
-                 filesystem (read-only), web fetch, and notification tools to the orchestrator. \
-                 Every tool call is audited to episodic memory.",
+                 safe filesystem actions, recoverable Git checkpoints, web fetch, and notifications. \
+                 Every tool call passes the local permission gateway and is audited.",
             )
     }
 }
@@ -1549,15 +2291,27 @@ mod repair_authorization_tests {
             .unwrap();
         }
         let raw_log_path = data_dir.join("raw_log.sqlite");
+        let permissions = PermissionGateway::new(
+            data_dir.clone(),
+            "repair-test",
+            include_str!("../../../config/default-permissions.toml"),
+        );
         ContinuumMcpServer {
             state: Arc::new(ServerState {
                 data_dir,
                 http: reqwest::Client::new(),
                 fs_extra_paths: Vec::new(),
+                fs_max_write_bytes: 1024 * 1024,
+                fs_max_patch_replacements: 100,
+                terminal_config: crate::config::McpTerminalConfig::default(),
+                ide_config: crate::config::McpIdeConfig::default(),
+                browser_config: crate::config::McpBrowserConfig::default(),
+                github_config: continuum_core::config::GitHubConfig::default(),
                 semantic: OnceCell::new(),
                 episodic: OnceCell::new(),
                 vault: OnceCell::new(),
                 repair_grant,
+                permissions,
                 privacy: PrivacyFilter::from_config(
                     &continuum_core::config::ContextConfig::default(),
                     &continuum_core::config::PrivacyConfig::default(),
@@ -1617,5 +2371,17 @@ mod repair_authorization_tests {
         let server = server_with_grant(tmp.path().to_path_buf(), Some(grant));
         assert!(server.require_repair_restart_component("vision").is_ok());
         assert!(server.require_repair_restart_component("triage").is_err());
+    }
+
+    #[test]
+    fn permission_resource_uses_only_known_scope_fields() {
+        assert_eq!(
+            permission_resource(&serde_json::json!({ "path": "C:/repo/file.rs", "token": "no" })),
+            Some("C:/repo/file.rs".to_string())
+        );
+        assert_eq!(
+            permission_resource(&serde_json::json!({ "query": "hello" })),
+            None
+        );
     }
 }

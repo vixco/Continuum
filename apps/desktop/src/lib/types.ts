@@ -9,6 +9,14 @@ export type VoiceMode = "idle" | "listening" | "thinking" | "speaking" | "muted"
 
 export type ComponentStatus = "healthy" | "degrading" | "error" | "unknown";
 
+export type ObservationPausePreset =
+  "fifteen_minutes" | "one_hour" | "four_hours" | "until_tomorrow" | "indefinite";
+
+export interface ObservationPauseStatus {
+  paused: boolean;
+  until: string | null;
+}
+
 export type RecentActionKind = "triage" | "wake" | "worker" | "voice" | "repair";
 
 export interface PerceptionState {
@@ -663,6 +671,14 @@ export interface ContinuumConfig {
     model_refresh_interval_secs: number;
     system_prompt_path: string | null;
   };
+  github: {
+    enabled: boolean;
+    connect_timeout_secs: number;
+    api_timeout_secs: number;
+    max_response_bytes: number;
+    max_mutation_body_bytes: number;
+    max_title_chars: number;
+  };
   vision: {
     name: string;
     model_path: string;
@@ -871,6 +887,16 @@ export interface ProviderConnection {
   last_test_ok: boolean | null;
 }
 
+export interface GitHubAuthStatus {
+  installed: boolean;
+  connected: boolean;
+  login: string | null;
+  token_source: string | null;
+  scopes: string[];
+  secure_storage: boolean;
+  detail: string;
+}
+
 export interface CatalogEntry {
   id: string;
   label: string;
@@ -964,6 +990,36 @@ export interface McpTool {
   namespace: string;
   name: string;
   description: string;
+}
+
+export type PermissionTier = "auto" | "session-approved" | "always-confirm" | "blocked";
+
+export interface PermissionPolicyEntry {
+  action: string;
+  tier: PermissionTier;
+  overridden: boolean;
+}
+
+export interface PermissionRequest {
+  id: string;
+  session_id: string;
+  action: string;
+  resource: string | null;
+  tier: PermissionTier;
+  summary: string;
+  created_at: string;
+}
+
+export type GrantScope = "once" | "session";
+
+export interface PermissionGrant {
+  id: string;
+  session_id: string;
+  action: string;
+  resource: string | null;
+  scope: GrantScope;
+  created_at: string;
+  expires_at: string;
 }
 
 /** A validated local stdio MCP server registration. */

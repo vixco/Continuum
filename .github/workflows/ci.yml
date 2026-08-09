@@ -1,10 +1,13 @@
 name: CI
 
 on:
+  # Validate every pushed branch so feature work is visible in Actions before
+  # it reaches a pull request. Releases remain gated to successful main CI in
+  # release.yml.
   push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

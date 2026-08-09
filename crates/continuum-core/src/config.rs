@@ -97,6 +97,40 @@ pub struct ContinuumConfig {
     /// kill-switch plus the clipboard-tool kill-switch.
     #[serde(default)]
     pub context_tools: ContextToolsConfig,
+    /// Optional GitHub CLI integration settings.
+    #[serde(default)]
+    pub github: GitHubConfig,
+}
+
+/// Official GitHub CLI bridge settings (`[github]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GitHubConfig {
+    /// Master switch. No network request occurs until the user connects/calls a tool.
+    pub enabled: bool,
+    /// Browser/device login deadline.
+    pub connect_timeout_secs: u64,
+    /// Deadline for status and API calls.
+    pub api_timeout_secs: u64,
+    /// Maximum bytes returned from one API call.
+    pub max_response_bytes: usize,
+    /// Maximum UTF-8 bytes sent in one issue/comment/PR body.
+    pub max_mutation_body_bytes: usize,
+    /// Maximum title characters for issues and pull requests.
+    pub max_title_chars: usize,
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            connect_timeout_secs: 600,
+            api_timeout_secs: 30,
+            max_response_bytes: 512 * 1024,
+            max_mutation_body_bytes: 64 * 1024,
+            max_title_chars: 256,
+        }
+    }
 }
 
 /// MCP context-tool switches (`[context_tools]`, context engine spec
@@ -1705,6 +1739,7 @@ impl Default for ContinuumConfig {
             context_package: ContextPackageConfig::default(),
             continuation: ContinuationConfig::default(),
             context_tools: ContextToolsConfig::default(),
+            github: GitHubConfig::default(),
         }
     }
 }

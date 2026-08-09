@@ -378,6 +378,12 @@ pub async fn stage_raw_log_and_events(
         "the events writer did not drain"
     );
     let _ = shutdown_tx.send(true);
+    anyhow::ensure!(
+        writer
+            .wait_for_stop(std::time::Duration::from_secs(30))
+            .await,
+        "the events writer did not commit its final batch"
+    );
 
     let rows = raw_log.list_context_events().await?;
     // `ContextEventRow` is a read-path struct with no `Serialize`; the

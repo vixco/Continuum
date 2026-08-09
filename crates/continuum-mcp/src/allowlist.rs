@@ -184,6 +184,66 @@ pub fn is_path_allowed(path: &Path, cfg: &AllowlistConfig) -> Result<PathBuf, De
     Ok(canonical)
 }
 
+/// Checks only the hard deny rules for a repository-relative path.
+///
+/// This is used for deleted Git paths that cannot be canonicalized. Absolute
+/// paths and parent traversals are rejected as invalid.
+pub fn is_relative_path_denied(path: &Path) -> Result<(), DenyReason> {
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(DenyReason::InvalidPath(
+            "expected a repository-relative path".to_string(),
+        ));
+    }
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            let value = name.to_string_lossy();
+            if let Some(denied) = DENY_DIRS
+                .iter()
+                .find(|denied| value.eq_ignore_ascii_case(denied))
+            {
+                return Err(DenyReason::DeniedDirectory((*denied).to_string()));
+            }
+        }
+    }
+    if let Some(name) = path.file_name().map(|value| value.to_string_lossy()) {
+        for pattern in DENY_PATTERNS {
+            if matches_glob_ci(&name, pattern) {
+                return Err(DenyReason::DeniedPattern((*pattern).to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves a not-yet-existing direct child through its canonical parent.
+///
+/// Creation and move destinations use this instead of canonicalizing the
+/// target itself. The parent must already exist and be allowlisted, and the
+/// new filename still passes the hard deny rules.
+pub fn resolve_new_path_allowed(path: &Path, cfg: &AllowlistConfig) -> Result<PathBuf, DenyReason> {
+    if path.exists() {
+        return Err(DenyReason::InvalidPath(
+            "destination already exists".to_string(),
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        DenyReason::InvalidPath("new path must have an existing parent".to_string())
+    })?;
+    let parent = is_path_allowed(parent, cfg)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| DenyReason::InvalidPath("new path must have a filename".to_string()))?;
+    is_relative_path_denied(Path::new(name))?;
+    Ok(parent.join(name))
+}
+
 /// Canonicalize a path and strip the Windows `\\?\` verbatim prefix if present
 /// (which `std::fs::canonicalize` always emits on Windows).
 fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
@@ -258,6 +318,22 @@ mod tests {
             is_path_allowed(&key, &cfg).unwrap_err(),
             DenyReason::DeniedPattern(_)
         ));
+    }
+
+    #[test]
+    fn lexical_check_rejects_deleted_secret_paths_and_traversal() {
+        assert!(is_relative_path_denied(Path::new("config/.env")).is_err());
+        assert!(is_relative_path_denied(Path::new("../outside.txt")).is_err());
+        assert!(is_relative_path_denied(Path::new("src/main.rs")).is_ok());
+    }
+
+    #[test]
+    fn new_paths_require_an_allowed_parent_and_safe_name() {
+        let dir = tempdir().unwrap();
+        let cfg = AllowlistConfig::from_roots([dir.path()]);
+        let path = resolve_new_path_allowed(&dir.path().join("new.txt"), &cfg).unwrap();
+        assert!(path.ends_with("new.txt"));
+        assert!(resolve_new_path_allowed(&dir.path().join(".env"), &cfg).is_err());
     }
 
     #[test]
