@@ -11,8 +11,7 @@ use windows::{
     Win32::{
         Foundation::{LocalFree, HLOCAL},
         Security::Cryptography::{
-            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
-            CRYPT_INTEGER_BLOB,
+            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         },
     },
 };
@@ -463,7 +462,11 @@ fn validate_run_record(record: &RunRecord) -> Result<()> {
         }
         match result.status.as_str() {
             "success" if result.error.is_none() => {}
-            "error" if result.error.as_deref().is_some_and(|value| !value.is_empty()) => {}
+            "error"
+                if result
+                    .error
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty()) => {}
             "success" => bail!(
                 "run_id {} success result {} unexpectedly contains an error",
                 record.run_id,
@@ -498,10 +501,7 @@ fn validate_run_record(record: &RunRecord) -> Result<()> {
         }
         "completed_with_errors" => {
             if record.results.len() != record.steps.len()
-                || !record
-                    .results
-                    .iter()
-                    .any(|result| result.status == "error")
+                || !record.results.iter().any(|result| result.status == "error")
             {
                 bail!(
                     "completed_with_errors run_id {} must contain all step results and at least one error",
@@ -509,12 +509,7 @@ fn validate_run_record(record: &RunRecord) -> Result<()> {
                 );
             }
         }
-        "failed"
-            if !record
-                .results
-                .iter()
-                .any(|result| result.status == "error") =>
-        {
+        "failed" if !record.results.iter().any(|result| result.status == "error") => {
             bail!("failed run_id {} has no failed step result", record.run_id);
         }
         _ => {}
@@ -535,9 +530,7 @@ fn validate_step_id(step_id: &str) -> Result<()> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        bail!(
-            "step ids may contain only letters, numbers, '-' or '_' (maximum 96 characters)"
-        );
+        bail!("step ids may contain only letters, numbers, '-' or '_' (maximum 96 characters)");
     }
     Ok(())
 }
@@ -750,9 +743,7 @@ pub fn validate_run_id(run_id: &str) -> Result<()> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        bail!(
-            "run_id must contain only letters, numbers, '-' or '_' (maximum 96 characters)"
-        );
+        bail!("run_id must contain only letters, numbers, '-' or '_' (maximum 96 characters)");
     }
     Ok(())
 }
@@ -792,10 +783,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = RunStore::new(temp.path()).expect("store");
         store.save(&record("run-test", "test")).expect("save");
-        assert_eq!(
-            store.load("run-test").expect("load").unwrap().goal,
-            "test"
-        );
+        assert_eq!(store.load("run-test").expect("load").unwrap().goal, "test");
     }
 
     #[test]
@@ -804,10 +792,7 @@ mod tests {
         let store = RunStore::new(temp.path()).expect("store");
         store.save(&record("run-test", "before")).expect("first");
         store.save(&record("run-test", "after")).expect("second");
-        assert_eq!(
-            store.load("run-test").expect("load").unwrap().goal,
-            "after"
-        );
+        assert_eq!(store.load("run-test").expect("load").unwrap().goal, "after");
         assert!(!store.backup_path("run-test").exists());
     }
 
@@ -815,9 +800,7 @@ mod tests {
     fn interrupted_replace_recovers_last_complete_record() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = RunStore::new(temp.path()).expect("store");
-        store
-            .save(&record("run-test", "durable"))
-            .expect("save");
+        store.save(&record("run-test", "durable")).expect("save");
         std::fs::rename(store.path("run-test"), store.backup_path("run-test"))
             .expect("simulate interrupted replace");
         assert_eq!(

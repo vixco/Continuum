@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use continuum_gateway::{McpSpec, ToolDef, ToolExecutor};
-use continuum_memory::{
-    NodeStatus, NodeSummary, NodeType, NoteDraft, Sensitivity, Source, Vault,
-};
+use continuum_memory::{NodeStatus, NodeSummary, NodeType, NoteDraft, Sensitivity, Source, Vault};
 use serde_json::json;
 
 const SEARCH_LIMIT_MAX: u64 = 25;
@@ -140,7 +138,10 @@ impl VaultToolExecutor {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
 
-        if let Some(id) = self.find_existing_note_id(title, project.as_deref()).await? {
+        if let Some(id) = self
+            .find_existing_note_id(title, project.as_deref())
+            .await?
+        {
             let mut note = self
                 .vault
                 .get(&id)
