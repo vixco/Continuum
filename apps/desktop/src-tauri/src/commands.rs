@@ -15,8 +15,7 @@ use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
 use continuum_core::health::{self, repair::RepairInput};
 use continuum_core::logs::{LogEntry, LogFilter};
 use continuum_core::permissions::{
-    GrantScope, PermissionGateway, PermissionGrant, PermissionPolicyEntry, PermissionRequest,
-    PermissionTier,
+    GrantScope, PermissionGateway, PermissionGrant, PermissionRequest,
 };
 use continuum_core::privacy_pause::{self, ObservationPausePreset, ObservationPauseStatus};
 use continuum_core::skills::{self, SkillFrontmatter, SkillLoader};
@@ -1612,28 +1611,6 @@ fn permission_gateway(app: &AppState) -> PermissionGateway {
         "desktop",
         include_str!("../../../../config/default-permissions.toml"),
     )
-}
-
-/// Return the effective per-tool permission policy.
-#[tauri::command]
-pub async fn list_tool_permissions(
-    app: State<'_, Arc<AppState>>,
-) -> Result<Vec<PermissionPolicyEntry>, String> {
-    permission_gateway(&app)
-        .list_policy()
-        .map_err(|error| error.to_string())
-}
-
-/// Persist one per-tool permission override.
-#[tauri::command]
-pub async fn set_tool_permission(
-    app: State<'_, Arc<AppState>>,
-    action: String,
-    tier: PermissionTier,
-) -> Result<(), String> {
-    permission_gateway(&app)
-        .set_policy(&action, tier)
-        .map_err(|error| error.to_string())
 }
 
 /// Return permission requests waiting for a user decision.

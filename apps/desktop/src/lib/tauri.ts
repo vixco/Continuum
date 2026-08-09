@@ -23,9 +23,7 @@ import type {
   McpServerRegistration,
   McpTool,
   PermissionGrant,
-  PermissionPolicyEntry,
   PermissionRequest,
-  PermissionTier,
   MemoryEvent,
   MemoryEventPayload,
   MemoryEventRange,
@@ -346,10 +344,6 @@ export const continuum = {
     invoke<ContinuumConfig>("toggle_skill", { name, enabled }),
   installSkillFromUrl: (url: string) => invoke<Skill>("install_skill_from_url", { url }),
   listMcpTools: () => invoke<McpTool[]>("list_mcp_tools", undefined, []),
-  listToolPermissions: () =>
-    invoke<PermissionPolicyEntry[]>("list_tool_permissions", undefined, []),
-  setToolPermission: (action: string, tier: PermissionTier) =>
-    invoke<void>("set_tool_permission", { action, tier }),
   listPermissionRequests: () =>
     invoke<PermissionRequest[]>("list_permission_requests", undefined, []),
   listPermissionGrants: () => invoke<PermissionGrant[]>("list_permission_grants", undefined, []),

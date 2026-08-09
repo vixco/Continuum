@@ -1,54 +1,74 @@
 # Permissions
 
-Continuum's permission model is about **filesystem access** and **tool access**. Config lives at `~/.continuum/config/default-permissions.toml`.
-
-## Filesystem allowlist
-
-```toml
-[fs]
-extra_paths = [
-  "C:\\Users\\you\\projects",   # read-write
-]
-
-read_only_paths = [
-  "C:\\Users\\you"              # read-only
-]
-```
-
-Plus a hardcoded deny list Continuum never touches:
-
-- `.ssh`, `.aws`, `.gnupg`, `.docker` directories
-- Browser profile directories (`User Data`, `Profiles`)
-- `node_modules`, `target` (too noisy)
-- Anywhere matching `*.pem`, `*.key`, `id_rsa*`, `.env*`, `*.kdbx`
+Continuum enforces tool permissions in the native MCP process **before a tool
+body runs**. The model prompt is not the security boundary.
 
 ## Tool tiers
 
-Each MCP tool has a default permission tier:
+| Tier | Behavior |
+|---|---|
+| `auto` | Runs without a confirmation. Use only for low-risk, read-only tools. |
+| `session-approved` | Opens one native approval per MCP process/session, then remembers that approval for the same tool. |
+| `always-confirm` | Opens a native approval for every call. |
+| `blocked` | Cannot run through the ordinary MCP process. |
 
-| Tier | Tools | Default |
-|---|---|---|
-| `read` | `fs_read_file`, `fs_list_dir`, `memory_query_*`, `memory_get_fact`, `system_*`, `web_fetch` | allow |
-| `write` | `memory_set_fact` | allow within allowlist |
-| `notify` | `system_notification` | allow, rate-limited |
-| `worker` | `workers_spawn_worker`, `workers_*` | allow, queue-gated |
-| `repair` | `repair_*` | allow only from repair agent context |
+Unknown tools fail closed as `always-confirm` until they are classified in
+`config/default-permissions.toml`.
 
-Override per-tool in `default-permissions.toml`:
+Bundled defaults are compiled into the desktop and MCP binary. User overrides
+are written atomically to:
 
-```toml
-[tools]
-"mcp__continuum__system_notification" = "deny"   # no toasts, ever
+```text
+<data-dir>/permissions.toml
 ```
 
-## Confirmation prompts
+The Tools page reads the effective policy and persists dropdown changes to that
+file. A newly spawned MCP process uses the updated policy on the next agent run.
 
-For destructive or irreversible actions (file writes outside allowlist, worker spawns with broad tool allowlists, rolling back config), the orchestrator is instructed to ask the user via voice / notification before proceeding. This is prompt-level behavior, not enforced at the tool layer, so treat it as a gentle default — not a guarantee.
+## Important defaults
 
-## Worker allowlist
+- Ordinary context and allowlisted filesystem reads are `auto`.
+- Direct vault search/get requires session approval; sensitive notes are still
+  withheld by the egress gate after approval.
+- Clipboard reads, memory wipes, permanent vault deletes and worker spawns use
+  `always-confirm`.
+- Repair mutations remain `blocked` outside the dedicated, short-lived Health
+  capability flow.
 
-Each worker spec includes an `allowed_tools` CSV. If blank, the worker inherits the narrow default: `Read,Grep,Glob,Edit,fs_read_file,fs_list_dir`. The orchestrator can widen per task.
+## Filesystem allowlist
 
-## Audit trail
+Filesystem reads must remain inside one of the canonicalized roots Continuum
+knows about. A hardcoded deny list applies even inside an allowed root:
 
-Every MCP tool call writes an episodic event with kind `tool_call`, sanitised args (passwords, secrets, tokens redacted; strings >500 chars truncated), and a ≤200-char result summary. Browse it in Memory tab → Episodic.
+- credential directories such as `.ssh`, `.aws`, `.gnupg` and browser profiles;
+- private-key and keystore files;
+- `.env` variants;
+- large generated trees such as `node_modules` and `target`.
+
+Symlinks are canonicalized before the root and deny-list checks.
+
+## Native approvals
+
+Approvals are shown outside the model transcript and default to **Deny**.
+Headless sessions cannot satisfy an approval and fail closed. Approval summaries
+minimize message bodies, credentials and other payload-bearing fields before
+showing them.
+
+## Cloud-egress boundary
+
+Permission to read locally is not automatically permission to send content to a
+cloud model. Continuum applies a second egress gate to MCP results:
+
+- vault notes marked `sensitive` are withheld;
+- sensitive rows are removed from vault search results;
+- secret-looking response fields are redacted;
+- audit events for memory, filesystem, clipboard, worker and web tools are
+  stored as `local_only` and carry minimized argument shapes rather than full
+  bodies, prompts, paths or URL queries.
+
+## Agent OS
+
+Agent OS uses an additional capability policy for computer and connected-app
+actions. Public mutations must run inside `agent_run_plan` with a stable
+`run_id` and typed postcondition. Destructive connected-app actions default to
+deny, and an unknown dispatched mutation is never replayed automatically.
