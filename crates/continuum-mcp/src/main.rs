@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use continuum_mcp::ContinuumMcpServer;
+use continuum_mcp::{ContinuumMcpServer, PermissionedMcpServer};
 use rmcp::{transport::stdio, ServiceExt};
 use tracing_subscriber::EnvFilter;
 
@@ -52,10 +52,11 @@ fn main() -> Result<()> {
             component = "main",
             data_dir = %data_dir.display(),
             version = env!("CARGO_PKG_VERSION"),
-            "continuum-mcp starting"
+            "continuum-mcp starting with enforced permissions"
         );
 
-        let server = ContinuumMcpServer::new(data_dir).await?;
+        let server = ContinuumMcpServer::new(data_dir.clone()).await?;
+        let server = PermissionedMcpServer::new(server, &data_dir)?;
         let service = server.serve(stdio()).await.inspect_err(|e| {
             tracing::error!(layer = "mcp", component = "main", error = %e, "serve error");
         })?;
