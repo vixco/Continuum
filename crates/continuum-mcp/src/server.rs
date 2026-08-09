@@ -964,15 +964,11 @@ impl ContinuumMcpServer {
         Parameters(req): Parameters<MemoryVaultGetRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("memory_vault_get", &req, || async {
-            tracing::debug!("memory_vault_get opening vault");
             let vault = self.vault().await?;
-            tracing::debug!("memory_vault_get reading note");
-            let note = vault
+            vault
                 .get(&req.id)
                 .await
-                .map_err(|e| memtool::vault_err_to_mcp(&e))?;
-            tracing::debug!("memory_vault_get finished reading note");
-            Ok(note)
+                .map_err(|e| memtool::vault_err_to_mcp(&e))
         })
         .await
     }

@@ -34,55 +34,49 @@ pub(crate) fn record_tool_call(
     let summary_trunc = truncate(result_summary, 160);
     let sensitivity = audit_sensitivity(&tool);
 
-    // The embedding backend performs synchronous ONNX work during both model
-    // initialization and insertion. Poll the complete audit future from the
-    // blocking pool so that work can never starve the MCP request workers.
-    let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        runtime.block_on(async move {
-            let content = format!("tool={tool} args={args_str} result={summary_trunc}");
-            let event = EpisodicEvent {
-                id: Uuid::new_v4().to_string(),
-                ts: Utc::now(),
-                kind: EventKind::ToolCall,
-                summary: content,
-                importance: 0.3,
-                tags: vec!["tool_call".to_string(), tool.clone()],
-                source_frame_id: None,
-                project: None,
-                sensitivity,
-            };
+    tokio::spawn(async move {
+        let content = format!("tool={tool} args={args_str} result={summary_trunc}");
+        let event = EpisodicEvent {
+            id: Uuid::new_v4().to_string(),
+            ts: Utc::now(),
+            kind: EventKind::ToolCall,
+            summary: content,
+            importance: 0.3,
+            tags: vec!["tool_call".to_string(), tool.clone()],
+            source_frame_id: None,
+            project: None,
+            sensitivity,
+        };
 
-            match server.episodic().await {
-                Ok(mut episodic) => {
-                    if let Err(error) = episodic.insert_event(&event).await {
-                        warn!(
-                            layer = "mcp",
-                            component = "audit",
-                            tool = %tool,
-                            error = %error,
-                            "Failed to persist tool-call audit event"
-                        );
-                    } else {
-                        debug!(
-                            layer = "mcp",
-                            component = "audit",
-                            tool = %tool,
-                            "Tool-call audit persisted with minimized arguments"
-                        );
-                    }
-                }
-                Err(error) => {
+        match server.episodic().await {
+            Ok(mut episodic) => {
+                if let Err(error) = episodic.insert_event(&event).await {
                     warn!(
                         layer = "mcp",
                         component = "audit",
                         tool = %tool,
                         error = %error,
-                        "Episodic store unavailable — audit skipped"
+                        "Failed to persist tool-call audit event"
+                    );
+                } else {
+                    debug!(
+                        layer = "mcp",
+                        component = "audit",
+                        tool = %tool,
+                        "Tool-call audit persisted with minimized arguments"
                     );
                 }
             }
-        });
+            Err(error) => {
+                warn!(
+                    layer = "mcp",
+                    component = "audit",
+                    tool = %tool,
+                    error = %error,
+                    "Episodic store unavailable — audit skipped"
+                );
+            }
+        }
     });
 }
 

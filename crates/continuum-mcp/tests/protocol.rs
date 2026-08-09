@@ -368,6 +368,8 @@ async fn vault_tools_round_trip() {
     std::fs::write(
         data_dir.path().join("permissions.toml"),
         r#"[memory]
+memory_vault_search = "auto"
+memory_vault_get = "auto"
 memory_vault_save = "auto"
 memory_vault_resolve = "auto"
 memory_vault_delete = "auto"
@@ -396,13 +398,10 @@ memory_wipe_all = "auto"
 
     let mut child = Command::new(&bin)
         .env("CONTINUUM_DATA_DIR", data_dir.path())
-        .env(
-            "RUST_LOG",
-            "warn,continuum_mcp::permission_broker=debug,continuum_mcp::server=debug,continuum_memory::vault=debug",
-        )
+        .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn continuum-mcp");
 
