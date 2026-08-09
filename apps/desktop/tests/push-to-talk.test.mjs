@@ -4,18 +4,19 @@ import test from "node:test";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("live voice makes the native runtime ready before arming a turn", async () => {
+test("live voice waits for the automatically managed runtime before arming a turn", async () => {
   const source = await read("src/components/PushToTalkButton.tsx");
 
   const runtimeStatus = source.indexOf("continuum.getRuntimeStatus()");
-  const startRuntime = source.indexOf("continuum.startRuntime()");
+  const waitForRuntime = source.indexOf("waitForRuntime()");
   const voiceReady = source.indexOf("waitForVoiceReady()");
   const talkNow = source.indexOf("continuum.talkNow()");
 
   assert.ok(runtimeStatus >= 0, "voice must check whether the runtime is alive");
-  assert.ok(startRuntime > runtimeStatus, "voice must start an offline runtime");
-  assert.ok(voiceReady > startRuntime, "voice must wait for native voice components");
+  assert.ok(waitForRuntime > runtimeStatus, "voice must wait for automatic startup");
+  assert.ok(voiceReady > waitForRuntime, "voice must wait for native voice components");
   assert.ok(talkNow > voiceReady, "voice must arm only after runtime + voice readiness");
+  assert.doesNotMatch(source, /continuum\.startRuntime\(\)/);
   assert.match(source, /state\.system\.stt_loaded/);
   assert.match(source, /state\.system\.tts_loaded/);
   assert.match(source, /state\.system\.orchestrator_ready/);

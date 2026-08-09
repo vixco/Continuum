@@ -6,6 +6,13 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Automatic runtime startup and model storage settings**: the desktop now
+  starts the packaged runtime after onboarding, keeps a real loading state
+  until a fresh heartbeat arrives, and surfaces startup failures without a
+  manual Start runtime button. Settings can select the shared local-model
+  directory and run the bundled model downloader; model paths are persisted
+  together for Whisper, vision, triage, and TTS.
+
 - **Timed privacy power control**: the desktop title bar now has a circular
   power button for pausing all AI observation for 15 minutes, 1 hour, 4 hours,
   until tomorrow at 08:00, or until manually resumed. The control turns red

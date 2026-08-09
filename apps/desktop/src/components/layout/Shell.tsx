@@ -14,7 +14,6 @@ import {
   Mic,
   Minus,
   Power,
-  Play,
   RefreshCw,
   Search,
   Settings as SettingsIcon,
@@ -329,7 +328,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
 
   const mode: VoiceMode = voice.muted ? "muted" : orchestrator.active ? "thinking" : voice.mode;
 
-  const { runtime, startRuntime } = useRuntime();
+  const runtime = useRuntime();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -379,24 +378,19 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
           </kbd>
         </button>
 
-        {!runtime.alive && (
-          <button
-            type="button"
-            onClick={startRuntime}
-            disabled={runtime.starting}
-            className="press tb-runtime offline"
-            title="Start the Continuum runtime"
+        {!runtime.alive && runtime.starting && (
+          <span className="tb-runtime offline" title="Continuum is starting automatically">
+            <RefreshCw size={11} className="animate-spin" /> Starting runtime
+          </span>
+        )}
+        {!runtime.alive && !runtime.starting && (
+          <span
+            className="tb-runtime offline"
+            title={runtime.error ?? "The Continuum runtime is not publishing a heartbeat."}
+            role="status"
           >
-            {runtime.starting ? (
-              <>
-                <RefreshCw size={11} className="animate-spin" /> Starting
-              </>
-            ) : (
-              <>
-                <Play size={11} /> Start runtime
-              </>
-            )}
-          </button>
+            Runtime unavailable
+          </span>
         )}
 
         <ObservationPowerButton />
@@ -435,38 +429,35 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
 }
 
 function useRuntime() {
-  const [runtime, setRuntime] = useState<RuntimeStatus & { starting: boolean }>({
+  const [runtime, setRuntime] = useState<RuntimeStatus>({
     alive: false,
+    starting: true,
+    error: null,
     state_path: "",
     binary_path: null,
-    starting: false,
   });
 
   const refresh = useCallback(async () => {
     try {
       const status = await continuum.getRuntimeStatus();
-      setRuntime({ ...status, starting: false });
+      setRuntime(status);
     } catch {
-      setRuntime((r) => ({ ...r, alive: false, starting: false }));
+      setRuntime((runtime) => ({
+        ...runtime,
+        alive: false,
+        starting: false,
+        error: "Could not read the runtime startup status.",
+      }));
     }
   }, []);
 
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), 3000);
+    const t = setInterval(() => void refresh(), runtime.starting ? 500 : 3000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, runtime.starting]);
 
-  const startRuntime = useCallback(async () => {
-    setRuntime((r) => ({ ...r, starting: true }));
-    try {
-      await continuum.startRuntime();
-    } finally {
-      setTimeout(() => void refresh(), 500);
-    }
-  }, [refresh]);
-
-  return { runtime, startRuntime, refresh };
+  return runtime;
 }
 
 const PAUSE_OPTIONS: Array<{ preset: ObservationPausePreset; label: string; detail: string }> = [

@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { clsx } from "clsx";
-import { Check, RefreshCw, RotateCcw } from "lucide-react";
+import { Check, Download, FolderOpen, RefreshCw, RotateCcw } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { IntegrationsPanel } from "@/components/continuum/IntegrationsPanel";
 import { ResourcePanel } from "@/components/continuum/ResourcePanel";
@@ -10,7 +11,7 @@ import { Button, Card, Modal } from "@/components/ui/primitives";
 import { useStore } from "@/lib/store";
 import { useTheme, type Theme } from "@/lib/theme";
 import { continuum } from "@/lib/tauri";
-import type { UpdateInfo } from "@/lib/tauri";
+import type { ModelsDirectoryInfo, UpdateInfo } from "@/lib/tauri";
 
 interface UpdateState {
   phase: string;
@@ -55,6 +56,8 @@ export function SettingsPage({
       <IntegrationsPanel />
 
       <ResourcePanel />
+
+      <ModelDirectoryCard />
 
       <Card
         title="Continuum updates"
@@ -181,6 +184,113 @@ export function SettingsPage({
         </p>
       </Modal>
     </div>
+  );
+}
+
+function ModelDirectoryCard() {
+  const setConfig = useStore((state) => state.setConfig);
+  const [info, setInfo] = useState<ModelsDirectoryInfo | null>(null);
+  const [busy, setBusy] = useState<"saving" | "downloading" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    const next = await continuum.getModelsDirectory();
+    setInfo(next);
+  };
+
+  useEffect(() => {
+    void refresh().catch((reason: unknown) => setError(String(reason)));
+  }, []);
+
+  const chooseDirectory = async () => {
+    setError(null);
+    setMessage(null);
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: info?.path || undefined,
+      title: "Choose Continuum models directory",
+    });
+    if (typeof selected !== "string") return;
+
+    setBusy("saving");
+    try {
+      const result = await continuum.updateModelsDirectory(selected);
+      setConfig(result.config);
+      setInfo(result.info);
+      setMessage(
+        result.restart_required
+          ? "Saved. Continuum will use this directory on its next automatic start."
+          : "Saved. Continuum will use this directory when the runtime starts."
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadModels = async () => {
+    if (!info?.path) return;
+    setBusy("downloading");
+    setError(null);
+    setMessage(null);
+    try {
+      await continuum.downloadModels(info.path);
+      await refresh();
+      setMessage("Models downloaded. They load on the next automatic runtime start.");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card
+      title="Local model storage"
+      subtitle="Choose where Continuum reads and downloads Whisper, vision, triage, and TTS models."
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            readOnly
+            value={info?.path ?? "Loading…"}
+            aria-label="Models directory"
+            className="min-w-0 flex-1 rounded-md border border-bg-border bg-bg-elevated px-3 py-2 font-mono text-xs text-ink"
+          />
+          <Button size="sm" variant="default" onClick={chooseDirectory} disabled={busy !== null}>
+            {busy === "saving" ? (
+              <RefreshCw size={13} className="animate-spin" />
+            ) : (
+              <FolderOpen size={13} />
+            )}
+            Choose directory
+          </Button>
+          <Button size="sm" variant="primary" onClick={downloadModels} disabled={busy !== null}>
+            {busy === "downloading" ? (
+              <RefreshCw size={13} className="animate-spin" />
+            ) : (
+              <Download size={13} />
+            )}
+            {busy === "downloading" ? "Downloading…" : "Download missing models"}
+          </Button>
+        </div>
+        {info && (
+          <p className={clsx("text-xs", info.whisper_present ? "text-green-300" : "text-red-300")}>
+            Whisper: {info.whisper_present ? "ready" : `missing at ${info.whisper_model_path}`}
+          </p>
+        )}
+        {message && <p className="text-xs text-amber-200">{message}</p>}
+        {error && (
+          <p className="text-xs text-red-300" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+    </Card>
   );
 }
 

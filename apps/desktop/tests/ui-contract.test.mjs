@@ -34,6 +34,20 @@ test("shell keeps explicit navigation and window-control accessibility labels", 
   assert.match(shell, /aria-label="Close"/);
 });
 
+test("runtime startup is automatic and Settings owns the model directory", async () => {
+  const shell = await read("src/components/layout/Shell.tsx");
+  const settings = await read("src/components/layout/SettingsPage.tsx");
+  const tauriMain = await read("src-tauri/src/main.rs");
+
+  assert.doesNotMatch(shell, /Start runtime/);
+  assert.match(shell, /Starting runtime/);
+  assert.match(tauriMain, /spawn_automatic_runtime_start/);
+  assert.match(settings, /Choose directory/);
+  assert.match(settings, /Download missing models/);
+  assert.match(settings, /getModelsDirectory/);
+  assert.match(settings, /updateModelsDirectory/);
+});
+
 test("chat remains virtualized for long agent transcripts", async () => {
   const list = await read("src/components/chat/MessageList.tsx");
   assert.match(list, /react-virtuoso/);

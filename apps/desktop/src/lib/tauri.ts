@@ -363,10 +363,26 @@ export const continuum = {
   getRuntimeStatus: () =>
     invoke<RuntimeStatus>("get_runtime_status", undefined, {
       alive: false,
+      starting: false,
+      error: null,
       state_path: "",
       binary_path: null,
     }),
-  startRuntime: () => invoke<void>("start_runtime"),
+  getModelsDirectory: () =>
+    invoke<ModelsDirectoryInfo>("get_models_directory", undefined, {
+      path: "",
+      whisper_model_path: "",
+      whisper_present: false,
+    }),
+  updateModelsDirectory: (modelsDir: string) =>
+    invoke<ModelsDirectoryUpdate>("update_models_directory", { modelsDir }),
+  downloadModels: (modelsDir: string) =>
+    invoke<void>("download_model", {
+      name: "__all__",
+      url: "",
+      modelsDir,
+      qwenUrl: null,
+    }),
   isOnboardingComplete: () => invoke<boolean>("is_onboarding_complete", undefined, true),
   resetOnboarding: () => invoke<boolean>("reset_onboarding", undefined, false),
   catalogList: () => invoke<CatalogEntry[]>("catalog_list", undefined, []),
@@ -410,8 +426,22 @@ export const continuum = {
 
 export interface RuntimeStatus {
   alive: boolean;
+  starting: boolean;
+  error: string | null;
   state_path: string;
   binary_path: string | null;
+}
+
+export interface ModelsDirectoryInfo {
+  path: string;
+  whisper_model_path: string;
+  whisper_present: boolean;
+}
+
+export interface ModelsDirectoryUpdate {
+  config: ContinuumConfig;
+  info: ModelsDirectoryInfo;
+  restart_required: boolean;
 }
 
 export async function subscribeState(handler: (s: ContinuumState) => void) {

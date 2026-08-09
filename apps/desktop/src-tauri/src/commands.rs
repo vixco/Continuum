@@ -4,7 +4,8 @@
 //! continuum-core handles directly. Long-running work (memory search, repair
 //! agent) spawns into the tokio runtime the Tauri app owns.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State, Window};
@@ -819,10 +820,7 @@ async fn guarded_start_runtime(
                 .into(),
         );
     }
-    let working_dir = bin
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let working_dir = runtime_working_dir(&bin);
     let mut child = runtime_command(&bin, &working_dir)
         .spawn()
         .map_err(|error| format!("failed to start {}: {error}", bin.display()))?;
@@ -1489,8 +1487,54 @@ pub async fn dismiss_worker(app: State<'_, Arc<AppState>>, id: String) -> Result
 #[derive(Serialize)]
 pub struct RuntimeStatus {
     pub alive: bool,
+    pub starting: bool,
+    pub error: Option<String>,
     pub state_path: String,
     pub binary_path: Option<String>,
+}
+
+/// Shared state for the desktop-owned automatic runtime launch.
+pub struct RuntimeStartupState {
+    starting: AtomicBool,
+    error: Mutex<Option<String>>,
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl RuntimeStartupState {
+    /// Create an idle startup tracker.
+    pub fn new() -> Self {
+        Self {
+            starting: AtomicBool::new(false),
+            error: Mutex::new(None),
+            gate: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn begin(&self) {
+        self.starting.store(true, Ordering::Release);
+        if let Ok(mut error) = self.error.lock() {
+            *error = None;
+        }
+    }
+
+    fn finish(&self, result: &Result<String, String>) {
+        self.starting.store(false, Ordering::Release);
+        if let Ok(mut error) = self.error.lock() {
+            *error = result.as_ref().err().cloned();
+        }
+    }
+
+    fn snapshot(&self) -> (bool, Option<String>) {
+        let starting = self.starting.load(Ordering::Acquire);
+        let error = self.error.lock().ok().and_then(|error| error.clone());
+        (starting, error)
+    }
+}
+
+impl Default for RuntimeStartupState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[tauri::command]
@@ -1498,8 +1542,11 @@ pub async fn get_runtime_status(app: State<'_, Arc<AppState>>) -> Result<Runtime
     let dev_dir = app.runtime.dev_dir();
     let state_path = dev_dir.join("state.json");
     let alive = crate::components::runtime_alive(&dev_dir);
+    let (starting, error) = app.runtime_startup.snapshot();
     Ok(RuntimeStatus {
         alive,
+        starting: !alive && starting,
+        error: if alive { None } else { error },
         state_path: state_path.to_string_lossy().into_owned(),
         binary_path: locate_runtime_binary().map(|p| p.to_string_lossy().into_owned()),
     })
@@ -1516,21 +1563,45 @@ pub async fn pipe_health() -> Result<PipeHealth, String> {
     Ok(runtime_bridge::current_pipe_health())
 }
 
-#[tauri::command]
-pub async fn start_runtime() -> Result<(), String> {
-    let Some(bin) = locate_runtime_binary() else {
-        return Err(
-            "continuum runtime binary not found next to the desktop app — install may be incomplete"
-                .to_string(),
+/// Start the packaged runtime in the background and keep one authoritative
+/// startup state until a fresh heartbeat proves readiness.
+pub(crate) fn spawn_automatic_runtime_start(app: Arc<AppState>, app_handle: AppHandle) {
+    app.runtime_startup.begin();
+    tokio::spawn(async move {
+        let _guard = app.runtime_startup.gate.lock().await;
+        let cfg = app.runtime.config_snapshot();
+        let result = guarded_start_runtime(
+            &app.runtime.dev_dir(),
+            &continuum_core::config::continuum_backups_dir(),
+            cfg.health.backup_retention.max(1),
+            cfg.health.runtime_start_timeout_secs.clamp(10, 5 * 60),
+            &app_handle,
+        )
+        .await;
+
+        match &result {
+            Ok(detail) => tracing::info!(
+                layer = "desktop",
+                component = "runtime_startup",
+                %detail,
+                "Automatic runtime startup completed"
+            ),
+            Err(error) => tracing::error!(
+                layer = "desktop",
+                component = "runtime_startup",
+                %error,
+                "Automatic runtime startup failed"
+            ),
+        }
+        app.runtime_startup.finish(&result);
+        let _ = app_handle.emit(
+            "continuum:runtime_startup",
+            serde_json::json!({
+                "starting": false,
+                "error": result.as_ref().err(),
+            }),
         );
-    };
-    // Set cwd to the install dir so the runtime can find its sibling
-    // `prompts/`, `skills/` and `config/` folders via relative paths.
-    let working_dir = runtime_working_dir(&bin);
-    runtime_command(&bin, &working_dir)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("failed to spawn {}: {}", bin.display(), e))
+    });
 }
 
 pub(crate) fn bundled_binary_candidates(name: &str) -> Vec<std::path::PathBuf> {

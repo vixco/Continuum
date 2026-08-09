@@ -45,6 +45,8 @@ use continuum_core::runtime::ContinuumRuntime;
 pub struct AppState {
     pub runtime: ContinuumRuntime,
     pub health: continuum_core::health::HealthRegistry,
+    /// Tracks the desktop-owned automatic runtime launch across UI polls.
+    pub(crate) runtime_startup: commands::RuntimeStartupState,
     /// Serializes repair runs so two UI invocations cannot race mutations.
     pub(crate) repair_gate: Arc<tokio::sync::Mutex<()>>,
     /// One-time live preview required before a repair can start.
@@ -155,6 +157,7 @@ fn main() {
     let app_state = Arc::new(AppState {
         runtime: runtime.clone(),
         health: health.clone(),
+        runtime_startup: commands::RuntimeStartupState::new(),
         repair_gate: Arc::new(tokio::sync::Mutex::new(())),
         pending_repair: tokio::sync::Mutex::new(None),
     });
@@ -208,11 +211,12 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(app_state)
+        .manage(app_state.clone())
         .manage(chat_state)
         .manage(memory_state.clone())
         .invoke_handler(tauri::generate_handler![
@@ -265,7 +269,6 @@ fn main() {
             commands::dismiss_worker,
             commands::get_runtime_status,
             commands::pipe_health,
-            commands::start_runtime,
             commands::list_mcp_tools,
             commands::list_permission_requests,
             commands::list_permission_grants,
@@ -312,6 +315,8 @@ fn main() {
             onboarding::list_audio_input_devices,
             onboarding::list_audio_output_devices,
             onboarding::download_model,
+            onboarding::get_models_directory,
+            onboarding::update_models_directory,
             onboarding::run_diagnostics,
             onboarding::is_onboarding_complete,
             onboarding::complete_onboarding,
@@ -325,6 +330,9 @@ fn main() {
             runtime_bridge::spawn_ipc_listener(runtime_for_tauri.clone(), handle.clone());
             memory::spawn_watcher_bridge(handle.clone(), memory_state.clone());
             tray::init(app)?;
+            if onboarding::is_complete(&app_state) {
+                commands::spawn_automatic_runtime_start(app_state.clone(), handle);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -37,6 +37,7 @@
       "resources/bin": "bin",
       "../../../config": "config",
       "../../../prompts": "prompts",
+      "../../../scripts/download-models.ps1": "scripts/download-models.ps1",
       "../../../skills": "skills"
     },
     "icon": [

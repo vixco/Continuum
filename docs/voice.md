@@ -126,7 +126,8 @@ On top of the pipeline:
 ## Installing models
 
 Phase 5 requires Piper voices, the Piper Windows binary, espeak-ng-data,
-and a Whisper STT model. Run the bundled script once:
+and a Whisper STT model. Use **Settings → Local model storage** to select the
+directory and download missing models, or run the bundled script directly:
 
 ```powershell
 powershell scripts/download-models.ps1
@@ -141,7 +142,7 @@ prints a summary at the end. Files land at:
 | Piper EN voice | `~/.continuum-dev/models/tts/en_US-norman-medium.onnx` (+ `.json`) |
 | Piper NL voice | `~/.continuum-dev/models/tts/nl_NL-mls-medium.onnx` (+ `.json`) |
 | espeak-ng-data | `~/.continuum-dev/models/tts/espeak-ng-data/` |
-| Whisper small | `~/.continuum-dev/models/stt/whisper-small.bin` |
+| Whisper medium | `~/.continuum-dev/models/stt/whisper-medium.bin` |
 
 Both the Piper binary and espeak-ng-data come from the official Piper
 Windows release bundle (`piper_windows_amd64.zip`). That avoids the
