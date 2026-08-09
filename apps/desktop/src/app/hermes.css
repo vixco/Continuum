@@ -1,0 +1,320 @@
+/*
+ * Continuum Desktop — Hallmark × Hermes polish layer
+ *
+ * This file intentionally sits after globals.css. The existing design tokens
+ * remain the source of truth; these rules only refine macro-structure,
+ * density, hierarchy, and interaction feedback. The goal is the same visual
+ * discipline that makes great agent desktops feel native: flat over boxed,
+ * quiet chrome, hairline separation, transcript-first chat, and clear state.
+ */
+
+/* ---------- Window chrome ---------- */
+
+.app-window {
+  background: var(--color-paper);
+  border-color: var(--ui-stroke-tertiary);
+}
+
+.titlebar {
+  height: 44px;
+  flex-basis: 44px;
+  padding-inline: 8px 10px;
+  gap: 8px;
+  border-bottom-color: var(--ui-stroke-tertiary);
+  background: color-mix(in oklch, var(--color-paper) 82%, var(--color-paper-2));
+}
+
+.tb-brand {
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+
+.tb-mark {
+  width: 20px;
+  height: 20px;
+}
+
+.tb-mark img {
+  width: 16px;
+  height: 16px;
+  opacity: 0.94;
+}
+
+.tb-status {
+  min-height: 20px;
+  margin-left: 2px;
+  padding-left: 9px;
+  font-size: 10px;
+  letter-spacing: 0.015em;
+  border-left-color: var(--ui-stroke-tertiary);
+}
+
+.tb-actions {
+  gap: 2px;
+}
+
+.tb-actions > button:not(.win-btn),
+.tb-runtime {
+  min-height: 28px;
+  border-color: var(--ui-stroke-tertiary);
+  background: transparent;
+  box-shadow: none;
+}
+
+.tb-actions > button:not(.win-btn):hover,
+.tb-runtime:hover {
+  background: var(--color-paper-3);
+  border-color: var(--ui-stroke-secondary);
+}
+
+.win-btn {
+  width: 32px;
+  height: 28px;
+  border-radius: 5px;
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar {
+  width: 218px;
+  flex-basis: 218px;
+  gap: 18px;
+  padding: 17px 9px 11px;
+  border-right-color: var(--ui-stroke-tertiary);
+  background: color-mix(in oklch, var(--color-paper) 70%, var(--color-paper-2));
+}
+
+.nav-group {
+  gap: 2px;
+}
+
+.nav-group-label {
+  padding: 0 9px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--color-neutral);
+}
+
+.nav-item {
+  min-height: 34px;
+  gap: 9px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 520;
+  color: var(--color-muted);
+}
+
+.nav-item::before {
+  inset-block: 9px;
+  left: 1px;
+  width: 2px;
+}
+
+.nav-item:hover {
+  background: color-mix(in oklch, var(--color-paper-3) 72%, transparent);
+}
+
+.nav-item.is-active {
+  border: 0;
+  background: color-mix(in oklch, var(--color-accent) 9%, var(--color-paper-3));
+  color: var(--color-ink);
+  box-shadow: inset 0 0 0 1px var(--ui-stroke-quaternary);
+}
+
+.nav-item svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}
+
+.sidebar-foot {
+  gap: 4px;
+  padding-top: 8px;
+  border-top-color: var(--ui-stroke-tertiary);
+}
+
+/* ---------- Main surface ---------- */
+
+.main {
+  background: var(--color-paper);
+}
+
+.main-scroll {
+  padding: 30px 34px 52px;
+}
+
+.main-scroll > * {
+  max-width: 1360px;
+}
+
+/* Make dashboard panels feel like one workspace instead of floating cards. */
+.continuum-card,
+.liquid-panel {
+  border-color: var(--ui-stroke-tertiary) !important;
+  background: color-mix(in oklch, var(--color-paper-2) 78%, var(--color-paper)) !important;
+  box-shadow: inset 0 1px 0 var(--ui-stroke-quaternary), var(--shadow-card) !important;
+}
+
+.continuum-card:hover,
+.liquid-panel:hover {
+  border-color: var(--ui-stroke-secondary) !important;
+}
+
+/* Repeated nested panels are visually flattened. */
+.continuum-card .continuum-card,
+.liquid-panel .liquid-panel,
+.continuum-card .liquid-panel,
+.liquid-panel .continuum-card {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-color: var(--ui-stroke-quaternary) !important;
+}
+
+.update-banner {
+  margin-inline: 18px;
+  border-color: var(--ui-stroke-secondary);
+  background: color-mix(in oklch, var(--color-accent) 7%, var(--color-paper-2));
+}
+
+/* ---------- Chat: transcript is the primary surface ---------- */
+
+.app-window[data-active-tab="chat"] .sidebar {
+  background: color-mix(in oklch, var(--color-paper) 77%, var(--color-paper-2));
+}
+
+.app-window[data-active-tab="chat"] .main,
+.app-window[data-active-tab="chat"] .main-scroll,
+.app-window[data-active-tab="chat"] .main-scroll > * {
+  background: var(--color-paper);
+}
+
+/* Conversation rail: intentionally quieter than the transcript. */
+.app-window[data-active-tab="chat"] .main-scroll.is-flush aside {
+  border-right-color: var(--ui-stroke-tertiary) !important;
+  background: color-mix(in oklch, var(--color-paper) 84%, var(--color-paper-2)) !important;
+}
+
+/* Remove the hard horizontal band around the composer and let the input float. */
+.app-window[data-active-tab="chat"] .main-scroll.is-flush > div > div.flex.min-h-0.min-w-0.flex-1.flex-col > div.border-t {
+  border-top-color: transparent !important;
+  background: linear-gradient(to bottom, transparent, var(--color-paper) 22%) !important;
+  padding: 10px 16px 8px !important;
+}
+
+.app-window[data-active-tab="chat"] textarea {
+  caret-color: var(--color-accent);
+}
+
+.app-window[data-active-tab="chat"] textarea::placeholder {
+  color: color-mix(in oklch, var(--color-muted) 70%, transparent);
+}
+
+/* Composer shell: stronger focus than resting chrome, but no loud glow. */
+.app-window[data-active-tab="chat"] textarea:focus-visible {
+  outline: none;
+}
+
+.app-window[data-active-tab="chat"] textarea:focus-visible ~ button,
+.app-window[data-active-tab="chat"] textarea:focus-visible + button {
+  color: var(--color-ink-2);
+}
+
+/* Wider reading measure feels closer to a native agent transcript while
+   keeping long prose readable. */
+.app-window[data-active-tab="chat"] .max-w-3xl {
+  max-width: 52rem;
+}
+
+/* ---------- Command surface ---------- */
+
+.command-scrim {
+  padding-top: 13vh;
+  background: color-mix(in oklch, var(--color-paper) 80%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.command-palette {
+  width: min(620px, calc(100vw - 48px));
+  border-color: var(--stroke-nous);
+  background: color-mix(in oklch, var(--color-paper-3) 93%, var(--color-paper));
+  box-shadow: var(--shadow-nous);
+}
+
+/* ---------- Controls ---------- */
+
+button,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+.continuum-select,
+input[type="text"],
+input[type="search"],
+textarea {
+  border-color: var(--ui-stroke-tertiary);
+}
+
+.continuum-select:hover,
+input[type="text"]:hover,
+input[type="search"]:hover {
+  border-color: var(--ui-stroke-secondary);
+}
+
+/* ---------- Overlays ---------- */
+
+.continuum-modal {
+  border-color: var(--stroke-nous) !important;
+  background: var(--color-paper-3) !important;
+  box-shadow: var(--shadow-modal) !important;
+}
+
+/* ---------- Motion / accessibility ---------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  .nav-item.is-active svg,
+  .tb-status > :first-child {
+    animation: continuum-hermes-settle 180ms var(--ease-out);
+  }
+}
+
+@keyframes continuum-hermes-settle {
+  from {
+    opacity: 0.72;
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1120px) {
+  .sidebar {
+    width: 196px;
+    flex-basis: 196px;
+  }
+
+  .main-scroll {
+    padding-inline: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main-scroll > *,
+  .command-scrim,
+  .nav-item,
+  .press {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "policies": {
+    "agent.status": "allow",
+    "agent.policy.read": "allow",
+    "agent.policy.write": "ask",
+    "agent.evidence.read": "allow",
+    "agent.plan": "ask",
+    "computer.observe": "allow",
+    "computer.accessibility": "allow",
+    "computer.screenshot": "ask",
+    "computer.window": "ask",
+    "computer.input": "ask",
+    "computer.navigation": "ask",
+    "composio.read": "allow",
+    "composio.connect": "ask",
+    "composio.write": "ask",
+    "composio.destructive": "deny"
+  },
+  "native_approval_dialogs": true,
+  "approval_timeout_secs": 90,
+  "max_plan_steps": 40,
+  "verify_after_mutation": true
+}

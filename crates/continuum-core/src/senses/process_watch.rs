@@ -497,8 +497,10 @@ mod tests {
     #[tokio::test]
     async fn master_pause_prevents_process_polling_and_clears_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ProcessWatcherConfig::default();
-        config.enabled = true;
+        let config = ProcessWatcherConfig {
+            enabled: true,
+            ..ProcessWatcherConfig::default()
+        };
         let toggles = ToggleControl::default();
         toggles.set(ToggleName::PauseAll, true);
         let watcher =
