@@ -412,23 +412,3 @@ jobs:
       - name: Build docs site
         run: pnpm build
         working-directory: apps/docs
-
-  release:
-    name: Publish cross-platform release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs:
-      - fmt
-      - release-contract
-      - clippy-light
-      - clippy-full
-      - full-test
-      - build-desktop
-      - build-desktop-macos
-      - build-desktop-macos-intel
-      - docs-site
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release.yml
-    with:
-      release_sha: ${{ github.sha }}
-    secrets: inherit
