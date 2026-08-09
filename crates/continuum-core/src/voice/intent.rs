@@ -1,9 +1,20 @@
-//! # Voice intent-file protocol
+//! # Continuum voice intent-file protocol
 //!
 //! The dashboard process and the daemon process are separate, so dashboard
-//! commands that influence live voice behavior travel through the filesystem.
-//! The protocol supports one-shot push-to-talk plus a persistent Chat voice
-//! session and native TTS playback requests.
+//! commands that need to influence live daemon behavior (like push-to-talk)
+//! travel through the filesystem — the same pattern [`workers::intent`] uses
+//! for MCP→runtime spawn/cancel calls.
+//!
+//! ## Directory layout
+//!
+//! ```text
+//! ~/.continuum-dev/
+//! └── voice-intents/                ← dashboard writes, daemon drains on each tick
+//!     ├── 20260416T123456789-talk_now.json
+//!     └── ...
+//! ```
+//!
+//! The directory is created on demand by [`ensure_intents_dir`].
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,65 +27,44 @@ use serde::{Deserialize, Serialize};
 pub const VOICE_INTENTS_SUBDIR: &str = "voice-intents";
 
 /// Intents older than this many milliseconds are silently dropped on drain.
+/// Self-healing for crashes that leave stale files behind: a stale `talk_now`
+/// firing on next launch would be surprising.
 const STALE_INTENT_TTL_MS: u64 = 30_000;
 
 /// Top-level envelope for a voice intent. One file = one intent.
+///
+/// Future variants (`Cancel`, `Mute`) slot in without touching the on-disk
+/// schema thanks to serde's tagged enum representation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VoiceIntent {
-    /// Open a one-shot listening session right now. Equivalent to a hotkey press.
-    TalkNow { ts_ms: u64 },
-    /// Start persistent Chat voice mode. Spoken turns bypass wake-word routing
-    /// and are published for the desktop Chat surface instead.
-    ChatStart { ts_ms: u64 },
-    /// Stop persistent Chat voice mode and discard any partial voice turn.
-    ChatStop { ts_ms: u64 },
-    /// Speak a completed Chat response through Continuum's native TTS engine.
-    Speak { ts_ms: u64, text: String },
+    /// Open a listening session right now. Equivalent to a hotkey press.
+    TalkNow {
+        /// Wall-clock timestamp (ms since epoch) when the dashboard issued
+        /// the click. Used to drop stale intents from before a crash.
+        ts_ms: u64,
+    },
 }
 
 impl VoiceIntent {
-    fn now_ms() -> u64 {
-        SystemTime::now()
+    /// Convenience constructor that stamps the current wall-clock time.
+    pub fn talk_now() -> Self {
+        let ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    pub fn talk_now() -> Self {
-        Self::TalkNow { ts_ms: Self::now_ms() }
-    }
-
-    pub fn chat_start() -> Self {
-        Self::ChatStart { ts_ms: Self::now_ms() }
-    }
-
-    pub fn chat_stop() -> Self {
-        Self::ChatStop { ts_ms: Self::now_ms() }
-    }
-
-    pub fn speak(text: impl Into<String>) -> Self {
-        Self::Speak {
-            ts_ms: Self::now_ms(),
-            text: text.into(),
-        }
+            .unwrap_or(0);
+        Self::TalkNow { ts_ms }
     }
 
     fn ts_ms(&self) -> u64 {
         match self {
-            Self::TalkNow { ts_ms }
-            | Self::ChatStart { ts_ms }
-            | Self::ChatStop { ts_ms }
-            | Self::Speak { ts_ms, .. } => *ts_ms,
+            Self::TalkNow { ts_ms } => *ts_ms,
         }
     }
 
     fn kind_label(&self) -> &'static str {
         match self {
             Self::TalkNow { .. } => "talk_now",
-            Self::ChatStart { .. } => "chat_start",
-            Self::ChatStop { .. } => "chat_stop",
-            Self::Speak { .. } => "speak",
         }
     }
 }
@@ -88,13 +78,17 @@ pub fn ensure_intents_dir(data_dir: &Path) -> Result<PathBuf> {
     Ok(p)
 }
 
-/// Writes a new intent file. Atomic via `.tmp` + rename.
+/// Writes a new intent file. Returns the path it was written to.
+///
+/// Atomic via `.tmp` + rename so a partially-written file can never be
+/// observed by the daemon mid-write.
 pub fn write_intent(data_dir: &Path, intent: &VoiceIntent) -> Result<PathBuf> {
     let dir = ensure_intents_dir(data_dir)?;
     let ts = Utc::now().format("%Y%m%dT%H%M%S%3f").to_string();
     let path = dir.join(format!("{ts}-{}.json", intent.kind_label()));
     let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_string_pretty(intent).context("Failed to serialize voice intent")?;
+    let payload =
+        serde_json::to_string_pretty(intent).context("Failed to serialize voice intent")?;
     std::fs::write(&tmp, payload)
         .with_context(|| format!("Failed to write voice intent tmp at {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| {
@@ -107,8 +101,10 @@ pub fn write_intent(data_dir: &Path, intent: &VoiceIntent) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Reads and removes every intent file from the directory. Stale intents are
-/// dropped. Unparseable files are renamed with a `.bad` suffix.
+/// Reads and removes every intent file from the directory. Stale intents
+/// (older than `STALE_INTENT_TTL_MS`) are dropped silently. Unparseable files
+/// are renamed with a `.bad` suffix so they don't starve the loop but can
+/// still be inspected.
 pub fn drain_intents(data_dir: &Path) -> Result<Vec<VoiceIntent>> {
     let dir = ensure_intents_dir(data_dir)?;
     let mut out = Vec::new();
@@ -129,7 +125,10 @@ pub fn drain_intents(data_dir: &Path) -> Result<Vec<VoiceIntent>> {
         .collect();
     entries.sort();
 
-    let now_ms = SelfTime::now_ms();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
     for path in entries {
         let contents = match std::fs::read_to_string(&path) {
@@ -166,48 +165,23 @@ pub fn drain_intents(data_dir: &Path) -> Result<Vec<VoiceIntent>> {
     Ok(out)
 }
 
-struct SelfTime;
-impl SelfTime {
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
     #[test]
-    fn all_voice_intents_roundtrip() {
+    fn write_and_drain_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let intents = [
-            VoiceIntent::talk_now(),
-            VoiceIntent::chat_start(),
-            VoiceIntent::speak("hello"),
-            VoiceIntent::chat_stop(),
-        ];
-        for intent in &intents {
-            write_intent(tmp.path(), intent).unwrap();
-        }
-        let drained = drain_intents(tmp.path()).unwrap();
-        assert_eq!(drained.len(), intents.len());
-        assert_eq!(drained, intents);
-    }
+        let intent = VoiceIntent::talk_now();
+        let p = write_intent(tmp.path(), &intent).unwrap();
+        assert!(p.exists());
 
-    #[test]
-    fn speak_keeps_exact_text() {
-        let tmp = TempDir::new().unwrap();
-        let intent = VoiceIntent::speak("Hello, world — test 123.");
-        write_intent(tmp.path(), &intent).unwrap();
-        let drained = drain_intents(tmp.path()).unwrap();
-        assert!(matches!(
-            drained.as_slice(),
-            [VoiceIntent::Speak { text, .. }] if text == "Hello, world — test 123."
-        ));
+        let intents = drain_intents(tmp.path()).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert!(matches!(intents[0], VoiceIntent::TalkNow { .. }));
+        // File should be gone after drain.
+        assert!(!p.exists());
     }
 
     #[test]
@@ -216,7 +190,9 @@ mod tests {
         let dir = ensure_intents_dir(tmp.path()).unwrap();
         let bad = dir.join("20260416T000000000-oops.json");
         std::fs::write(&bad, "{ not json").unwrap();
-        assert!(drain_intents(tmp.path()).unwrap().is_empty());
+
+        let intents = drain_intents(tmp.path()).unwrap();
+        assert!(intents.is_empty());
         assert!(!bad.exists());
         assert!(bad.with_extension("bad").exists());
     }
@@ -224,6 +200,7 @@ mod tests {
     #[test]
     fn stale_intent_is_dropped() {
         let tmp = TempDir::new().unwrap();
+        // Write an intent stamped 5 minutes in the past.
         let stale_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -231,7 +208,11 @@ mod tests {
             - 300_000;
         let intent = VoiceIntent::TalkNow { ts_ms: stale_ts };
         let p = write_intent(tmp.path(), &intent).unwrap();
-        assert!(drain_intents(tmp.path()).unwrap().is_empty());
+        assert!(p.exists());
+
+        let intents = drain_intents(tmp.path()).unwrap();
+        assert!(intents.is_empty(), "stale intent should be dropped");
+        // File still consumed (removed), just not surfaced.
         assert!(!p.exists());
     }
 
@@ -240,7 +221,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join(VOICE_INTENTS_SUBDIR);
         assert!(!dir.exists());
-        assert!(drain_intents(tmp.path()).unwrap().is_empty());
-        assert!(dir.exists());
+        let intents = drain_intents(tmp.path()).unwrap();
+        assert!(intents.is_empty());
+        assert!(dir.exists(), "drain should ensure_dir as a side effect");
     }
 }
