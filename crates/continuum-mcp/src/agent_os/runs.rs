@@ -678,7 +678,7 @@ impl Drop for LocalCryptoBlob {
         if self.0.pbData.is_null() {
             return;
         }
-        let remaining = unsafe { LocalFree(HLOCAL(self.0.pbData.cast())) };
+        let remaining = unsafe { LocalFree(Some(HLOCAL(self.0.pbData.cast()))) };
         if !remaining.0.is_null() {
             tracing::warn!(
                 layer = "mcp",
