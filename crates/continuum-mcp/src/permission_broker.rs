@@ -56,7 +56,10 @@ impl PermissionConfig {
             .unwrap_or_else(|| data_dir.join("permissions.toml"));
         if override_path.exists() {
             let body = std::fs::read_to_string(&override_path).with_context(|| {
-                format!("failed to read MCP permissions at {}", override_path.display())
+                format!(
+                    "failed to read MCP permissions at {}",
+                    override_path.display()
+                )
             })?;
             merge_toml_permissions(&body, &override_path.display().to_string(), &mut tools)?;
         }
@@ -451,7 +454,9 @@ fn summarize_arguments(value: &Value, depth: usize) -> Value {
 
 fn redacted_shape(value: &Value) -> Value {
     match value {
-        Value::String(value) => serde_json::json!({"redacted": true, "chars": value.chars().count()}),
+        Value::String(value) => {
+            serde_json::json!({"redacted": true, "chars": value.chars().count()})
+        }
         Value::Array(items) => serde_json::json!({"redacted": true, "items": items.len()}),
         Value::Object(object) => serde_json::json!({"redacted": true, "fields": object.len()}),
         other => serde_json::json!({"redacted": true, "type": match other {
@@ -466,9 +471,7 @@ fn redacted_shape(value: &Value) -> Value {
 fn sanitize_dialog_text(value: &str) -> String {
     value
         .chars()
-        .filter(|character| {
-            !character.is_control() || matches!(character, '\n' | '\t')
-        })
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
         .filter(|character| {
             !matches!(
                 character,
@@ -588,7 +591,10 @@ mod tests {
             tools,
             source: PathBuf::from("test"),
         };
-        assert_eq!(config.tier("new_unclassified_tool"), ToolPermission::AlwaysConfirm);
+        assert_eq!(
+            config.tier("new_unclassified_tool"),
+            ToolPermission::AlwaysConfirm
+        );
     }
 
     #[test]
