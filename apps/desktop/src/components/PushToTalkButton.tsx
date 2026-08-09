@@ -9,6 +9,7 @@ import type { ContinuumState, VoiceMode } from "@/lib/types";
 
 const RUNTIME_READY_TIMEOUT_MS = 20_000;
 const VOICE_READY_TIMEOUT_MS = 12_000;
+const FIRST_SPEECH_TIMEOUT_MS = 25_000;
 const RUNTIME_POLL_MS = 250;
 const REARM_DELAY_MS = 300;
 
@@ -37,11 +38,19 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
   const hadRuntimeActivityRef = useRef(false);
   const previousModeRef = useRef<VoiceMode>(mode);
   const rearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearRearmTimer = useCallback(() => {
     if (rearmTimerRef.current) {
       clearTimeout(rearmTimerRef.current);
       rearmTimerRef.current = null;
+    }
+  }, []);
+
+  const clearSpeechWatchdog = useCallback(() => {
+    if (speechWatchdogRef.current) {
+      clearTimeout(speechWatchdogRef.current);
+      speechWatchdogRef.current = null;
     }
   }, []);
 
@@ -51,11 +60,12 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     armingRef.current = false;
     hadRuntimeActivityRef.current = false;
     clearRearmTimer();
+    clearSpeechWatchdog();
     setLiveActive(false);
     setIsStarting(false);
     setIsArming(false);
     setIsArmed(false);
-  }, [clearRearmTimer]);
+  }, [clearRearmTimer, clearSpeechWatchdog]);
 
   const failLive = useCallback(
     (message: string) => {
@@ -101,6 +111,15 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       armedRef.current = true;
       hadRuntimeActivityRef.current = false;
       setIsArmed(true);
+
+      clearSpeechWatchdog();
+      speechWatchdogRef.current = setTimeout(() => {
+        speechWatchdogRef.current = null;
+        if (!liveRef.current || !armedRef.current) return;
+        failLive(
+          "No speech reached Whisper within 25 seconds. If you were talking, check the Windows microphone input/privacy settings and the Whisper model, then retry."
+        );
+      }, FIRST_SPEECH_TIMEOUT_MS);
     } catch (err) {
       failLive(toErrorMessage(err));
     } finally {
@@ -108,14 +127,15 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       setIsStarting(false);
       setIsArming(false);
     }
-  }, [failLive]);
+  }, [clearSpeechWatchdog, failLive]);
 
   useEffect(() => {
     return () => {
       liveRef.current = false;
       clearRearmTimer();
+      clearSpeechWatchdog();
     };
-  }, [clearRearmTimer]);
+  }, [clearRearmTimer, clearSpeechWatchdog]);
 
   // Drive the continuous turn loop from the *native runtime's* real state.
   // `talk_now` is initially optimistic (runtime stays idle until Whisper has
@@ -140,6 +160,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
 
     if (activeRuntimeMode) {
       hadRuntimeActivityRef.current = true;
+      clearSpeechWatchdog();
       if (armedRef.current) {
         armedRef.current = false;
         setIsArmed(false);
@@ -164,7 +185,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
         void armNextTurn();
       }, REARM_DELAY_MS);
     }
-  }, [armNextTurn, clearRearmTimer, failLive, mode]);
+  }, [armNextTurn, clearRearmTimer, clearSpeechWatchdog, failLive, mode]);
 
   async function onClick() {
     if (liveRef.current) {
