@@ -21,6 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $desktop = Join-Path $repoRoot "apps/desktop"
+. (Join-Path $PSScriptRoot "lib\onnx-runtime.ps1")
 
 function Write-Step($msg) { Write-Host "`n== $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  OK  $msg" -ForegroundColor Green }
@@ -80,9 +81,16 @@ function Test-Preqs {
 
 if ($Check) {
   Write-Step "Checking prerequisites"
-  $null = Test-Preqs
-  $null = Test-Preqs -NeedRust
+  $ok = Test-Preqs -NeedRust
+  try {
+    $onnxRuntime = Resolve-ContinuumOnnxRuntime -RepoRoot $repoRoot
+    Write-Ok "ONNX Runtime $($onnxRuntime.Version) found at $($onnxRuntime.Path)"
+  } catch {
+    Write-Err $_.Exception.Message
+    $ok = $false
+  }
   Write-Host "`nRun without flags to launch the Tauri dashboard." -ForegroundColor DarkGray
+  if (-not $ok) { exit 1 }
   return
 }
 
@@ -100,6 +108,19 @@ if ($FrontendOnly) {
 # --- Default + -WithRuntime: Tauri desktop app --------------------------
 Write-Step "Tauri desktop app (frameless dashboard)"
 if (-not (Test-Preqs -NeedRust)) { exit 1 }
+
+# ort uses dynamic loading. Without an explicit path, Windows can silently pick
+# its old System32 copy (currently 1.17 on some Windows builds), while ort rc.11
+# requires 1.23 or newer. Resolve and validate before Tauri starts so both the
+# dashboard and the runtime process spawned by its button inherit the safe DLL.
+try {
+  $onnxRuntime = Resolve-ContinuumOnnxRuntime -RepoRoot $repoRoot
+  $env:ORT_DYLIB_PATH = $onnxRuntime.Path
+  Write-Ok "ONNX Runtime $($onnxRuntime.Version) -> $($onnxRuntime.Path)"
+} catch {
+  Write-Err $_.Exception.Message
+  exit 1
+}
 
 if (-not (Test-Path (Join-Path $desktop "node_modules"))) {
   Write-Step "Installing desktop dependencies (first run only)"
