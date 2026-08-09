@@ -36,6 +36,44 @@ const EXPECTED_TOOLS: &[&str] = &[
     "system_clipboard_get",
     "fs_read_file",
     "fs_list_dir",
+    "fs_create_file",
+    "fs_apply_patch",
+    "fs_move",
+    "fs_delete_to_trash",
+    // Local action tooling
+    "git_diff",
+    "git_checkpoint_list",
+    "git_checkpoint",
+    "git_rollback",
+    "terminal_run",
+    "terminal_verify",
+    "ide_status",
+    "ide_open_file",
+    "ide_open_diff",
+    "browser_status",
+    "browser_list_tabs",
+    "browser_dom_snapshot",
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "windows_ui_focused_element",
+    "windows_ui_invoke_focused",
+    "windows_ui_set_focused_value",
+    "task_plan_write",
+    "task_plan_get",
+    "task_plan_list",
+    "evidence_record",
+    "evidence_list",
+    // Optional GitHub connection
+    "github_status",
+    "github_me",
+    "github_list_repos",
+    "github_get_repo",
+    "github_list_issues",
+    "github_get_file",
+    "github_create_issue",
+    "github_comment_issue",
+    "github_create_pull_request",
     "web_fetch",
     "system_notification",
     // Phase 7 — repair
@@ -309,6 +347,20 @@ async fn vault_tools_round_trip() {
     );
 
     let data_dir = tempdir().expect("tempdir");
+
+    // This test exercises the vault tools' JSON-RPC contract, not the
+    // interactive permission workflow. Keep production defaults intact and
+    // opt only this isolated temporary data directory into automatic writes.
+    std::fs::write(
+        data_dir.path().join("permissions.toml"),
+        r#"[memory]
+memory_vault_save = "auto"
+memory_vault_resolve = "auto"
+memory_vault_delete = "auto"
+memory_wipe_all = "auto"
+"#,
+    )
+    .expect("write test permission overrides");
 
     // Plant a `candidate` note directly on disk, before the server (and
     // therefore the vault) ever starts — the MCP server has no live
