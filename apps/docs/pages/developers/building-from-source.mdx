@@ -51,9 +51,13 @@ Set these permanently (User > Environment Variables) or per-shell before buildin
 ```powershell
 $env:LIBCLANG_PATH  = "C:\LLVM\bin"       # bindgen for whisper-rs
 $env:CMAKE_GENERATOR = "Ninja"             # faster than NMake
-$env:ORT_DYLIB_PATH = "<onnxruntime>\lib\onnxruntime.dll"
+$env:ORT_DYLIB_PATH = "<onnxruntime-1.23+>\lib\onnxruntime.dll"
 $env:PROTOC = "C:\protoc\bin\protoc.exe"
 ```
+
+`scripts/dev.ps1` validates this DLL before launching Tauri and also checks the
+standard `C:\onnxruntime\onnxruntime.dll` location. This prevents Windows' older
+System32 ONNX Runtime from being selected by the dynamic loader.
 
 ## Building a release bundle locally
 

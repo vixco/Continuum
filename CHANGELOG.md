@@ -147,10 +147,11 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
-- Context-event batches now retry transient SQLite write-lock contention from
-  concurrent frame persistence, and writer health counters advance only after
-  the transaction commits. Benchmarks also await the final writer flush, so a
-  last batch cannot disappear from scoring or stall the drain gate.
+- **Local runtime start on Windows**: `scripts/dev.ps1` now resolves and
+  validates ONNX Runtime 1.23+ before launching Tauri, sets the exact
+  `ORT_DYLIB_PATH` inherited by the title-bar runtime process, and fails early
+  with an actionable error instead of letting `ort` load Windows' incompatible
+  System32 1.17 DLL and panic.
 
 Completion defects found in the final context-engine review (fix wave 3b):
 
