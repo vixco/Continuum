@@ -244,6 +244,9 @@ fn canonical_chat_tool(local_tool: &str) -> Option<&'static str> {
         "memory_delete" => Some("memory_vault_delete"),
         "context_screen" => Some("context_screen"),
         "context_window" => Some("context_window"),
+        "settings_list" => Some("settings_list"),
+        "settings_get" => Some("settings_get"),
+        "settings_set" => Some("settings_set"),
         _ => None,
     }
 }
@@ -517,6 +520,8 @@ mod tests {
     fn bundled_permissions_are_valid() {
         let parsed = parse_permissions(DEFAULTS, "test").expect("parse defaults");
         assert_eq!(parsed["memory"]["memory_query_episodic"], "auto");
+        assert_eq!(parsed["settings"]["settings_get"], "auto");
+        assert_eq!(parsed["settings"]["settings_set"], "session-approved");
         assert_eq!(parsed["workers"]["workers_spawn_worker"], "always-confirm");
     }
 
@@ -546,6 +551,9 @@ mod tests {
             canonical_chat_tool("context_window"),
             Some("context_window")
         );
+        assert_eq!(canonical_chat_tool("settings_list"), Some("settings_list"));
+        assert_eq!(canonical_chat_tool("settings_get"), Some("settings_get"));
+        assert_eq!(canonical_chat_tool("settings_set"), Some("settings_set"));
         assert_eq!(canonical_chat_tool("unknown"), None);
     }
 
