@@ -40,6 +40,7 @@ parking_lot = "0.12"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "multithread"] }
 tempfile = "3"
 tokio-util = "0.7"
+toml = "0.8"
 url = "2"
 uuid = { workspace = true }
 
