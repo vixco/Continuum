@@ -28,10 +28,7 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     pub fn load(root: &Path) -> AnyResult<Self> {
         std::fs::create_dir_all(root).with_context(|| {
-            format!(
-                "Failed to create agent policy directory {}",
-                root.display()
-            )
+            format!("Failed to create agent policy directory {}", root.display())
         })?;
         let path = root.join("policy.json");
         recover_interrupted_policy_replace(&path)?;
@@ -554,10 +551,7 @@ mod tests {
         let config = PolicyConfig::default();
         assert_eq!(config.policies["computer.observe"], PolicyMode::Allow);
         assert_eq!(config.policies["computer.input"], PolicyMode::Ask);
-        assert_eq!(
-            config.policies["composio.destructive"],
-            PolicyMode::Deny
-        );
+        assert_eq!(config.policies["composio.destructive"], PolicyMode::Deny);
     }
 
     #[test]

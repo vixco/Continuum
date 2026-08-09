@@ -200,9 +200,8 @@ impl ReliableAgentOsServer {
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| format!("run_{}", uuid::Uuid::new_v4().simple()));
-        validate_run_id(&run_id).map_err(|error| {
-            McpError::invalid_params(format!("invalid run_id: {error}"), None)
-        })?;
+        validate_run_id(&run_id)
+            .map_err(|error| McpError::invalid_params(format!("invalid run_id: {error}"), None))?;
         let plan_hash = hash_plan(&plan);
 
         if plan.dry_run {
@@ -396,11 +395,7 @@ impl ReliableAgentOsServer {
 
             let result_value = call_result_value(&result);
             let verification = self
-                .verify_postcondition(
-                    &classification.contract,
-                    &result_value,
-                    context.clone(),
-                )
+                .verify_postcondition(&classification.contract, &result_value, context.clone())
                 .await;
             if verification.status != "verified" {
                 let detail = verification.detail.clone();
@@ -593,8 +588,7 @@ impl ReliableAgentOsServer {
                         let observed = call_result_value(&value);
                         let matched = object_key_contains(&observed, "title", needle);
                         VerificationRecord {
-                            status: if matched { "verified" } else { "contradicted" }
-                                .to_string(),
+                            status: if matched { "verified" } else { "contradicted" }.to_string(),
                             contract: "window_title_contains".to_string(),
                             detail: if matched {
                                 format!("The post-action window state contained title {needle:?}.")
@@ -654,9 +648,8 @@ impl ReliableAgentOsServer {
                 .with_context(|| format!("invalid reliable run journal {}", path.display()))
                 .map(Some),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to read reliable run journal {}", path.display())
-            }),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read reliable run journal {}", path.display())),
         }
     }
 
@@ -1064,7 +1057,11 @@ fn canonical_json(value: &Value) -> String {
         }
         Value::Array(items) => format!(
             "[{}]",
-            items.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+            items
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
     }
@@ -1345,7 +1342,9 @@ mod tests {
 
     #[test]
     fn mutations_require_typed_postconditions() {
-        assert!(parse_postcondition(Some("the form should be saved"), ReliableRisk::Write).is_err());
+        assert!(
+            parse_postcondition(Some("the form should be saved"), ReliableRisk::Write).is_err()
+        );
         assert!(parse_postcondition(Some("state_changed"), ReliableRisk::Write).is_ok());
         assert!(parse_postcondition(None, ReliableRisk::Read).is_ok());
         assert!(parse_postcondition(Some("result_ok"), ReliableRisk::Write).is_err());

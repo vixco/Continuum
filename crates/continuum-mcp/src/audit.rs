@@ -101,10 +101,9 @@ fn sanitize_for_tool(tool: &str, value: &Value) -> Value {
     let mut sanitized = sanitize(value, 0);
     match tool {
         "memory_set_fact" => redact_fields(&mut sanitized, &["value", "source"]),
-        "memory_vault_save" => redact_fields(
-            &mut sanitized,
-            &["body", "source_ref", "relations", "tags"],
-        ),
+        "memory_vault_save" => {
+            redact_fields(&mut sanitized, &["body", "source_ref", "relations", "tags"])
+        }
         "memory_vault_search" | "memory_query_episodic" | "context_search" => {
             redact_fields(&mut sanitized, &["query"])
         }
@@ -318,8 +317,14 @@ mod tests {
     #[test]
     fn sensitive_tool_families_are_local_only() {
         use continuum_core::memory::events::EventSensitivity;
-        assert_eq!(audit_sensitivity("memory_vault_get"), EventSensitivity::LocalOnly);
-        assert_eq!(audit_sensitivity("fs_read_file"), EventSensitivity::LocalOnly);
+        assert_eq!(
+            audit_sensitivity("memory_vault_get"),
+            EventSensitivity::LocalOnly
+        );
+        assert_eq!(
+            audit_sensitivity("fs_read_file"),
+            EventSensitivity::LocalOnly
+        );
         assert_eq!(
             audit_sensitivity("context_session"),
             EventSensitivity::CloudAllowed
