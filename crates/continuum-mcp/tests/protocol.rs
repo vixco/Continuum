@@ -140,10 +140,18 @@ fn mcp_bin() -> std::path::PathBuf {
 }
 
 async fn read_response(reader: &mut BufReader<ChildStdout>) -> Value {
+    read_response_with_timeout(reader, Duration::from_secs(10), "MCP response").await
+}
+
+async fn read_response_with_timeout(
+    reader: &mut BufReader<ChildStdout>,
+    wait: Duration,
+    context: &str,
+) -> Value {
     let mut line = String::new();
-    let n = timeout(Duration::from_secs(10), reader.read_line(&mut line))
+    let n = timeout(wait, reader.read_line(&mut line))
         .await
-        .expect("response timeout")
+        .unwrap_or_else(|_| panic!("response timeout while waiting for {context}"))
         .expect("read error");
     assert!(n > 0, "unexpected EOF from MCP server");
     serde_json::from_str(line.trim_end()).expect("server emitted non-JSON line")
@@ -315,7 +323,10 @@ async fn call_tool(
         }),
     )
     .await;
-    read_response(reader).await
+    // Opening and rebuilding the vault on the first memory tool call can
+    // exceed ten seconds on a cold Windows CI runner. Keep the handshake
+    // timeout strict, but give real tool execution enough time to finish.
+    read_response_with_timeout(reader, Duration::from_secs(30), name).await
 }
 
 /// Parses a successful tool call's `content[0].text` (itself a JSON string)
