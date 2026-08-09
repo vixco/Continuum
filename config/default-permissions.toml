@@ -1,114 +1,75 @@
 # Continuum MCP tool permission tiers
 #
-# Tiers:
-#   auto             — can be called without confirmation
-#   session-approved — requires confirmation once per session, then allowed
-#   always-confirm   — requires confirmation on every call
-#   blocked          — cannot be called unless explicitly enabled by user
+# These tiers are enforced by `PermissionedMcpServer` before the tool body runs.
 #
-# Override in ~/.continuum/permissions.toml or ~/.continuum-dev/permissions.toml.
+#   auto             — may run without confirmation
+#   session-approved — native confirmation once per MCP process/session
+#   always-confirm   — native confirmation for every call
+#   blocked          — cannot run through the ordinary MCP process
 #
-# The tool names below MUST match the handlers registered in
-# `crates/continuum-mcp/src/server.rs`. When you add, rename, or remove a tool
-# there, update this file in the same commit (non-negotiable #7 — MCP tool
-# schemas are a public contract, bump a version if they shift).
+# Override in `<data-dir>/permissions.toml` or point
+# CONTINUUM_PERMISSIONS_FILE at an explicit policy file. Unknown tools fail
+# closed as `always-confirm` until they are classified here.
 
-# --- Memory tools ---
-# Read-only semantic / episodic queries are safe; writes require confirmation
-# to prevent the orchestrator from silently overriding user-stated facts.
 [memory]
 memory_query_episodic = "auto"
 memory_list_facts     = "auto"
 memory_get_fact       = "auto"
 memory_set_fact       = "session-approved"
 
-# Vault tools (direct access to the memory vault's full node model — see
-# docs/memory.md). Reads are safe; writes require confirmation for the same
-# reason memory_set_fact does. memory_vault_delete permanently removes a
-# note's markdown file (unlike memory_vault_resolve's reject/archive, which
-# keeps the file with a new status), so it gets the same confirmation tier
-# as the other vault writes below. memory_wipe_all is the most destructive
-# tool in the whole server (queues a wipe of raw log + episodic memory +
-# vault timeline events), so it always requires confirmation, every call.
-memory_vault_search   = "auto"
-memory_vault_get      = "auto"
+# Direct vault search/get can return user-authored bodies. They therefore need
+# one independent approval per MCP session; results marked sensitivity=sensitive
+# are additionally stripped by the egress gate even after approval.
+memory_vault_search   = "session-approved"
+memory_vault_get      = "session-approved"
 memory_vault_save     = "session-approved"
 memory_vault_resolve  = "session-approved"
-memory_vault_delete   = "session-approved"
+memory_vault_delete   = "always-confirm"
 memory_wipe_all       = "always-confirm"
 
-# --- System info tools ---
-# All read-only. Clipboard read can leak secrets, so gate it once per session.
 [system]
 system_current_time   = "auto"
 system_active_window  = "auto"
 system_live_context   = "auto"
-system_clipboard_get  = "session-approved"
+system_clipboard_get  = "always-confirm"
 system_notification   = "auto"
 
-# --- Context tools (context engine spec §5.2) ---
-# The observation tier: every tool here is read-only, reads only state the
-# runtime has already published (state.json / live-context.json) or the
-# projects table (opened read-only), routes every response through the same
-# PrivacyFilter cloud gate the runtime uses, and degrades to empty/stale
-# answers instead of erroring. Nothing here can leak more than the wake
-# context the orchestrator already receives, so they are "auto" like the
-# other read-only observation tools (system_active_window,
-# system_live_context) — the one tool that reads content the user never
-# pointed a window at, system_clipboard_get, stays session-approved above.
-#
-# Kill-switches: `[context_tools] enabled = false` empties this whole
-# family, and `[privacy.toggles]` (mic / screen / pause_all) empties the
-# tools whose source was switched off.
-#
-# context_git is "auto" like the rest even though it can spawn a `git`
-# subprocess: the spawn is timeout-bounded, runs a single read-only
-# `git status` / `git log -1`, and is REFUSED outright for any project the
-# user has not confirmed (a `discovered` auto-discovery proposal is a guess
-# about a directory, and probing it would turn a guess into filesystem
-# access). That refusal is the consent boundary; the permission tier does
-# not need to duplicate it.
 [context]
-context_session  = "auto"
-context_window   = "auto"
-context_screen   = "auto"
-context_audio    = "auto"
-context_projects = "auto"
+context_session   = "auto"
+context_window    = "auto"
+context_screen    = "auto"
+context_audio     = "auto"
+context_projects  = "auto"
 context_processes = "auto"
-context_timeline = "auto"
-context_search   = "auto"
-context_files    = "auto"
-context_git      = "auto"
-context_package  = "auto"
+context_timeline  = "auto"
+context_search    = "auto"
+context_files     = "auto"
+context_git       = "auto"
+context_package   = "auto"
 
-# --- Filesystem tools (read-only, path-allowlisted) ---
+# Read-only and path-allowlisted. The hardcoded secret/credential deny list is
+# still applied after root canonicalization.
 [fs]
 fs_read_file = "auto"
 fs_list_dir  = "auto"
 
-# --- Web fetch (GET only, public-IP only, no redirects) ---
 [web]
 web_fetch = "auto"
 
-# --- Repair tools (REPAIR AGENT ONLY) ---
-# All destructive / state-mutating. Blocked by default; the repair agent
-# A normal MCP process keeps these unreachable. The Health tab spawns a
-# dedicated MCP process with a short-lived capability scoped to read-only tests
-# for components in the user's one-time live preview. Component restart,
-# reinstall, and rollback remain denied in that safe flow.
+# Repair tools are unreachable from the ordinary MCP process. A dedicated
+# Health flow may pass a short-lived CONTINUUM_REPAIR_TOKEN; the server then
+# performs its existing per-component and per-operation capability checks.
 [repair]
 repair_restart_component = "blocked"
-repair_reinstall_model   = "blocked"
-repair_rollback_config   = "blocked"
-repair_test_component    = "blocked"
-repair_escalate          = "blocked"
+repair_reinstall_model    = "blocked"
+repair_rollback_config    = "blocked"
+repair_test_component     = "blocked"
+repair_escalate           = "blocked"
 
-# --- Worker tools ---
-# Spawning workers costs real money (Claude Code API usage) and runs
-# arbitrary code in worker cwd, so spawn/cancel require confirmation.
-# Status / wait / list are passive lookups → auto.
+# Worker creation can execute code and spend money. Spawns always require a
+# native confirmation; passive status operations remain automatic.
 [workers]
-workers_spawn_worker  = "session-approved"
+workers_spawn_worker  = "always-confirm"
 workers_worker_status = "auto"
 workers_worker_wait   = "auto"
 workers_worker_list   = "auto"
