@@ -35,8 +35,14 @@ test("one click keeps voice conversational by re-arming after each completed tur
 test("live voice controls the headless runtime and surfaces concrete failures", async () => {
   const source = await read("src/components/PushToTalkButton.tsx");
 
-  assert.match(source, /continuum\.contextWriteIntent\(\{ kind: "set_toggle", name: "pause_all", value: false \}\)/);
-  assert.match(source, /continuum\.contextWriteIntent\(\{ kind: "set_toggle", name: "mic", value: true \}\)/);
+  assert.match(
+    source,
+    /continuum\.contextWriteIntent\(\{\s*kind: "set_toggle",\s*name: "pause_all",\s*value: false,?\s*\}\)/
+  );
+  assert.match(
+    source,
+    /continuum\.contextWriteIntent\(\{\s*kind: "set_toggle",\s*name: "mic",\s*value: true,?\s*\}\)/
+  );
   assert.match(source, /config\.audio\.enabled/);
   assert.match(source, /config\.voice\.enabled/);
   assert.match(source, /role="alert"/);
@@ -45,6 +51,14 @@ test("live voice controls the headless runtime and surfaces concrete failures", 
   assert.match(source, /text-to-speech \(Piper\/Kokoros\)/);
   assert.match(source, /voice model\/orchestrator/);
   assert.match(source, /No speech reached Whisper within 25 seconds/);
-  assert.doesNotMatch(source, /setPaused\(false\)/, "dashboard-only pause state must not pretend to control the daemon");
-  assert.doesNotMatch(source, /setVoiceMuted\(false\)/, "dashboard-only mute state must not pretend to control the daemon");
+  assert.doesNotMatch(
+    source,
+    /setPaused\(false\)/,
+    "dashboard-only pause state must not pretend to control the daemon"
+  );
+  assert.doesNotMatch(
+    source,
+    /setVoiceMuted\(false\)/,
+    "dashboard-only mute state must not pretend to control the daemon"
+  );
 });
