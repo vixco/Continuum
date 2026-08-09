@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import { CheckCircle2, ChevronDown, Loader2, Plus, Server, Trash2 } from "lucide-react";
@@ -25,6 +26,16 @@ const PERMISSION_PRESETS: Array<{ value: PermissionTier; label: string }> = [
   { value: "blocked", label: "Blocked" },
 ];
 
+interface ToolPermissionView {
+  tool: string;
+  permission: PermissionTier;
+  source: "bundled_default" | "user_override";
+}
+
+function permissionMap(items: ToolPermissionView[]): Record<string, PermissionTier> {
+  return Object.fromEntries(items.map((item) => [item.tool, item.permission]));
+}
+
 export function ToolsTab() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [editing, setEditing] = useState<Skill | null>(null);
@@ -40,6 +51,7 @@ export function ToolsTab() {
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [showServerInstaller, setShowServerInstaller] = useState(false);
   const [toolPermissions, setToolPermissions] = useState<Record<string, PermissionTier>>({});
+  const [savingPermissions, setSavingPermissions] = useState<Set<string>>(new Set());
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
   const [permissionGrants, setPermissionGrants] = useState<PermissionGrant[]>([]);
 
@@ -61,13 +73,13 @@ export function ToolsTab() {
       const [tools, servers, policies, requests, grants] = await Promise.all([
         continuum.listMcpTools(),
         continuum.listInstalledMcpServers(),
-        continuum.listToolPermissions(),
+        invoke<ToolPermissionView[]>("list_tool_permissions"),
         continuum.listPermissionRequests(),
         continuum.listPermissionGrants(),
       ]);
       setMcpTools(tools);
       setMcpServers(servers);
-      setToolPermissions(Object.fromEntries(policies.map((row) => [row.action, row.tier])));
+      setToolPermissions(permissionMap(policies));
       setPermissionRequests(requests);
       setPermissionGrants(grants);
       setMcpError(null);
@@ -92,8 +104,8 @@ export function ToolsTab() {
   }
 
   useEffect(() => {
-    refresh();
-    refreshMcpTools();
+    void refresh();
+    void refreshMcpTools();
     const timer = window.setInterval(refreshPermissionActivity, 2_000);
     return () => window.clearInterval(timer);
   }, []);
@@ -117,12 +129,24 @@ export function ToolsTab() {
   async function setToolPermission(name: string, value: PermissionTier) {
     const previous = toolPermissions[name];
     setToolPermissions((current) => ({ ...current, [name]: value }));
+    setSavingPermissions((current) => new Set(current).add(name));
+    setMcpError(null);
     try {
-      await continuum.setToolPermission(name, value);
-      setMcpNotice(`${name} is now ${value}.`);
+      const policies = await invoke<ToolPermissionView[]>("set_tool_permission", {
+        tool: name,
+        permission: value,
+      });
+      setToolPermissions(permissionMap(policies));
+      setMcpNotice(`${name} is now ${value}. The enforced local policy is active.`);
     } catch (cause) {
       setToolPermissions((current) => ({ ...current, [name]: previous ?? "blocked" }));
       setMcpError(`Failed to save ${name}: ${cause}`);
+    } finally {
+      setSavingPermissions((current) => {
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
     }
   }
 
@@ -333,6 +357,7 @@ export function ToolsTab() {
                 key={ns.namespace}
                 ns={ns}
                 permissions={toolPermissions}
+                saving={savingPermissions}
                 onPermissionChange={setToolPermission}
               />
             ))}
@@ -592,11 +617,13 @@ function formatError(error: unknown): string {
 function McpNamespace({
   ns,
   permissions,
+  saving,
   onPermissionChange,
 }: {
   ns: { namespace: string; tools: McpTool[] };
   permissions: Record<string, PermissionTier>;
-  onPermissionChange: (name: string, value: PermissionTier) => void;
+  saving: Set<string>;
+  onPermissionChange: (name: string, value: PermissionTier) => Promise<void>;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -623,13 +650,19 @@ function McpNamespace({
                 <div className="truncate font-mono text-xs text-ink">{tool.name}</div>
                 <div className="truncate text-xs text-ink-muted">{tool.description}</div>
               </div>
-              <Select
-                value={permissions[tool.name] ?? "auto"}
-                options={PERMISSION_PRESETS}
-                onChange={(v) => onPermissionChange(tool.name, v as PermissionTier)}
-                className="w-28"
-                title="Saved immediately and enforced by continuum-mcp."
-              />
+              <div className="flex items-center gap-2">
+                {saving.has(tool.name) && (
+                  <Loader2 size={12} className="animate-spin text-ink-dim" />
+                )}
+                <Select
+                  value={permissions[tool.name] ?? "blocked"}
+                  options={PERMISSION_PRESETS}
+                  onChange={(value) => void onPermissionChange(tool.name, value as PermissionTier)}
+                  disabled={saving.has(tool.name)}
+                  className="w-28"
+                  title="Saved immediately and enforced by continuum-mcp."
+                />
+              </div>
             </li>
           ))}
         </ul>

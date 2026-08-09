@@ -16,6 +16,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_os_registration;
 mod chat;
 mod chat_store;
 mod chat_tools;
@@ -25,6 +26,8 @@ mod events;
 mod github;
 mod memory;
 mod onboarding;
+#[cfg_attr(test, allow(dead_code))]
+mod permissions;
 mod providers;
 mod runtime_bridge;
 mod tray;
@@ -81,6 +84,14 @@ fn main() {
     components::register_default(&health, &runtime);
 
     let dev_dir = runtime.dev_dir();
+    if let Err(error) = agent_os_registration::ensure_bundled(&dev_dir) {
+        tracing::warn!(
+            layer = "desktop",
+            component = "agent_os_registration",
+            error = %error,
+            "The bundled Agent OS could not be registered; computer and connected-app actions remain unavailable"
+        );
+    }
     let backups_dir = continuum_core::config::continuum_backups_dir();
     let backup_retention = runtime.config_snapshot().health.backup_retention.max(1);
 
@@ -155,6 +166,7 @@ fn main() {
         repair_gate: Arc::new(tokio::sync::Mutex::new(())),
         pending_repair: tokio::sync::Mutex::new(None),
     });
+
     let runtime_for_tauri = runtime.clone();
 
     let chat_state = Arc::new(providers::ChatState {
@@ -225,8 +237,6 @@ fn main() {
             commands::pipe_health,
             commands::start_runtime,
             commands::list_mcp_tools,
-            commands::list_tool_permissions,
-            commands::set_tool_permission,
             commands::list_permission_requests,
             commands::list_permission_grants,
             commands::approve_permission_request,
@@ -234,6 +244,8 @@ fn main() {
             commands::revoke_permission_grant,
             commands::list_installed_mcp_servers,
             commands::install_mcp_server,
+            permissions::list_tool_permissions,
+            permissions::set_tool_permission,
             providers::catalog_list,
             providers::providers_list,
             providers::provider_add,

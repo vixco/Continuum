@@ -1,87 +1,133 @@
-# Security policy
+# Security Policy
 
-Continuum runs with deep access to a user's machine: microphone, screen, clipboard,
-and an `mcp__continuum__*` tool surface that Claude Opus can invoke during wakes.
-Security bugs in this project can be serious, so please help us fix them
-responsibly.
+Continuum is a local AI execution and context layer. Security reports can involve
+computer input, connected accounts, updater integrity, local memory, credentials,
+or permission enforcement. Please handle suspected vulnerabilities privately.
 
 ## Supported versions
 
-| Version     | Supported      |
-| ----------- | -------------- |
-| `0.1.x`     | :white_check_mark: (current alpha) |
-| `< 0.1.0`   | :x: (pre-release) |
+Continuum is currently pre-release. Security fixes are made against the latest
+commit on `main` and shipped in the next signed updater release. Older alpha
+releases are not maintained as separate security branches.
 
-We will produce fixes for the latest alpha / beta / stable release only. Older
-tags are archived as-is.
+| Version | Supported |
+| --- | --- |
+| Latest release | Yes |
+| `main` | Yes |
+| Older alpha releases | No |
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue for security bugs.**
+Do **not** open a public issue for a vulnerability that could put users,
+credentials, connected services, or local files at risk.
 
-Use one of the following private channels instead:
+Use one of these private channels:
 
-1. **GitHub private advisory** (preferred): go to
-   <https://github.com/vixco/Continuum/security/advisories/new> and file a
-   draft. This keeps the report private while we coordinate a fix.
-2. **Email**: send to `t.soekar@tovix.nl` with subject
-   `[continuum-security] <short description>`. If you want end-to-end encryption,
-   request a PGP key in the first message and we'll reply with one.
+1. **GitHub private vulnerability reporting / Security Advisory** (preferred):
+   open a private draft under the repository's Security tab.
+2. **Email:** `t.soekar@tovix.nl`, with subject
+   `[continuum-security] <short description>`.
 
-Include in the report:
+Include, where possible:
 
-- The affected component (Senses, Triage, Orchestrator, Workers, MCP tool X, …)
-- Continuum version, Claude Code CLI version, OS version
-- A proof-of-concept or the shortest reproduction you have
-- The impact you see — information disclosure, privilege escalation, remote
-  code execution, bypass of the MCP permission tier, etc.
-- Any proposed mitigation
+- affected commit or release;
+- operating system and architecture;
+- exact capability, MCP tool, provider, or integration involved;
+- minimal reproduction steps;
+- observed and expected permission decisions;
+- whether user interaction or an approval dialog was required;
+- potential impact and data exposed;
+- logs with secrets removed;
+- a suggested fix or regression test, when available.
 
-## Response timeline
+Do not include real API keys, OAuth links, cookies, private messages, passwords,
+or customer data. Use test accounts and synthetic payloads.
 
-| Stage                               | Target          |
-| ----------------------------------- | --------------- |
-| Acknowledgement of the report       | 3 business days |
-| Initial severity assessment         | 7 days          |
-| Fix or mitigation available         | 30 days (critical/high) / 90 days (medium/low) |
-| Public disclosure after fix shipped | by default 14 days, negotiable |
+## High-priority vulnerability classes
 
-Severity follows the CVSS 3.1 base score. We classify anything that bypasses
-the non-negotiables in `CLAUDE.md` (e.g. a path that phones home, or lets
-the orchestrator call a tool outside the registered MCP namespace) as
-**high** at minimum.
+Please report these privately even when impact is uncertain:
 
-## Threat model (non-goals and in-goals)
+- bypassing an `allow` / `ask` / `deny` capability decision;
+- executing a denied action through another tool or plan step;
+- approval-dialog spoofing or approval reuse outside its approved scope;
+- duplicate side effects after a retry, timeout, crash, or concurrent run;
+- arbitrary command, script, URL, path, or process execution;
+- unsafe computer input, window targeting, or accessibility-tree confusion;
+- credential, token, OAuth URL, clipboard, typed-text, screenshot, or memory
+  disclosure;
+- Composio tool misclassification that lowers a destructive action to read or
+  write authority;
+- tampering with resumable run checkpoints or evidence;
+- updater signature bypass, wrong-platform updates, incomplete Releases, or
+  replacement of published binaries;
+- untrusted project content escaping a sandbox or changing durable policy;
+- remote content causing silent scope expansion or cross-account actions.
 
-**In-scope (we want to hear about these):**
+## Security boundaries
 
-- Any path that causes Continuum to send data to a server other than the Anthropic
-  API (via Claude Code), the optional ElevenLabs API (if the user has opted
-  in), or the HuggingFace model CDN during a pre-staged model download.
-- Any way to make `mcp__continuum__fs_*` read paths outside the allowlist.
-- Any way to make `mcp__continuum__web_fetch` connect to a private IP (DNS
-  rebinding, SSRF, IPv6 equivalents, resolver tricks).
-- Any way to escape the Tauri command sandbox (unvalidated input passed to
-  shell/git, path traversal through skill names, CSP bypass).
-- Any way to cause the repair agent or orchestrator to run code with
-  privileges the user did not grant for the session.
-- Credentials or secrets written to logs, crash dumps, or episodic memory.
+The following boundaries are intentional and should remain explicit:
 
-**Out of scope (please do not report these):**
+- Audit logging after execution is not permission enforcement.
+- MCP cannot constrain an agent's native shell or filesystem tools unless the
+  agent is launched with matching sandbox restrictions.
+- A transport success is not proof that an external side effect succeeded.
+- A timeout or lost response is an unknown outcome, not permission to retry.
+- Destructive connected-app actions default to deny.
+- Relaxing a persistent policy requires independent native user approval.
+- Sensitive tool arguments must not be copied into goals, expectations, logs,
+  evidence, or error messages.
+- Windows resumable run checkpoints are protected with current-user DPAPI;
+  Unix checkpoint files are restricted to the owner.
+- Tauri updater signatures protect update artifacts, but do not replace Windows
+  Authenticode or Apple Developer ID signing/notarization.
 
-- Findings that require an attacker to already have code execution on the
-  user's machine as the same user Continuum runs as.
-- Weaknesses in upstream Claude Code, Anthropic's API, Piper, whisper.cpp,
-  or other vendored dependencies — report those to the respective projects
-  directly; we'll pick up the fix when it ships.
-- Social-engineering scenarios that require the user to deliberately
-  mis-configure Continuum (e.g. "I added `/` to `[mcp.fs].extra_paths` and now
-  the orchestrator can read everything").
+## Response targets
 
-## Disclosure
+| Stage | Target |
+| --- | --- |
+| Acknowledge a report | 3 business days |
+| Initial severity assessment | 7 days |
+| Critical/high mitigation or fix | 30 days |
+| Medium/low mitigation or fix | 90 days |
 
-Once a fix is released, we will publish a GitHub security advisory with
-the CVE (if assigned), the fixed version, and credit to the reporter (or
-anonymised on request). The advisory links to the PR that fixed it.
+These are targets, not guarantees. Complex upstream or certificate-related
+issues may require coordination with another maintainer or vendor.
 
-Thanks for helping keep Continuum safe.
+## Local security testing
+
+Security changes should include a regression test whenever practical. Relevant
+gates include:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+python -m unittest -v scripts/test_release_contract.py
+```
+
+Use synthetic secrets and ensure the test fails when the protected value appears
+in raw checkpoint bytes, evidence, logs, release metadata, or error output.
+
+## Disclosure and credit
+
+We aim to acknowledge valid reports and coordinate disclosure after a fix is
+available. Public disclosure timing should be agreed through the private
+advisory. Reporters who want credit should include the preferred name and link.
+
+## Out of scope
+
+The following are generally not vulnerabilities by themselves:
+
+- expected Windows SmartScreen or macOS Gatekeeper warnings while publisher
+  signing/notarization credentials are not configured;
+- actions the user explicitly approved with accurate scope and risk information;
+- access by another process already running with the same user privileges to
+  data that the operating system intentionally exposes to that user;
+- unsupported older alpha builds when the issue is fixed in the latest release;
+- social engineering without a product or permission-boundary bypass;
+- vulnerabilities that exist entirely in an upstream project and cannot be
+  mitigated in Continuum. Report them upstream as well, but contact us privately
+  when Continuum users need a coordinated dependency update.
+
+When in doubt, report privately. A cautious report is preferable to publishing a
+potential permission or credential issue before it can be assessed.
