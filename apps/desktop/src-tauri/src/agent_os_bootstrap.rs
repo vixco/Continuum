@@ -157,9 +157,7 @@ fn registration_is_current(
     command: &str,
     args: &[String],
 ) -> bool {
-    registration.name == SERVER_NAME
-        && registration.command == command
-        && registration.args == args
+    registration.name == SERVER_NAME && registration.command == command && registration.args == args
 }
 
 #[cfg(test)]
@@ -210,10 +208,7 @@ mod tests {
     #[test]
     fn stale_registration_is_replaced_without_losing_recovery_path() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let old = fixture_binary(
-            temp.path(),
-            if cfg!(windows) { "old.exe" } else { "old" },
-        );
+        let old = fixture_binary(temp.path(), if cfg!(windows) { "old.exe" } else { "old" });
         let current = fixture_binary(
             temp.path(),
             if cfg!(windows) {
