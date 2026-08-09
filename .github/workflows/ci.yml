@@ -8,8 +8,8 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Keep the latest PR run only, but never cancel a main release after artifacts
-  # or a tag may already have been created.
+  # Keep the latest PR run only. Main runs always finish so the separate
+  # workflow_run release trigger gets a definitive result for the tested SHA.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -409,23 +409,3 @@ jobs:
       - name: Build docs site
         run: pnpm build
         working-directory: apps/docs
-
-  release:
-    name: Publish cross-platform release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs:
-      - fmt
-      - release-contract
-      - clippy-light
-      - clippy-full
-      - full-test
-      - build-desktop
-      - build-desktop-macos
-      - build-desktop-macos-intel
-      - docs-site
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release.yml
-    with:
-      release_sha: ${{ github.sha }}
-    secrets: inherit
