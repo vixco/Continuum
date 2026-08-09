@@ -538,8 +538,14 @@ mod tests {
             canonical_chat_tool("memory_delete"),
             Some("memory_vault_delete")
         );
-        assert_eq!(canonical_chat_tool("context_screen"), Some("context_screen"));
-        assert_eq!(canonical_chat_tool("context_window"), Some("context_window"));
+        assert_eq!(
+            canonical_chat_tool("context_screen"),
+            Some("context_screen")
+        );
+        assert_eq!(
+            canonical_chat_tool("context_window"),
+            Some("context_window")
+        );
         assert_eq!(canonical_chat_tool("unknown"), None);
     }
 
