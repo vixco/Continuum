@@ -9,7 +9,7 @@ import type { ContinuumState, VoiceMode } from "@/lib/types";
 
 const RUNTIME_READY_TIMEOUT_MS = 20_000;
 const VOICE_READY_TIMEOUT_MS = 12_000;
-const CONTROL_APPLY_TIMEOUT_MS = 4_000;
+const CONTROL_APPLY_TIMEOUT_MS = 10_000;
 const FIRST_SPEECH_TIMEOUT_MS = 25_000;
 const RUNTIME_POLL_MS = 250;
 const REARM_DELAY_MS = 300;
