@@ -80,9 +80,10 @@ pub async fn set_tool_permission(
     effective_permissions(&path)
 }
 
-/// The HTTP-provider chat path executes memory tools inside the Tauri process
-/// rather than through `continuum-mcp`. This is its mandatory authorization
-/// choke point so those tools cannot bypass the policy shown in the Tools tab.
+/// The HTTP-provider chat path executes tools inside the Tauri process rather
+/// than through `continuum-mcp`. This is its mandatory authorization choke
+/// point so neither memory nor live-context tools can bypass the policy shown
+/// in the Tools tab.
 #[cfg(not(test))]
 pub(crate) async fn authorize_in_process_tool(
     local_tool: &str,
@@ -116,8 +117,8 @@ pub(crate) async fn authorize_in_process_tool(
     }
 }
 
-/// Unit tests exercise the vault behavior without opening native UI. Permission
-/// parsing and fail-closed mapping are tested separately below.
+/// Unit tests exercise the vault/context behavior without opening native UI.
+/// Permission parsing and fail-closed mapping are tested separately below.
 #[cfg(test)]
 pub(crate) async fn authorize_in_process_tool(
     local_tool: &str,
@@ -241,6 +242,8 @@ fn canonical_chat_tool(local_tool: &str) -> Option<&'static str> {
         "memory_get" => Some("memory_vault_get"),
         "memory_save" => Some("memory_vault_save"),
         "memory_delete" => Some("memory_vault_delete"),
+        "context_screen" => Some("context_screen"),
+        "context_window" => Some("context_window"),
         _ => None,
     }
 }
@@ -535,6 +538,8 @@ mod tests {
             canonical_chat_tool("memory_delete"),
             Some("memory_vault_delete")
         );
+        assert_eq!(canonical_chat_tool("context_screen"), Some("context_screen"));
+        assert_eq!(canonical_chat_tool("context_window"), Some("context_window"));
         assert_eq!(canonical_chat_tool("unknown"), None);
     }
 
