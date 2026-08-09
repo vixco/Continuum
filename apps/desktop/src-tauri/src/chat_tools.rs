@@ -294,6 +294,9 @@ fn read_live_context_for_chat(source: ObservedSource) -> Result<(LiveWorldState,
     if !cfg.context_tools.enabled {
         return Err("Live context is unavailable because [context_tools].enabled is false.".into());
     }
+    if matches!(source, ObservedSource::Screen) && !cfg.screen.enabled {
+        return Err("Live context is unavailable because [screen].enabled is false.".into());
+    }
     if !source_enabled(&cfg.privacy.toggles, source) {
         let label = match source {
             ObservedSource::Screen => "screen observation",
@@ -460,7 +463,7 @@ fn resolve_mcp_binary() -> Option<PathBuf> {
         return Some(candidate);
     }
     if let Some(paths) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(paths) {
+        for directory in std::env::split_paths(&paths) {
             let candidate = directory.join(MCP_BIN_NAME);
             if candidate.exists() {
                 return Some(candidate);
