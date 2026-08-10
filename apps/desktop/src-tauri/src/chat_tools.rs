@@ -48,13 +48,45 @@ impl ToolExecutor for VaultToolExecutor {
             "memory_get" => self.get(input).await,
             "memory_save" => self.save(input).await,
             "memory_delete" => self.delete(input).await,
-            "context_screen" => self.context_screen(),
-            "context_window" => self.context_window(),
+            "context_screen" => Self::context_screen(),
+            "context_window" => Self::context_window(),
             "settings_list" => settings_tools::list(input),
             "settings_get" => settings_tools::get(input),
             "settings_set" => settings_tools::set(input),
             other => Err(format!(
                 "unknown chat tool {other:?} (expected memory_search|memory_get|memory_save|memory_delete|context_screen|context_window|settings_list|settings_get|settings_set)"
+            )),
+        };
+        if let Err(error) = &result {
+            tracing::warn!(
+                layer = "desktop",
+                component = "chat_tools",
+                tool = name,
+                error = %error,
+                "chat tool call failed"
+            );
+        }
+        result
+    }
+}
+
+/// In-process executor for context and settings tools when the memory vault is
+/// disabled or unavailable. Settings autonomy must never depend on memory.
+pub struct SettingsToolExecutor;
+
+#[async_trait::async_trait]
+impl ToolExecutor for SettingsToolExecutor {
+    async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<String, String> {
+        crate::permissions::authorize_in_process_tool(name, input).await?;
+
+        let result = match name {
+            "context_screen" => VaultToolExecutor::context_screen(),
+            "context_window" => VaultToolExecutor::context_window(),
+            "settings_list" => settings_tools::list(input),
+            "settings_get" => settings_tools::get(input),
+            "settings_set" => settings_tools::set(input),
+            other => Err(format!(
+                "unknown base chat tool {other:?} (expected context_screen|context_window|settings_list|settings_get|settings_set)"
             )),
         };
         if let Err(error) = &result {
@@ -212,7 +244,7 @@ impl VaultToolExecutor {
         Ok(json!({"deleted": true, "id": id}).to_string())
     }
 
-    fn context_screen(&self) -> Result<String, String> {
+    fn context_screen() -> Result<String, String> {
         let (state, stale) = read_live_context_for_chat(ObservedSource::Screen)?;
         let monitors = state
             .monitors
@@ -239,7 +271,7 @@ impl VaultToolExecutor {
         .map_err(|error| error.to_string())
     }
 
-    fn context_window(&self) -> Result<String, String> {
+    fn context_window() -> Result<String, String> {
         let (state, stale) = read_live_context_for_chat(ObservedSource::Window)?;
         let active = state.window.map(|window| {
             json!({
@@ -450,10 +482,27 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
     ]
 }
 
+/// Build the tools exposed to one HTTP/Anthropic chat turn.
+///
+/// Live context and settings are always available. Memory tools are added only
+/// when the vault is enabled and opened successfully.
+pub fn chat_tool_defs(include_memory: bool) -> Vec<ToolDef> {
+    let mut tools = memory_tool_defs();
+    if !include_memory {
+        tools.retain(|tool| !tool.name.starts_with("memory_"));
+    }
+    tools
+}
+
 /// Claude CLI gets an explicit allowlist rather than a wildcard. Adding a new
 /// server tool therefore does not implicitly grant chat access to it. The
 /// conversation id scopes permission grants to this chat session.
-pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path, session_id: &str) -> Option<McpSpec> {
+pub fn mcp_spec(
+    vault_dir: &Path,
+    dev_dir: &Path,
+    session_id: &str,
+    include_memory: bool,
+) -> Option<McpSpec> {
     let server_command = resolve_mcp_binary()?;
     Some(McpSpec {
         server_command,
@@ -468,7 +517,28 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path, session_id: &str) -> Option<Mc
             ),
             ("CONTINUUM_SESSION_ID".into(), format!("chat-{session_id}")),
         ],
-        allowed_tools: [
+        allowed_tools: mcp_allowed_tools(include_memory),
+    })
+}
+
+fn mcp_allowed_tools(include_memory: bool) -> Vec<String> {
+    let mut tools = vec![
+        "mcp__continuum__context_session",
+        "mcp__continuum__context_window",
+        "mcp__continuum__context_screen",
+        "mcp__continuum__context_audio",
+        "mcp__continuum__context_projects",
+        "mcp__continuum__context_timeline",
+        "mcp__continuum__context_search",
+        "mcp__continuum__context_files",
+        "mcp__continuum__context_git",
+        "mcp__continuum__context_package",
+        "mcp__continuum__settings_list",
+        "mcp__continuum__settings_get",
+        "mcp__continuum__settings_set",
+    ];
+    if include_memory {
+        tools.extend([
             "mcp__continuum__memory_vault_search",
             "mcp__continuum__memory_vault_get",
             "mcp__continuum__memory_vault_save",
@@ -477,23 +547,9 @@ pub fn mcp_spec(vault_dir: &Path, dev_dir: &Path, session_id: &str) -> Option<Mc
             "mcp__continuum__memory_get_fact",
             "mcp__continuum__memory_list_facts",
             "mcp__continuum__memory_query_episodic",
-            "mcp__continuum__context_session",
-            "mcp__continuum__context_window",
-            "mcp__continuum__context_screen",
-            "mcp__continuum__context_audio",
-            "mcp__continuum__context_projects",
-            "mcp__continuum__context_timeline",
-            "mcp__continuum__context_search",
-            "mcp__continuum__context_files",
-            "mcp__continuum__context_git",
-            "mcp__continuum__context_package",
-            "mcp__continuum__fs_read_file",
-            "mcp__continuum__fs_apply_patch",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    })
+        ]);
+    }
+    tools.into_iter().map(String::from).collect()
 }
 
 fn resolve_mcp_binary() -> Option<PathBuf> {
@@ -800,5 +856,37 @@ mod tests {
                 "settings_set"
             ]
         );
+    }
+    #[test]
+    fn base_chat_tools_remain_available_without_memory() {
+        let names = chat_tool_defs(false)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "context_screen",
+                "context_window",
+                "settings_list",
+                "settings_get",
+                "settings_set"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_base_allowlist_uses_typed_settings_without_generic_fs_writes() {
+        let tools = mcp_allowed_tools(false);
+        assert!(tools.contains(&"mcp__continuum__settings_list".to_string()));
+        assert!(tools.contains(&"mcp__continuum__settings_get".to_string()));
+        assert!(tools.contains(&"mcp__continuum__settings_set".to_string()));
+        assert!(!tools.iter().any(|tool| tool.contains("memory_")));
+        assert!(!tools.contains(&"mcp__continuum__fs_apply_patch".to_string()));
+
+        let with_memory = mcp_allowed_tools(true);
+        assert!(with_memory
+            .iter()
+            .any(|tool| tool == "mcp__continuum__memory_vault_search"));
     }
 }

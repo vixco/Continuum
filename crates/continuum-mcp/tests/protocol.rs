@@ -108,6 +108,10 @@ const EXPECTED_TOOLS: &[&str] = &[
     "context_files",
     "context_git",
     "context_package",
+    // Typed autonomous settings
+    "settings_list",
+    "settings_get",
+    "settings_set",
 ];
 
 fn mcp_bin() -> std::path::PathBuf {

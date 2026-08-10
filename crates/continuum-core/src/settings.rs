@@ -1,39 +1,4 @@
-#!/usr/bin/env python3
-from pathlib import Path
-
-
-def read(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
-def write(path: str, content: str) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-
-
-def replace_once(path: str, old: str, new: str) -> None:
-    text = read(path)
-    count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"{path}: expected one match, found {count} for {old[:80]!r}")
-    write(path, text.replace(old, new, 1))
-
-
-def replace_between(path: str, start_marker: str, end_marker: str, replacement: str) -> None:
-    text = read(path)
-    start = text.find(start_marker)
-    if start < 0:
-        raise RuntimeError(f"{path}: start marker not found: {start_marker!r}")
-    end = text.find(end_marker, start)
-    if end < 0:
-        raise RuntimeError(f"{path}: end marker not found: {end_marker!r}")
-    write(path, text[:start] + replacement + text[end:])
-
-
-write(
-    "crates/continuum-core/src/settings.rs",
-    r'''//! Typed, autonomous access to Continuum's runtime settings.
+//! Typed, autonomous access to Continuum's runtime settings.
 //!
 //! This module is shared by desktop chat providers and the MCP server so every
 //! model gets the same discovery, validation, redaction, backup, and write
@@ -68,9 +33,7 @@ pub fn list(
     flatten("", &defaults, &mut default_paths);
 
     let query = query.unwrap_or_default().trim().to_ascii_lowercase();
-    let limit = limit
-        .unwrap_or(DEFAULT_LIST_LIMIT)
-        .clamp(1, MAX_LIST_LIMIT);
+    let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
     let settings = current_paths
         .into_iter()
         .filter(|(path, _)| query.is_empty() || path.to_ascii_lowercase().contains(&query))
@@ -78,14 +41,18 @@ pub fn list(
         .map(|(path, value)| {
             let sensitive = is_sensitive_path(&path);
             let default = default_paths.get(&path).cloned().unwrap_or(Value::Null);
+            let kind = value_type(&value);
+            let current = redact_value(&path, value);
+            let default = redact_value(&path, default);
+            let ui_location = ui_location(&path);
             json!({
                 "path": path,
-                "value": redact_value(&path, value),
-                "default": redact_value(&path, default),
-                "value_type": value_type(&value),
+                "value": current,
+                "default": default,
+                "value_type": kind,
                 "sensitive": sensitive,
                 "mutable": true,
-                "ui_location": ui_location(&path),
+                "ui_location": ui_location,
                 "restart_recommended": true,
             })
         })
@@ -111,9 +78,12 @@ pub fn get(config_path: &Path, setting_path: &str) -> Result<Value, String> {
     let defaults = ContinuumConfig::default();
     let current = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let defaults = serde_json::to_value(defaults).map_err(|error| error.to_string())?;
-    let value = lookup(&current, setting_path)
-        .ok_or_else(|| format!("Unknown setting path `{setting_path}`. Use settings_list first."))?;
-    let default = lookup(&defaults, setting_path).cloned().unwrap_or(Value::Null);
+    let value = lookup(&current, setting_path).ok_or_else(|| {
+        format!("Unknown setting path `{setting_path}`. Use settings_list first.")
+    })?;
+    let default = lookup(&defaults, setting_path)
+        .cloned()
+        .unwrap_or(Value::Null);
     let sensitive = is_sensitive_path(setting_path);
 
     Ok(json!({
@@ -135,11 +105,7 @@ pub fn get(config_path: &Path, setting_path: &str) -> Result<Value, String> {
 /// validated. Only then is the requested path copied into the raw TOML document,
 /// preserving unknown sibling keys. The existing file is backed up and the
 /// replacement is written through a same-directory temporary file.
-pub fn set(
-    config_path: &Path,
-    setting_path: &str,
-    requested: Value,
-) -> Result<Value, String> {
+pub fn set(config_path: &Path, setting_path: &str, requested: Value) -> Result<Value, String> {
     validate_setting_path(setting_path)?;
 
     let current_config = load_config(config_path)
@@ -176,12 +142,12 @@ pub fn set(
 
     let verified = load_config(config_path).map_err(|error| {
         restore_backup(config_path, backup.as_deref());
-        format!(
-            "The updated config could not be reloaded and was restored from backup: {error}"
-        )
+        format!("The updated config could not be reloaded and was restored from backup: {error}")
     })?;
     let verified_json = serde_json::to_value(verified).map_err(|error| error.to_string())?;
-    let verified_value = lookup(&verified_json, setting_path).cloned().unwrap_or(Value::Null);
+    let verified_value = lookup(&verified_json, setting_path)
+        .cloned()
+        .unwrap_or(Value::Null);
     let candidate_value = lookup(
         &serde_json::to_value(&candidate).map_err(|error| error.to_string())?,
         setting_path,
@@ -266,7 +232,11 @@ fn lookup<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     Some(current)
 }
 
-fn replace_existing_path(root: &mut Value, path: &str, replacement: Value) -> Result<Value, String> {
+fn replace_existing_path(
+    root: &mut Value,
+    path: &str,
+    replacement: Value,
+) -> Result<Value, String> {
     let segments = path_segments(path)?;
     let mut current = root;
     for (index, segment) in segments.iter().enumerate() {
@@ -517,13 +487,8 @@ fn ui_location(path: &str) -> String {
         "chat" => "Chat",
         "privacy" => "Privacy",
         "projects" | "git_context" | "github" => "Integrations & projects",
-        "events"
-        | "file_watcher"
-        | "process_watcher"
-        | "session_state"
-        | "context_package"
-        | "continuation"
-        | "context_tools" => "Context engine",
+        "events" | "file_watcher" | "process_watcher" | "session_state" | "context_package"
+        | "continuation" | "context_tools" => "Context engine",
         _ => "Advanced",
     };
     format!("Settings > {label} ({section})")
@@ -616,437 +581,3 @@ mod tests {
         );
     }
 }
-''',
-)
-
-replace_once(
-    "crates/continuum-core/src/lib.rs",
-    "pub mod config_edit;\npub mod context;",
-    "pub mod config_edit;\npub mod settings;\npub mod context;",
-)
-
-write(
-    "apps/desktop/src-tauri/src/settings_tools.rs",
-    r'''//! Desktop wrappers around the shared typed settings backend.
-
-use std::path::PathBuf;
-
-use continuum_core::config::continuum_dev_dir;
-use serde_json::Value;
-
-fn config_path() -> PathBuf {
-    continuum_dev_dir().join("config.toml")
-}
-
-pub fn list(input: &Value) -> Result<String, String> {
-    let query = input.get("query").and_then(Value::as_str);
-    let limit = input
-        .get("limit")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
-    serialize(continuum_core::settings::list(
-        &config_path(),
-        query,
-        limit,
-    )?)
-}
-
-pub fn get(input: &Value) -> Result<String, String> {
-    let path = required_string(input, "path")?;
-    serialize(continuum_core::settings::get(&config_path(), path)?)
-}
-
-pub fn set(input: &Value) -> Result<String, String> {
-    let path = required_string(input, "path")?;
-    let value = input
-        .get("value")
-        .cloned()
-        .ok_or_else(|| "missing required field `value`".to_string())?;
-    serialize(continuum_core::settings::set(
-        &config_path(),
-        path,
-        value,
-    )?)
-}
-
-fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("missing required string field `{key}`"))
-}
-
-fn serialize(value: Value) -> Result<String, String> {
-    serde_json::to_string(&value).map_err(|error| error.to_string())
-}
-''',
-)
-
-chat_tools = "apps/desktop/src-tauri/src/chat_tools.rs"
-replace_once(
-    chat_tools,
-    '''        result
-    }
-}
-
-impl VaultToolExecutor {''',
-    '''        result
-    }
-}
-
-/// In-process executor for context and settings tools when the memory vault is
-/// disabled or unavailable. Settings autonomy must never depend on memory.
-pub struct SettingsToolExecutor;
-
-#[async_trait::async_trait]
-impl ToolExecutor for SettingsToolExecutor {
-    async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<String, String> {
-        crate::permissions::authorize_in_process_tool(name, input).await?;
-
-        let result = match name {
-            "context_screen" => VaultToolExecutor::context_screen(),
-            "context_window" => VaultToolExecutor::context_window(),
-            "settings_list" => settings_tools::list(input),
-            "settings_get" => settings_tools::get(input),
-            "settings_set" => settings_tools::set(input),
-            other => Err(format!(
-                "unknown base chat tool {other:?} (expected context_screen|context_window|settings_list|settings_get|settings_set)"
-            )),
-        };
-        if let Err(error) = &result {
-            tracing::warn!(
-                layer = "desktop",
-                component = "chat_tools",
-                tool = name,
-                error = %error,
-                "chat tool call failed"
-            );
-        }
-        result
-    }
-}
-
-impl VaultToolExecutor {''',
-)
-replace_once(chat_tools, '"context_screen" => self.context_screen(),', '"context_screen" => Self::context_screen(),')
-replace_once(chat_tools, '"context_window" => self.context_window(),', '"context_window" => Self::context_window(),')
-replace_once(chat_tools, "    fn context_screen(&self) -> Result<String, String> {", "    fn context_screen() -> Result<String, String> {")
-replace_once(chat_tools, "    fn context_window(&self) -> Result<String, String> {", "    fn context_window() -> Result<String, String> {")
-replace_once(
-    chat_tools,
-    "/// Claude CLI gets an explicit allowlist rather than a wildcard.",
-    r'''
-/// Build the tools exposed to one HTTP/Anthropic chat turn.
-///
-/// Live context and settings are always available. Memory tools are added only
-/// when the vault is enabled and opened successfully.
-pub fn chat_tool_defs(include_memory: bool) -> Vec<ToolDef> {
-    let mut tools = memory_tool_defs();
-    if !include_memory {
-        tools.retain(|tool| !tool.name.starts_with("memory_"));
-    }
-    tools
-}
-
-/// Claude CLI gets an explicit allowlist rather than a wildcard.''',
-)
-replace_between(
-    chat_tools,
-    "/// Claude CLI gets an explicit allowlist rather than a wildcard.",
-    "fn resolve_mcp_binary()",
-    r'''/// Claude CLI gets an explicit allowlist rather than a wildcard. Adding a new
-/// server tool therefore does not implicitly grant chat access to it. The
-/// conversation id scopes permission grants to this chat session.
-pub fn mcp_spec(
-    vault_dir: &Path,
-    dev_dir: &Path,
-    session_id: &str,
-    include_memory: bool,
-) -> Option<McpSpec> {
-    let server_command = resolve_mcp_binary()?;
-    Some(McpSpec {
-        server_command,
-        env: vec![
-            (
-                "CONTINUUM_VAULT_DIR".into(),
-                vault_dir.to_string_lossy().into_owned(),
-            ),
-            (
-                "CONTINUUM_DATA_DIR".into(),
-                dev_dir.to_string_lossy().into_owned(),
-            ),
-            ("CONTINUUM_SESSION_ID".into(), format!("chat-{session_id}")),
-        ],
-        allowed_tools: mcp_allowed_tools(include_memory),
-    })
-}
-
-fn mcp_allowed_tools(include_memory: bool) -> Vec<String> {
-    let mut tools = vec![
-        "mcp__continuum__context_session",
-        "mcp__continuum__context_window",
-        "mcp__continuum__context_screen",
-        "mcp__continuum__context_audio",
-        "mcp__continuum__context_projects",
-        "mcp__continuum__context_timeline",
-        "mcp__continuum__context_search",
-        "mcp__continuum__context_files",
-        "mcp__continuum__context_git",
-        "mcp__continuum__context_package",
-        "mcp__continuum__settings_list",
-        "mcp__continuum__settings_get",
-        "mcp__continuum__settings_set",
-    ];
-    if include_memory {
-        tools.extend([
-            "mcp__continuum__memory_vault_search",
-            "mcp__continuum__memory_vault_get",
-            "mcp__continuum__memory_vault_save",
-            "mcp__continuum__memory_vault_resolve",
-            "mcp__continuum__memory_vault_delete",
-            "mcp__continuum__memory_get_fact",
-            "mcp__continuum__memory_list_facts",
-            "mcp__continuum__memory_query_episodic",
-        ]);
-    }
-    tools.into_iter().map(String::from).collect()
-}
-
-''',
-)
-text = read(chat_tools)
-closing = text.rfind("\n}")
-if closing < 0:
-    raise RuntimeError("chat_tools.rs: final test-module closing brace not found")
-write(chat_tools, text[:closing] + r'''
-    #[test]
-    fn base_chat_tools_remain_available_without_memory() {
-        let names = chat_tool_defs(false)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "context_screen",
-                "context_window",
-                "settings_list",
-                "settings_get",
-                "settings_set"
-            ]
-        );
-    }
-
-    #[test]
-    fn claude_base_allowlist_uses_typed_settings_without_generic_fs_writes() {
-        let tools = mcp_allowed_tools(false);
-        assert!(tools.contains(&"mcp__continuum__settings_list".to_string()));
-        assert!(tools.contains(&"mcp__continuum__settings_get".to_string()));
-        assert!(tools.contains(&"mcp__continuum__settings_set".to_string()));
-        assert!(!tools.iter().any(|tool| tool.contains("memory_")));
-        assert!(!tools.contains(&"mcp__continuum__fs_apply_patch".to_string()));
-
-        let with_memory = mcp_allowed_tools(true);
-        assert!(with_memory
-            .iter()
-            .any(|tool| tool == "mcp__continuum__memory_vault_search"));
-    }
-''' + text[closing:])
-
-chat_rs = "apps/desktop/src-tauri/src/chat.rs"
-replace_between(
-    chat_rs,
-    "    let mut tools = Vec::new();",
-    "\n    // Prompt injection:",
-    r'''    let mut tools = Vec::new();
-    let mut executor: Option<Arc<dyn ToolExecutor>> = None;
-    let mut mcp = None;
-    let mut tools_section = None;
-    let include_memory = vault.is_some();
-
-    match conn.kind {
-        ProviderKind::ClaudeCli => {
-            // Settings and live context are independent from the memory
-            // vault. Memory tools are added to the MCP allowlist only when
-            // the vault was explicitly enabled and opened successfully.
-            if let Some(spec) = chat_tools::mcp_spec(
-                memory.vault_dir(),
-                &dev_dir,
-                &conversation_id,
-                include_memory,
-            ) {
-                mcp = Some(spec);
-                if include_memory {
-                    tools_section = Some(memory_tools_section(conn.kind));
-                }
-            }
-        }
-        ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
-            tools = chat_tools::chat_tool_defs(include_memory);
-            executor = Some(match &vault {
-                Some(vault) => Arc::new(chat_tools::VaultToolExecutor {
-                    vault: vault.clone(),
-                }) as Arc<dyn ToolExecutor>,
-                None => Arc::new(chat_tools::SettingsToolExecutor) as Arc<dyn ToolExecutor>,
-            });
-            if include_memory {
-                tools_section = Some(memory_tools_section(conn.kind));
-            }
-        }
-    }
-''',
-)
-replace_once(
-    chat_rs,
-    '''    // Memory tools: when enabled and the vault opens, the chat AI can read
-    // and write the memory vault — via the in-process executor for HTTP
-    // providers, or via an attached continuum-mcp server for the Claude
-    // CLI. A vault that fails to open degrades this send to a tool-less
-    // chat (warn + continue), never to a failed send.''',
-    '''    // Memory is optional. A disabled or unavailable vault removes only the
-    // memory tools; typed settings and privacy-filtered live-context tools stay
-    // attached so self-configuration never depends on the memory subsystem.''',
-)
-replace_once(
-    chat_rs,
-    "        tool_max_rounds: chat_cfg.memory_tool_max_rounds,",
-    "        tool_max_rounds: chat_cfg.memory_tool_max_rounds.max(1),",
-)
-
-replace_once(
-    "crates/continuum-mcp/src/tools/mod.rs",
-    "pub mod repair;\npub mod system;",
-    "pub mod repair;\npub mod settings;\npub mod system;",
-)
-write(
-    "crates/continuum-mcp/src/tools/settings.rs",
-    r'''//! Typed settings request schemas for `mcp__continuum__settings_*`.
-
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
-pub struct SettingsListRequest {
-    /// Optional dotted-path keyword, such as `screen`, `voice`, `privacy`, or `chat`.
-    pub query: Option<String>,
-    /// Maximum matches (default 80, maximum 250).
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct SettingsGetRequest {
-    /// Exact dotted path returned by `settings_list`.
-    pub path: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct SettingsSetRequest {
-    /// Exact dotted path returned by `settings_list` or `settings_get`.
-    pub path: String,
-    /// New JSON value. It must match the typed config field.
-    pub value: serde_json::Value,
-}
-''',
-)
-
-server = "crates/continuum-mcp/src/server.rs"
-replace_once(
-    server,
-    "use crate::tools::system::{self as systool, NotificationRequest};",
-    '''use crate::tools::settings::{
-    SettingsGetRequest, SettingsListRequest, SettingsSetRequest,
-};
-use crate::tools::system::{self as systool, NotificationRequest};''',
-)
-replace_once(
-    server,
-    '''#[tool_router]
-impl ContinuumMcpServer {
-    /// Constructs a new server with all tools registered. Stores are opened''',
-    '''#[tool_router]
-impl ContinuumMcpServer {
-    #[tool(
-        description = "Discover Continuum runtime settings by typed dotted path. Returns current/default values, value types, Settings UI locations, and the config path. Secret-like values are redacted."
-    )]
-    async fn settings_list(
-        &self,
-        Parameters(req): Parameters<SettingsListRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("settings_list", &req, || async {
-            continuum_core::settings::list(
-                &self.state.data_dir.join("config.toml"),
-                req.query.as_deref(),
-                req.limit,
-            )
-            .map_err(|error| McpError::invalid_params(error, None))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Read one exact Continuum setting by dotted path, including its current/default value and Settings UI location. Secret-like values are redacted."
-    )]
-    async fn settings_get(
-        &self,
-        Parameters(req): Parameters<SettingsGetRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("settings_get", &req, || async {
-            continuum_core::settings::get(
-                &self.state.data_dir.join("config.toml"),
-                &req.path,
-            )
-            .map_err(|error| McpError::invalid_params(error, None))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Change one existing typed Continuum setting after an explicit user request. The full candidate config is validated, unknown sibling keys are preserved, and the previous file is backed up before an atomic write."
-    )]
-    async fn settings_set(
-        &self,
-        Parameters(req): Parameters<SettingsSetRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("settings_set", &req, || async {
-            continuum_core::settings::set(
-                &self.state.data_dir.join("config.toml"),
-                &req.path,
-                req.value.clone(),
-            )
-            .map_err(|error| McpError::invalid_params(error, None))
-        })
-        .await
-    }
-
-    /// Constructs a new server with all tools registered. Stores are opened''',
-)
-
-replace_once(
-    "crates/continuum-mcp/tests/protocol.rs",
-    '''    "context_git",
-    "context_package",
-];''',
-    '''    "context_git",
-    "context_package",
-    // Typed autonomous settings
-    "settings_list",
-    "settings_get",
-    "settings_set",
-];''',
-)
-
-replace_once(
-    "apps/desktop/src-tauri/assets/chat-system-prompt.md",
-    r'''- On the Claude CLI path, equivalent config control is available through
-  `mcp__continuum__fs_read_file` and `mcp__continuum__fs_apply_patch`. Read the
-  current `~/.continuum-dev/config.toml` first, patch only the requested keys,
-  and preserve valid TOML. Never use a broad filesystem edit when a precise
-  config patch will do.''',
-    r'''- On the Claude CLI path, use `mcp__continuum__settings_list`,
-  `mcp__continuum__settings_get`, and `mcp__continuum__settings_set`. These call
-  the same typed backend, validation, backup, and permission gate as the other
-  providers. Never fall back to a generic filesystem mutation for settings.''',
-)
-
-print("Autonomous settings hardening patch applied.")
