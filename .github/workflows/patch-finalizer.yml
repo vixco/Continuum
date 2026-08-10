@@ -1,0 +1,61 @@
+name: Patch finalizer workflow
+
+on:
+  push:
+    branches:
+      - swarm/review-finalize-20260810
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: swarm/review-finalize-20260810
+      - name: Preserve all formatter output in integration commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/finalize-reviewed-swarm.yml')
+          text = path.read_text(encoding='utf-8')
+          old = '''          git add \\
+            crates/continuum-core/src/runtime_publish.rs \\
+            crates/continuum-core/src/health/verified.rs \\
+            crates/continuum-core/src/health/runtime_repair.rs \\
+            crates/continuum-core/src/operational_state.rs
+          git commit --amend --no-edit'''
+          new = '''          git add -A
+          git commit --amend --no-edit'''
+          count = text.count(old)
+          if count == 1:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit(f'unexpected finalizer staging block: {count} matches')
+          old_a8 = '''          cargo fmt --all
+          git add apps/desktop/tests/chat-scroll-behavior.test.mjs
+          git commit --amend --no-edit'''
+          new_a8 = '''          cargo fmt --all
+          git add -A
+          git commit --amend --no-edit'''
+          count_a8 = text.count(old_a8)
+          if count_a8 == 1:
+              text = text.replace(old_a8, new_a8, 1)
+          elif new_a8 not in text:
+              raise SystemExit(f'unexpected A8 staging block: {count_a8} matches')
+          path.write_text(text, encoding='utf-8')
+          PY
+          if git diff --quiet; then
+            echo 'Finalizer already patched.'
+            exit 0
+          fi
+          git config user.name 'Continuum integration bot'
+          git config user.email '93612321+vixco@users.noreply.github.com'
+          git add .github/workflows/finalize-reviewed-swarm.yml
+          git commit -m 'fix(ci): commit formatter output before cherry-picks'
+          git push origin HEAD:swarm/review-finalize-20260810
