@@ -11,11 +11,31 @@ import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("release_contract.py")
+REPO_ROOT = MODULE_PATH.parent.parent
 SPEC = importlib.util.spec_from_file_location("release_contract", MODULE_PATH)
 assert SPEC and SPEC.loader
 release_contract = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = release_contract
 SPEC.loader.exec_module(release_contract)
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_macos_build_includes_app_bundle_for_updater_archive(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'pnpm tauri build --bundles app,dmg --target "${{ matrix.target }}"',
+            workflow,
+        )
+
+    def test_release_builds_restore_platform_specific_rust_caches(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count("- name: Cache Rust release artifacts"), 2)
+        self.assertIn("${{ runner.os }}-${{ runner.arch }}-rust-", workflow)
+        self.assertIn("${{ runner.os }}-${{ matrix.target }}-rust-", workflow)
 
 
 def git(root: Path, *args: str) -> str:
