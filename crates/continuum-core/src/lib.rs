@@ -51,7 +51,7 @@ pub mod workers;
 /// the events writer and the raw log.
 #[cfg(feature = "runtime")]
 pub mod bench;
-#[cfg(feature = "runtime")]
+#[cfg(feature = "raw-log")]
 pub mod memory;
 #[cfg(feature = "runtime")]
 pub mod orchestrator;

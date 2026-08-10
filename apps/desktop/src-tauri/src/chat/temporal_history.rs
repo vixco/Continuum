@@ -43,7 +43,7 @@ pub(super) fn historical_activity_intent(message: &str) -> bool {
 
 fn unavailable(reason: &str) -> String {
     format!(
-        "## Historical activity context\n- Retrieval status: unavailable ({reason}).\n\nDo not treat unavailable history as evidence that no prior activity exists.\n"
+        "## Historical activity context\n- Retrieval status: unavailable ({reason}).\n\nUnavailable history is not evidence that no prior activity exists.\n"
     )
 }
 
@@ -67,7 +67,9 @@ pub(super) async fn temporal_context_section(
     };
     let log = match RawLog::open_read_only(&db_path.to_string_lossy()).await {
         Ok(log) => log,
-        Err(RawLogError::NotYetCreated { .. }) => return unavailable("history store not created yet"),
+        Err(RawLogError::NotYetCreated { .. }) => {
+            return unavailable("history store not created yet")
+        }
         Err(error) => {
             tracing::debug!(
                 layer = "desktop",
@@ -114,13 +116,12 @@ pub(super) async fn temporal_context_section(
 
     let observations = rows.into_iter().map(|row| {
         let live_zone = filter.resolve_zone(&row.application, &row.window_title);
-        let sensitivity = if row.sensitivity == EventSensitivity::LocalOnly
-            || live_zone != Zone::CloudAllowed
-        {
-            EventSensitivity::LocalOnly
-        } else {
-            EventSensitivity::CloudAllowed
-        };
+        let sensitivity =
+            if row.sensitivity == EventSensitivity::LocalOnly || live_zone != Zone::CloudAllowed {
+                EventSensitivity::LocalOnly
+            } else {
+                EventSensitivity::CloudAllowed
+            };
 
         TemporalObservation {
             source_reference: format!("context_event:{}", row.id),
@@ -197,7 +198,9 @@ pub(super) async fn temporal_context_section(
                 output.push('\n');
             }
             if session.conflicting_signals {
-                output.push_str("  Contradiction state: conflicting signals observed; confidence reduced.\n");
+                output.push_str(
+                    "  Contradiction state: conflicting signals observed; confidence reduced.\n",
+                );
             }
             if session.dropped_evidence > 0 {
                 output.push_str(&format!(
@@ -226,7 +229,9 @@ mod tests {
     #[test]
     fn triggers_history_change_and_failure_questions_without_triggering_normal_chat() {
         assert!(historical_activity_intent("What was I doing earlier?"));
-        assert!(historical_activity_intent("What changed since I last asked?"));
+        assert!(historical_activity_intent(
+            "What changed since I last asked?"
+        ));
         assert!(historical_activity_intent("Why did this break?"));
         assert!(historical_activity_intent("Waar was ik mee bezig eerder?"));
         assert!(!historical_activity_intent("Write a Rust function for me"));

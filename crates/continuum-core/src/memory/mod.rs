@@ -13,9 +13,13 @@
 //! 2. Re-rank results via the triage LLM for relevance
 //! 3. Inject top results into the orchestrator's context
 
+#[cfg(feature = "runtime")]
 pub mod distill;
+#[cfg(feature = "runtime")]
 pub mod episodic;
 pub mod events;
 pub mod raw_log;
+#[cfg(feature = "runtime")]
 pub mod retrieval;
+#[cfg(feature = "runtime")]
 pub mod semantic;
