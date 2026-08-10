@@ -283,3 +283,45 @@ test("history and triage alone never make the UI claim the user is being observe
   assert.equal(summary.activeCount, 0);
   assert.equal(summary.kind, "off");
 });
+
+test("heartbeat loss demotes every runtime-derived view and confidence", () => {
+  const { state, config } = fixture();
+  state.context.page.recent_events = [{ ts: "2026-08-10T11:59:00Z" }];
+  const live = deriveObservationSummary({ state, config, runtimeAvailable: true });
+  const unavailable = deriveObservationSummary({
+    state,
+    config,
+    runtimeAvailable: false,
+    runtimeStarting: false,
+  });
+
+  assert.equal(live.sources.find((source) => source.id === "screen").state, "active");
+  assert.equal(live.currentActivity.freshness, "live");
+  assert.equal(unavailable.kind, "unavailable");
+  assert.equal(unavailable.activeCount, 0);
+  assert.ok(
+    unavailable.sources
+      .filter((source) => source.id !== "history")
+      .every((source) => source.state === "unavailable")
+  );
+  assert.equal(unavailable.sources.find((source) => source.id === "history").state, "last_known");
+  assert.equal(unavailable.currentActivity.freshness, "last_known");
+  assert.equal(unavailable.currentActivity.confidence, null);
+  assert.match(unavailable.currentActivity.evidence, /not a live inference/i);
+});
+
+test("runtime startup never exposes a prior snapshot as live", () => {
+  const { state, config } = fixture();
+  const summary = deriveObservationSummary({
+    state,
+    config,
+    runtimeAvailable: false,
+    runtimeStarting: true,
+  });
+
+  assert.equal(summary.kind, "processing");
+  assert.equal(summary.activeCount, 0);
+  assert.ok(summary.sources.every((source) => source.state !== "active"));
+  assert.notEqual(summary.currentActivity.freshness, "live");
+  assert.equal(summary.currentActivity.confidence, null);
+});
