@@ -1,4 +1,4 @@
-name: A7 public source export
+name: A7 public integration source export
 
 on:
   push:
@@ -13,14 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: swarm/agi-integration
 
-      - name: Archive tracked public source
-        run: git archive --format=zip --output="$RUNNER_TEMP/continuum-a7-source.zip" HEAD
+      - name: Archive tracked public integration source
+        run: git archive --format=zip --output="$RUNNER_TEMP/continuum-a7-integration-source.zip" HEAD
 
       - name: Upload source archive
         uses: actions/upload-artifact@v4
         with:
-          name: continuum-a7-public-source
-          path: ${{ runner.temp }}/continuum-a7-source.zip
+          name: continuum-a7-public-integration-source
+          path: ${{ runner.temp }}/continuum-a7-integration-source.zip
           if-no-files-found: error
           retention-days: 1
