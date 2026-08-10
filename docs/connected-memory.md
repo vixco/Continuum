@@ -43,13 +43,13 @@ A realistic synthetic case is repeated editing, testing and documentation work o
 
 Evidence references are identifiers, not raw activity payloads. Callers must preserve source provenance and sensitivity and must not serialize passwords, private screen contents, clipboard text or personal filenames into the relation contract.
 
-Ambient/session producers must use `observation_adapter` before constructing durable-memory input:
+Ambient/session producers must use `observation_adapter` before constructing memory input:
 
 - `never_observe` is rejected before a memory candidate or evidence record exists;
-- `local_only` may remain in bounded local history and maps to the legacy sensitive class, but recurrence/salience can never auto-promote it through the observation path;
-- `cloud_allowed` may enter ordinary consolidation after the usual evidence checks.
+- `local_only` may remain in bounded local history, but it is not eligible for automatic memory-candidate construction at all; a separate explicit-confirmation/manual path is required before it can become memory;
+- `cloud_allowed` may enter ordinary candidate consolidation after the usual evidence checks.
 
-`assess_observation_consolidation` enforces that boundary even if a generic consolidation configuration allows sensitive memory promotion. Such a generic override is reserved for separately evidenced explicit-confirmation/manual flows, not ambient observation.
+`assess_observation_consolidation` enforces that boundary even if a generic manual-flow consolidation configuration allows sensitive memory promotion. Generic sensitive promotion is reserved for separately evidenced explicit-confirmation/manual flows, not ambient observation.
 
 ## Relation lifecycle
 
