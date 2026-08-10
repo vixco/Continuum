@@ -38,3 +38,10 @@ test("the explanatory observation control replaces the ambiguous titlebar power 
   assert.doesNotMatch(shell, /ObservationPowerButton/);
   assert.doesNotMatch(page, /ObservationStatusControl/);
 });
+
+test("history state vocabulary includes live and last-known without treating either as a fixture", async () => {
+  const source = await read("src/components/observation/ObservationStatusControl.tsx");
+
+  assert.match(source, /active: "Live"/);
+  assert.match(source, /last_known: "Last known"/);
+});

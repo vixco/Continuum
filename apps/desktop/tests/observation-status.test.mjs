@@ -205,3 +205,81 @@ test("unpublished process and triage health stay unavailable rather than looking
   assert.equal(summary.sources.find((source) => source.id === "processes").state, "unavailable");
   assert.equal(summary.sources.find((source) => source.id === "triage").state, "unavailable");
 });
+
+test("healthy history writer is live and reports the latest retained event", () => {
+  const { state, config } = fixture();
+  state.context.page.recent_events = [{ ts: "2026-08-10T11:59:00Z" }];
+  const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+  const history = summary.sources.find((source) => source.id === "history");
+
+  assert.equal(history.state, "active");
+  assert.match(history.reason, /writer is healthy/i);
+  assert.match(history.reason, /Latest retained event/);
+});
+
+test("published history without writer health is explicitly last-known", () => {
+  const { state, config } = fixture();
+  state.context.page.recent_events = [{ ts: "2026-08-10T11:58:00Z" }];
+  state.context.engine.events_writer = null;
+  const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+  const history = summary.sources.find((source) => source.id === "history");
+
+  assert.equal(history.enabled, true);
+  assert.equal(history.state, "last_known");
+  assert.match(history.reason, /last-known/i);
+});
+
+test("unhealthy history writer is degraded instead of looking enabled", () => {
+  const { state, config } = fixture();
+  state.context.page.recent_events = [{ ts: "2026-08-10T11:57:00Z" }];
+  state.context.engine.events_writer = {
+    healthy: false,
+    enabled: true,
+    should_restart: true,
+    detail: "History writer stopped after repeated write failures",
+  };
+  const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+  const history = summary.sources.find((source) => source.id === "history");
+
+  assert.equal(history.state, "degraded");
+  assert.equal(summary.kind, "degraded");
+  assert.match(summary.reason, /Historical context/);
+  assert.match(summary.reason, /write failures/);
+});
+
+test("configured retention with a disabled writer is unavailable, not off by choice", () => {
+  const { state, config } = fixture();
+  state.context.engine.events_writer = {
+    healthy: true,
+    enabled: false,
+    should_restart: false,
+    detail: "History writer is unavailable in this runtime",
+  };
+  const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+  const history = summary.sources.find((source) => source.id === "history");
+
+  assert.equal(history.enabled, true);
+  assert.equal(history.state, "unavailable");
+  assert.match(history.reason, /unavailable/i);
+});
+
+test("history and triage alone never make the UI claim the user is being observed", () => {
+  const { state, config } = fixture();
+  state.context.page.toggles = {
+    mic: false,
+    screen: false,
+    files: false,
+    git: false,
+    pause_all: false,
+  };
+  state.context.engine.process_watcher = {
+    healthy: true,
+    enabled: false,
+    should_restart: false,
+    detail: "Off by policy",
+  };
+  const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+
+  assert.equal(summary.activeCount, 0);
+  assert.equal(summary.kind, "off");
+});

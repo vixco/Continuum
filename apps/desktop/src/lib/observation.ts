@@ -18,7 +18,8 @@ export type ObservationStatusKind =
   | "off"
   | "unavailable";
 
-export type ObservationSourceState = "active" | "idle" | "off" | "unavailable" | "degraded";
+export type ObservationSourceState =
+  "active" | "idle" | "last_known" | "off" | "unavailable" | "degraded";
 export type PrivacyImpact = "higher" | "moderate" | "lower";
 
 export interface ObservationSourceView {
@@ -163,6 +164,82 @@ function currentActivity(state: ContinuumState): CurrentActivityView {
   };
 }
 
+function historicalContextSource(
+  state: ContinuumState,
+  config: ContinuumConfig
+): Pick<ObservationSourceView, "enabled" | "state" | "reason"> {
+  const retentionDays = config.storage.retention_days;
+  if (retentionDays <= 0) {
+    return {
+      enabled: false,
+      state: "off",
+      reason: "Historical retention is off by choice.",
+    };
+  }
+
+  const page = state.context.page;
+  const writer = state.context.engine?.events_writer;
+  const latestEventAt = page?.recent_events.reduce<string | null>(
+    (latest, event) => (!latest || event.ts > latest ? event.ts : latest),
+    null
+  );
+  const retentionLabel = `${retentionDays} day${retentionDays === 1 ? "" : "s"}`;
+  const latestLabel = latestEventAt
+    ? ` Latest retained event: ${new Date(latestEventAt).toLocaleString()}.`
+    : " No retained events have been published yet.";
+
+  if (!writer) {
+    if (page) {
+      return {
+        enabled: true,
+        state: "last_known",
+        reason: `Showing last-known historical context; writer health is not available.${latestLabel}`,
+      };
+    }
+    return {
+      enabled: true,
+      state: "unavailable",
+      reason:
+        "Historical retention is configured, but neither writer health nor a history projection is available.",
+    };
+  }
+
+  if (!writer.enabled) {
+    return {
+      enabled: true,
+      state: "unavailable",
+      reason:
+        normalizedDetail(writer) ??
+        "Historical retention is configured, but the runtime history writer is unavailable.",
+    };
+  }
+
+  if (!writer.healthy || writer.should_restart) {
+    return {
+      enabled: true,
+      state: "degraded",
+      reason: `${
+        normalizedDetail(writer) ?? "The runtime history writer reported a problem."
+      }${latestEventAt ? latestLabel : ""}`,
+    };
+  }
+
+  if (!page) {
+    return {
+      enabled: true,
+      state: "unavailable",
+      reason:
+        "The history writer is healthy, but the desktop has not received a historical-context projection yet.",
+    };
+  }
+
+  return {
+    enabled: true,
+    state: "active",
+    reason: `History writer is healthy; source-attributed activity is retained for ${retentionLabel}.${latestLabel}`,
+  };
+}
+
 function sourceViews(state: ContinuumState, config: ContinuumConfig): ObservationSourceView[] {
   const engine: ContextEngineSnapshot | null = state.context.engine;
   const toggles = state.context.page?.toggles ?? null;
@@ -221,18 +298,7 @@ function sourceViews(state: ContinuumState, config: ContinuumConfig): Observatio
         reason: "The runtime has not published triage state.",
       };
 
-  const historyPublished = state.context.page !== null;
-  const historyEnabled = historyPublished && config.storage.retention_days > 0;
-  const historyState: ObservationSourceState = !historyPublished
-    ? "unavailable"
-    : historyEnabled
-      ? "active"
-      : "off";
-  const historyReason = !historyPublished
-    ? "Waiting for the runtime to publish historical context."
-    : historyEnabled
-      ? `Source-attributed activity is retained for ${config.storage.retention_days} day${config.storage.retention_days === 1 ? "" : "s"}.`
-      : "Historical retention is off.";
+  const history = historicalContextSource(state, config);
 
   return [
     {
@@ -293,11 +359,11 @@ function sourceViews(state: ContinuumState, config: ContinuumConfig): Observatio
     {
       id: "history",
       label: "Historical context",
-      enabled: historyEnabled,
+      enabled: history.enabled,
       canToggle: false,
       toggleName: null,
-      state: historyState,
-      reason: historyReason,
+      state: history.state,
+      reason: history.reason,
       privacyImpact: "moderate",
       privacy:
         "Keeps source-attributed activity on this device until retention removes it or you delete it.",
@@ -309,7 +375,10 @@ export function deriveObservationSummary(input: ObservationSummaryInput): Observ
   const { state, config } = input;
   const sources = sourceViews(state, config);
   const activeCount = sources.filter(
-    (source) => source.state === "active" || source.state === "idle"
+    (source) =>
+      source.id !== "history" &&
+      source.id !== "triage" &&
+      (source.state === "active" || source.state === "idle")
   ).length;
   const lastUpdatedAt =
     state.context.session?.updated ??

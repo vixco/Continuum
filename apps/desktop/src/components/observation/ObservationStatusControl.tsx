@@ -48,8 +48,9 @@ const STATUS_TONE: Record<ObservationStatusKind, string> = {
 };
 
 const SOURCE_STATE_LABEL: Record<ObservationSourceView["state"], string> = {
-  active: "Active",
+  active: "Live",
   idle: "Idle",
+  last_known: "Last known",
   off: "Off",
   unavailable: "Unavailable",
   degraded: "Degraded",
@@ -58,6 +59,7 @@ const SOURCE_STATE_LABEL: Record<ObservationSourceView["state"], string> = {
 const SOURCE_STATE_TONE: Record<ObservationSourceView["state"], string> = {
   active: "text-state-healthy",
   idle: "text-ink-muted",
+  last_known: "text-ink-muted",
   off: "text-ink-dim",
   unavailable: "text-state-warn",
   degraded: "text-state-error",
