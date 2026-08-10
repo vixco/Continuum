@@ -6,7 +6,7 @@
 //! vision backends, an [`OnnxVisionModel`](onnx::OnnxVisionModel) implementation
 //! that uses SmolVLM-256M via ONNX Runtime, and reusable ambient-perception
 //! primitives in [`perception`] for deterministic frame deduplication, semantic
-//! caching, compact observation records, runtime health, and metrics.
+//! cache identity, compact observation records, runtime health, and metrics.
 //!
 //! # Architecture
 //!
@@ -49,6 +49,7 @@
 //! # }
 //! ```
 
+mod digest;
 pub mod error;
 pub mod onnx;
 pub mod perception;
@@ -119,10 +120,6 @@ pub trait VisionModel: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Verify that `VisionModel` can be used as a trait object.
-    ///
-    /// This is a compile-time check that the trait is object-safe and that
-    /// `Box<dyn VisionModel>` works as expected in the orchestration layer.
     #[tokio::test]
     async fn test_vision_model_is_object_safe() {
         struct MockVisionModel;
@@ -156,7 +153,6 @@ mod tests {
         model.warmup().await.expect("mock warmup should not fail");
     }
 
-    /// Verify that `Arc<dyn VisionModel>` works for shared ownership across tasks.
     #[tokio::test]
     async fn test_vision_model_works_with_arc() {
         struct MockVisionModel;
