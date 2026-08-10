@@ -53,6 +53,8 @@ use crate::chat_store::{
 use crate::chat_tools;
 use crate::providers::{build_adapter, ChatState};
 
+mod temporal_history;
+
 /// Built-in system prompt, embedded at compile time. Overridden per-config
 /// via `[chat].system_prompt_path`.
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../assets/chat-system-prompt.md");
@@ -653,6 +655,14 @@ pub async fn chat_send_message(
         chrono::Utc::now(),
     );
 
+    let temporal_context = temporal_history::temporal_context_section(
+        &dev_dir,
+        &full_cfg,
+        &privacy_filter,
+        text.trim(),
+    )
+    .await;
+
     let mut system = system_prompt(
         &chat_cfg,
         runtime_running,
@@ -672,6 +682,12 @@ pub async fn chat_send_message(
     if !session_context.is_empty() {
         system.push('\n');
         system.push_str(&session_context);
+        system.push('\n');
+    }
+
+    if !temporal_context.is_empty() {
+        system.push('\n');
+        system.push_str(&temporal_context);
         system.push('\n');
     }
 
