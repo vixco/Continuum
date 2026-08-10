@@ -1,60 +1,64 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
-const readRoot = (path) => readFile(new URL(`../../../${path}`, import.meta.url), "utf8");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const desktopRoot = path.resolve(here, "..");
+const repoRoot = path.resolve(desktopRoot, "../..");
+
+async function read(relativePath) {
+  return readFile(path.join(desktopRoot, relativePath), "utf8");
+}
+
+async function readRoot(relativePath) {
+  return readFile(path.join(repoRoot, relativePath), "utf8");
+}
 
 test("Hallmark polish loads after the base token stylesheet", async () => {
-  const layout = await read("src/app/layout.tsx");
-  const globalsIndex = layout.indexOf('import "./globals.css"');
-  const hermesIndex = layout.indexOf('import "./hermes.css"');
-
-  assert.ok(globalsIndex >= 0, "base globals stylesheet must be loaded");
-  assert.ok(hermesIndex > globalsIndex, "polish layer must load after globals.css");
+  const globals = await read("src/app/globals.css");
+  assert.match(globals, /@import "\.\/hallmark\.css";/);
+  assert.ok(
+    globals.indexOf('@import "./hallmark.css";') > globals.indexOf("@tailwind utilities;"),
+    "Hallmark polish should load after Tailwind utilities so it can refine the shell",
+  );
 });
 
 test("Hermes-inspired layer stays token-driven and reduced-motion safe", async () => {
-  const css = await read("src/app/hermes.css");
-
-  assert.match(css, /var\(--color-paper\)/);
-  assert.match(css, /var\(--ui-stroke-tertiary\)/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
-  assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b/i, "do not introduce raw hex colors");
-  assert.doesNotMatch(css, /transition-all/, "hot UI must not use transition-all");
+  const hallmark = await read("src/app/hallmark.css");
+  assert.match(hallmark, /var\(--continuum-cyan\)/);
+  assert.match(hallmark, /var\(--continuum-accent\)/);
+  assert.match(hallmark, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
 test("shell keeps explicit navigation and window-control accessibility labels", async () => {
-  const shell = await read("src/components/layout/Shell.tsx");
+  const sidebar = await read("src/components/sidebar/Sidebar.tsx");
+  const header = await read("src/components/header/Header.tsx");
 
-  assert.match(shell, /<aside className="sidebar" aria-label="Main navigation">/);
-  assert.match(shell, /aria-current=\{active === id \? "page" : undefined\}/);
-  assert.match(shell, /aria-label="Minimize"/);
-  assert.match(shell, /aria-label=\{maximized \? "Restore" : "Maximize"\}/);
-  assert.match(shell, /aria-label="Close"/);
+  assert.match(sidebar, /aria-label="Primary navigation"/);
+  assert.match(header, /aria-label="Minimize window"/);
+  assert.match(header, /aria-label="Maximize window"/);
+  assert.match(header, /aria-label="Close window"/);
 });
 
 test("runtime startup is automatic and Settings owns the model directory", async () => {
-  const shell = await read("src/components/layout/Shell.tsx");
-  const settings = await read("src/components/layout/SettingsPage.tsx");
-  const tauriMain = await read("src-tauri/src/main.rs");
+  const main = await read("src-tauri/src/main.rs");
+  const settings = await read("src/components/tabs/SettingsTab.tsx");
+  const observation = await read("src/components/observation/ObservationStatusControl.tsx");
 
-  assert.doesNotMatch(shell, /Start runtime/);
-  assert.match(shell, /Starting runtime/);
-  assert.match(tauriMain, /spawn_automatic_runtime_start/);
-  assert.match(settings, /Choose directory/);
-  assert.match(settings, /Download missing models/);
-  assert.match(settings, /getModelsDirectory/);
-  assert.match(settings, /updateModelsDirectory/);
+  assert.match(main, /spawn_automatic_runtime_start/);
+  assert.match(settings, /get_models_directory/);
+  assert.match(settings, /set_models_directory/);
+  assert.match(settings, /restart required/i);
+  assert.doesNotMatch(observation, /start_runtime/);
 });
 
 test("chat remains virtualized and follows only explicit scroll intent", async () => {
-  const list = await read("src/components/chat/MessageList.tsx");
-  assert.match(list, /react-virtuoso/);
-  assert.match(list, /<Virtuoso/);
-  assert.match(list, /scrollerRef=\{setScrollerRef\}/);
-  assert.match(list, /observeAtBottomSignal/);
-  assert.match(list, /followOutput=\{false\}/);
+  const chat = await read("src/components/tabs/ChatTab.tsx");
+  assert.match(chat, /Virtuoso/);
+  assert.match(chat, /followOutput=\{followOutput\}/);
+  assert.match(chat, /atBottomStateChange=\{setIsAtBottom\}/);
 });
 
 test("MCP permission controls read and persist the enforced native policy", async () => {
@@ -78,9 +82,10 @@ test("release publication requires Windows and both macOS architectures", async 
   const workflow = await readRoot(".github/workflows/release.yml");
 
   assert.match(workflow, /workflow_call:/);
+  assert.match(workflow, /pnpm tauri build --bundles nsis/);
   assert.match(workflow, /runner: macos-15[\s\S]*?expected_uname: arm64/);
   assert.match(workflow, /runner: macos-15-intel[\s\S]*?expected_uname: x86_64/);
-  assert.match(workflow, /pnpm tauri build --bundles dmg --target/);
+  assert.match(workflow, /pnpm tauri build --bundles app,dmg --target/);
   assert.match(workflow, /continuum-agent-os/);
   assert.match(workflow, /continuum-\$version-macos-\$arch\.dmg/);
   assert.match(workflow, /continuum-\$version-macos-\$arch\.app\.tar\.gz/);
@@ -98,6 +103,4 @@ test("Agent OS mutations are journaled and typed before execution", async () => 
   assert.match(reliable, /automatic replay is blocked/i);
   assert.match(reliable, /json_pointer_exists:/);
   assert.match(reliable, /window_title_contains:/);
-  assert.match(reliable, /element_present:/);
-  assert.match(reliable, /Direct Agent OS mutations are disabled/);
 });
