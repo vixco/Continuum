@@ -54,12 +54,11 @@ export function stageRuntime({
 
 export function runDesktopDev({ repoRoot = defaultRepoRoot, platform = process.platform } = {}) {
   const paths = stageRuntime({ repoRoot, platform });
-  const pnpm = platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const child = spawn(pnpm, ["dev"], {
+  const child = spawn("pnpm", ["dev"], {
     cwd: paths.desktop,
     env: process.env,
     stdio: "inherit",
-    shell: false,
+    shell: platform === "win32",
   });
 
   const stop = () => {
@@ -73,8 +72,8 @@ export function runDesktopDev({ repoRoot = defaultRepoRoot, platform = process.p
     process.exitCode = 1;
   });
   child.on("exit", (code, signal) => {
-    if (signal) process.kill(process.pid, signal);
-    else process.exitCode = code ?? 0;
+    if (signal && platform !== "win32") process.kill(process.pid, signal);
+    else process.exitCode = code ?? (signal ? 1 : 0);
   });
 }
 
