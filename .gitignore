@@ -2,6 +2,12 @@
 target/
 *.pdb
 
+# Staged runtime binaries — the release workflow copies continuum /
+# continuum-mcp / continuum-agent-os into the desktop bundle at build time.
+# Only the .gitkeep placeholder is committed.
+apps/desktop/src-tauri/resources/bin/*
+!apps/desktop/src-tauri/resources/bin/.gitkeep
+
 # Per-machine cargo overrides (target-dir, toolchain paths, etc). The
 # committed .cargo/config.toml has sensible defaults; copy it to
 # .cargo/config.local.toml and edit there if you need local-only tweaks.

@@ -353,6 +353,51 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --bundles app,dmg --target "${{ matrix.target }}"
 
+      - name: Ad-hoc sign .app and rebuild DMG
+        # No Apple Developer ID is configured yet, so Tauri leaves the .app
+        # without a trusted signature. We deep ad-hoc sign the bundle —
+        # including the staged continuum / continuum-mcp / continuum-agent-os
+        # Mach-Os in Resources/bin — so that once a user strips the download
+        # quarantine flag (see KNOWN_ISSUES.md) codesign --verify passes and
+        # the runtime can exec its bundled binaries without a broken-seal
+        # "damaged" error. Ad-hoc signing is NOT a Gatekeeper trust anchor;
+        # only Apple notarization removes the first-launch warning. The DMG is
+        # then rebuilt from the signed .app so the published installer carries
+        # the consistent signature.
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          app_dir="target/$target/release/bundle/macos"
+          dmg_dir="target/$target/release/bundle/dmg"
+          app="$(find "$app_dir" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app" || { echo "No .app found under $app_dir" >&2; exit 1; }
+
+          # Deep ad-hoc sign the whole bundle, innermost-first, so every
+          # nested Mach-O (helper binaries, the staged runtime) gets a
+          # signature before its parent is sealed.
+          find "$app" -type f -perm +111 -exec file {} + \
+            | awk -F: '/Mach-O/{print $1}' \
+            | while read -r bin; do codesign --force --sign - "$bin"; done
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # Rebuild the DMG from the now-signed .app so the installer and the
+          # bundle it contains stay consistent. Remove the Tauri-produced DMG
+          # first to keep the "exactly one DMG" assertion below valid.
+          rm -f "$dmg_dir"/*.dmg
+          staging="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$staging"; mkdir -p "$staging"
+          cp -R "$app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create \
+            -volname "Continuum" \
+            -fs HFS+ \
+            -srcfolder "$staging" \
+            -ov \
+            -format UDZO \
+            "$dmg_dir/Continuum-${{ needs.prepare.outputs.version }}-$target.dmg"
+        shell: bash
+
       - name: Assemble macOS assets
         run: |
           set -euo pipefail
@@ -504,6 +549,21 @@ jobs:
 
             The updater archives are independently signed; `latest.json` carries their signatures.
             `release-manifest.json` and `SHA256SUMS.txt` describe the complete cross-platform asset set.
+
+            ### Opening on macOS
+
+            The macOS DMG is **not** Apple Developer ID-signed or notarized yet.
+            When you download it from a browser, macOS adds a quarantine flag and
+            may show **"Continuum" is damaged and can't be opened.** The app is
+            not corrupt — Gatekeeper is refusing an unnotarized download. To open
+            it, pick one:
+
+            - Drag Continuum into `/Applications`, then **right-click** it and
+              choose **Open** → confirm the prompt (one-time per version), or
+            - Run `xattr -cr /Applications/Continuum.app` in a terminal, then
+              double-click to open.
+
+            See `KNOWN_ISSUES.md` for the full notes.
 
       - name: Verify the draft release has every asset
         env:
