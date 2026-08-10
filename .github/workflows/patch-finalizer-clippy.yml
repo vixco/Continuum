@@ -1,0 +1,32 @@
+name: Patch reviewed swarm finalizer Clippy findings
+
+on:
+  push:
+    branches:
+      - swarm/review-finalize-20260810
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: swarm/review-finalize-20260810
+      - name: Patch deterministic finalizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/patch_finalizer_clippy.py
+          if git diff --quiet; then
+            echo "Finalizer already patched."
+            exit 0
+          fi
+          git config user.name "Continuum integration bot"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git add scripts/finalize_swarm_integration.sh
+          git commit -m "fix(ci): repair strict Clippy integration findings"
+          git push origin HEAD:swarm/review-finalize-20260810
