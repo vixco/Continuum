@@ -15,6 +15,7 @@ pub mod github;
 pub mod ide;
 pub mod memory;
 pub mod repair;
+pub mod settings;
 pub mod system;
 pub mod task_evidence;
 pub mod terminal;

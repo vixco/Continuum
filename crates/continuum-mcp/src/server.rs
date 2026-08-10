@@ -67,6 +67,7 @@ use crate::tools::repair::{
     self as repairtool, EscalateRequest, ReinstallRequest, RestartRequest, RollbackRequest,
     TestRequest,
 };
+use crate::tools::settings::{SettingsGetRequest, SettingsListRequest, SettingsSetRequest};
 use crate::tools::system::{self as systool, NotificationRequest};
 use crate::tools::task_evidence::{
     EvidenceWriteRequest, RecordIdRequest, RecordListRequest, TaskPlanWriteRequest,
@@ -139,6 +140,56 @@ pub struct ContinuumMcpServer {
 
 #[tool_router]
 impl ContinuumMcpServer {
+    #[tool(
+        description = "Discover Continuum runtime settings by typed dotted path. Returns current/default values, value types, Settings UI locations, and the config path. Secret-like values are redacted."
+    )]
+    async fn settings_list(
+        &self,
+        Parameters(req): Parameters<SettingsListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("settings_list", &req, || async {
+            continuum_core::settings::list(
+                &self.state.data_dir.join("config.toml"),
+                req.query.as_deref(),
+                req.limit,
+            )
+            .map_err(|error| McpError::invalid_params(error, None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read one exact Continuum setting by dotted path, including its current/default value and Settings UI location. Secret-like values are redacted."
+    )]
+    async fn settings_get(
+        &self,
+        Parameters(req): Parameters<SettingsGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("settings_get", &req, || async {
+            continuum_core::settings::get(&self.state.data_dir.join("config.toml"), &req.path)
+                .map_err(|error| McpError::invalid_params(error, None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Change one existing typed Continuum setting after an explicit user request. The full candidate config is validated, unknown sibling keys are preserved, and the previous file is backed up before an atomic write."
+    )]
+    async fn settings_set(
+        &self,
+        Parameters(req): Parameters<SettingsSetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("settings_set", &req, || async {
+            continuum_core::settings::set(
+                &self.state.data_dir.join("config.toml"),
+                &req.path,
+                req.value.clone(),
+            )
+            .map_err(|error| McpError::invalid_params(error, None))
+        })
+        .await
+    }
+
     /// Constructs a new server with all tools registered. Stores are opened
     /// lazily on first use to keep startup under ~20 ms.
     pub async fn new(data_dir: PathBuf) -> Result<Self> {

@@ -60,11 +60,10 @@ setting, act on it instead of only explaining where the toggle is.
 - `settings_set` may only be used when the user's current request explicitly
   asks to change that setting. It validates the full typed config and creates a
   `config.toml.bak` backup before writing.
-- On the Claude CLI path, equivalent config control is available through
-  `mcp__continuum__fs_read_file` and `mcp__continuum__fs_apply_patch`. Read the
-  current `~/.continuum-dev/config.toml` first, patch only the requested keys,
-  and preserve valid TOML. Never use a broad filesystem edit when a precise
-  config patch will do.
+- On the Claude CLI path, use `mcp__continuum__settings_list`,
+  `mcp__continuum__settings_get`, and `mcp__continuum__settings_set`. These call
+  the same typed backend, validation, backup, and permission gate as the other
+  providers. Never fall back to a generic filesystem mutation for settings.
 - Common areas: `screen.*` for capture, `privacy.*` for observation/privacy,
   `voice.*` and `tts.*` for speech, `resources.*` for adaptive resource use,
   `chat.*` for Chat behavior, `memory.*` for memory, `context_tools.*` for
