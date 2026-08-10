@@ -1000,6 +1000,10 @@ pub struct OrchestratorSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TriageSection {
+    /// Whether interactive per-frame triage evaluation is requested. The
+    /// model may still load for other local maintenance work; this switch is
+    /// applied live through the runtime service control plane.
+    pub evaluation_enabled: bool,
     /// Path to the `.gguf` triage model. Empty string means "use default
     /// location" (`<dev_dir>/models/triage/<default_file>`).
     pub model_path: String,
@@ -1757,6 +1761,7 @@ impl Default for OrchestratorSection {
 impl Default for TriageSection {
     fn default() -> Self {
         Self {
+            evaluation_enabled: true,
             // Empty means "derive from dev_dir" at load time.
             model_path: String::new(),
             context_size: 4096,

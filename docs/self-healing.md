@@ -141,13 +141,15 @@ All under the `repair_*` namespace (routed via `continuum-mcp`):
 
 | Tool                       | Effect                                                                 |
 |----------------------------|------------------------------------------------------------------------|
-| `repair_restart_component` | Published MCP compatibility boundary, but denied in the safe Health session because restart intents have no runtime consumer. |
-| `repair_reinstall_model`   | Published MCP compatibility boundary; denied in the safe Health session. |
-| `repair_rollback_config`   | Published MCP compatibility boundary; denied in the safe Health session. The separate desktop rollback command is guarded and reversible. |
-| `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`; it is not live recovery proof. |
-| `repair_escalate`          | Published MCP compatibility boundary; denied because escalation intents have no dashboard consumer. |
+| `repair_restart_component` | Queues one authorization-bound restart for `file_watcher` or `process_watcher`. The existing single supervisor reinitializes in process; queueing is **not** recovery proof. |
+| `repair_reinstall_model`   | Compatibility boundary; denied in the safe Health session because model installation needs a separate approved workflow. |
+| `repair_rollback_config`   | Compatibility boundary; denied in the safe Health session. The separate desktop rollback command remains guarded and reversible. |
+| `repair_test_component`    | Read-only live-state/file-presence probe. Returns `healthy / degrading / error / unknown`; it is not by itself recovery proof. |
+| `repair_escalate`          | Compatibility boundary; denied because escalation intents have no dashboard consumer. |
 
-The desktop now runs that same guarded startup path automatically after onboarding: it creates and re-verifies a backup, refuses duplicate runtime processes, starts the packaged runtime once, and keeps the UI in a loading state until a fresh `state.json` heartbeat arrives (90 seconds by default, clamped to 10–300 seconds). A timeout stops the child process and the title bar preserves the concrete startup error. The Health preview can still request the same idempotent repair, but there is no manual Start runtime control. Component restart intent files are not consumed in this release and must never be presented as successful repair.
+The desktop runs the guarded startup path automatically after onboarding: it creates and re-verifies a backup, refuses duplicate runtime processes, starts the packaged runtime once, and keeps the UI in a loading state until a fresh `state.json` heartbeat arrives (90 seconds by default, clamped to 10–300 seconds). A timeout stops the child process and preserves the concrete startup error.
+
+Watcher repair is narrower. A Health preview may grant restart capability only for a currently previewed `file_watcher` or `process_watcher` diagnosis that still advertises `automatically_safe`. The runtime revalidates that short-lived grant, refuses disabled/policy-blocked targets and duplicate pending attempts, increments the existing supervisor generation, then compares a fresh post-restart observation with the pre-repair activation count. Success is published only when a new activation reaches `running` or `idle`; timeout, unchanged activation, permission failure, or another fault is a verified failure. Triage, model installation, cache deletion, configuration rollback, memory mutation and whole-runtime restart remain manual or separately approved operations.
 
 Missing local models do not stop the rest of the runtime, but the affected
 component degrades visibly. Settings → Local model storage selects one shared
@@ -250,18 +252,26 @@ displays and is not established by unit tests alone.
 The `continuum` runtime process has **no `HealthRegistry`** — its health
 surface is `RuntimeSnapshot.context_engine` in `~/.continuum-dev/state.json`,
 refreshed on the same 2 s publish loop as every other runtime counter (the
-curator precedent). Each entry is a uniform summary:
-`{ healthy, enabled, should_restart, detail }`. Per spec §7,
-disabled-with-reason states report `healthy: true, enabled: false` with the
-reason in `detail` and never request a restart. `RuntimeSnapshot.paused`
-mirrors the live shared `pause_all` atomic. Watchers always spawn, including on
-a paused boot, but park before observation and report disabled-with-reason;
-this is deliberate and lets them resume without a restart. `live_context` and
-`events_writer` always have a real handle.
+curator precedent). Each entry retains the legacy summary
+`{ healthy, enabled, should_restart, detail }` and adds the authoritative
+`state` plus a structured `diagnostic`. The diagnostic includes component,
+affected capability, stable reason code, root-cause category, public-safe
+explanation/evidence references, retryability, recommended action and repair
+policy. Deliberate `disabled_by_user`, `disabled_by_policy` and `idle` states
+are not failures. `RuntimeSnapshot.operational_events` is a bounded,
+deduplicated timeline of health transitions, watcher transitions, repair
+starts/completions/failures and verification results. It never contains raw
+logs or local paths.
 
-The seven published keys are `idle` (a plain bool from the cadence
-controller), `context_watcher`, `live_context`, `git_watcher`,
-`file_watcher`, `events_writer` and `triage`. Components without a key —
+`RuntimeSnapshot.paused` mirrors the live shared `pause_all` atomic. Optional
+file/process collectors keep exactly one supervisor task alive and create or
+drop their observation backend in place, which lets persisted service controls
+take effect without a runtime restart and prevents duplicate instances.
+`live_context` and `events_writer` always have a real handle.
+
+The eight published component keys are `context_watcher`, `live_context`,
+`git_watcher`, `file_watcher`, `process_watcher`, `events_writer` and `triage`,
+plus `idle` as the cadence controller's plain boolean. Components without a key —
 the privacy filter, the project resolver, session-state inference and the
 intent drainer — are covered below with the reason each has nothing to
 probe.
@@ -351,28 +361,44 @@ probe.
 ### File watcher (`file_watcher`)
 
 - Logs: `layer = "senses"`, `component = "file_watch"`.
-- Health: disabled-with-reason by default (`[file_watcher].enabled = false`
-  — opt-in). Per-root unavailability (deleted/unmounted root) is healthy:
-  the root is retried every `[file_watcher].rearm_secs` and listed in
-  `detail`; other roots are unaffected. `should_restart` is `true` ONLY
-  when the notify event channel itself died.
-- Recovery: for `channel_dead`, restart the runtime — watches are re-armed
-  from the Projects table, nothing is lost. For an unavailable root,
-  restore the directory (or remove the project root from config) and wait
-  one rearm tick; no restart needed.
+- Control: `[file_watcher].enabled` remains opt-in and is mirrored by the live
+  `file_activity` service request. Changing it through a context intent first
+  persists `config.toml`, then starts/stops the existing supervisor. The
+  independent `[privacy.toggles].files` gate can still block observation.
+- Health: `idle` means the service is enabled but has no confirmed roots;
+  `running` means at least one root is armed; `degraded` means some roots are
+  temporarily unavailable while others continue; `permission_required` is
+  distinct from both idle and off. Public state reports project identifiers
+  and counts, never root paths or raw OS errors. `current_instances` and its
+  high-water mark prove that no more than one notify backend is alive.
+- Recovery: unavailable roots re-arm every `[file_watcher].rearm_secs` without
+  a component restart. Backend initialization/channel failure uses bounded
+  exponential retry. After exhaustion, an authorization-bound
+  `repair_restart_component(file_watcher)` may reset the existing supervisor;
+  success requires a new activation reaching `running` or `idle`. Permission
+  changes and project-root corrections are manual-only.
 
 ### Background-process collector (`process_watcher`)
 
 - Logs: `layer = "senses"`, `component = "process_watch"`.
-- Health: disabled-with-reason by default because `[process_watcher].enabled`
-  is an opt-in consent boundary. While enabled, `detail` reports poll count,
-  active significant processes, emitted events, and `last_poll_at`.
-  `should_restart` is always `false`: an individual process-table refresh or
-  snapshot write is retried on the next poll, so restart-thrashing cannot help.
-- Recovery: confirm the data directory is writable when `processes.json`
-  publication fails. Adjust `[process_watcher]` thresholds/include/exclude
-  names when the signal is too noisy or too sparse, then restart the runtime;
-  configuration is read at startup.
+- Control: `[process_watcher].enabled` remains an opt-in consent boundary and
+  is mirrored by the live `background_activity` service request. Disabling it
+  clears the bounded public snapshot and performs no process-table refresh.
+  `pause_all` remains the stricter policy gate.
+- Privacy: the collector reads only bounded lifecycle/resource fields; it does
+  not read command lines, environment variables or process memory. Names and
+  executable paths pass through the privacy filter, and the published list is
+  capped by `snapshot_limit`.
+- Health: `idle` means sampling is healthy with no relevant process;
+  `running` means at least one allowlisted/significant process is present;
+  snapshot publication failure is `degraded` or `permission_required`. A
+  collector that is enabled but has not produced a sample for three poll
+  intervals (minimum 15 seconds) becomes `failed/collector_stalled` and is the
+  only automatically restartable process-watcher state.
+- Recovery: transient refresh/write failures retry on the next poll. A stalled
+  collector may receive one authorization-bound in-process restart; a fresh
+  activation and successful `running`/`idle` sample are required. Directory
+  permission repair and threshold/include/exclude edits are manual.
 
 ### Events writer (`events_writer`)
 
@@ -392,14 +418,18 @@ probe.
 ### Triage evaluation (`triage`)
 
 - Logs: `layer = "triage"`, `component = "coalesce"`.
-- Health: `enabled` follows whether a triage model loaded (no model is a
-  healthy, disabled-with-reason state). `should_restart` is `true` when a
-  single evaluation has been "in flight" far longer than any plausible
-  model latency — the signature of an evaluation task that died without
-  releasing the coalescer, which silently parks every subsequent frame.
-- Recovery: restart the runtime. Nothing is lost — frames skipped while
-  the coalescer was wedged were, by definition, never evaluated, and the
-  session state, event log and vault are all written by other tasks.
+- Control: `[triage].evaluation_enabled` / the live `triage_evaluation`
+  service request stops new per-frame evaluations without unloading a model
+  that may still serve other local work. Results and parked frames carry a
+  generation; anything from a disabled/older generation is discarded.
+- Health: deliberate off is `disabled_by_user`; a loaded model with no current
+  salient frame is `idle`; an in-flight evaluation is `running`; a missing
+  configured model is `unavailable`, not idle. An evaluation beyond the stuck
+  threshold is `failed/evaluation_stuck`.
+- Recovery: in-flight local model work is not force-killed by an automatic
+  repair. A stuck evaluation is manual-only and requires a whole-runtime
+  restart; model restoration requires approval. Other perception, session,
+  event and memory tasks continue independently.
 
 ### Live-context publisher (content-versioned)
 

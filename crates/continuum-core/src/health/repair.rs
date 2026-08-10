@@ -225,6 +225,7 @@ where
         .arg("--no-session-persistence")
         .arg("--allowedTools")
         .arg("mcp__continuum__repair_test_component")
+        .arg("mcp__continuum__repair_restart_component")
         .arg("--permission-mode")
         .arg("default")
         .current_dir(input.repo_root)
@@ -379,6 +380,14 @@ impl Drop for RepairSessionFiles {
     }
 }
 
+fn executable_restart_components(allowed_components: &[String]) -> Vec<String> {
+    allowed_components
+        .iter()
+        .filter(|component| matches!(component.as_str(), "file_watcher" | "process_watcher"))
+        .cloned()
+        .collect()
+}
+
 fn create_repair_session(input: &RepairInput<'_>) -> Result<RepairSessionFiles> {
     // Resolve every non-secret dependency before publishing the capability.
     // A missing MCP binary must not leave a usable orphan grant behind.
@@ -400,10 +409,10 @@ fn create_repair_session(input: &RepairInput<'_>) -> Result<RepairSessionFiles> 
         created_at: now,
         expires_at: now + chrono::Duration::seconds(ttl as i64),
         allowed_components: input.allowed_components.clone(),
-        // Component restart intents do not yet have a runtime consumer.
-        // The desktop performs the one genuinely supported action (starting
-        // an offline runtime) directly under its preview and backup guard.
-        allowed_restart_components: Vec::new(),
+        // Only supervisors with an in-process single-instance consumer may
+        // receive restart authority. A preview can never grant an arbitrary
+        // component merely by naming it.
+        allowed_restart_components: executable_restart_components(&input.allowed_components),
         allow_escalation_intent: false,
         // The Health-tab safe flow intentionally cannot authorize downloads or
         // config rollback. Those require a separate, explicit user workflow.
@@ -1025,6 +1034,20 @@ mod tests {
             current
         );
         assert_eq!(crate::health::backup::count_backups(&backups), 1);
+    }
+
+    #[test]
+    fn restart_authority_is_restricted_to_verified_supervisors() {
+        let allowed = vec![
+            "vision".to_string(),
+            "file_watcher".to_string(),
+            "process_watcher".to_string(),
+            "triage".to_string(),
+        ];
+        assert_eq!(
+            executable_restart_components(&allowed),
+            vec!["file_watcher".to_string(), "process_watcher".to_string()]
+        );
     }
 
     #[test]

@@ -445,8 +445,11 @@ const SAFE_TEST_TARGETS: &[&str] = &[
     "memory",
     "mcp",
     "context_watcher",
+    "file_watcher",
+    "process_watcher",
 ];
 const SAFE_DIRECT_TARGETS: &[&str] = &["runtime"];
+const SAFE_RESTART_TARGETS: &[&str] = &["file_watcher", "process_watcher"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RepairPreviewIssue {
@@ -503,15 +506,19 @@ pub async fn preview_repair(
         .into_iter()
         .filter(is_preview_repair_issue)
         .map(|component| {
-            let actionable = SAFE_DIRECT_TARGETS.contains(&component.name.as_str());
+            let direct = SAFE_DIRECT_TARGETS.contains(&component.name.as_str());
+            let restart = SAFE_RESTART_TARGETS.contains(&component.name.as_str());
+            let actionable = direct || restart;
             RepairPreviewIssue {
                 detail: component
                     .last_error
                     .clone()
                     .or(component.recovery_note.clone())
                     .unwrap_or_else(|| "live health probe reported a non-healthy state".into()),
-                proposed_action: if actionable {
+                proposed_action: if direct {
                     "create a verified backup, start the offline runtime once, then wait for a live heartbeat".into()
+                } else if restart {
+                    "queue one authorized in-process supervisor restart, then require a fresh activation and running or idle health state".into()
                 } else {
                     "diagnose and escalate; no automatic mutation is allowlisted".into()
                 },
@@ -536,6 +543,7 @@ pub async fn preview_repair(
         backup_required: true,
         allowed_actions: vec![
             "start an offline runtime after a verified backup".into(),
+            "restart an allowlisted watcher supervisor and verify a fresh activation".into(),
             "test previewed components".into(),
             "report explicit manual next steps".into(),
         ],
@@ -2174,9 +2182,10 @@ mod health_repair_tests {
     }
 
     #[test]
-    fn only_offline_runtime_has_a_direct_mutating_action() {
+    fn automatic_mutations_are_narrowly_allowlisted() {
         assert_eq!(SAFE_DIRECT_TARGETS, &["runtime"]);
-        assert!(!SAFE_DIRECT_TARGETS.contains(&"vision"));
+        assert_eq!(SAFE_RESTART_TARGETS, &["file_watcher", "process_watcher"]);
+        assert!(!SAFE_RESTART_TARGETS.contains(&"vision"));
     }
 
     async fn state() -> (tempfile::TempDir, MemoryState) {
