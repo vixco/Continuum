@@ -1,0 +1,152 @@
+name: Persistent intelligence evaluation
+
+on:
+  push:
+    branches:
+      - main
+      - "swarm/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  synthetic-contract:
+    name: Synthetic cross-layer and autonomy contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run persistent-intelligence evaluator regression tests
+        run: python -m unittest -v scripts/test_persistent_intelligence_eval.py
+
+      - name: Evaluate committed persistent-intelligence suite
+        run: >-
+          python scripts/persistent_intelligence_eval.py
+          --suite evals/persistent-intelligence/reference-suite.json
+          --report persistent-intelligence-report.json
+
+      - name: Verify persistent-intelligence runtime proof remains unavailable
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          python scripts/persistent_intelligence_eval.py \
+            --suite evals/persistent-intelligence/reference-suite.json \
+            --require-runtime \
+            --report persistent-intelligence-runtime-gate-report.json \
+            > persistent-intelligence-runtime-gate.stdout.json
+          status=$?
+          set -e
+
+          if [[ "$status" -ne 1 ]]; then
+            echo "::error::Expected the reserved runtime gate to exit 1; got $status"
+            cat persistent-intelligence-runtime-gate.stdout.json >&2 || true
+            exit 1
+          fi
+
+      - name: Run bounded-autonomy evaluator regression tests
+        run: python -m unittest -v scripts/test_autonomy_contract_eval.py
+
+      - name: Evaluate committed bounded-autonomy suite
+        run: >-
+          python scripts/autonomy_contract_eval.py
+          --suite evals/autonomy/reference-suite.json
+          --report autonomy-contract-report.json
+
+      - name: Verify bounded-autonomy runtime proof remains unavailable
+        shell: bash
+        run: |
+          set +e
+          python scripts/autonomy_contract_eval.py \
+            --suite evals/autonomy/reference-suite.json \
+            --require-runtime \
+            --report autonomy-runtime-gate-report.json \
+            > autonomy-runtime-gate.stdout.json
+          status=$?
+          set -e
+
+          if [[ "$status" -ne 1 ]]; then
+            echo "Expected the autonomy runtime gate to exit 1; got $status" >&2
+            cat autonomy-runtime-gate.stdout.json >&2 || true
+            exit 1
+          fi
+
+      - name: Upload sanitized evaluation reports
+        if: ${{ always() && hashFiles('persistent-intelligence-report.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: persistent-intelligence-evaluation-${{ github.run_id }}
+          path: |
+            persistent-intelligence-report.json
+            persistent-intelligence-runtime-gate-report.json
+            autonomy-contract-report.json
+            autonomy-runtime-gate-report.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish sanitized evaluation summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f persistent-intelligence-report.json ]]; then
+            {
+              echo '## Persistent-intelligence contract'
+              echo
+              echo 'The committed suite is synthetic contract evidence, not runtime proof.'
+              echo
+              echo '```json'
+              cat persistent-intelligence-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f autonomy-contract-report.json ]]; then
+            {
+              echo
+              echo '## Bounded-autonomy contract'
+              echo
+              echo 'The committed trace suite validates deterministic invariants, not live autonomous execution.'
+              echo
+              echo '```json'
+              cat autonomy-contract-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f persistent-intelligence-runtime-gate-report.json ]]; then
+            {
+              echo
+              echo '## Reserved persistent-intelligence runtime gate'
+              echo
+              echo 'Expected result: unsupported and non-zero until artifact-bound runtime adapters exist.'
+              echo
+              echo '```json'
+              cat persistent-intelligence-runtime-gate-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f autonomy-runtime-gate-report.json ]]; then
+            {
+              echo
+              echo '## Reserved autonomy runtime gate'
+              echo
+              echo 'Expected result: unsupported and non-zero until live runtime traces are validated.'
+              echo
+              echo '```json'
+              cat autonomy-runtime-gate-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
