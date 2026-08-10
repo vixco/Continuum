@@ -1,0 +1,40 @@
+name: Review A5 integration conflicts
+
+on:
+  push:
+    branches:
+      - swarm/review-a5-conflicts-20260810
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Attempt product-only A5 cherry-pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Continuum integration bot"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git fetch origin swarm/a5-health-and-watchers
+          set +e
+          git cherry-pick 6d73e86ff0c5bc5678679c72c085a868c71e488b
+          status=$?
+          set -e
+          echo "cherry_pick_status=$status"
+          if [[ "$status" -ne 0 ]]; then
+            echo "CONFLICT_FILES_BEGIN"
+            git diff --name-only --diff-filter=U
+            echo "CONFLICT_FILES_END"
+            echo "STATUS_BEGIN"
+            git status --short
+            echo "STATUS_END"
+            exit 1
+          fi
+          echo "A5 product commit applies without conflicts."
