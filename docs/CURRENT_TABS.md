@@ -41,3 +41,9 @@ If a tab is being deprecated or its scope shrinks, prefer:
 The Brain tab's model selects are an example: the underlying fields are not
 yet wired into the runtime, so the controls are rendered disabled with
 tooltips explaining why. The table above records that fact.
+
+## Cross-tab observation status
+
+- **Data source:** live Zustand state published by the runtime, durable observation-pause status, and runtime heartbeat. No sample state is presented as live.
+- **Controls:** supported screen, microphone, file and Git toggles write context intents; pause/resume uses the durable observation lease; screenshot storage uses the native config command.
+- **Explanation:** disabled, idle, unavailable and degraded remain distinct, and current activity keeps the session contract's confidence, evidence and privacy uncertainty.
