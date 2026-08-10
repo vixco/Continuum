@@ -1,0 +1,45 @@
+name: A8 minimal temporal fix
+
+on:
+  push:
+    branches:
+      - "swarm/a8-evaluation-and-ci"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Apply minimal semantic patch to integration baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin swarm/agi-integration
+          git show origin/swarm/agi-integration:crates/continuum-core/src/context/temporal.rs \
+            > crates/continuum-core/src/context/temporal.rs
+          python .a8-minimal-temporal-fix.py
+          git diff --check
+
+      - name: Run feature-light temporal regression
+        run: cargo test -p continuum-core --no-default-features --lib context::temporal
+
+      - name: Commit minimal temporal fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Continuum Agent"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git add crates/continuum-core/src/context/temporal.rs
+          git commit -m "fix(temporal): minimize provenance hardening diff"
+          git push origin HEAD:swarm/a8-evaluation-and-ci
