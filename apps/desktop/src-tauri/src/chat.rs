@@ -544,11 +544,9 @@ pub async fn chat_send_message(
         }
     };
 
-    // Memory tools: when enabled and the vault opens, the chat AI can read
-    // and write the memory vault — via the in-process executor for HTTP
-    // providers, or via an attached continuum-mcp server for the Claude
-    // CLI. A vault that fails to open degrades this send to a tool-less
-    // chat (warn + continue), never to a failed send.
+    // Memory is optional. A disabled or unavailable vault removes only the
+    // memory tools; typed settings and privacy-filtered live-context tools stay
+    // attached so self-configuration never depends on the memory subsystem.
     let vault = if chat_cfg.memory_tools_enabled {
         match memory.vault().await {
             Ok(v) => Some(v),
@@ -570,24 +568,34 @@ pub async fn chat_send_message(
     let mut executor: Option<Arc<dyn ToolExecutor>> = None;
     let mut mcp = None;
     let mut tools_section = None;
-    if let Some(vault) = &vault {
-        match conn.kind {
-            ProviderKind::ClaudeCli => {
-                // CLI path: tool traffic travels over MCP; continuum-mcp
-                // opens the same vault directory this process uses. A
-                // missing binary means no tools this turn (logged once).
-                if let Some(spec) =
-                    chat_tools::mcp_spec(memory.vault_dir(), &dev_dir, &conversation_id)
-                {
-                    mcp = Some(spec);
+    let include_memory = vault.is_some();
+
+    match conn.kind {
+        ProviderKind::ClaudeCli => {
+            // Settings and live context are independent from the memory
+            // vault. Memory tools are added to the MCP allowlist only when
+            // the vault was explicitly enabled and opened successfully.
+            if let Some(spec) = chat_tools::mcp_spec(
+                memory.vault_dir(),
+                &dev_dir,
+                &conversation_id,
+                include_memory,
+            ) {
+                mcp = Some(spec);
+                if include_memory {
                     tools_section = Some(memory_tools_section(conn.kind));
                 }
             }
-            ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
-                tools = chat_tools::memory_tool_defs();
-                executor = Some(Arc::new(chat_tools::VaultToolExecutor {
+        }
+        ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
+            tools = chat_tools::chat_tool_defs(include_memory);
+            executor = Some(match &vault {
+                Some(vault) => Arc::new(chat_tools::VaultToolExecutor {
                     vault: vault.clone(),
-                }) as Arc<dyn ToolExecutor>);
+                }) as Arc<dyn ToolExecutor>,
+                None => Arc::new(chat_tools::SettingsToolExecutor) as Arc<dyn ToolExecutor>,
+            });
+            if include_memory {
                 tools_section = Some(memory_tools_section(conn.kind));
             }
         }
@@ -685,7 +693,7 @@ pub async fn chat_send_message(
         tools,
         executor,
         mcp,
-        tool_max_rounds: chat_cfg.memory_tool_max_rounds,
+        tool_max_rounds: chat_cfg.memory_tool_max_rounds.max(1),
     };
 
     let mut stream = match adapter.stream_chat(req, cancel).await {

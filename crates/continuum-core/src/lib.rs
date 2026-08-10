@@ -37,6 +37,7 @@ pub mod privacy_pause;
 pub mod runtime;
 pub mod runtime_publish;
 pub mod senses;
+pub mod settings;
 pub mod skills;
 pub mod state;
 pub mod triage;
