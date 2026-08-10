@@ -6,6 +6,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Runtime-backed observation status**: a calm cross-tab control now explains whether Continuum is observing, paused, starting, unavailable, degraded, missing permission, missing vision, or running without historical retention. It shows each live source, its runtime reason and privacy impact, provides durable pause/resume and supported source controls, and summarizes current activity with confidence and evidence.
+
 - **Automatic runtime startup and model storage settings**: the desktop now
   starts the packaged runtime after onboarding, keeps a real loading state
   until a fresh heartbeat arrives, and surfaces startup failures without a
@@ -153,6 +155,8 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   the adapter spins up.
 
 ### Fixed
+
+- **Stable streaming chat position**: growing assistant and tool output now stays pinned only when the reader was already near the bottom. Deliberate upward scrolling is preserved, streaming updates no longer stack smooth-scroll calls, and an unobtrusive new-messages action returns to the live response.
 
 - **Local runtime start on Windows**: `scripts/dev.ps1` now resolves and
   validates ONNX Runtime 1.23+ before launching Tauri, sets the exact

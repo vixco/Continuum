@@ -48,11 +48,13 @@ test("runtime startup is automatic and Settings owns the model directory", async
   assert.match(settings, /updateModelsDirectory/);
 });
 
-test("chat remains virtualized for long agent transcripts", async () => {
+test("chat remains virtualized and follows only explicit scroll intent", async () => {
   const list = await read("src/components/chat/MessageList.tsx");
   assert.match(list, /react-virtuoso/);
   assert.match(list, /<Virtuoso/);
-  assert.match(list, /atBottomStateChange=\{setAtBottom\}/);
+  assert.match(list, /scrollerRef=\{setScrollerRef\}/);
+  assert.match(list, /observeAtBottomSignal/);
+  assert.match(list, /followOutput=\{false\}/);
 });
 
 test("MCP permission controls read and persist the enforced native policy", async () => {
