@@ -3,9 +3,10 @@
 //! Local vision model runtime for Continuum's senses layer (Layer 1).
 //!
 //! This crate provides the [`VisionModel`] trait for abstracting over different
-//! vision backends, and an [`OnnxVisionModel`](onnx::OnnxVisionModel) implementation
-//! that uses SmolVLM-256M via ONNX Runtime to produce one-sentence screen
-//! descriptions for the perception frame builder.
+//! vision backends, an [`OnnxVisionModel`](onnx::OnnxVisionModel) implementation
+//! that uses SmolVLM-256M via ONNX Runtime, and reusable ambient-perception
+//! primitives in [`perception`] for deterministic frame deduplication, semantic
+//! caching, compact observation records, runtime health, and metrics.
 //!
 //! # Architecture
 //!
@@ -16,9 +17,11 @@
 //!    (`continuum_core::senses::vision`, one capture worker per monitor via
 //!    `xcap`). There is no `perception_*` MCP tool — that namespace is
 //!    reserved but unimplemented; nothing outside the runtime drives capture.
-//! 2. The image is passed to [`VisionModel::describe()`]
-//! 3. The resulting [`VisionOutput`] is included in the perception frame
-//! 4. The frame flows up to Layer 2 (Triage) for decision-making
+//! 2. Cheap fingerprints/change gates decide whether semantic work is useful.
+//! 3. Selected images are passed to [`VisionModel::describe()`].
+//! 4. The resulting [`VisionOutput`] is included in the perception frame.
+//! 5. Compact, privacy-classified observation metadata can be handed to temporal
+//!    context and memory consumers without persisting raw screenshots.
 //!
 //! # Model files
 //!
@@ -48,6 +51,7 @@
 
 pub mod error;
 pub mod onnx;
+pub mod perception;
 
 use anyhow::Result;
 use async_trait::async_trait;
