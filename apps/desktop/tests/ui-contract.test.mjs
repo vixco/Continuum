@@ -16,49 +16,45 @@ async function readRoot(relativePath) {
   return readFile(path.join(repoRoot, relativePath), "utf8");
 }
 
-test("Hallmark polish loads after the base token stylesheet", async () => {
+test("desktop styles load shared tokens before Tailwind", async () => {
   const globals = await read("src/app/globals.css");
-  assert.match(globals, /@import "\.\/hallmark\.css";/);
-  assert.ok(
-    globals.indexOf('@import "./hallmark.css";') > globals.indexOf("@tailwind utilities;"),
-    "Hallmark polish should load after Tailwind utilities so it can refine the shell",
-  );
+  const tokenImport = '@import "../../../../tokens.css";';
+  assert.match(globals, /tokens\.css/);
+  assert.ok(globals.indexOf(tokenImport) < globals.indexOf("@tailwind base;"));
 });
 
-test("Hermes-inspired layer stays token-driven and reduced-motion safe", async () => {
-  const hallmark = await read("src/app/hallmark.css");
-  assert.match(hallmark, /var\(--continuum-cyan\)/);
-  assert.match(hallmark, /var\(--continuum-accent\)/);
-  assert.match(hallmark, /@media \(prefers-reduced-motion: reduce\)/);
+test("desktop styles are token-driven and reduced-motion safe", async () => {
+  const globals = await read("src/app/globals.css");
+  assert.match(globals, /var\(--color-accent\)/);
+  assert.match(globals, /var\(--color-paper\)/);
+  assert.match(globals, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("shell keeps explicit navigation and window-control accessibility labels", async () => {
-  const sidebar = await read("src/components/sidebar/Sidebar.tsx");
-  const header = await read("src/components/header/Header.tsx");
-
-  assert.match(sidebar, /aria-label="Primary navigation"/);
-  assert.match(header, /aria-label="Minimize window"/);
-  assert.match(header, /aria-label="Maximize window"/);
-  assert.match(header, /aria-label="Close window"/);
+test("shell keeps navigation and window controls accessible", async () => {
+  const shell = await read("src/components/layout/Shell.tsx");
+  assert.match(shell, /aria-label="Main navigation"/);
+  assert.match(shell, /aria-label="Minimize"/);
+  assert.match(shell, /"Restore" : "Maximize"/);
+  assert.match(shell, /aria-label="Close"/);
 });
 
 test("runtime startup is automatic and Settings owns the model directory", async () => {
   const main = await read("src-tauri/src/main.rs");
-  const settings = await read("src/components/tabs/SettingsTab.tsx");
+  const settings = await read("src/components/layout/SettingsPage.tsx");
   const observation = await read("src/components/observation/ObservationStatusControl.tsx");
-
   assert.match(main, /spawn_automatic_runtime_start/);
-  assert.match(settings, /get_models_directory/);
-  assert.match(settings, /set_models_directory/);
-  assert.match(settings, /restart required/i);
+  assert.match(settings, /continuum\.getModelsDirectory\(\)/);
+  assert.match(settings, /continuum\.updateModelsDirectory\(selected\)/);
+  assert.match(settings, /next automatic runtime start/i);
   assert.doesNotMatch(observation, /start_runtime/);
 });
 
-test("chat remains virtualized and follows only explicit scroll intent", async () => {
-  const chat = await read("src/components/tabs/ChatTab.tsx");
-  assert.match(chat, /Virtuoso/);
-  assert.match(chat, /followOutput=\{followOutput\}/);
-  assert.match(chat, /atBottomStateChange=\{setIsAtBottom\}/);
+test("chat stays virtualized and respects explicit scroll intent", async () => {
+  const messages = await read("src/components/chat/MessageList.tsx");
+  assert.match(messages, /VirtuosoHandle/);
+  assert.match(messages, /followOutput=\{false\}/);
+  assert.match(messages, /shouldFollowChatOutput\(next\)/);
+  assert.match(messages, /atBottomStateChange=\{\(atBottom\) =>/);
 });
 
 test("MCP permission controls read and persist the enforced native policy", async () => {
