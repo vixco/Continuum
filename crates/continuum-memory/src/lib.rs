@@ -33,6 +33,23 @@ pub use watcher::VaultWatcher;
 pub use world_model::*;
 
 #[cfg(test)]
+mod public_api {
+    use super::{WorldEntity, WorldEntityKind};
+
+    #[test]
+    fn world_entity_types_are_exported_from_crate_root() {
+        let entity = WorldEntity {
+            id: "project:synthetic".into(),
+            kind: WorldEntityKind::Project,
+            label: "Synthetic project".into(),
+            project: Some("synthetic".into()),
+            confidence: 1.0,
+        };
+        assert_eq!(entity.kind, WorldEntityKind::Project);
+    }
+}
+
+#[cfg(test)]
 mod fts_gate {
     /// The whole design depends on FTS5 being present in sqlx's bundled
     /// SQLite. If this test fails, STOP and escalate — do not work around
