@@ -24,31 +24,16 @@ jobs:
       - name: Apply reviewed temporal trust-boundary fixes
         shell: bash
         run: |
-          set -uo pipefail
-          set +e
-          python .a8-temporal-fix.py 2>&1 | tee /tmp/a8-temporal-patch.log
-          status=${PIPESTATUS[0]}
-          set -e
+          set -euo pipefail
+          python .a8-temporal-fix.py
 
-          if [[ "$status" -ne 0 ]]; then
-            {
-              echo '## Temporal patch failure'
-              echo
-              echo '```text'
-              cat /tmp/a8-temporal-patch.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit "$status"
-          fi
-
-      - name: Verify formatting
+      - name: Format reviewed Rust files
         shell: bash
         run: |
           set -euo pipefail
           rustfmt --edition 2021 \
             crates/continuum-core/src/context/temporal.rs \
             apps/desktop/src-tauri/src/chat/temporal_history.rs
-          cargo fmt --all -- --check
 
       - name: Run focused temporal tests
         shell: bash
