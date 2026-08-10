@@ -30,10 +30,25 @@ jobs:
       - name: Format reviewed Rust files
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          set +e
           rustfmt --edition 2021 \
             crates/continuum-core/src/context/temporal.rs \
-            apps/desktop/src-tauri/src/chat/temporal_history.rs
+            apps/desktop/src-tauri/src/chat/temporal_history.rs \
+            2>&1 | tee /tmp/a8-rustfmt.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [[ "$status" -ne 0 ]]; then
+            {
+              echo '## Focused rustfmt failure'
+              echo
+              echo '```text'
+              cat /tmp/a8-rustfmt.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
 
       - name: Run focused temporal tests
         shell: bash
