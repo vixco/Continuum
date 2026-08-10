@@ -19,6 +19,7 @@ jobs:
   synthetic-contract:
     name: Synthetic cross-layer contract
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -39,6 +40,7 @@ jobs:
       - name: Verify runtime proof remains unavailable
         shell: bash
         run: |
+          set -uo pipefail
           set +e
           python scripts/persistent_intelligence_eval.py \
             --suite evals/persistent-intelligence/reference-suite.json \
@@ -49,14 +51,29 @@ jobs:
           set -e
 
           if [[ "$status" -ne 1 ]]; then
-            echo "Expected the reserved runtime gate to exit 1; got $status" >&2
+            echo "::error::Expected the reserved runtime gate to exit 1; got $status"
             cat persistent-intelligence-runtime-gate.stdout.json >&2 || true
             exit 1
           fi
 
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path("persistent-intelligence-runtime-gate-report.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          assert report["contract_status"] == "pass", report
+          assert report["runtime_status"] == "unsupported", report
+          assert report["runtime_required"] is True, report
+          assert report["runtime_evidence_supported"] is False, report
+          PY
+
       - name: Upload sanitized evaluation reports
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: ${{ always() && hashFiles('persistent-intelligence-report.json') != '' }}
+        uses: actions/upload-artifact@v7
         with:
           name: persistent-intelligence-evaluation-${{ github.run_id }}
           path: |

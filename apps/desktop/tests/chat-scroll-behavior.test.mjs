@@ -40,6 +40,29 @@ test("an intentional upward scroll disables following and marks later output uns
   assert.equal(withOutput.hasUnseenContent, true);
 });
 
+test("a small upward scroll inside the bottom threshold preserves reader intent", () => {
+  const initial = createChatScrollSnapshot(600);
+  const scrolledUp = observeChatScroll(initial, {
+    scrollTop: 580,
+    scrollHeight: 1200,
+    clientHeight: 600,
+  });
+
+  assert.equal(scrolledUp.atBottom, true, "the viewport remains physically near the bottom");
+  assert.equal(scrolledUp.pinnedToBottom, false, "upward intent must win over the threshold");
+
+  const afterPositiveSignal = observeAtBottomSignal(scrolledUp, true);
+  assert.equal(
+    afterPositiveSignal.pinnedToBottom,
+    false,
+    "a stale positive Virtuoso signal must not re-enable following"
+  );
+
+  const withOutput = observeChatContent(afterPositiveSignal);
+  assert.equal(shouldFollowChatOutput(withOutput), false);
+  assert.equal(withOutput.hasUnseenContent, true);
+});
+
 test("scrolling back near the bottom resumes following and clears unseen output", () => {
   const away = {
     ...createChatScrollSnapshot(420),

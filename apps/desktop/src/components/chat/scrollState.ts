@@ -43,9 +43,11 @@ export function distanceFromBottom(metrics: ChatScrollMetrics): number {
 /**
  * Update scroll intent from a native scroll event.
  *
- * Only a real upward movement disables pinning. A resize of the streaming
- * item can make `atBottom` false while `scrollTop` stays unchanged; treating
- * that as user intent is the root of the jump-away-from-latest regression.
+ * Explicit movement wins over the physical bottom threshold. A small upward
+ * gesture can remain inside that threshold, but it is still user intent and
+ * must disable following. Conversely, an unpinned reader resumes following
+ * only after actually moving down into the bottom region. Streaming-item
+ * resize drift leaves the prior intent unchanged.
  */
 export function observeChatScroll(
   snapshot: ChatScrollSnapshot,
@@ -54,11 +56,19 @@ export function observeChatScroll(
 ): ChatScrollSnapshot {
   const atBottom = distanceFromBottom(metrics) <= threshold;
   const movedUp = metrics.scrollTop < snapshot.lastScrollTop - CHAT_SCROLL_DIRECTION_EPSILON_PX;
+  const movedDown = metrics.scrollTop > snapshot.lastScrollTop + CHAT_SCROLL_DIRECTION_EPSILON_PX;
+
+  let pinnedToBottom = snapshot.pinnedToBottom;
+  if (movedUp) {
+    pinnedToBottom = false;
+  } else if (movedDown && atBottom) {
+    pinnedToBottom = true;
+  }
 
   return {
     atBottom,
-    pinnedToBottom: atBottom ? true : movedUp ? false : snapshot.pinnedToBottom,
-    hasUnseenContent: atBottom ? false : snapshot.hasUnseenContent,
+    pinnedToBottom,
+    hasUnseenContent: pinnedToBottom ? false : snapshot.hasUnseenContent,
     lastScrollTop: metrics.scrollTop,
   };
 }
@@ -71,16 +81,20 @@ export function observeChatContent(snapshot: ChatScrollSnapshot): ChatScrollSnap
   return { ...snapshot, hasUnseenContent: true };
 }
 
-/** A positive bottom signal is safe; a negative one may only be resize drift. */
+/**
+ * A negative Virtuoso signal may be resize drift. A positive signal updates
+ * physical position but cannot override an explicit unpinned reader intent;
+ * native downward movement or the latest-message action performs that change.
+ */
 export function observeAtBottomSignal(
   snapshot: ChatScrollSnapshot,
   atBottom: boolean
 ): ChatScrollSnapshot {
   if (!atBottom) return { ...snapshot, atBottom: false };
+  if (!snapshot.pinnedToBottom) return { ...snapshot, atBottom: true };
   return {
     ...snapshot,
     atBottom: true,
-    pinnedToBottom: true,
     hasUnseenContent: false,
   };
 }
