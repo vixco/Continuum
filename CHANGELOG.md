@@ -10,7 +10,9 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   runs the deterministic CI graph before push, while
   `pnpm ci:release:windows` adds a clean unsigned NSIS packaging dry-run. Native
   macOS DMGs remain built and verified on GitHub's Apple Silicon and Intel
-  runners after a successful `main` CI run.
+  runners after a successful `main` CI run. Release builds now retain separate
+  Rust caches for Windows x64, macOS Apple Silicon, and macOS Intel so unchanged
+  dependencies and crates are reused on subsequent releases.
 
 - **Runtime-backed observation status**: a calm cross-tab control now explains whether Continuum is observing, paused, starting, unavailable, degraded, missing permission, missing vision, or running without historical retention. It shows each live source, its runtime reason and privacy impact, provides durable pause/resume and supported source controls, and summarizes current activity with confidence and evidence.
 

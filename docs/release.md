@@ -60,6 +60,9 @@ The expensive full-workspace Clippy/test graph and duplicate pre-release macOS
 builds are not run on every push. They remain available through the CI manual
 dispatch with `deep` enabled and through `pnpm ci:full`. The release workflow
 itself builds and verifies both macOS architectures once, after fast CI passes.
+Each release architecture has its own Cargo registry and `target` cache keyed
+by the pinned Rust version and `Cargo.lock`. The first release fills these
+caches; later releases reuse unchanged dependencies and compiled crates.
 
 The release workflow then:
 
