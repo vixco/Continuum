@@ -10,6 +10,7 @@
 //! The index is disposable by design: delete `vault/.continuum/index.db`
 //! and it is rebuilt from the markdown on next open.
 
+pub mod entity;
 pub mod error;
 pub mod frontmatter; // Task 2
 pub mod index; // Task 3
@@ -22,6 +23,7 @@ pub mod vault; // Task 5
 pub mod watcher; // Task 7
 pub mod world_model;
 
+pub use entity::*;
 pub use error::{MemoryError, Result};
 pub use migrate::migrate_legacy_semantic;
 pub use model::*;
