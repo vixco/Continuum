@@ -546,7 +546,7 @@ export const DEFAULT_STATE: ContinuumState = {
     stt_loaded: false,
     orchestrator_ready: false,
     paused: false,
-    version: "0.1.0-alpha.11",
+    version: "0.1.0-alpha.12",
   },
   // Task C1: `null` until the runtime bridge has read a state.json from a
   // running `continuum` process — the same shape the Context page treats
