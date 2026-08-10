@@ -6,11 +6,19 @@ The connected-memory layer adds deterministic policy above that existing vault:
 
 - evidence references carry source, session, observation time and confidence;
 - repeated observations can be assessed for durable promotion without turning every frame or sentence into long-term memory;
-- sensitive observations never auto-promote under the default policy;
+- canonical observation privacy is admitted before candidate construction;
 - relation beliefs have explicit observed/inferred/confirmed/disputed/superseded/expired lifecycle semantics;
 - hybrid ranking can combine semantic similarity, relation affinity, recency, confidence, evidence strength and project affinity;
 - graph expansion is breadth-first, depth/node bounded, and operates over one already-fetched graph snapshot to avoid N+1 queries;
 - rejected, superseded and archived vault nodes are excluded from connected retrieval by default.
+
+## Entity model
+
+The existing vault intentionally has a fixed ten-type `NodeType` schema. Connected temporal reasoning needs additional projected entities without making old frontmatter unreadable, so `WorldEntityKind` is additive rather than a persistent-schema replacement.
+
+It covers `User`, `Project`, `Activity`, `Goal`, `Task`, `Application`, `File`, `Person`, `Concept`, `Decision`, `Event`, `Outcome`, `Preference`, `Fact`, `Error`, `Session`, and `Note`.
+
+Existing vault kinds map losslessly to and from the richer taxonomy. New projected-only kinds (`User`, `Activity`, `Application`, `File`, `Concept`, `Event`, `Outcome`) deliberately return no legacy `NodeType`; callers must not silently coerce them into generic notes merely to make them persistent. A future schema migration can make selected kinds durable with an explicit compatibility plan.
 
 ## Consolidation boundary
 
@@ -35,7 +43,13 @@ A realistic synthetic case is repeated editing, testing and documentation work o
 
 Evidence references are identifiers, not raw activity payloads. Callers must preserve source provenance and sensitivity and must not serialize passwords, private screen contents, clipboard text or personal filenames into the relation contract.
 
-`Sensitivity::Sensitive` stays candidate-only under the default policy. An explicit confirmation path may choose to promote it later, but ambient observation alone must not.
+Ambient/session producers must use `observation_adapter` before constructing durable-memory input:
+
+- `never_observe` is rejected before a memory candidate or evidence record exists;
+- `local_only` may remain in bounded local history and maps to the legacy sensitive class, but recurrence/salience can never auto-promote it through the observation path;
+- `cloud_allowed` may enter ordinary consolidation after the usual evidence checks.
+
+`assess_observation_consolidation` enforces that boundary even if a generic consolidation configuration allows sensitive memory promotion. Such a generic override is reserved for separately evidenced explicit-confirmation/manual flows, not ambient observation.
 
 ## Relation lifecycle
 
@@ -59,9 +73,11 @@ The score is explainable: each returned hit includes individual semantic, relati
 
 `bounded_related_nodes` expands relationships in memory from a single `GraphData` snapshot. It is both depth- and node-capped and applies a minimum edge confidence. This is the intended performance contract for A7 integration: fetch a bounded graph once, then traverse locally rather than issuing one relation query per node.
 
+LanceDB remains useful for episodic vector candidate generation. It should not become an authority on whether a fact or relation is current; lifecycle truth stays in the vault/world-model projection.
+
 ## UI contract
 
-A6 can render real connected data using the existing `GraphData` plus the additive `ConnectedRelation` contract. UI code should never fabricate evidence, confidence or lifecycle state. Until enriched relations are persisted, the UI should clearly distinguish existing vault edges (type/confidence/origin) from richer evidence-backed relation records.
+A6 can render real connected data using the existing `GraphData` plus the additive `WorldEntity` and `ConnectedRelation` contracts. UI code should never fabricate evidence, confidence or lifecycle state. Until enriched relations are persisted, the UI should clearly distinguish existing vault edges (type/confidence/origin) from richer evidence-backed relation records and projected-only entities.
 
 ## Compatibility and migration
 
@@ -70,10 +86,11 @@ This change is intentionally migration-free:
 - no authoritative markdown schema field is made mandatory;
 - no SQLite schema change is required;
 - existing MCP memory tools remain unchanged;
-- the disposable graph index continues to rebuild from legacy and current vault notes.
+- the disposable graph index continues to rebuild from legacy and current vault notes;
+- the legacy semantic SQLite store remains a read-only migration/fallback input rather than a second source of truth.
 
-When enriched relation persistence is added later, it must preserve unknown frontmatter keys, rebuild safely, include schema-version recovery, and retain old notes without silent loss.
+When enriched relation/entity persistence is added later, it must preserve unknown frontmatter keys, rebuild safely, include schema-version recovery, and retain old notes without silent loss.
 
 ## Current limitation
 
-The policy and ranking primitives are implemented and tested as deterministic library code, but the temporal-session producer does not yet call the consolidation policy and the vault does not yet persist `ConnectedRelation` as a first-class enriched edge. This separation is deliberate for the swarm: A3 can produce candidate evidence without writing durable memory directly, and A1 can wire the producer/storage boundary after selecting compatible changes.
+The policy and ranking primitives are implemented and tested as deterministic library code, but the temporal-session producer does not yet call the consolidation policy and the vault does not yet persist `ConnectedRelation` or projected-only entity kinds as first-class enriched state. This separation is deliberate for the swarm: A3 can produce candidate evidence without writing durable memory directly, and A1 can wire the producer/storage boundary after selecting compatible changes.
