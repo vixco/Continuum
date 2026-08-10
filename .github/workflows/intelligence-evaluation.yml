@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   synthetic-contract:
-    name: Synthetic cross-layer contract
+    name: Cross-layer intelligence contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -28,8 +28,18 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - name: Run evaluator regression tests
         run: python -m unittest -v scripts/test_persistent_intelligence_eval.py
+
+      - name: Run chat streaming and scroll regression
+        run: >-
+          node --experimental-strip-types --test
+          apps/desktop/tests/chat-scroll-behavior.test.mjs
 
       - name: Evaluate committed synthetic suite
         run: >-
