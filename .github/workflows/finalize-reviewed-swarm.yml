@@ -61,9 +61,8 @@ jobs:
               printf 'Unexpected conflicts:\n%s\n' "${conflicts[*]:-none}"
               exit 1
             fi
-            # The integration branch owns the newer shared typed settings backend.
-            # A5's watcher controls are wired through runtime commands, so retaining
-            # this file avoids resurrecting the superseded duplicate implementation.
+            # Keep the integration branch's newer shared typed settings backend.
+            # A5's live watcher controls use runtime commands, not this old copy.
             git checkout --ours -- apps/desktop/src-tauri/src/settings_tools.rs
             git add apps/desktop/src-tauri/src/settings_tools.rs
             GIT_EDITOR=true git cherry-pick --continue
@@ -76,120 +75,145 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              target = Path(path)
-              text = target.read_text(encoding="utf-8")
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"expected exactly one match in {path}, found {count}")
-              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+          # 1. The additive ContextPageSnapshot contract requires `services` in
+          # every explicit test initializer. Insert it by structure, not spaces.
+          path = Path("crates/continuum-core/src/runtime_publish.rs")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          candidates = []
+          for index, line in enumerate(lines):
+              if line.strip() != "continuation: vec![ContinuationCandidateView {":
+                  continue
+              nearby = lines[max(0, index - 8):index]
+              if any("files: false" in item for item in nearby):
+                  candidates.append(index)
+          if len(candidates) != 1:
+              raise SystemExit(f"expected one ContextPageSnapshot test insertion point, found {len(candidates)}")
+          index = candidates[0]
+          if index == 0 or "services:" not in lines[index - 1]:
+              indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+              lines.insert(index, f"{indent}services: RuntimeServiceSnapshot::default(),")
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-          replace_once(
-              "crates/continuum-core/src/runtime_publish.rs",
-              """            toggles: ObservationTogglesView {
-                  files: false,
-                  ..ObservationTogglesView::default()
-              },
-              continuation: vec![ContinuationCandidateView {""",
-              """            toggles: ObservationTogglesView {
-                  files: false,
-                  ..ObservationTogglesView::default()
-              },
-              services: RuntimeServiceSnapshot::default(),
-              continuation: vec![ContinuationCandidateView {""",
-          )
-
+          # 2. Return directly from the retry loop so no initial value is
+          # assigned only to be overwritten before inspection.
           path = Path("crates/continuum-core/src/health/verified.rs")
           text = path.read_text(encoding="utf-8")
           start_marker = "    let mut backoff = RetryBackoff::new(plan.retry);"
           end_marker = "\n}\n\n/// Converts a legacy health status"
           start = text.index(start_marker)
           end = text.index(end_marker, start)
-          replacement = """    let mut backoff = RetryBackoff::new(plan.retry);
-              let mut attempts = 0;
-
-              loop {
-                  attempts += 1;
-                  let execution = executor.execute(plan).await;
-                  let retryable = execution.retryable;
-                  let after = probe.inspect().await;
-
-                  let command_ok = execution.exited_successfully;
-                  let state_ok = plan.success_states.contains(&after.state);
-                  if command_ok && state_ok {
-                      return VerifiedRepairResult {
-                          component: plan.component.clone(),
-                          action: plan.action.clone(),
-                          outcome: VerifiedRepairOutcome::VerifiedSuccess,
-                          before,
-                          after,
-                          execution: Some(execution),
-                          attempts,
-                          started_at,
-                          verified_at: Utc::now(),
-                          explanation: "The action completed and a fresh health probe verified recovery."
-                              .to_string(),
-                      };
-                  }
-
-                  let delay = if retryable {
-                      backoff.next_delay()
-                  } else {
-                      None
-                  };
-                  if let Some(delay) = delay {
-                      tokio::time::sleep(delay).await;
-                      continue;
-                  }
-
-                  return VerifiedRepairResult {
-                      component: plan.component.clone(),
-                      action: plan.action.clone(),
-                      outcome: VerifiedRepairOutcome::VerifiedFailure,
-                      before,
-                      after,
-                      execution: Some(execution),
-                      attempts,
-                      started_at,
-                      verified_at: Utc::now(),
-                      explanation: "The action did not produce an accepted post-repair health state."
-                          .to_string(),
-                  };
-              }
-          """
+          replacement = "\n".join([
+              "    let mut backoff = RetryBackoff::new(plan.retry);",
+              "    let mut attempts = 0;",
+              "",
+              "    loop {",
+              "        attempts += 1;",
+              "        let execution = executor.execute(plan).await;",
+              "        let retryable = execution.retryable;",
+              "        let after = probe.inspect().await;",
+              "",
+              "        let command_ok = execution.exited_successfully;",
+              "        let state_ok = plan.success_states.contains(&after.state);",
+              "        if command_ok && state_ok {",
+              "            return VerifiedRepairResult {",
+              "                component: plan.component.clone(),",
+              "                action: plan.action.clone(),",
+              "                outcome: VerifiedRepairOutcome::VerifiedSuccess,",
+              "                before,",
+              "                after,",
+              "                execution: Some(execution),",
+              "                attempts,",
+              "                started_at,",
+              "                verified_at: Utc::now(),",
+              "                explanation: \"The action completed and a fresh health probe verified recovery.\"",
+              "                    .to_string(),",
+              "            };",
+              "        }",
+              "",
+              "        let delay = if retryable {",
+              "            backoff.next_delay()",
+              "        } else {",
+              "            None",
+              "        };",
+              "        if let Some(delay) = delay {",
+              "            tokio::time::sleep(delay).await;",
+              "            continue;",
+              "        }",
+              "",
+              "        return VerifiedRepairResult {",
+              "            component: plan.component.clone(),",
+              "            action: plan.action.clone(),",
+              "            outcome: VerifiedRepairOutcome::VerifiedFailure,",
+              "            before,",
+              "            after,",
+              "            execution: Some(execution),",
+              "            attempts,",
+              "            started_at,",
+              "            verified_at: Utc::now(),",
+              "            explanation: \"The action did not produce an accepted post-repair health state.\"",
+              "                .to_string(),",
+              "        };",
+              "    }",
+              "",
+          ])
           path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
 
-          replace_once(
-              "crates/continuum-core/src/health/runtime_repair.rs",
-              """struct RepairIntentEnvelope {
-              kind: String,
-              queued_at: DateTime<Utc>,""",
-              """struct RepairIntentEnvelope {
-              queued_at: DateTime<Utc>,""",
-          )
-          replace_once(
-              "crates/continuum-core/src/health/runtime_repair.rs",
-              """            if !activated || (!accepted_state && !terminal_failure && now < pending.deadline) {
-                  if now < pending.deadline {
-                      continue;
-                  }
-              }
-          """,
-              """            if now < pending.deadline
-                  && (!activated || (!accepted_state && !terminal_failure))
-              {
-                  continue;
-              }
-          """,
-          )
-          replace_once(
-              "crates/continuum-core/src/operational_state.rs",
-              """fn push_event(
-              inner: &mut OperationalEventInner,""",
-              """#[allow(clippy::too_many_arguments)]
-          fn push_event(
-              inner: &mut OperationalEventInner,""",
-          )
+          # 3. Keep the header discriminator, but do not deserialize an unused
+          # duplicate `kind` field into the full envelope.
+          path = Path("crates/continuum-core/src/health/runtime_repair.rs")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          inside_envelope = False
+          removed_kind = 0
+          for index, line in enumerate(lines):
+              if line.strip() == "struct RepairIntentEnvelope {":
+                  inside_envelope = True
+                  continue
+              if inside_envelope and line.strip() == "}":
+                  inside_envelope = False
+              if inside_envelope and line.strip() == "kind: String,":
+                  lines[index] = None
+                  removed_kind += 1
+          if removed_kind != 1:
+              raise SystemExit(f"expected to remove one envelope kind field, removed {removed_kind}")
+          lines = [line for line in lines if line is not None]
+
+          # 4. Collapse the nested deadline guard without changing semantics.
+          start_index = None
+          for index, line in enumerate(lines):
+              if line.strip().startswith("if !activated || (!accepted_state"):
+                  start_index = index
+                  break
+          if start_index is None:
+              raise SystemExit("verification deadline guard not found")
+          indent = lines[start_index][: len(lines[start_index]) - len(lines[start_index].lstrip())]
+          expected_tail = [
+              "if now < pending.deadline {",
+              "continue;",
+              "}",
+              "}",
+          ]
+          actual_tail = [item.strip() for item in lines[start_index + 1:start_index + 5]]
+          if actual_tail != expected_tail:
+              raise SystemExit(f"unexpected verification deadline guard: {actual_tail}")
+          lines[start_index:start_index + 5] = [
+              f"{indent}if now < pending.deadline",
+              f"{indent}    && (!activated || (!accepted_state && !terminal_failure))",
+              f"{indent}{{",
+              f"{indent}    continue;",
+              f"{indent}}}",
+          ]
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          # 5. This internal constructor deliberately takes all event fields.
+          path = Path("crates/continuum-core/src/operational_state.rs")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          matches = [index for index, line in enumerate(lines) if line == "fn push_event("]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one push_event helper, found {len(matches)}")
+          index = matches[0]
+          if index == 0 or lines[index - 1] != "#[allow(clippy::too_many_arguments)]":
+              lines.insert(index, "#[allow(clippy::too_many_arguments)]")
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
           cargo fmt --all
           git add \
