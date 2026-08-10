@@ -28,7 +28,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-continuum-core = { path = "../../../crates/continuum-core", default-features = false }
+continuum-core = { path = "../../../crates/continuum-core", default-features = false, features = ["raw-log"] }
 continuum-gateway = { path = "../../../crates/continuum-gateway" }
 continuum-memory = { path = "../../../crates/continuum-memory" }
 cpal = { version = "0.17", optional = true }

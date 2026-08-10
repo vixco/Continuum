@@ -12,10 +12,10 @@ description = "Main orchestration runtime for Continuum — the four-layer cogni
 # the state / log / health / config modules.
 default = ["runtime"]
 runtime = [
+    "raw-log",
     "dep:continuum-llm",
     "dep:continuum-vision",
     "dep:xcap",
-    "dep:sqlx",
     "dep:lancedb",
     "dep:fastembed",
     "dep:arrow-array",
@@ -26,6 +26,7 @@ runtime = [
     "dep:futures",
     "dep:notify",
 ]
+raw-log = ["dep:sqlx"]
 cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
 vulkan = ["runtime", "continuum-llm/vulkan"]
 # Moshi full-duplex speech-to-speech front-end (kyutai-labs/moshi). Off by

@@ -178,12 +178,12 @@ impl TemporalSynthesizer {
                 omitted_private += 1;
                 continue;
             }
-            let overlaps = scope.since.map_or(true, |since| row.ended_at >= since)
-                && scope.until.map_or(true, |until| row.started_at <= until);
+            let overlaps = scope.since.is_none_or(|since| row.ended_at >= since)
+                && scope.until.is_none_or(|until| row.started_at <= until);
             let project_matches = scope
                 .project
                 .as_deref()
-                .map_or(true, |project| row.project.as_deref() == Some(project));
+                .is_none_or(|project| row.project.as_deref() == Some(project));
             if !overlaps || !project_matches {
                 omitted_out_of_scope += 1;
                 continue;

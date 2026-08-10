@@ -6,6 +6,9 @@
     "node": ">=22"
   },
   "scripts": {
+    "ci:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 -Stage All",
+    "ci:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 -Stage Full",
+    "ci:release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 -Stage ReleaseWindows -StrictToolchain",
     "dev": "pnpm --filter desktop dev",
     "dev:app": "pnpm --filter @continuum/desktop tauri dev",
     "dev:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",

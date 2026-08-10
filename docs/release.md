@@ -46,17 +46,20 @@ source snapshot for every binary release.
 
 ## Automatic release flow
 
-Every push to `main` runs the ordinary CI graph. Publication is the final job and
-is callable only after all of these gates succeed:
+Every push to `main` runs the fast CI graph. Publication starts only after all
+of these gates succeed:
 
 - Rust formatting.
 - Release-contract unit tests and Tauri packaging validation.
-- Light and full native Clippy.
-- Complete Rust workspace tests plus isolated context-engine benchmark gates.
+- Light Clippy for the core and desktop paths.
+- Focused core and desktop Rust tests.
 - Windows x64 desktop build.
-- macOS Apple Silicon desktop build.
-- macOS Intel desktop build.
 - Documentation build.
+
+The expensive full-workspace Clippy/test graph and duplicate pre-release macOS
+builds are not run on every push. They remain available through the CI manual
+dispatch with `deep` enabled and through `pnpm ci:full`. The release workflow
+itself builds and verifies both macOS architectures once, after fast CI passes.
 
 The release workflow then:
 
@@ -113,19 +116,49 @@ before installation.
 
 ## Local pre-release checks
 
-CI is authoritative, but maintainers should still run the fastest deterministic
-checks before merging a release-affecting change:
+The local runner is the shared entry point for every deterministic CI gate. Run
+it before pushing:
 
 ```powershell
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-python scripts/release_contract.py validate-config --repo-root .
-python -m unittest -v scripts/test_release_contract.py
-pnpm install --frozen-lockfile
-pnpm --dir apps/desktop typecheck
-pnpm --dir apps/desktop lint
-pnpm --dir apps/desktop build
+pnpm ci:local
+```
+
+This runs frozen dependency installation, Rust formatting, release-contract
+tests, focused core/desktop tests, desktop type/lint/format/build checks, the
+desktop Rust test compile, and the docs build. It deliberately skips a second
+link of the same native desktop executable. Clippy stays in parallel GitHub CI
+and in the explicit full local route, so it does not rebuild another dependency
+graph on every local edit. Repeated
+runs reuse pnpm and Cargo caches, so only changed work is rebuilt. Local Rust
+artifacts live in `target/ci-local`, isolated from a running development copy in
+`target/debug`.
+
+Run the intentionally slower full native graph only when a broad Rust/native
+change warrants it:
+
+```powershell
+pnpm ci:full
+```
+
+For the closest local release rehearsal on Windows, including a clean NSIS
+installer build, use:
+
+```powershell
+pnpm ci:release:windows
+```
+
+That command requires the pinned Rust/pnpm versions and Node 22. It deliberately
+disables updater signing and never reads the GitHub signing key. The resulting
+installer is local evidence only: macOS DMGs require Apple's SDK and are built
+on the two native GitHub macOS runners after the exact `main` commit passes CI.
+The GitHub release remains the only signed, complete publication proof.
+
+Individual stages are available for fast iteration, for example:
+
+```powershell
+.\scripts\ci.ps1 -Stage Format
+.\scripts\ci.ps1 -Stage ClippyLight
+.\scripts\ci.ps1 -Stage Desktop -SkipInstall
 ```
 
 For release workflow changes, add or update a contract test. Do not rely on a
