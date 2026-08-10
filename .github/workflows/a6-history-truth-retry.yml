@@ -1,0 +1,353 @@
+name: Retry A6 history truth refinement
+
+on:
+  push:
+    branches: [swarm/a6-desktop-ux]
+    paths:
+      - .github/workflows/a6-history-truth-retry.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refine-a6-history-truth-retry
+  cancel-in-progress: false
+
+jobs:
+  verify-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: swarm/a6-desktop-ux
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.11.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Apply history truth refinement
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          observation_path = Path("apps/desktop/src/lib/observation.ts")
+          observation = observation_path.read_text(encoding="utf-8")
+
+          old_type = 'export type ObservationSourceState = "active" | "idle" | "off" | "unavailable" | "degraded";'
+          new_type = '''export type ObservationSourceState =
+            | "active"
+            | "idle"
+            | "last_known"
+            | "off"
+            | "unavailable"
+            | "degraded";'''
+          assert old_type in observation
+          observation = observation.replace(old_type, new_type, 1)
+
+          anchor = "function sourceViews(state: ContinuumState, config: ContinuumConfig): ObservationSourceView[] {"
+          assert anchor in observation
+          helper = '''function historicalContextSource(
+            state: ContinuumState,
+            config: ContinuumConfig
+          ): Pick<ObservationSourceView, "enabled" | "state" | "reason"> {
+            const retentionDays = config.storage.retention_days;
+            if (retentionDays <= 0) {
+              return {
+                enabled: false,
+                state: "off",
+                reason: "Historical retention is off by choice.",
+              };
+            }
+
+            const page = state.context.page;
+            const writer = state.context.engine?.events_writer;
+            const latestEventAt = page?.recent_events.reduce<string | null>(
+              (latest, event) => (!latest || event.ts > latest ? event.ts : latest),
+              null
+            );
+            const retentionLabel = `${retentionDays} day${retentionDays === 1 ? "" : "s"}`;
+            const latestLabel = latestEventAt
+              ? ` Latest retained event: ${new Date(latestEventAt).toLocaleString()}.`
+              : " No retained events have been published yet.";
+
+            if (!writer) {
+              if (page) {
+                return {
+                  enabled: true,
+                  state: "last_known",
+                  reason: `Showing last-known historical context; writer health is not available.${latestLabel}`,
+                };
+              }
+              return {
+                enabled: true,
+                state: "unavailable",
+                reason:
+                  "Historical retention is configured, but neither writer health nor a history projection is available.",
+              };
+            }
+
+            if (!writer.enabled) {
+              return {
+                enabled: true,
+                state: "unavailable",
+                reason:
+                  normalizedDetail(writer) ??
+                  "Historical retention is configured, but the runtime history writer is unavailable.",
+              };
+            }
+
+            if (!writer.healthy || writer.should_restart) {
+              return {
+                enabled: true,
+                state: "degraded",
+                reason: `${
+                  normalizedDetail(writer) ?? "The runtime history writer reported a problem."
+                }${latestEventAt ? latestLabel : ""}`,
+              };
+            }
+
+            if (!page) {
+              return {
+                enabled: true,
+                state: "unavailable",
+                reason:
+                  "The history writer is healthy, but the desktop has not received a historical-context projection yet.",
+              };
+            }
+
+            return {
+              enabled: true,
+              state: "active",
+              reason: `History writer is healthy; source-attributed activity is retained for ${retentionLabel}.${latestLabel}`,
+            };
+          }
+
+          '''
+          observation = observation.replace(anchor, helper + anchor, 1)
+
+          history_start = observation.index("  const historyPublished = state.context.page !== null;")
+          history_end = observation.index("\n\n  return [", history_start)
+          observation = (
+              observation[:history_start]
+              + "  const history = historicalContextSource(state, config);"
+              + observation[history_end:]
+          )
+          for old, new in (
+              ("      enabled: historyEnabled,", "      enabled: history.enabled,"),
+              ("      state: historyState,", "      state: history.state,"),
+              ("      reason: historyReason,", "      reason: history.reason,"),
+          ):
+              assert old in observation
+              observation = observation.replace(old, new, 1)
+
+          count_start = observation.index("  const activeCount = sources.filter(")
+          count_end = observation.index(").length;", count_start) + len(").length;")
+          count_block = '''  const activeCount = sources.filter(
+            (source) =>
+              source.id !== "history" &&
+              source.id !== "triage" &&
+              (source.state === "active" || source.state === "idle")
+          ).length;'''
+          observation = observation[:count_start] + count_block + observation[count_end:]
+          observation_path.write_text(observation, encoding="utf-8")
+
+          control_path = Path("apps/desktop/src/components/observation/ObservationStatusControl.tsx")
+          control = control_path.read_text(encoding="utf-8")
+          assert '  active: "Active",' in control
+          control = control.replace('  active: "Active",', '  active: "Live",', 1)
+          assert '  idle: "Idle",\n  off: "Off",' in control
+          control = control.replace(
+              '  idle: "Idle",\n  off: "Off",',
+              '  idle: "Idle",\n  last_known: "Last known",\n  off: "Off",',
+              1,
+          )
+          assert '  idle: "text-ink-muted",\n  off: "text-ink-dim",' in control
+          control = control.replace(
+              '  idle: "text-ink-muted",\n  off: "text-ink-dim",',
+              '  idle: "text-ink-muted",\n  last_known: "text-ink-muted",\n  off: "text-ink-dim",',
+              1,
+          )
+          control_path.write_text(control, encoding="utf-8")
+
+          test_path = Path("apps/desktop/tests/observation-status.test.mjs")
+          tests = test_path.read_text(encoding="utf-8")
+          assert "published history without writer health is explicitly last-known" not in tests
+          tests += '''
+
+          test("healthy history writer is live and reports the latest retained event", () => {
+            const { state, config } = fixture();
+            state.context.page.recent_events = [{ ts: "2026-08-10T11:59:00Z" }];
+            const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+            const history = summary.sources.find((source) => source.id === "history");
+
+            assert.equal(history.state, "active");
+            assert.match(history.reason, /writer is healthy/i);
+            assert.match(history.reason, /Latest retained event/);
+          });
+
+          test("published history without writer health is explicitly last-known", () => {
+            const { state, config } = fixture();
+            state.context.page.recent_events = [{ ts: "2026-08-10T11:58:00Z" }];
+            state.context.engine.events_writer = null;
+            const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+            const history = summary.sources.find((source) => source.id === "history");
+
+            assert.equal(history.enabled, true);
+            assert.equal(history.state, "last_known");
+            assert.match(history.reason, /last-known/i);
+          });
+
+          test("unhealthy history writer is degraded instead of looking enabled", () => {
+            const { state, config } = fixture();
+            state.context.page.recent_events = [{ ts: "2026-08-10T11:57:00Z" }];
+            state.context.engine.events_writer = {
+              healthy: false,
+              enabled: true,
+              should_restart: true,
+              detail: "History writer stopped after repeated write failures",
+            };
+            const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+            const history = summary.sources.find((source) => source.id === "history");
+
+            assert.equal(history.state, "degraded");
+            assert.equal(summary.kind, "degraded");
+            assert.match(summary.reason, /Historical context/);
+            assert.match(summary.reason, /write failures/);
+          });
+
+          test("configured retention with a disabled writer is unavailable, not off by choice", () => {
+            const { state, config } = fixture();
+            state.context.engine.events_writer = {
+              healthy: true,
+              enabled: false,
+              should_restart: false,
+              detail: "History writer is unavailable in this runtime",
+            };
+            const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+            const history = summary.sources.find((source) => source.id === "history");
+
+            assert.equal(history.enabled, true);
+            assert.equal(history.state, "unavailable");
+            assert.match(history.reason, /unavailable/i);
+          });
+
+          test("history and triage alone never make the UI claim the user is being observed", () => {
+            const { state, config } = fixture();
+            state.context.page.toggles = {
+              mic: false,
+              screen: false,
+              files: false,
+              git: false,
+              pause_all: false,
+            };
+            state.context.engine.process_watcher = {
+              healthy: true,
+              enabled: false,
+              should_restart: false,
+              detail: "Off by policy",
+            };
+            const summary = deriveObservationSummary({ state, config, runtimeAvailable: true });
+
+            assert.equal(summary.activeCount, 0);
+            assert.equal(summary.kind, "off");
+          });
+          '''
+          test_path.write_text(tests, encoding="utf-8")
+
+          ui_test_path = Path("apps/desktop/tests/observation-ui-contract.test.mjs")
+          ui_tests = ui_test_path.read_text(encoding="utf-8")
+          assert "history state vocabulary includes live and last-known" not in ui_tests
+          ui_tests += '''
+
+          test("history state vocabulary includes live and last-known without treating either as a fixture", async () => {
+            const source = await read("src/components/observation/ObservationStatusControl.tsx");
+
+            assert.match(source, /active: "Live"/);
+            assert.match(source, /last_known: "Last known"/);
+          });
+          '''
+          ui_test_path.write_text(ui_tests, encoding="utf-8")
+
+          docs_path = Path("docs/CURRENT_TABS.md")
+          docs = docs_path.read_text(encoding="utf-8")
+          old_control = '''The shell-level circular privacy power control is live on every tab. It writes
+          a durable local pause lease and the real `pause_all` runtime intent; red means
+          all observation is stopped, while the normal accent color means the configured
+          individual sources may observe.'''
+          new_control = '''The shell-level observation status control is live on every tab. It derives
+          one explanatory state from the runtime heartbeat, durable pause lease, source
+          toggles, component health and model readiness. Pause/resume writes the real
+          durable lease and runtime intent; no frontend-only power state is maintained.'''
+          assert old_control in docs
+          docs = docs.replace(old_control, new_control, 1)
+          old_explanation = (
+              "- **Explanation:** disabled, idle, unavailable and degraded remain distinct, and current activity "
+              "keeps the session contract's confidence, evidence and privacy uncertainty."
+          )
+          new_explanation = (
+              "- **Explanation:** disabled, idle, unavailable and degraded remain distinct, and current activity "
+              "keeps the session contract's confidence, evidence and privacy uncertainty. Historical context also "
+              "separates retention off, a live healthy writer, last-known projected data, missing writer state and "
+              "a degraded writer."
+          )
+          assert old_explanation in docs
+          docs_path.write_text(docs.replace(old_explanation, new_explanation, 1), encoding="utf-8")
+          PY
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format changed frontend files
+        working-directory: apps/desktop
+        run: |
+          pnpm exec prettier --write \
+            src/components/observation/ObservationStatusControl.tsx \
+            src/lib/observation.ts \
+            tests/observation-status.test.mjs \
+            tests/observation-ui-contract.test.mjs
+
+      - name: Verify patch hygiene
+        run: git diff --check
+
+      - name: Run desktop regression tests
+        working-directory: apps/desktop
+        run: pnpm test:desktop
+
+      - name: Type-check desktop
+        working-directory: apps/desktop
+        run: pnpm typecheck
+
+      - name: Lint desktop
+        working-directory: apps/desktop
+        run: pnpm lint
+
+      - name: Verify formatting
+        working-directory: apps/desktop
+        run: pnpm format
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: pnpm build
+
+      - name: Remove temporary workflows
+        run: rm .github/workflows/a6-history-truth.yml .github/workflows/a6-history-truth-retry.yml
+
+      - name: Commit verified refinement
+        shell: bash
+        run: |
+          git config user.name "Continuum Agent A6"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(desktop): distinguish live and last-known history"
+          git push origin HEAD:swarm/a6-desktop-ux
