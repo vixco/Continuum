@@ -10,6 +10,7 @@ import {
   requestLatest,
   shouldFollowChatOutput,
 } from "../src/components/chat/scrollState.ts";
+import { createFollowFrameController } from "../src/components/chat/followFrame.ts";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -90,4 +91,43 @@ test("MessageList wires intent state to Virtuoso without forced smooth streaming
   assert.match(source, /scrollToLatest\("auto"\)/);
   assert.match(source, /New messages/);
   assert.doesNotMatch(source, /initialTopMostItemIndex/);
+});
+
+test("queued follow cannot run after upward intent cancels it", () => {
+  let nextHandle = 1;
+  const callbacks = new Map();
+  const canceled = [];
+  const controller = createFollowFrameController({
+    requestFrame(callback) {
+      const handle = nextHandle++;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    cancelFrame(handle) {
+      canceled.push(handle);
+    },
+  });
+  let followed = 0;
+
+  controller.schedule(() => {
+    followed += 1;
+  });
+  const queued = callbacks.get(1);
+  controller.cancel();
+  queued(); // Simulate a racy scheduler delivering the canceled callback anyway.
+
+  assert.deepEqual(canceled, [1]);
+  assert.equal(controller.hasPending(), false);
+  assert.equal(followed, 0);
+});
+
+test("MessageList cancels pending follow on both wheel and native upward scroll intent", async () => {
+  const source = await read("src/components/chat/MessageList.tsx");
+
+  assert.match(source, /createFollowFrameController/);
+  assert.match(
+    source,
+    /if \(!next\.pinnedToBottom && next\.lastScrollTop < previous\.lastScrollTop\) \{\s*cancelPendingFollow\(\)/
+  );
+  assert.match(source, /if \(event\.deltaY >= 0\) return;\s*cancelPendingFollow\(\)/);
 });

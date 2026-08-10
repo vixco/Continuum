@@ -45,3 +45,11 @@ test("history state vocabulary includes live and last-known without treating eit
   assert.match(source, /active: "Live"/);
   assert.match(source, /last_known: "Last known"/);
 });
+
+test("runtime loss labels source and activity freshness instead of claiming live state", async () => {
+  const source = await read("src/components/observation/ObservationStatusControl.tsx");
+
+  assert.match(source, /Runtime unavailable; last-known data is labeled/);
+  assert.match(source, /activityFreshnessLabel/);
+  assert.doesNotMatch(source, />\s*Live runtime state, not sample data\.\s*</);
+});

@@ -11,6 +11,7 @@ import { ArrowDown } from "lucide-react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 import { MessageBubble } from "./MessageBubble";
+import { createFollowFrameController, type FollowFrameController } from "./followFrame";
 import {
   createChatScrollSnapshot,
   observeAtBottomSignal,
@@ -37,7 +38,7 @@ interface ScrollUiState {
 export function MessageList({ messages, streamingMessage, isStreaming }: MessageListProps) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const scrollerCleanupRef = useRef<(() => void) | null>(null);
-  const followFrameRef = useRef<number | null>(null);
+  const followFrameRef = useRef<FollowFrameController | null>(null);
   const conversationRef = useRef<string | null>(null);
   const scrollRef = useRef<ChatScrollSnapshot>(createChatScrollSnapshot());
   const [scrollUi, setScrollUi] = useState<ScrollUiState>({
@@ -65,12 +66,24 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
     });
   }, []);
 
+  const getFollowFrame = useCallback(() => {
+    if (!followFrameRef.current) {
+      followFrameRef.current = createFollowFrameController({
+        requestFrame: (callback) => requestAnimationFrame(callback),
+        cancelFrame: (handle) => cancelAnimationFrame(handle),
+      });
+    }
+    return followFrameRef.current;
+  }, []);
+
+  const cancelPendingFollow = useCallback(() => {
+    followFrameRef.current?.cancel();
+  }, []);
+
   const scrollToLatest = useCallback(
     (behavior: "auto" | "smooth") => {
       if (data.length === 0) return;
-      if (followFrameRef.current !== null) cancelAnimationFrame(followFrameRef.current);
-      followFrameRef.current = requestAnimationFrame(() => {
-        followFrameRef.current = null;
+      getFollowFrame().schedule(() => {
         virtuosoRef.current?.scrollToIndex({
           index: data.length - 1,
           align: "end",
@@ -78,7 +91,7 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
         });
       });
     },
-    [data.length]
+    [data.length, getFollowFrame]
   );
 
   const setScrollerRef = useCallback(
@@ -93,10 +106,16 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
         clientHeight: target.clientHeight,
       });
       const onScroll = () => {
-        publishScrollState(observeChatScroll(scrollRef.current, readMetrics()));
+        const previous = scrollRef.current;
+        const next = observeChatScroll(previous, readMetrics());
+        if (!next.pinnedToBottom && next.lastScrollTop < previous.lastScrollTop) {
+          cancelPendingFollow();
+        }
+        publishScrollState(next);
       };
       const onWheel = (event: WheelEvent) => {
         if (event.deltaY >= 0) return;
+        cancelPendingFollow();
         publishScrollState({
           ...scrollRef.current,
           atBottom: false,
@@ -113,13 +132,13 @@ export function MessageList({ messages, streamingMessage, isStreaming }: Message
         target.removeEventListener("wheel", onWheel);
       };
     },
-    [publishScrollState]
+    [cancelPendingFollow, publishScrollState]
   );
 
   useEffect(
     () => () => {
       scrollerCleanupRef.current?.();
-      if (followFrameRef.current !== null) cancelAnimationFrame(followFrameRef.current);
+      followFrameRef.current?.cancel();
     },
     []
   );
