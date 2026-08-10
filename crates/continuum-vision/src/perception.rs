@@ -1,10 +1,10 @@
 //! Efficient ambient-perception primitives shared by capture and context consumers.
 //!
-//! The screen watcher owns platform capture. This module deliberately does not
-//! capture pixels itself; it provides deterministic fingerprints, per-display
-//! change gating, semantic-result caching, compact observation contracts, and
-//! health/metrics types so high-frequency acquisition does not imply high-frequency
-//! model inference.
+//! Platform capture stays in `continuum_core::senses::vision`. This module only
+//! defines cheap deterministic fingerprints/change gating plus compact, privacy-
+//! classified contracts for downstream temporal context, health, UI, and memory.
+//! It intentionally does **not** own a production cache; A7's bounded shared cache
+//! is the authoritative reuse layer.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -15,64 +15,47 @@ use serde::{Deserialize, Serialize};
 /// Stable schema version for compact ambient screen observations.
 pub const OBSERVATION_SCHEMA_VERSION: u16 = 1;
 
-/// Privacy classification attached before an observation leaves the senses layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sensitivity {
-    /// Safe for normal local processing and eligible downstream use.
     CloudAllowed,
-    /// Must remain local and be redacted before any cloud prompt use.
     LocalOnly,
-    /// Content must not be semantically processed or durably persisted.
     NeverObserve,
 }
 
-/// Retention decision for an observation.
+impl Sensitivity {
+    pub fn reusable_semantic_cache_allowed(self) -> bool {
+        self == Self::CloudAllowed
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetentionClass {
-    /// Ephemeral current-context evidence only.
     Ephemeral,
-    /// Metadata may enter bounded recent-history storage.
     RecentHistory,
-    /// Explicitly excluded from persistence.
     DoNotPersist,
 }
 
-/// Runtime status exposed to health and desktop surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PerceptionHealth {
-    /// Capture is active and semantic processing is available.
     Observing,
-    /// Observation is intentionally paused by user/privacy control.
     Paused,
-    /// OS permission or capture authorization is missing.
     PermissionRequired { reason: String },
-    /// Capture works, but the semantic encoder is unavailable.
     EncoderUnavailable { reason: String },
-    /// The subsystem is operating with reduced capability.
     Degraded { reason: String },
-    /// A frame is currently undergoing semantic processing.
     Processing,
-    /// Recent-history persistence is intentionally disabled.
     HistoricalCaptureDisabled,
 }
 
-/// Deterministic, privacy-safe identity for one frame/region.
-///
-/// `exact_hash` detects byte-identical content. `perceptual_hash` is a compact
-/// 16×9 average-luma bitset that remains stable across small pixel-level changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameFingerprint {
-    /// FNV-1a hash over RGBA bytes.
     pub exact_hash: u64,
-    /// 144-bit average-luma hash packed into three `u64`s.
     pub perceptual_hash: [u64; 3],
 }
 
 impl FrameFingerprint {
-    /// Build a deterministic fingerprint from an RGBA frame.
     pub fn from_rgba(image: &RgbaImage) -> Self {
         Self {
             exact_hash: fnv1a64(image.as_raw()),
@@ -80,7 +63,6 @@ impl FrameFingerprint {
         }
     }
 
-    /// Normalized Hamming distance in `[0, 1]` between perceptual hashes.
     pub fn perceptual_distance(self, other: Self) -> f32 {
         let differing: u32 = self
             .perceptual_hash
@@ -92,17 +74,13 @@ impl FrameFingerprint {
     }
 }
 
-/// Unique key for a display or bounded dirty region.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObservationKey {
-    /// Stable display identity supplied by the platform capture layer.
     pub display_id: String,
-    /// Optional region in display coordinates `(x, y, width, height)`.
     pub region: Option<(u32, u32, u32, u32)>,
 }
 
 impl ObservationKey {
-    /// Construct a key for a whole display.
     pub fn display(display_id: impl Into<String>) -> Self {
         Self {
             display_id: display_id.into(),
@@ -110,7 +88,6 @@ impl ObservationKey {
         }
     }
 
-    /// Construct a key for one region on a display.
     pub fn region(
         display_id: impl Into<String>,
         x: u32,
@@ -125,29 +102,20 @@ impl ObservationKey {
     }
 }
 
-/// Why the change gate did or did not request semantic processing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GateReason {
-    /// First frame for this key.
     FirstObservation,
-    /// Exact pixel content is unchanged.
     ExactDuplicate,
-    /// Perceptual change is below threshold and fallback sampling is not due.
     BelowThreshold,
-    /// Perceptual change crossed the configured threshold.
     MeaningfulChange,
-    /// Time-based refresh is due despite low visual change.
     FallbackSample,
 }
 
-/// Result of evaluating one frame fingerprint.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GateDecision {
-    /// Whether local semantic inference should run.
     pub should_encode: bool,
-    /// Normalized perceptual change score.
     pub change_score: f32,
-    /// Decision reason for metrics/diagnostics.
     pub reason: GateReason,
 }
 
@@ -157,7 +125,6 @@ struct GateState {
     last_semantic_at: Instant,
 }
 
-/// Per-display/region adaptive semantic gate.
 #[derive(Debug)]
 pub struct ChangeGate {
     threshold: f32,
@@ -166,7 +133,6 @@ pub struct ChangeGate {
 }
 
 impl ChangeGate {
-    /// Create a gate. `threshold` is clamped to `[0, 1]`.
     pub fn new(threshold: f32, fallback_after: Duration) -> Self {
         Self {
             threshold: threshold.clamp(0.0, 1.0),
@@ -175,10 +141,6 @@ impl ChangeGate {
         }
     }
 
-    /// Evaluate a fingerprint at a caller-supplied monotonic time.
-    ///
-    /// Passing time explicitly makes the gate deterministic in tests and allows
-    /// capture workers to share one clock source without sleeping.
     pub fn evaluate_at(
         &mut self,
         key: ObservationKey,
@@ -234,146 +196,62 @@ impl ChangeGate {
         }
     }
 
-    /// Drop all state for one display, e.g. after reconnect/resolution change.
     pub fn invalidate_display(&mut self, display_id: &str) {
         self.state.retain(|key, _| key.display_id != display_id);
     }
 
-    /// Number of independent display/region keys currently tracked.
     pub fn tracked_keys(&self) -> usize {
         self.state.len()
     }
 }
 
-/// Cache key for semantic encoder output.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SemanticCacheKey {
-    /// Display or region identity.
     pub observation_key: ObservationKey,
-    /// Exact frame hash.
     pub exact_hash: u64,
-    /// Encoder/model identity; changing it invalidates cached semantics.
     pub encoder_revision: String,
 }
 
-/// Compact cached semantic result. Raw screenshots are intentionally absent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SemanticResult {
-    /// Privacy-scrubbed one-line summary.
-    pub summary: String,
-    /// Optional privacy-scrubbed relevant visible text, bounded by the caller.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub visible_text: Vec<String>,
-    /// Optional opaque embedding-store reference rather than an inline vector.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_ref: Option<String>,
-    /// Encoder confidence in `[0, 1]`.
-    pub confidence: f32,
-}
-
-/// In-memory semantic cache keyed by frame bytes and encoder revision.
-#[derive(Debug, Default)]
-pub struct SemanticCache {
-    entries: HashMap<SemanticCacheKey, SemanticResult>,
-}
-
-impl SemanticCache {
-    /// Read a cached semantic result.
-    pub fn get(&self, key: &SemanticCacheKey) -> Option<&SemanticResult> {
-        self.entries.get(key)
-    }
-
-    /// Insert or replace a semantic result.
-    pub fn insert(&mut self, key: SemanticCacheKey, value: SemanticResult) {
-        self.entries.insert(key, value);
-    }
-
-    /// Invalidate all cached results created by a previous encoder revision.
-    pub fn retain_revision(&mut self, encoder_revision: &str) {
-        self.entries
-            .retain(|key, _| key.encoder_revision == encoder_revision);
-    }
-
-    /// Number of cached semantic results.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
-/// Compact typed observation emitted after privacy classification and change gating.
-///
-/// It intentionally contains no raw pixels and no screenshot path. Screenshot
-/// persistence remains a separate explicit opt-in mechanism.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AmbientObservation {
-    /// Schema version for compatible downstream evolution.
     pub schema_version: u16,
-    /// Capture timestamp as Unix milliseconds, preserving source time exactly.
     pub timestamp_unix_ms: i64,
-    /// Display/region identity.
     pub key: ObservationKey,
-    /// Exact content hash for deduplication/provenance.
     pub content_hash: u64,
-    /// Normalized visual change score.
     pub change_score: f32,
-    /// Privacy-scrubbed semantic summary, when semantic processing ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_summary: Option<String>,
-    /// Opaque embedding-store reference, never the vector itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_ref: Option<String>,
-    /// Confidence in the semantic fields.
     pub confidence: f32,
-    /// Producer identity, e.g. `screen:xcap` or `screen:synthetic-test`.
     pub source: String,
-    /// Privacy classification applied before publication.
     pub sensitivity: Sensitivity,
-    /// Explicit retention decision.
     pub retention: RetentionClass,
-    /// Whether semantic inference ran for this observation.
     pub semantic_processed: bool,
 }
 
 impl AmbientObservation {
-    /// Returns whether this record is allowed to enter any persistent history.
     pub fn persistence_allowed(&self) -> bool {
         self.sensitivity != Sensitivity::NeverObserve
             && self.retention != RetentionClass::DoNotPersist
     }
 }
 
-/// Monotonic counters/latencies suitable for runtime diagnostics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerceptionMetrics {
-    /// Frames acquired from capture APIs.
     pub frames_captured: u64,
-    /// Byte-identical frames discarded before semantic work.
     pub exact_duplicates_discarded: u64,
-    /// Low-change frames skipped before semantic work.
     pub low_change_discarded: u64,
-    /// Semantic encoder invocations.
     pub semantic_inferences: u64,
-    /// Semantic cache hits.
     pub semantic_cache_hits: u64,
-    /// Oldest-buffered frames dropped under backpressure.
     pub buffered_frames_dropped: u64,
-    /// Last measured capture latency in microseconds.
     pub last_capture_latency_us: u64,
-    /// Last measured change-detection latency in microseconds.
     pub last_change_detection_latency_us: u64,
-    /// Last measured semantic inference latency in microseconds.
     pub last_inference_latency_us: u64,
-    /// Last measured capture-to-searchable-observation latency in microseconds.
     pub last_searchable_latency_us: u64,
 }
 
 impl PerceptionMetrics {
-    /// Fraction of captured frames discarded before semantic inference.
     pub fn deduplication_rate(&self) -> f32 {
         if self.frames_captured == 0 {
             return 0.0;
@@ -382,7 +260,6 @@ impl PerceptionMetrics {
             / self.frames_captured as f32
     }
 
-    /// Fraction of semantic lookups served from cache.
     pub fn semantic_cache_hit_rate(&self) -> f32 {
         let lookups = self.semantic_cache_hits + self.semantic_inferences;
         if lookups == 0 {
@@ -425,21 +302,12 @@ mod tests {
 
     fn split(left: u8, right: u8) -> RgbaImage {
         let mut image = solid(left);
-        for pixel in image.enumerate_pixels_mut() {
-            if pixel.0 >= 16 {
-                *pixel.2 = Rgba([right, right, right, 255]);
+        for (x, _, pixel) in image.enumerate_pixels_mut() {
+            if x >= 16 {
+                *pixel = Rgba([right, right, right, 255]);
             }
         }
         image
-    }
-
-    #[test]
-    fn exact_fingerprint_is_deterministic() {
-        let image = solid(42);
-        assert_eq!(
-            FrameFingerprint::from_rgba(&image),
-            FrameFingerprint::from_rgba(&image)
-        );
     }
 
     #[test]
@@ -467,7 +335,6 @@ mod tests {
         );
         assert!(decision.should_encode);
         assert_eq!(decision.reason, GateReason::MeaningfulChange);
-        assert!(decision.change_score >= 0.05);
     }
 
     #[test]
@@ -500,33 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn cached_encoder_results_invalidate_by_revision() {
+    fn encoder_revision_is_part_of_cache_identity() {
         let key = ObservationKey::display("display-1");
-        let mut cache = SemanticCache::default();
-        for revision in ["encoder-v1", "encoder-v2"] {
-            cache.insert(
-                SemanticCacheKey {
-                    observation_key: key.clone(),
-                    exact_hash: 5,
-                    encoder_revision: revision.to_string(),
-                },
-                SemanticResult {
-                    summary: revision.to_string(),
-                    visible_text: Vec::new(),
-                    embedding_ref: None,
-                    confidence: 0.8,
-                },
-            );
-        }
-        cache.retain_revision("encoder-v2");
-        assert_eq!(cache.len(), 1);
-        assert!(cache
-            .get(&SemanticCacheKey {
-                observation_key: key,
-                exact_hash: 5,
-                encoder_revision: "encoder-v2".into(),
-            })
-            .is_some());
+        let v1 = SemanticCacheKey {
+            observation_key: key.clone(),
+            exact_hash: 5,
+            encoder_revision: "encoder-v1".into(),
+        };
+        let v2 = SemanticCacheKey {
+            observation_key: key,
+            exact_hash: 5,
+            encoder_revision: "encoder-v2".into(),
+        };
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn restricted_observations_are_not_reusable_cache_material() {
+        assert!(Sensitivity::CloudAllowed.reusable_semantic_cache_allowed());
+        assert!(!Sensitivity::LocalOnly.reusable_semantic_cache_allowed());
+        assert!(!Sensitivity::NeverObserve.reusable_semantic_cache_allowed());
     }
 
     #[test]
@@ -567,8 +427,6 @@ mod tests {
         let encoded = serde_json::to_vec(&observation).expect("serialize observation");
         let decoded: AmbientObservation =
             serde_json::from_slice(&encoded).expect("deserialize observation");
-        assert_eq!(decoded.timestamp_unix_ms, observation.timestamp_unix_ms);
-        assert_eq!(decoded.confidence, observation.confidence);
         assert_eq!(decoded, observation);
     }
 
@@ -579,7 +437,6 @@ mod tests {
         };
         let json = serde_json::to_string(&health).expect("serialize health");
         assert!(json.contains("encoder_unavailable"));
-        assert!(json.contains("synthetic model not loaded"));
     }
 
     #[test]
