@@ -1,0 +1,95 @@
+name: Persistent intelligence evaluation
+
+on:
+  push:
+    branches:
+      - main
+      - "swarm/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  synthetic-contract:
+    name: Synthetic cross-layer contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run evaluator regression tests
+        run: python -m unittest -v scripts/test_persistent_intelligence_eval.py
+
+      - name: Evaluate committed synthetic suite
+        run: >-
+          python scripts/persistent_intelligence_eval.py
+          --suite evals/persistent-intelligence/reference-suite.json
+          --report persistent-intelligence-report.json
+
+      - name: Verify runtime proof remains unavailable
+        shell: bash
+        run: |
+          set +e
+          python scripts/persistent_intelligence_eval.py \
+            --suite evals/persistent-intelligence/reference-suite.json \
+            --require-runtime \
+            --report persistent-intelligence-runtime-gate-report.json \
+            > persistent-intelligence-runtime-gate.stdout.json
+          status=$?
+          set -e
+
+          if [[ "$status" -ne 1 ]]; then
+            echo "Expected the reserved runtime gate to exit 1; got $status" >&2
+            cat persistent-intelligence-runtime-gate.stdout.json >&2 || true
+            exit 1
+          fi
+
+      - name: Upload sanitized evaluation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: persistent-intelligence-evaluation-${{ github.run_id }}
+          path: |
+            persistent-intelligence-report.json
+            persistent-intelligence-runtime-gate-report.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish sanitized evaluation summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f persistent-intelligence-report.json ]]; then
+            {
+              echo '## Persistent-intelligence contract'
+              echo
+              echo 'The committed suite is synthetic contract evidence, not runtime proof.'
+              echo
+              echo '```json'
+              cat persistent-intelligence-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f persistent-intelligence-runtime-gate-report.json ]]; then
+            {
+              echo
+              echo '## Reserved runtime gate'
+              echo
+              echo 'Expected result: unsupported and non-zero until artifact-bound runtime adapters exist.'
+              echo
+              echo '```json'
+              cat persistent-intelligence-runtime-gate-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
