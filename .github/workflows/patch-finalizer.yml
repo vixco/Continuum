@@ -22,33 +22,46 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
+
           path = Path('.github/workflows/finalize-reviewed-swarm.yml')
-          text = path.read_text(encoding='utf-8')
-          old = '''          git add \\
-            crates/continuum-core/src/runtime_publish.rs \\
-            crates/continuum-core/src/health/verified.rs \\
-            crates/continuum-core/src/health/runtime_repair.rs \\
-            crates/continuum-core/src/operational_state.rs
-          git commit --amend --no-edit'''
-          new = '''          git add -A
-          git commit --amend --no-edit'''
-          count = text.count(old)
-          if count == 1:
-              text = text.replace(old, new, 1)
-          elif new not in text:
-              raise SystemExit(f'unexpected finalizer staging block: {count} matches')
-          old_a8 = '''          cargo fmt --all
-          git add apps/desktop/tests/chat-scroll-behavior.test.mjs
-          git commit --amend --no-edit'''
-          new_a8 = '''          cargo fmt --all
-          git add -A
-          git commit --amend --no-edit'''
-          count_a8 = text.count(old_a8)
-          if count_a8 == 1:
-              text = text.replace(old_a8, new_a8, 1)
-          elif new_a8 not in text:
-              raise SystemExit(f'unexpected A8 staging block: {count_a8} matches')
-          path.write_text(text, encoding='utf-8')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          output = []
+          index = 0
+          replaced_multiline = 0
+          replaced_chat = 0
+
+          while index < len(lines):
+              line = lines[index]
+              stripped = line.strip()
+              if stripped == 'git add \\':
+                  indent = line[: len(line) - len(line.lstrip())]
+                  output.append(f'{indent}git add -A')
+                  index += 1
+                  while index < len(lines) and not lines[index].strip().startswith('git commit --amend'):
+                      index += 1
+                  if index >= len(lines):
+                      raise SystemExit('unterminated multiline git add block')
+                  output.append(lines[index])
+                  replaced_multiline += 1
+                  index += 1
+                  continue
+              if stripped == 'git add apps/desktop/tests/chat-scroll-behavior.test.mjs':
+                  indent = line[: len(line) - len(line.lstrip())]
+                  output.append(f'{indent}git add -A')
+                  replaced_chat += 1
+                  index += 1
+                  continue
+              output.append(line)
+              index += 1
+
+          if replaced_multiline not in (0, 1):
+              raise SystemExit(f'unexpected multiline staging blocks: {replaced_multiline}')
+          if replaced_chat not in (0, 1):
+              raise SystemExit(f'unexpected chat staging blocks: {replaced_chat}')
+          rendered = '\n'.join(output) + '\n'
+          if 'git add -A' not in rendered:
+              raise SystemExit('finalizer staging was not updated')
+          path.write_text(rendered, encoding='utf-8')
           PY
           if git diff --quiet; then
             echo 'Finalizer already patched.'
