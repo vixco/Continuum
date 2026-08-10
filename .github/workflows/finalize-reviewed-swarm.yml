@@ -1,0 +1,304 @@
+name: Finalize reviewed swarm integration
+
+on:
+  push:
+    branches:
+      - swarm/review-finalize-20260810
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: swarm/agi-integration
+          fetch-depth: 0
+
+      - name: Guard integration head
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          expected="fc68a3e4625227d59e08813b30e067532951fb6a"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Integration branch moved: expected $expected, found $actual"
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: Integrate reviewed A5 runtime work
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Continuum integration bot"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+          git fetch origin swarm/a5-health-and-watchers
+          set +e
+          git cherry-pick 6d73e86ff0c5bc5678679c72c085a868c71e488b
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if [[ "${#conflicts[@]}" -ne 1 || "${conflicts[0]}" != "apps/desktop/src-tauri/src/settings_tools.rs" ]]; then
+              printf 'Unexpected conflicts:\n%s\n' "${conflicts[*]:-none}"
+              exit 1
+            fi
+            # The integration branch owns the newer shared typed settings backend.
+            # A5's watcher controls are wired through runtime commands, so retaining
+            # this file avoids resurrecting the superseded duplicate implementation.
+            git checkout --ours -- apps/desktop/src-tauri/src/settings_tools.rs
+            git add apps/desktop/src-tauri/src/settings_tools.rs
+            GIT_EDITOR=true git cherry-pick --continue
+          fi
+
+      - name: Repair A5 compile and Clippy findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one match in {path}, found {count}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "crates/continuum-core/src/runtime_publish.rs",
+              """            toggles: ObservationTogglesView {
+                  files: false,
+                  ..ObservationTogglesView::default()
+              },
+              continuation: vec![ContinuationCandidateView {""",
+              """            toggles: ObservationTogglesView {
+                  files: false,
+                  ..ObservationTogglesView::default()
+              },
+              services: RuntimeServiceSnapshot::default(),
+              continuation: vec![ContinuationCandidateView {""",
+          )
+
+          path = Path("crates/continuum-core/src/health/verified.rs")
+          text = path.read_text(encoding="utf-8")
+          start_marker = "    let mut backoff = RetryBackoff::new(plan.retry);"
+          end_marker = "\n}\n\n/// Converts a legacy health status"
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          replacement = """    let mut backoff = RetryBackoff::new(plan.retry);
+              let mut attempts = 0;
+
+              loop {
+                  attempts += 1;
+                  let execution = executor.execute(plan).await;
+                  let retryable = execution.retryable;
+                  let after = probe.inspect().await;
+
+                  let command_ok = execution.exited_successfully;
+                  let state_ok = plan.success_states.contains(&after.state);
+                  if command_ok && state_ok {
+                      return VerifiedRepairResult {
+                          component: plan.component.clone(),
+                          action: plan.action.clone(),
+                          outcome: VerifiedRepairOutcome::VerifiedSuccess,
+                          before,
+                          after,
+                          execution: Some(execution),
+                          attempts,
+                          started_at,
+                          verified_at: Utc::now(),
+                          explanation: "The action completed and a fresh health probe verified recovery."
+                              .to_string(),
+                      };
+                  }
+
+                  let delay = if retryable {
+                      backoff.next_delay()
+                  } else {
+                      None
+                  };
+                  if let Some(delay) = delay {
+                      tokio::time::sleep(delay).await;
+                      continue;
+                  }
+
+                  return VerifiedRepairResult {
+                      component: plan.component.clone(),
+                      action: plan.action.clone(),
+                      outcome: VerifiedRepairOutcome::VerifiedFailure,
+                      before,
+                      after,
+                      execution: Some(execution),
+                      attempts,
+                      started_at,
+                      verified_at: Utc::now(),
+                      explanation: "The action did not produce an accepted post-repair health state."
+                          .to_string(),
+                  };
+              }
+          """
+          path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+          replace_once(
+              "crates/continuum-core/src/health/runtime_repair.rs",
+              """struct RepairIntentEnvelope {
+              kind: String,
+              queued_at: DateTime<Utc>,""",
+              """struct RepairIntentEnvelope {
+              queued_at: DateTime<Utc>,""",
+          )
+          replace_once(
+              "crates/continuum-core/src/health/runtime_repair.rs",
+              """            if !activated || (!accepted_state && !terminal_failure && now < pending.deadline) {
+                  if now < pending.deadline {
+                      continue;
+                  }
+              }
+          """,
+              """            if now < pending.deadline
+                  && (!activated || (!accepted_state && !terminal_failure))
+              {
+                  continue;
+              }
+          """,
+          )
+          replace_once(
+              "crates/continuum-core/src/operational_state.rs",
+              """fn push_event(
+              inner: &mut OperationalEventInner,""",
+              """#[allow(clippy::too_many_arguments)]
+          fn push_event(
+              inner: &mut OperationalEventInner,""",
+          )
+          PY
+          cargo fmt --all
+          git add \
+            crates/continuum-core/src/runtime_publish.rs \
+            crates/continuum-core/src/health/verified.rs \
+            crates/continuum-core/src/health/runtime_repair.rs \
+            crates/continuum-core/src/operational_state.rs
+          git commit --amend --no-edit
+
+      - name: Integrate reviewed A8 hardening without test regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp apps/desktop/tests/chat-scroll-behavior.test.mjs /tmp/chat-scroll-before-a8.mjs
+          git fetch origin swarm/a8-evaluation-and-ci
+          git cherry-pick ab81a0b81a94f193bf45b803c16edc4e87fe8193
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("apps/desktop/tests/chat-scroll-behavior.test.mjs")
+          text = Path("/tmp/chat-scroll-before-a8.mjs").read_text(encoding="utf-8")
+          marker = 'test("scrolling back near the bottom resumes following and clears unseen output", () => {'
+          addition = '''test("a small upward scroll inside the bottom threshold preserves reader intent", () => {
+            const initial = createChatScrollSnapshot(600);
+            const scrolledUp = observeChatScroll(initial, {
+              scrollTop: 580,
+              scrollHeight: 1200,
+              clientHeight: 600,
+            });
+
+            assert.equal(scrolledUp.atBottom, true, "the viewport remains physically near the bottom");
+            assert.equal(scrolledUp.pinnedToBottom, false, "upward intent must win over the threshold");
+
+            const afterPositiveSignal = observeAtBottomSignal(scrolledUp, true);
+            assert.equal(
+              afterPositiveSignal.pinnedToBottom,
+              false,
+              "a stale positive Virtuoso signal must not re-enable following"
+            );
+
+            const withOutput = observeChatContent(afterPositiveSignal);
+            assert.equal(shouldFollowChatOutput(withOutput), false);
+            assert.equal(withOutput.hasUnseenContent, true);
+          });
+
+          '''
+          if addition.strip() not in text:
+              if marker not in text:
+                  raise SystemExit("chat test insertion marker missing")
+              text = text.replace(marker, addition + marker, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+          cargo fmt --all
+          git add apps/desktop/tests/chat-scroll-behavior.test.mjs
+          git commit --amend --no-edit
+
+      - name: Reject temporary swarm artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=(
+            .a8-minimal-temporal-fix.py
+            .a8-minimal-temporal-test.log
+            .github/workflows/a8-minimal-temporal-fix.yml
+            .github/workflows/a5-export-integration-bundle.yml
+          )
+          for path in "${forbidden[@]}"; do
+            if [[ -e "$path" ]]; then
+              echo "::error::Temporary swarm artifact would ship: $path"
+              exit 1
+            fi
+          done
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Verify core tests and Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p continuum-core --no-default-features --lib
+          cargo clippy -p continuum-core --no-default-features --lib --tests -- -D warnings
+          cargo test -p continuum-mcp --lib
+
+      - name: Verify persistent-intelligence evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v scripts/test_persistent_intelligence_eval.py
+          python scripts/persistent_intelligence_eval.py \
+            --suite evals/persistent-intelligence/reference-suite.json \
+            --report /tmp/persistent-intelligence-report.json
+
+      - name: Verify desktop behavior and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm test:desktop
+          pnpm typecheck
+          pnpm lint
+          pnpm build
+
+      - name: Push reviewed integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          test -z "$(git status --porcelain)"
+          git push origin HEAD:swarm/agi-integration
