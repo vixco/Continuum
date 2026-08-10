@@ -1,0 +1,35 @@
+name: A1 temporary integration source export
+
+on:
+  push:
+    branches:
+      - swarm/a1-integration-fixes
+
+permissions:
+  contents: read
+
+jobs:
+  export-public-source:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: swarm/a1-integration-fixes
+      - name: Build public source snapshot
+        run: |
+          mkdir -p /tmp/continuum-integration-source
+          tar \
+            --exclude=.git \
+            --exclude=node_modules \
+            --exclude=target \
+            --exclude='*.log' \
+            --exclude='.env*' \
+            --exclude='.github/workflows/a1-integration-source-export.yml' \
+            -cf - . | tar -xf - -C /tmp/continuum-integration-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: continuum-a1-integration-source
+          path: /tmp/continuum-integration-source
+          if-no-files-found: error
+          retention-days: 1
