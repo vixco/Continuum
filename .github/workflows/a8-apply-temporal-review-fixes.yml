@@ -21,6 +21,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.94.0
 
+      - name: Configure Git identity
+        shell: bash
+        run: |
+          git config user.name "Continuum Agent"
+          git config user.email "93612321+vixco@users.noreply.github.com"
+
       - name: Apply reviewed temporal trust-boundary fixes
         shell: bash
         run: |
@@ -40,13 +46,10 @@ jobs:
           set -e
 
           if [[ "$status" -ne 0 ]]; then
-            {
-              echo '## Focused rustfmt failure'
-              echo
-              echo '```text'
-              cat /tmp/a8-rustfmt.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/a8-rustfmt.log .a8-rustfmt.log
+            git add .a8-rustfmt.log
+            git commit -m "chore(a8): capture focused rustfmt diagnostic"
+            git push origin HEAD:swarm/a8-evaluation-and-ci
             exit "$status"
           fi
 
@@ -61,13 +64,10 @@ jobs:
           set -e
 
           if [[ "$status" -ne 0 ]]; then
-            {
-              echo '## Focused temporal-test failure'
-              echo
-              echo '```text'
-              tail -n 240 /tmp/a8-temporal-test.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/a8-temporal-test.log .a8-temporal-test.log
+            git add .a8-temporal-test.log
+            git commit -m "chore(a8): capture focused temporal-test diagnostic"
+            git push origin HEAD:swarm/a8-evaluation-and-ci
             exit "$status"
           fi
 
@@ -75,8 +75,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "Continuum Agent"
-          git config user.email "93612321+vixco@users.noreply.github.com"
           git add \
             crates/continuum-core/src/context/temporal.rs \
             apps/desktop/src-tauri/src/chat/temporal_history.rs
