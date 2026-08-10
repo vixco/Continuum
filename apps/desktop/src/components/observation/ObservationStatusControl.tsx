@@ -259,6 +259,18 @@ export function ObservationStatusControl() {
 
   const paused = summary.kind === "paused";
   const activity = summary.currentActivity;
+  const sourceTruthNote =
+    summary.kind === "processing"
+      ? "Waiting for live runtime state."
+      : summary.kind === "unavailable"
+        ? "Runtime unavailable; last-known data is labeled."
+        : "Live runtime state, not sample data.";
+  const activityFreshnessLabel =
+    activity.freshness === "live"
+      ? "Live"
+      : activity.freshness === "last_known"
+        ? "Last known"
+        : "Unavailable";
 
   return (
     <div ref={rootRef} className="relative z-[70]">
@@ -345,9 +357,7 @@ export function ObservationStatusControl() {
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
                   Observation sources
                 </h2>
-                <p className="mt-0.5 text-[11px] text-ink-dim">
-                  Live runtime state, not sample data.
-                </p>
+                <p className="mt-0.5 text-[11px] text-ink-dim">{sourceTruthNote}</p>
               </div>
             </div>
             <div className="space-y-2">
@@ -423,8 +433,13 @@ export function ObservationStatusControl() {
             </div>
 
             <div className="mt-4 rounded-md border border-bg-border bg-bg-elevated p-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                Current activity
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
+                  Current activity
+                </div>
+                <span className="rounded border border-bg-border px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-ink-dim">
+                  {activityFreshnessLabel}
+                </span>
               </div>
               <div className="mt-2 text-sm font-medium text-ink">{activity.title}</div>
               <div className="mt-1 text-[11px] leading-4 text-ink-muted">{activity.evidence}</div>
