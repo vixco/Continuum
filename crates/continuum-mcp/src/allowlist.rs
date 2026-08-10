@@ -474,7 +474,13 @@ mod tests {
 
     #[test]
     fn does_not_expand_nonleading_tilde() {
-        assert_eq!(expand_home(Path::new("project/~/file")), PathBuf::from("project/~/file"));
-        assert_eq!(expand_home(Path::new("~other/file")), PathBuf::from("~other/file"));
+        assert_eq!(
+            expand_home(Path::new("project/~/file")),
+            PathBuf::from("project/~/file")
+        );
+        assert_eq!(
+            expand_home(Path::new("~other/file")),
+            PathBuf::from("~other/file")
+        );
     }
 }

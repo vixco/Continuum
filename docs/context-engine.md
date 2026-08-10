@@ -515,8 +515,23 @@ triage. `interval_secs = 3`.
 
 ### `[triage]`
 
-`context_size = 4096` (raised from 2048 to fit the classification block),
-`max_tokens = 256`.
+`evaluation_enabled = true` requests interactive per-frame triage. It can be
+changed live through the `triage_evaluation` runtime-service intent; turning it
+off prevents new evaluations and rejects results from the previous generation
+without weakening any privacy gate. `context_size = 4096` (raised from 2048 to
+fit the classification block), `max_tokens = 256`.
+
+### Optional runtime-service control
+
+`file_activity`, `background_activity` and `triage_evaluation` are persisted to
+`[file_watcher].enabled`, `[process_watcher].enabled` and
+`[triage].evaluation_enabled`. The context-intent API applies the durable write
+before changing the process-local control, so a failed config write cannot
+leave the running state and next boot disagreeing. These requests do not
+replace privacy controls: `pause_all` and source-specific privacy toggles always
+win. Runtime publication exposes both the requested service snapshot and the
+component's typed observed state, so UI code must not infer “running” from a
+saved boolean.
 
 ---
 

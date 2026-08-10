@@ -197,14 +197,80 @@ export interface SessionState {
   inferred_at: string | null;
 }
 
+export type OperationalState =
+  | "starting"
+  | "running"
+  | "idle"
+  | "degraded"
+  | "disabled_by_user"
+  | "disabled_by_policy"
+  | "permission_required"
+  | "unavailable"
+  | "stopping"
+  | "failed";
+
+export type RootCauseCategory =
+  | "user_choice"
+  | "configuration"
+  | "policy"
+  | "permission"
+  | "dependency"
+  | "resource"
+  | "data"
+  | "internal"
+  | "unknown";
+
+export type RepairPolicyClass =
+  | "automatically_safe"
+  | "requires_user_approval"
+  | "denied_destructive"
+  | "manual_only"
+  | "unavailable";
+
+export interface ComponentDiagnostic {
+  component: string;
+  capability_affected: string;
+  state: OperationalState;
+  reason_code: string;
+  explanation: string;
+  root_cause: RootCauseCategory;
+  evidence: Array<{ kind: string; reference: string; observed_at: string }>;
+  observed_at: string;
+  retryable: boolean;
+  recommended_action: string | null;
+  repair: { class: RepairPolicyClass; action: string | null; available: boolean };
+}
+
+export type OperationalEventKind =
+  | "health_transition"
+  | "watcher_state_transition"
+  | "repair_started"
+  | "repair_completed"
+  | "repair_failed"
+  | "verification_result";
+
+export interface OperationalEvent {
+  sequence: number;
+  kind: OperationalEventKind;
+  component: string;
+  from: OperationalState | null;
+  to: OperationalState;
+  reason_code: string;
+  explanation: string;
+  ts: string;
+}
+
 /// Per-component health summary (spec §7). Disabled-with-reason is a
 /// healthy state: `healthy: true, enabled: false` with the reason in
-/// `detail`. `should_restart` is the only restart signal.
+/// `detail`. `should_restart` is retained for older desktop builds; typed
+/// diagnostics are authoritative for new repair flows.
 export interface ComponentHealthSummary {
   healthy: boolean;
   enabled: boolean;
   should_restart: boolean;
   detail: string | null;
+  state: OperationalState;
+  diagnostic: ComponentDiagnostic | null;
 }
 
 export interface ContextEngineSnapshot {
@@ -293,12 +359,20 @@ export interface ContinuationCandidateView {
   confidence: number;
 }
 
+export interface RuntimeServiceSnapshot {
+  file_activity: boolean;
+  background_activity: boolean;
+  triage_evaluation: boolean;
+  version: number;
+}
+
 export interface ContextPageSnapshot {
   projects: ProjectSummaryView[];
   rules: OverrideRuleView[];
   pins: SessionPinView[];
   recent_events: ContextEventView[];
   toggles: ObservationTogglesView;
+  services: RuntimeServiceSnapshot;
   continuation: ContinuationCandidateView[];
 }
 
@@ -309,6 +383,7 @@ export interface ContextState {
   session: SessionState | null;
   engine: ContextEngineSnapshot | null;
   page: ContextPageSnapshot | null;
+  operational_events: OperationalEvent[];
 }
 
 /// Payload of a `context-intents/*.json` file (spec §4.13), written by
@@ -345,6 +420,11 @@ export type ContextIntentInput =
       kind: "set_toggle";
       name: "mic" | "screen" | "files" | "git" | "pause_all";
       value: boolean;
+    }
+  | {
+      kind: "set_runtime_service";
+      service: "file_activity" | "background_activity" | "triage_evaluation";
+      enabled: boolean;
     };
 
 export interface ContinuumState {

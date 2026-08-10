@@ -1,11 +1,11 @@
 //! # Repair tools (`mcp__continuum__repair_*`)
 //!
-//! Published compatibility tools for repair sessions. The restart, reinstall,
-//! and escalation helpers can write intent files under
-//! `~/.continuum-dev/repair-intents/`, but this release has no runtime consumer
-//! for those files. The guarded Health flow therefore denies those tools and
-//! performs its one supported mutation (starting an offline runtime) directly
-//! in the desktop after preview and backup authorization.
+//! Repair-session tools. Restart requests are supported only for the file and
+//! process watcher supervisors: the runtime revalidates the short-lived grant,
+//! restarts the existing single instance, and publishes a separate verification
+//! result. Queueing the request is never itself reported as recovery. Model
+//! reinstall, rollback and escalation remain separately guarded compatibility
+//! boundaries.
 //!
 //! For `rollback_config` and `test_component` we can answer directly from
 //! the MCP process because the work is pure disk I/O.
@@ -33,6 +33,8 @@ pub enum RepairTarget {
     Mcp,
     Memory,
     ContextWatcher,
+    FileWatcher,
+    ProcessWatcher,
 }
 
 impl RepairTarget {
@@ -47,6 +49,8 @@ impl RepairTarget {
             Self::Mcp => "mcp",
             Self::Memory => "memory",
             Self::ContextWatcher => "context_watcher",
+            Self::FileWatcher => "file_watcher",
+            Self::ProcessWatcher => "process_watcher",
         }
     }
 }
@@ -95,14 +99,21 @@ pub struct TestResponse {
     pub note: Option<String>,
 }
 
-/// Queue a legacy restart intent. No consumer exists in this release.
-pub fn restart(data_dir: &Path, target: RepairTarget) -> anyhow::Result<IntentResponse> {
+/// Queue an authorization-bound restart request for a runtime supervisor.
+/// The response proves only that the bounded request was persisted; recovery
+/// is established later by the runtime's verification event.
+pub fn restart(
+    data_dir: &Path,
+    target: RepairTarget,
+    authorization: &str,
+) -> anyhow::Result<IntentResponse> {
     queue_intent(
         data_dir,
         "restart",
         serde_json::json!({
             "component": target.as_str(),
         }),
+        Some(authorization),
     )
 }
 
@@ -114,6 +125,7 @@ pub fn reinstall(data_dir: &Path, target: RepairTarget) -> anyhow::Result<Intent
         serde_json::json!({
             "component": target.as_str(),
         }),
+        None,
     )
 }
 
@@ -156,8 +168,10 @@ pub fn test(data_dir: &Path, target: RepairTarget) -> TestResponse {
         RepairTarget::Memory => memory_status(data_dir),
         RepairTarget::ContextWatcher => (
             "unknown".into(),
-            Some("context_watcher has no file to probe; call restart instead".into()),
+            Some("context watcher requires a live runtime health probe".into()),
         ),
+        RepairTarget::FileWatcher => runtime_component_status(data_dir, "file_watcher"),
+        RepairTarget::ProcessWatcher => runtime_component_status(data_dir, "process_watcher"),
     };
     TestResponse {
         component: target.as_str().to_string(),
@@ -175,6 +189,7 @@ pub fn escalate(data_dir: &Path, message: &str) -> anyhow::Result<IntentResponse
             "message": message,
             "ts": Utc::now().to_rfc3339(),
         }),
+        None,
     )
 }
 
@@ -182,10 +197,70 @@ pub fn escalate(data_dir: &Path, message: &str) -> anyhow::Result<IntentResponse
 
 fn file_status(path: PathBuf) -> (String, Option<String>) {
     if path.exists() {
-        ("healthy".into(), Some(path.display().to_string()))
+        (
+            "healthy".into(),
+            Some("configured model artifact is present".into()),
+        )
     } else {
-        ("error".into(), Some(format!("missing: {}", path.display())))
+        (
+            "error".into(),
+            Some("configured model artifact is missing".into()),
+        )
     }
+}
+
+fn runtime_component_status(data_dir: &Path, component: &str) -> (String, Option<String>) {
+    let path = data_dir.join("state.json");
+    let Ok(bytes) = std::fs::read(path) else {
+        return (
+            "unknown".into(),
+            Some("runtime state is unavailable; no live verification is possible".into()),
+        );
+    };
+    let Ok(snapshot) =
+        serde_json::from_slice::<continuum_core::runtime_publish::RuntimeSnapshot>(&bytes)
+    else {
+        return (
+            "error".into(),
+            Some("runtime state could not be parsed".into()),
+        );
+    };
+    let summary = snapshot
+        .context_engine
+        .as_ref()
+        .and_then(|engine| match component {
+            "file_watcher" => engine.file_watcher.as_ref(),
+            "process_watcher" => engine.process_watcher.as_ref(),
+            _ => None,
+        });
+    let Some(summary) = summary else {
+        return (
+            "unknown".into(),
+            Some("component has not published a live health observation".into()),
+        );
+    };
+    let status = if summary.diagnostic.is_none() {
+        // Rolling desktop/runtime upgrades can read a snapshot written before
+        // the typed state field existed. Preserve the legacy health meaning
+        // instead of treating the serde default (`unavailable`) as a new fault.
+        if summary.should_restart || !summary.healthy {
+            "error"
+        } else {
+            "healthy"
+        }
+    } else if summary.state == continuum_core::operational_state::OperationalState::Degraded {
+        "degrading"
+    } else if summary.state.faulted() {
+        "error"
+    } else {
+        "healthy"
+    };
+    let note = summary
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.explanation.clone())
+        .or_else(|| Some("live runtime health observation available".into()));
+    (status.into(), note)
 }
 
 /// Health check for `RepairTarget::Memory`: the memory vault is the
@@ -200,33 +275,29 @@ fn file_status(path: PathBuf) -> (String, Option<String>) {
 fn memory_status(data_dir: &Path) -> (String, Option<String>) {
     let vault_dir = data_dir.join("vault");
     let index_path = vault_dir.join(".continuum").join("index.db");
-    let (status, note) = if !vault_dir.exists() {
+    let (status, mut note) = if !vault_dir.exists() {
         (
             "error".to_string(),
-            Some(format!("missing: {}", vault_dir.display())),
+            Some("memory vault directory is missing".to_string()),
         )
     } else if !index_path.exists() {
         (
             "degrading".to_string(),
-            Some(format!(
-                "vault dir exists but index is missing: {}",
-                index_path.display()
-            )),
+            Some("memory vault index is missing and can be rebuilt".to_string()),
         )
     } else {
-        ("healthy".to_string(), Some(vault_dir.display().to_string()))
+        (
+            "healthy".to_string(),
+            Some("memory vault and derived index are present".to_string()),
+        )
     };
 
-    let legacy = data_dir.join("semantic.sqlite");
-    let note = if legacy.exists() {
-        Some(format!(
-            "{} (legacy semantic.sqlite also present: {})",
-            note.unwrap_or_default(),
-            legacy.display()
-        ))
-    } else {
-        note
-    };
+    if data_dir.join("semantic.sqlite").exists() {
+        note = Some(format!(
+            "{}; legacy semantic store is also present",
+            note.unwrap_or_default()
+        ));
+    }
 
     (status, note)
 }
@@ -235,6 +306,7 @@ fn queue_intent(
     data_dir: &Path,
     kind: &str,
     body: serde_json::Value,
+    authorization: Option<&str>,
 ) -> anyhow::Result<IntentResponse> {
     let intents_dir = data_dir.join("repair-intents");
     std::fs::create_dir_all(&intents_dir)?;
@@ -253,6 +325,7 @@ fn queue_intent(
     let payload = serde_json::json!({
         "kind": kind,
         "queued_at": Utc::now().to_rfc3339(),
+        "authorization": authorization,
         "body": body,
     });
     std::fs::write(&temp, serde_json::to_string_pretty(&payload)?)?;
@@ -260,7 +333,8 @@ fn queue_intent(
         let _ = std::fs::remove_file(&temp);
     })?;
     Ok(IntentResponse {
-        intent_file: path.display().to_string(),
+        // Public tool responses never reveal the local Continuum data path.
+        intent_file: filename,
         queued_at: Utc::now().to_rfc3339(),
     })
 }
@@ -293,10 +367,14 @@ mod tests {
     #[test]
     fn restart_writes_intent_file() {
         let tmp = TempDir::new().unwrap();
-        let resp = restart(tmp.path(), RepairTarget::Tts).unwrap();
-        let contents = std::fs::read_to_string(&resp.intent_file).unwrap();
+        let token = uuid::Uuid::new_v4().to_string();
+        let resp = restart(tmp.path(), RepairTarget::FileWatcher, &token).unwrap();
+        let contents =
+            std::fs::read_to_string(tmp.path().join("repair-intents").join(&resp.intent_file))
+                .unwrap();
         assert!(contents.contains("\"kind\": \"restart\""));
-        assert!(contents.contains("\"component\": \"tts\""));
+        assert!(contents.contains("\"component\": \"file_watcher\""));
+        assert!(contents.contains(&token));
     }
 
     #[test]
@@ -371,7 +449,9 @@ mod tests {
     fn escalate_writes_message() {
         let tmp = TempDir::new().unwrap();
         let resp = escalate(tmp.path(), "user must reinstall models").unwrap();
-        let contents = std::fs::read_to_string(&resp.intent_file).unwrap();
+        let contents =
+            std::fs::read_to_string(tmp.path().join("repair-intents").join(&resp.intent_file))
+                .unwrap();
         assert!(contents.contains("user must reinstall models"));
         assert!(contents.contains("\"kind\": \"escalate\""));
     }

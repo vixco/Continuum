@@ -51,13 +51,16 @@ use continuum_memory::{NodeStatus, NodeType, NoteDraft, Sensitivity, Source, Vau
 use crate::audit::{Actor, AuditLog};
 use crate::config::ProjectConfigEntry;
 use crate::config_edit;
-use crate::context::intents::{ContextAction, ContextIntent, SessionField, ToggleName};
+use crate::context::intents::{
+    ContextAction, ContextIntent, RuntimeServiceName, SessionField, ToggleName,
+};
 use crate::context::project::{
     unique_slug, OverrideRule, ProjectEntry, ProjectResolver, ProjectStatus, RuleAction,
 };
 use crate::context::session_state::SessionStateHub;
 use crate::memory::episodic::EpisodicStore;
 use crate::memory::raw_log::RawLog;
+use crate::runtime_control::RuntimeServiceControl;
 use crate::senses::privacy::emit_system_event;
 use crate::senses::screenshots::ScreenshotPolicy;
 use crate::senses::toggles::ToggleControl;
@@ -138,6 +141,8 @@ pub struct IntentContext<'a> {
     pub resolver: &'a mut ProjectResolver,
     /// The live observation toggles.
     pub toggles: &'a ToggleControl,
+    /// Live optional-service controls (file/process/triage evaluation).
+    pub services: &'a RuntimeServiceControl,
     /// Where audit lines go.
     pub audit: &'a AuditLog,
     /// `<data_dir>/config.toml`.
@@ -182,7 +187,9 @@ impl IntentOutcome {
 /// spec's four families do (wake / tool / toggle / correction / delete).
 fn audit_kind(action: &ContextAction) -> &'static str {
     match action {
-        ContextAction::SetToggle { .. } => "toggle_change",
+        ContextAction::SetToggle { .. } | ContextAction::SetRuntimeService { .. } => {
+            "toggle_change"
+        }
         ContextAction::Forget { .. } | ContextAction::DeleteRange { .. } => "deletion",
         ContextAction::RecordUserCommand { .. } => "user_command",
         _ => "correction",
@@ -236,6 +243,9 @@ pub async fn apply_intent(ctx: &mut IntentContext<'_>, intent: &ContextIntent) -
         } => forget(&ctx.stores(), raw_reference.as_deref(), *event_id).await,
         ContextAction::DeleteRange { from, to } => delete_range(&ctx.stores(), *from, *to).await,
         ContextAction::SetToggle { name, value } => set_toggle(ctx, *name, *value).await,
+        ContextAction::SetRuntimeService { service, enabled } => {
+            set_runtime_service(ctx, *service, *enabled).await
+        }
         ContextAction::RecordUserCommand { text } => record_user_command(ctx, text),
     };
 
@@ -961,6 +971,53 @@ async fn set_toggle(
     ))
 }
 
+async fn set_runtime_service(
+    ctx: &mut IntentContext<'_>,
+    service: RuntimeServiceName,
+    enabled: bool,
+) -> Result<IntentOutcome> {
+    if ctx.services.enabled(service) == enabled {
+        return Ok(IntentOutcome::new(
+            false,
+            format!(
+                "{} was already {}",
+                service.as_str(),
+                if enabled { "on" } else { "off" }
+            ),
+            json!({ "service": service.as_str(), "enabled": enabled }),
+        ));
+    }
+
+    // Persist before publishing the live transition. A failed atomic write
+    // leaves the running service unchanged, avoiding a split-brain state in
+    // which the UI says a choice is durable but the next boot disagrees.
+    config_edit::set_runtime_service(&ctx.config_path, service, enabled)?;
+    let changed = ctx.services.set(service, enabled);
+    debug_assert!(
+        changed,
+        "the service state was checked immediately before set"
+    );
+
+    emit_system_event(
+        "watcher_state_transition",
+        &format!(
+            "{} {} by user request",
+            service.as_str(),
+            if enabled { "enabled" } else { "disabled" }
+        ),
+    );
+
+    Ok(IntentOutcome::new(
+        true,
+        format!(
+            "{} {}",
+            service.as_str(),
+            if enabled { "enabled" } else { "disabled" }
+        ),
+        json!({ "service": service.as_str(), "enabled": enabled }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,6 +1037,7 @@ mod tests {
         session: SessionStateHub,
         resolver: ProjectResolver,
         toggles: ToggleControl,
+        services: RuntimeServiceControl,
         audit: AuditLog,
         screenshot_policy: ScreenshotPolicy,
     }
@@ -1005,6 +1063,7 @@ mod tests {
                 session: SessionStateHub::new(),
                 resolver: ProjectResolver::new(Vec::new(), Vec::new(), &ProjectsConfig::default()),
                 toggles: ToggleControl::default(),
+                services: RuntimeServiceControl::default(),
                 audit: AuditLog::new(dir.path()),
                 screenshot_policy: ScreenshotPolicy::default(),
                 _dir: dir,
@@ -1019,6 +1078,7 @@ mod tests {
                 session: &self.session,
                 resolver: &mut self.resolver,
                 toggles: &self.toggles,
+                services: &self.services,
                 audit: &self.audit,
                 config_path: self.data_dir.join("config.toml"),
                 screenshot_policy: self.screenshot_policy,
@@ -1845,6 +1905,38 @@ mod tests {
         let cfg = crate::config::load_config(&h.data_dir.join("config.toml")).unwrap();
         assert!(!cfg.privacy.toggles.mic);
         assert!(cfg.privacy.toggles.screen, "others keep their defaults");
+    }
+
+    #[tokio::test]
+    async fn set_runtime_service_updates_live_state_and_config_without_weakening_privacy() {
+        let mut h = Harness::new().await;
+        assert!(!h.services.enabled(RuntimeServiceName::FileActivity));
+
+        let out = h
+            .apply(ContextAction::SetRuntimeService {
+                service: RuntimeServiceName::FileActivity,
+                enabled: true,
+            })
+            .await;
+        assert!(out.applied, "{out:?}");
+        assert!(h.services.enabled(RuntimeServiceName::FileActivity));
+
+        let cfg = crate::config::load_config(&h.data_dir.join("config.toml")).unwrap();
+        assert!(cfg.file_watcher.enabled);
+        assert!(cfg.privacy.toggles.files);
+    }
+
+    #[tokio::test]
+    async fn setting_a_runtime_service_to_its_current_value_is_a_no_op() {
+        let mut h = Harness::new().await;
+        let out = h
+            .apply(ContextAction::SetRuntimeService {
+                service: RuntimeServiceName::TriageEvaluation,
+                enabled: true,
+            })
+            .await;
+        assert!(!out.applied);
+        assert!(!h.data_dir.join("config.toml").exists());
     }
 
     #[tokio::test]

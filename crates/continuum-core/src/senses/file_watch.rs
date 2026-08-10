@@ -70,9 +70,14 @@ use tracing::{debug, info, warn};
 
 use crate::config::{ContextConfig, FileWatcherConfig, ObservationToggles, PrivacyConfig};
 use crate::context::project::{ProjectEntry, ProjectStatus};
+use crate::health::verified::{RetryBackoff, RetryPolicy};
 use crate::memory::events::{
     ContextEvent, EventSender, EventSensitivity, EventSource, EventType, COLLECTOR_EVENT_IMPORTANCE,
 };
+use crate::operational_state::{
+    ComponentDiagnostic, OperationalState, RepairPolicyClass, RootCauseCategory,
+};
+use crate::runtime_control::{RuntimeServiceControl, RuntimeServiceName};
 use crate::senses::privacy::{
     emit_system_event, source_enabled, ObservedSource, PrivacyFilter, Zone,
 };
@@ -579,25 +584,109 @@ impl RootTracker {
 /// Health snapshot of the file watcher, readable by the repair agent and
 /// the Context page (spec §7: disabled-with-reason and per-root
 /// unavailability are healthy, deliberate states — never restart-thrash).
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileWatchHealth {
-    /// Whether the watcher is armed. `false` + a reason is the
-    /// *disabled-with-reason* state (config off — the default —, toggle
-    /// off, notify init failure).
+    /// Legacy compatibility bit. Prefer [`FileWatchHealth::state`].
     pub enabled: bool,
-    /// Why the watcher is disabled, when it is.
+    /// Legacy public-safe reason. Never contains a root path or raw OS error.
     pub disabled_reason: Option<String>,
+    /// Typed lifecycle state used by the desktop and repair verifier.
+    pub state: OperationalState,
+    /// Stable public reason code for the current state.
+    pub reason_code: String,
+    /// User-facing public-safe explanation.
+    pub explanation: String,
     /// Roots currently armed and delivering.
     pub roots_active: usize,
-    /// `"<project>: <reason>"` for every unavailable root.
+    /// `"<project>: <reason>"` for every unavailable root. Project ids are
+    /// already public runtime identifiers; root paths are never included.
     pub roots_unavailable: Vec<String>,
     /// Total file events emitted onto the channel.
     pub events_emitted: u64,
     /// When the last debounce flush ran.
     pub last_flush_at: Option<DateTime<Utc>>,
-    /// The notify event channel died unexpectedly — the ONLY state in
-    /// which [`FileWatcher::should_restart`] is `true`.
+    /// The notify event channel died unexpectedly. A supervisor may restart
+    /// the single backend instance with bounded backoff.
     pub channel_dead: bool,
+    /// Successful backend activations over this process lifetime.
+    pub activation_count: u64,
+    /// Number of currently live notify backends. Must never exceed one.
+    pub current_instances: usize,
+    /// High-water mark used by duplicate-prevention tests/diagnostics.
+    pub max_concurrent_instances: usize,
+    /// Consecutive backend initialization/channel failures.
+    pub consecutive_failures: u32,
+    /// Public retry schedule, if an automatic safe restart is pending.
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+impl Default for FileWatchHealth {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            disabled_reason: Some("disabled by [file_watcher].enabled".to_string()),
+            state: OperationalState::DisabledByUser,
+            reason_code: "disabled_by_user".to_string(),
+            explanation: "File activity observation is turned off.".to_string(),
+            roots_active: 0,
+            roots_unavailable: Vec::new(),
+            events_emitted: 0,
+            last_flush_at: None,
+            channel_dead: false,
+            activation_count: 0,
+            current_instances: 0,
+            max_concurrent_instances: 0,
+            consecutive_failures: 0,
+            next_retry_at: None,
+        }
+    }
+}
+
+impl FileWatchHealth {
+    /// Stable public-safe diagnosis for state publication and verified repair.
+    pub fn diagnostic(&self) -> ComponentDiagnostic {
+        let root_cause = match self.state {
+            OperationalState::DisabledByUser => RootCauseCategory::UserChoice,
+            OperationalState::DisabledByPolicy => RootCauseCategory::Policy,
+            OperationalState::PermissionRequired => RootCauseCategory::Permission,
+            OperationalState::Failed => RootCauseCategory::Internal,
+            OperationalState::Unavailable => RootCauseCategory::Configuration,
+            OperationalState::Degraded => RootCauseCategory::Resource,
+            _ => RootCauseCategory::Unknown,
+        };
+        let repairable = self.channel_dead
+            || matches!(
+                self.reason_code.as_str(),
+                "notify_backend_init_failed" | "retry_budget_exhausted"
+            );
+        let mut diagnostic = ComponentDiagnostic::new(
+            "file_watcher",
+            "project_scoped_file_activity",
+            self.state,
+            self.reason_code.clone(),
+            self.explanation.clone(),
+            root_cause,
+            repairable || self.state == OperationalState::Degraded,
+        )
+        .with_evidence("runtime_state", "context_engine.file_watcher")
+        .with_evidence("metric", "file_watcher.roots_active");
+        if repairable {
+            diagnostic = diagnostic
+                .with_action(
+                    "Restart the file watcher, then verify that it reaches running or idle.",
+                )
+                .with_repair(
+                    RepairPolicyClass::AutomaticallySafe,
+                    true,
+                    Some("restart_file_watcher"),
+                );
+        } else if self.state == OperationalState::PermissionRequired {
+            diagnostic = diagnostic
+                .with_action("Grant filesystem access to the selected project root, then retry.")
+                .with_repair(RepairPolicyClass::ManualOnly, false, None);
+        }
+        diagnostic
+    }
 }
 
 /// Shared handle onto the watcher's health snapshot.
@@ -627,46 +716,56 @@ enum RawAction {
     RenameTo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileRunExit {
+    Shutdown,
+    Disabled,
+    PolicyBlocked,
+    RestartRequested,
+    BackendFailed,
+}
+
+/// Drop guard proving the supervisor never owns two notify backends at once.
+struct FileInstanceGuard {
+    health: SharedFileWatchHealth,
+}
+
+impl FileInstanceGuard {
+    fn new(health: SharedFileWatchHealth) -> Self {
+        {
+            let mut snapshot = health.write();
+            snapshot.current_instances = snapshot.current_instances.saturating_add(1);
+            snapshot.max_concurrent_instances = snapshot
+                .max_concurrent_instances
+                .max(snapshot.current_instances);
+            snapshot.activation_count = snapshot.activation_count.saturating_add(1);
+        }
+        Self { health }
+    }
+}
+
+impl Drop for FileInstanceGuard {
+    fn drop(&mut self) {
+        let mut snapshot = self.health.write();
+        snapshot.current_instances = snapshot.current_instances.saturating_sub(1);
+    }
+}
+
 /// The runtime-gated file watcher task (spec §4.5). Opt-in, default OFF.
-///
-/// # Layer
-///
-/// Layer 1 — Senses. Structured filesystem observation, no AI involvement.
-///
-/// # Self-healing
-///
-/// [`FileWatcher::health`] exposes the [`FileWatchHealth`] snapshot;
-/// [`FileWatcher::is_healthy`] is `true` even when disabled-with-reason or
-/// when individual roots are unavailable (spec §7), and
-/// [`FileWatcher::should_restart`] is `true` ONLY when the notify event
-/// channel itself died.
 pub struct FileWatcher {
     config: FileWatcherConfig,
-    /// The privacy choke point (spec §4.1) — scrubs displayed paths.
     privacy: Arc<PrivacyFilter>,
-    /// Honest per-source toggles; `[privacy.toggles].files` gates every
-    /// notify watch.
     toggles: ObservationToggles,
-    /// Live toggle control (Task C5): re-read on every flush tick so a
-    /// Context-page switch drops the notify watches without a restart.
     toggle_control: Option<ToggleControl>,
-    /// Async project-set provider (Projects table read injected from the
-    /// runtime binary). `None` (tests, tools) parks disabled.
+    /// Live service request, separate from the stricter privacy toggle.
+    service_control: Option<RuntimeServiceControl>,
     projects: Option<ProjectsProvider>,
-    /// Events-channel producer handle (Task A6): file events go here,
-    /// non-blocking, pre-stamped with their root's project id.
     events: EventSender,
-    /// Most recent non-ignored file-event path (Task A4 tier-3 seam).
     recent_file: RecentFileHandle,
     health: SharedFileWatchHealth,
 }
 
 impl FileWatcher {
-    /// Creates a file watcher with the given `[file_watcher]` config.
-    ///
-    /// Standalone construction (tests, tools) synthesizes a default
-    /// privacy filter; the runtime shares its boot-time filter via
-    /// [`FileWatcher::with_privacy`].
     pub fn new(config: FileWatcherConfig) -> Self {
         debug!(
             layer = "senses",
@@ -676,6 +775,14 @@ impl FileWatcher {
             storm_threshold = config.storm_threshold,
             "FileWatcher created"
         );
+        let mut health = FileWatchHealth::default();
+        if config.enabled {
+            health.enabled = true;
+            health.disabled_reason = None;
+            health.state = OperationalState::Starting;
+            health.reason_code = "starting".to_string();
+            health.explanation = "File activity observation is starting.".to_string();
+        }
         Self {
             config,
             privacy: Arc::new(PrivacyFilter::from_config(
@@ -684,34 +791,33 @@ impl FileWatcher {
             )),
             toggles: ObservationToggles::default(),
             toggle_control: None,
+            service_control: None,
             projects: None,
             events: EventSender::log_only(),
             recent_file: RecentFileHandle::default(),
-            health: SharedFileWatchHealth::default(),
+            health: Arc::new(RwLock::new(health)),
         }
     }
 
-    /// Attaches the shared boot-time privacy filter and observation
-    /// toggles (spec §4.1). Called once at senses spawn.
     pub fn with_privacy(mut self, filter: Arc<PrivacyFilter>, toggles: ObservationToggles) -> Self {
         self.privacy = filter;
         self.toggles = toggles;
         self
     }
 
-    /// Attaches the shared **live** toggle control (Task C5, spec §4.13).
-    ///
-    /// Without it the watcher honours the boot-time [`ObservationToggles`]
-    /// copy it was given; with it, every loop iteration re-reads the
-    /// current value, so a Context-page switch takes effect without a
-    /// restart.
     pub fn with_toggle_control(mut self, control: ToggleControl) -> Self {
         self.toggle_control = Some(control);
         self
     }
 
-    /// The toggle values to honour right now: the live control when one is
-    /// attached, else the boot-time copy.
+    /// Attaches the process-local live service control. The watcher task stays
+    /// unique and creates/drops its notify backend internally, so repeated
+    /// enable/restart requests cannot create duplicate watcher instances.
+    pub fn with_service_control(mut self, control: RuntimeServiceControl) -> Self {
+        self.service_control = Some(control);
+        self
+    }
+
     fn live_toggles(&self) -> ObservationToggles {
         match &self.toggle_control {
             Some(control) => control.snapshot(),
@@ -719,60 +825,98 @@ impl FileWatcher {
         }
     }
 
-    /// Attaches the project-set provider (the Projects table read from
-    /// the runtime binary) — the only source of "which roots to watch".
+    fn requested(&self) -> bool {
+        self.service_control
+            .as_ref()
+            .map(|control| control.enabled(RuntimeServiceName::FileActivity))
+            .unwrap_or(self.config.enabled)
+    }
+
+    fn restart_generation(&self) -> u64 {
+        self.service_control
+            .as_ref()
+            .map(|control| control.restart_generation(RuntimeServiceName::FileActivity))
+            .unwrap_or(0)
+    }
+
     pub fn with_projects_provider(mut self, provider: ProjectsProvider) -> Self {
         self.projects = Some(provider);
         self
     }
 
-    /// Attaches the events-channel producer handle (Task A6, spec §3).
     pub fn with_event_sender(mut self, sender: EventSender) -> Self {
         self.events = sender;
         self
     }
 
-    /// Shares an externally owned recent-file slot (the runtime binary
-    /// reads it into `FrameInput.recent_file_path` each frame).
     pub fn with_recent_file(mut self, handle: RecentFileHandle) -> Self {
         self.recent_file = handle;
         self
     }
 
-    /// The recent-file slot this watcher updates (Task A4 tier-3 seam).
     pub fn recent_file_handle(&self) -> RecentFileHandle {
         self.recent_file.clone()
     }
 
-    /// Current health snapshot (cheap clone).
     pub fn health(&self) -> FileWatchHealth {
         self.health.read().clone()
     }
 
-    /// Shared handle onto the health snapshot, for callers that outlive
-    /// the moved watcher (health loop, tests).
     pub fn health_handle(&self) -> SharedFileWatchHealth {
         self.health.clone()
     }
 
-    /// Always `true`: disabled-with-reason and per-root unavailability are
-    /// healthy, deliberate states (spec §7). Details in
-    /// [`FileWatcher::health`].
+    /// Legacy health semantics: deliberate disabled and root-level degraded
+    /// states are not process failures. Typed consumers use `state`.
     pub fn is_healthy(&self) -> bool {
-        true
+        !self.health.read().channel_dead
     }
 
-    /// `true` ONLY when the notify event channel itself died (all
-    /// watchers gone unexpectedly) — per-root failures rearm on backoff
-    /// and never restart the watcher (spec §4.5).
     pub fn should_restart(&self) -> bool {
         self.health.read().channel_dead
     }
 
-    fn disable(&self, reason: &str) {
+    fn set_state(
+        &self,
+        state: OperationalState,
+        reason_code: &str,
+        explanation: &str,
+        legacy_reason: Option<&str>,
+    ) {
         let mut health = self.health.write();
-        health.enabled = false;
-        health.disabled_reason = Some(reason.to_string());
+        health.enabled = state.enabled();
+        health.state = state;
+        health.reason_code = reason_code.to_string();
+        health.explanation = explanation.to_string();
+        health.disabled_reason = legacy_reason.map(ToOwned::to_owned);
+        if !state.enabled() {
+            health.roots_active = 0;
+            health.roots_unavailable.clear();
+        }
+    }
+
+    fn disable(&self, reason: &str) {
+        let (code, explanation) = if reason.contains("privacy") {
+            (
+                "disabled_by_policy",
+                "File activity observation is blocked by the privacy toggle.",
+            )
+        } else {
+            (
+                "disabled_by_user",
+                "File activity observation is turned off.",
+            )
+        };
+        self.set_state(
+            if code == "disabled_by_policy" {
+                OperationalState::DisabledByPolicy
+            } else {
+                OperationalState::DisabledByUser
+            },
+            code,
+            explanation,
+            Some(reason),
+        );
     }
 
     fn send_event(&self, event: ContextEvent) {
@@ -781,62 +925,184 @@ impl FileWatcher {
     }
 
     fn publish_root_health(&self, roots: &[RootWatch]) {
-        let mut health = self.health.write();
-        health.roots_active = roots.iter().filter(|r| r.tracker.is_active()).count();
-        health.roots_unavailable = roots
+        let active = roots.iter().filter(|root| root.tracker.is_active()).count();
+        let unavailable: Vec<String> = roots
             .iter()
-            .filter_map(|r| {
-                r.tracker
+            .filter_map(|root| {
+                root.tracker
                     .reason()
-                    .map(|reason| format!("{}: {reason}", r.info.project_id))
+                    .map(|reason| format!("{}: {reason}", root.info.project_id))
             })
             .collect();
+        let permission_required = unavailable
+            .iter()
+            .any(|reason| reason.ends_with(": permission denied"));
+        let mut health = self.health.write();
+        health.enabled = true;
+        health.disabled_reason = None;
+        health.roots_active = active;
+        health.roots_unavailable = unavailable;
+        match (active, health.roots_unavailable.len(), permission_required) {
+            (0, 0, _) => {
+                health.state = OperationalState::Idle;
+                health.reason_code = "no_confirmed_roots".to_string();
+                health.explanation =
+                    "File activity is enabled but no confirmed project roots are available."
+                        .to_string();
+            }
+            (0, _, true) => {
+                health.state = OperationalState::PermissionRequired;
+                health.reason_code = "filesystem_permission_required".to_string();
+                health.explanation =
+                    "File activity needs permission for one or more selected project roots."
+                        .to_string();
+            }
+            (_, 0, _) => {
+                health.state = OperationalState::Running;
+                health.reason_code = "watching_roots".to_string();
+                health.explanation =
+                    format!("File activity is watching {active} confirmed project root(s).");
+            }
+            (_, unavailable, _) => {
+                health.state = OperationalState::Degraded;
+                health.reason_code = "root_unavailable".to_string();
+                health.explanation = format!(
+                    "File activity is watching {active} root(s); {unavailable} root(s) are temporarily unavailable."
+                );
+            }
+        }
     }
 
-    /// Runs the watcher until the shutdown signal fires. Disabled states
-    /// (config off — the default —, toggle off, notify init failure) park
-    /// here — still responding to shutdown — so the health snapshot stays
-    /// observable.
+    /// Single supervisor task. It starts/stops one notify backend in place,
+    /// applies bounded automatic restart, and then waits for an explicit
+    /// service/config change once the retry budget is exhausted.
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        /// Parks a disabled watcher until shutdown, keeping the health
-        /// snapshot observable.
-        async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
-            while !*shutdown.borrow() {
-                if shutdown.changed().await.is_err() {
-                    break;
+        let mut backoff = RetryBackoff::new(RetryPolicy {
+            max_attempts: 4,
+            base_delay_ms: 250,
+            max_delay_ms: 4_000,
+        });
+        let mut exhausted_generation: Option<u64> = None;
+
+        loop {
+            if *shutdown.borrow() {
+                self.set_state(
+                    OperationalState::Stopping,
+                    "shutdown",
+                    "File activity observation is stopping.",
+                    None,
+                );
+                return;
+            }
+
+            let generation = self.restart_generation();
+            if !self.requested() {
+                backoff.reset();
+                exhausted_generation = None;
+                let reason = if self.service_control.is_some() {
+                    "disabled by user"
+                } else {
+                    "disabled by [file_watcher].enabled"
+                };
+                self.disable(reason);
+                if wait_control_tick(&mut shutdown).await {
+                    return;
+                }
+                continue;
+            }
+            if !source_enabled(&self.live_toggles(), ObservedSource::Files) {
+                backoff.reset();
+                exhausted_generation = None;
+                self.disable("disabled by [privacy.toggles]");
+                if wait_control_tick(&mut shutdown).await {
+                    return;
+                }
+                continue;
+            }
+            let Some(provider) = self.projects.clone() else {
+                self.set_state(
+                    OperationalState::Unavailable,
+                    "projects_provider_unavailable",
+                    "File activity cannot start because the project source is unavailable.",
+                    Some("no projects provider attached"),
+                );
+                if wait_control_tick(&mut shutdown).await {
+                    return;
+                }
+                continue;
+            };
+            if exhausted_generation == Some(generation) {
+                self.set_state(
+                    OperationalState::Failed,
+                    "retry_budget_exhausted",
+                    "File activity could not restart after bounded retries. Toggle it off and on or request a verified restart.",
+                    Some("automatic restart budget exhausted"),
+                );
+                if wait_control_tick(&mut shutdown).await {
+                    return;
+                }
+                if self.restart_generation() != generation || !self.requested() {
+                    exhausted_generation = None;
+                    backoff.reset();
+                }
+                continue;
+            }
+
+            self.set_state(
+                OperationalState::Starting,
+                "starting",
+                "File activity observation is starting.",
+                None,
+            );
+            let exit = self
+                .run_active_once(provider, generation, &mut shutdown)
+                .await;
+            match exit {
+                FileRunExit::Shutdown => return,
+                FileRunExit::Disabled | FileRunExit::PolicyBlocked => {
+                    backoff.reset();
+                    exhausted_generation = None;
+                }
+                FileRunExit::RestartRequested => {
+                    backoff.reset();
+                    exhausted_generation = None;
+                    emit_system_event(
+                        "repair_started",
+                        "file watcher restart request accepted; reinitializing one backend",
+                    );
+                }
+                FileRunExit::BackendFailed => {
+                    {
+                        let mut health = self.health.write();
+                        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+                    }
+                    let Some(delay) = backoff.next_delay() else {
+                        exhausted_generation = Some(generation);
+                        continue;
+                    };
+                    self.health.write().next_retry_at = chrono::Duration::from_std(delay)
+                        .ok()
+                        .map(|delta| Utc::now() + delta);
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                return;
+                            }
+                        }
+                    }
+                    self.health.write().next_retry_at = None;
                 }
             }
         }
+    }
 
-        if !self.config.enabled {
-            info!(
-                layer = "senses",
-                component = "file_watch",
-                "file watcher disabled by [file_watcher].enabled (opt-in, default OFF)"
-            );
-            self.disable("disabled by [file_watcher].enabled");
-            wait_for_shutdown(&mut shutdown).await;
-            return;
-        }
-        // Honest toggle (spec §4.1, the A2 seam): no notify watch is ever
-        // armed when the files source is off.
-        if !source_enabled(&self.live_toggles(), ObservedSource::Files) {
-            emit_system_event(
-                "toggle_change",
-                "files observation disabled by [privacy.toggles]; file watcher will not run",
-            );
-            self.disable("disabled by [privacy.toggles]");
-            wait_for_shutdown(&mut shutdown).await;
-            return;
-        }
-        let Some(provider) = self.projects.clone() else {
-            self.disable("no projects provider attached");
-            wait_for_shutdown(&mut shutdown).await;
-            return;
-        };
-
-        // Raw notify → task bridge. The callback runs on notify's thread:
-        // never block it — overflow flips the resync flag instead.
+    async fn run_active_once(
+        &self,
+        provider: ProjectsProvider,
+        generation: u64,
+        shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> FileRunExit {
         let (raw_tx, mut raw_rx) =
             tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(RAW_CHANNEL_CAP);
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -852,36 +1118,43 @@ impl FileWatcher {
                     layer = "senses",
                     component = "file_watch",
                     error = %error,
-                    "notify backend failed to initialize; file watcher disabled"
+                    "notify backend failed to initialize"
+                );
+                self.set_state(
+                    OperationalState::Failed,
+                    "notify_backend_init_failed",
+                    "The operating-system file watcher backend could not start.",
+                    Some("notify backend failed to initialize"),
                 );
                 emit_system_event(
                     "source_unavailable",
-                    "file watcher backend failed to initialize; file watching disabled",
+                    "file watcher backend failed to initialize",
                 );
-                self.disable("notify backend failed to initialize");
-                wait_for_shutdown(&mut shutdown).await;
-                return;
+                return FileRunExit::BackendFailed;
             }
         };
+        let _instance = FileInstanceGuard::new(self.health.clone());
         {
             let mut health = self.health.write();
-            health.enabled = true;
-            health.disabled_reason = None;
+            health.channel_dead = false;
+            health.consecutive_failures = 0;
+            health.next_retry_at = None;
         }
 
         let window = Duration::from_millis(self.config.debounce_ms.max(1));
         let ignore = IgnoreMatcher::new(&self.config.ignore_globs);
         let mut roots: Vec<RootWatch> = Vec::new();
-
         if let Some(projects) = provider().await {
             self.sync_roots(&mut watcher, &mut roots, watched_roots(&projects), window);
+        } else {
+            self.publish_root_health(&roots);
         }
         info!(
             layer = "senses",
             component = "file_watch",
             roots = roots.len(),
             debounce_ms = self.config.debounce_ms,
-            "file watcher armed"
+            "file watcher backend active"
         );
 
         let mut flush_tick = tokio::time::interval(Duration::from_millis(
@@ -891,8 +1164,6 @@ impl FileWatcher {
         let mut rearm_tick =
             tokio::time::interval(Duration::from_secs(self.config.rearm_secs.max(1)));
         rearm_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // The first interval tick fires immediately; consume it so the
-        // rearm path does not double-run the sync done above.
         rearm_tick.tick().await;
 
         loop {
@@ -901,82 +1172,76 @@ impl FileWatcher {
                     Some(Ok(event)) => self.handle_notify_event(&ignore, &mut roots, event),
                     Some(Err(error)) => self.handle_notify_error(&mut watcher, &mut roots, &error),
                     None => {
-                        // All senders gone while we still hold the watcher:
-                        // the notify channel itself is dead. The ONLY
-                        // should_restart() state (spec §4.5).
                         warn!(
                             layer = "senses",
                             component = "file_watch",
-                            "notify event channel died unexpectedly; file watcher requires restart"
-                        );
-                        emit_system_event(
-                            "source_unavailable",
-                            "file watcher event channel died; file watching stopped until restart",
+                            "notify event channel died unexpectedly"
                         );
                         {
                             let mut health = self.health.write();
                             health.channel_dead = true;
                             health.enabled = false;
+                            health.state = OperationalState::Failed;
+                            health.reason_code = "notify_channel_dead".to_string();
+                            health.explanation = "File activity stopped because the operating-system watcher disconnected.".to_string();
                             health.disabled_reason = Some("notify event channel died".to_string());
                         }
-                        wait_for_shutdown(&mut shutdown).await;
-                        return;
+                        emit_system_event(
+                            "source_unavailable",
+                            "file watcher event channel disconnected; bounded restart scheduled",
+                        );
+                        return FileRunExit::BackendFailed;
                     }
                 },
                 _ = flush_tick.tick() => {
-                    // Honest toggle, live (spec §4.1, Task C5): switching
-                    // the files source off drops every notify watch, so no
-                    // filesystem event is even observed; switching it back
-                    // on re-arms from the provider on the next tick.
-                    let files_enabled = source_enabled(&self.live_toggles(), ObservedSource::Files);
-                    if !files_enabled {
-                        if !roots.is_empty() {
-                            self.sync_roots(&mut watcher, &mut roots, Vec::new(), window);
-                            self.disable("disabled by [privacy.toggles]");
-                        }
-                        continue;
+                    if !self.requested() {
+                        self.sync_roots(&mut watcher, &mut roots, Vec::new(), window);
+                        self.disable("disabled by user");
+                        return FileRunExit::Disabled;
                     }
-                    if roots.is_empty() && self.health.read().disabled_reason.is_some() {
-                        {
-                            let mut health = self.health.write();
-                            health.enabled = true;
-                            health.disabled_reason = None;
-                        }
-                        if let Some(projects) = provider().await {
-                            self.sync_roots(
-                                &mut watcher,
-                                &mut roots,
-                                watched_roots(&projects),
-                                window,
-                            );
-                        }
+                    if !source_enabled(&self.live_toggles(), ObservedSource::Files) {
+                        self.sync_roots(&mut watcher, &mut roots, Vec::new(), window);
+                        self.disable("disabled by [privacy.toggles]");
+                        return FileRunExit::PolicyBlocked;
+                    }
+                    if self.restart_generation() != generation {
+                        self.set_state(
+                            OperationalState::Stopping,
+                            "restart_requested",
+                            "File activity is stopping before a safe in-process restart.",
+                            None,
+                        );
+                        return FileRunExit::RestartRequested;
                     }
                     if overflowed.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         warn!(
                             layer = "senses",
                             component = "file_watch",
-                            "raw event bridge overflowed; scheduling resync for every root"
+                            "raw event bridge overflowed; scheduling bounded resync"
                         );
                         for root in roots.iter_mut() {
                             root.resync_pending = true;
                         }
                     }
                     self.flush_roots(&mut roots);
+                    self.publish_root_health(&roots);
                 }
                 _ = rearm_tick.tick() => {
                     if let Some(projects) = provider().await {
                         self.sync_roots(&mut watcher, &mut roots, watched_roots(&projects), window);
                     }
                     self.rearm(&mut watcher, &mut roots);
+                    self.publish_root_health(&roots);
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        debug!(
-                            layer = "senses",
-                            component = "file_watch",
-                            "Shutdown signal received, stopping file watcher"
+                        self.set_state(
+                            OperationalState::Stopping,
+                            "shutdown",
+                            "File activity observation is stopping.",
+                            None,
                         );
-                        return;
+                        return FileRunExit::Shutdown;
                     }
                 }
             }
@@ -1359,6 +1624,13 @@ impl FileWatcher {
     }
 }
 
+async fn wait_control_tick(shutdown: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(100)) => false,
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+    }
+}
+
 /// [`best_root_index`] over the runtime watch list.
 fn best_root_index_watches(roots: &[RootWatch], path: &Path) -> Option<usize> {
     let p = normalize_path(path);
@@ -1394,7 +1666,12 @@ fn arm_root(watcher: &mut notify::RecommendedWatcher, root: &Path) -> Result<(),
                 error = %error,
                 "notify watch call failed"
             );
-            "watch error".to_string()
+            let public = error.to_string().to_ascii_lowercase();
+            if public.contains("permission denied") || public.contains("access is denied") {
+                "permission denied".to_string()
+            } else {
+                "watch error".to_string()
+            }
         })
 }
 
@@ -1958,6 +2235,100 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn permission_denial_is_distinct_from_disabled_or_idle() {
+        let watcher = FileWatcher::new(FileWatcherConfig {
+            enabled: true,
+            ..FileWatcherConfig::default()
+        });
+        let roots = vec![RootWatch {
+            info: root("synthetic", "D:/synthetic", EventSensitivity::LocalOnly),
+            tracker: RootTracker::unavailable("permission denied"),
+            buffer: DebounceBuffer::new(window()),
+            resync_pending: false,
+        }];
+        watcher.publish_root_health(&roots);
+        let health = watcher.health();
+        assert_eq!(health.state, OperationalState::PermissionRequired);
+        assert_eq!(health.reason_code, "filesystem_permission_required");
+        assert!(!health.diagnostic().repair.available);
+    }
+
+    #[tokio::test]
+    async fn live_control_starts_stops_and_restarts_without_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let project = entry(
+            "proj",
+            &[&root_dir.to_string_lossy()],
+            ProjectStatus::Confirmed,
+            None,
+        );
+        let control = RuntimeServiceControl::default();
+        let watcher = FileWatcher::new(FileWatcherConfig {
+            enabled: false,
+            debounce_ms: 50,
+            rearm_secs: 1,
+            ..FileWatcherConfig::default()
+        })
+        .with_privacy(Arc::new(filter()), ObservationToggles::default())
+        .with_service_control(control.clone())
+        .with_projects_provider(provider_for(vec![project]));
+        let health = watcher.health_handle();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { watcher.run(shutdown_rx).await });
+
+        assert!(
+            wait_until(
+                || health.read().state == OperationalState::DisabledByUser,
+                Duration::from_secs(2),
+            )
+            .await
+        );
+        assert_eq!(health.read().current_instances, 0);
+
+        assert!(control.set(RuntimeServiceName::FileActivity, true));
+        assert!(
+            wait_until(
+                || {
+                    let snapshot = health.read();
+                    snapshot.activation_count == 1
+                        && snapshot.roots_active == 1
+                        && snapshot.current_instances == 1
+                },
+                Duration::from_secs(5),
+            )
+            .await
+        );
+
+        control.request_restart(RuntimeServiceName::FileActivity);
+        assert!(
+            wait_until(
+                || health.read().activation_count >= 2,
+                Duration::from_secs(5),
+            )
+            .await
+        );
+        assert_eq!(health.read().max_concurrent_instances, 1);
+
+        assert!(control.set(RuntimeServiceName::FileActivity, false));
+        assert!(
+            wait_until(
+                || {
+                    let snapshot = health.read();
+                    snapshot.state == OperationalState::DisabledByUser
+                        && snapshot.current_instances == 0
+                },
+                Duration::from_secs(3),
+            )
+            .await
+        );
+
+        shutdown_tx.send(true).expect("shutdown");
+        task.await.expect("no panic");
     }
 
     #[tokio::test]

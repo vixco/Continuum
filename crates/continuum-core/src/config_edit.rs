@@ -37,6 +37,7 @@ use anyhow::{Context, Result};
 
 use crate::config::ProjectConfigEntry;
 use crate::context::intents::ToggleName;
+use crate::runtime_control::RuntimeServiceName;
 
 /// Reads `path` into a TOML document, or an empty document when the file
 /// does not exist yet (first run seeds defaults on demand).
@@ -119,6 +120,21 @@ pub fn set_toggle(path: &Path, name: ToggleName, value: bool) -> Result<()> {
     let privacy = table_mut(&mut doc, "privacy");
     let toggles = table_mut(privacy, "toggles");
     toggles.insert(name.as_str().to_string(), toml::Value::Boolean(value));
+    write_document(path, &doc)
+}
+
+/// Writes the persisted config key for one optional runtime service.
+///
+/// Privacy toggles and service enablement are deliberately separate: turning a
+/// service on never overrides `pause_all` or a source privacy toggle.
+pub fn set_runtime_service(path: &Path, service: RuntimeServiceName, enabled: bool) -> Result<()> {
+    let mut doc = read_document(path)?;
+    let (section, key) = match service {
+        RuntimeServiceName::FileActivity => ("file_watcher", "enabled"),
+        RuntimeServiceName::BackgroundActivity => ("process_watcher", "enabled"),
+        RuntimeServiceName::TriageEvaluation => ("triage", "evaluation_enabled"),
+    };
+    table_mut(&mut doc, section).insert(key.to_string(), toml::Value::Boolean(enabled));
     write_document(path, &doc)
 }
 
@@ -250,6 +266,25 @@ mod tests {
         assert!(upsert_known_project(&path, &entry("one")).is_err());
         // The bad file is left exactly as it was — no half-write.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
+    }
+
+    #[test]
+    fn set_runtime_service_persists_each_service_without_touching_privacy() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        set_toggle(&path, ToggleName::Files, false).unwrap();
+        set_runtime_service(&path, RuntimeServiceName::FileActivity, true).unwrap();
+        set_runtime_service(&path, RuntimeServiceName::BackgroundActivity, true).unwrap();
+        set_runtime_service(&path, RuntimeServiceName::TriageEvaluation, false).unwrap();
+
+        let cfg = load_config(&path).unwrap();
+        assert!(cfg.file_watcher.enabled);
+        assert!(cfg.process_watcher.enabled);
+        assert!(!cfg.triage.evaluation_enabled);
+        assert!(
+            !cfg.privacy.toggles.files,
+            "service control must not weaken privacy"
+        );
     }
 
     #[test]

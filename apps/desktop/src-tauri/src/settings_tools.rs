@@ -75,8 +75,8 @@ pub fn list(input: &Value) -> Result<String, String> {
 pub fn get(input: &Value) -> Result<String, String> {
     let setting_path = string_field(input, "path")?;
     let config_path = continuum_dev_dir().join("config.toml");
-    let cfg = load_config(&config_path)
-        .map_err(|error| format!("could not load settings: {error}"))?;
+    let cfg =
+        load_config(&config_path).map_err(|error| format!("could not load settings: {error}"))?;
     let defaults = ContinuumConfig::default();
     let current = serde_json::to_value(cfg).map_err(|error| error.to_string())?;
     let default_value = serde_json::to_value(defaults).map_err(|error| error.to_string())?;
@@ -111,8 +111,8 @@ pub fn set(input: &Value) -> Result<String, String> {
         .clone();
 
     let config_path = continuum_dev_dir().join("config.toml");
-    let cfg = load_config(&config_path)
-        .map_err(|error| format!("could not load settings: {error}"))?;
+    let cfg =
+        load_config(&config_path).map_err(|error| format!("could not load settings: {error}"))?;
     let mut candidate_json = serde_json::to_value(cfg).map_err(|error| error.to_string())?;
     let previous = replace_existing_path(&mut candidate_json, setting_path, requested.clone())?;
 
@@ -264,9 +264,7 @@ fn replace_existing_path(
     match current {
         Value::Object(map) => {
             let slot = map.get_mut(final_segment).ok_or_else(|| {
-                format!(
-                    "unknown setting path `{path}`; call settings_list to discover valid paths"
-                )
+                format!("unknown setting path `{path}`; call settings_list to discover valid paths")
             })?;
             Ok(std::mem::replace(slot, replacement))
         }
@@ -275,9 +273,7 @@ fn replace_existing_path(
                 .parse::<usize>()
                 .map_err(|_| format!("invalid array index in setting path `{path}`"))?;
             let slot = items.get_mut(index).ok_or_else(|| {
-                format!(
-                    "unknown setting path `{path}`; call settings_list to discover valid paths"
-                )
+                format!("unknown setting path `{path}`; call settings_list to discover valid paths")
             })?;
             Ok(std::mem::replace(slot, replacement))
         }
@@ -352,9 +348,7 @@ fn ui_location(path: &str) -> &'static str {
         "resources" => "Settings → Resources",
         "github" => "Settings → Integrations → GitHub",
         "voice" | "tts" | "audio" => "Voice / Settings",
-        "screen" | "vision" | "privacy" | "context" | "context_tools" => {
-            "Context / Settings"
-        }
+        "screen" | "vision" | "privacy" | "context" | "context_tools" => "Context / Settings",
         "file_watcher" | "process_watcher" => "Context / Settings",
         "chat" => "Chat / Settings",
         "memory" => "Memory / Settings",

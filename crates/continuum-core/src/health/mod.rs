@@ -13,6 +13,8 @@
 
 pub mod backup;
 pub mod repair;
+pub mod runtime_repair;
+pub mod verified;
 
 use std::collections::HashMap;
 use std::future::Future;

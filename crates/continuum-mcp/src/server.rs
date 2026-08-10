@@ -1954,16 +1954,16 @@ impl ContinuumMcpServer {
     // -----------------------------------------------------------------------
 
     #[tool(
-        description = "Compatibility tool for a future component restart consumer. Denied unless a repair capability explicitly authorizes an executable restart path; the safe Health flow does not."
+        description = "Queue one authorization-bound in-process restart for a supported watcher supervisor. The runtime performs a fresh health verification and does not treat queueing as success."
     )]
     async fn repair_restart_component(
         &self,
         Parameters(req): Parameters<RestartRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.require_repair_restart_component(req.component.as_str())?;
+        let grant = self.require_repair_restart_component(req.component.as_str())?;
         self.backup_before_repair_mutation("restart_component")?;
         self.run_tool("repair_restart_component", &req, || async {
-            repairtool::restart(&self.state.data_dir, req.component)
+            repairtool::restart(&self.state.data_dir, req.component, &grant.token)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))
         })
         .await
@@ -2362,14 +2362,16 @@ mod repair_authorization_tests {
             token: uuid::Uuid::new_v4().to_string(),
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(1),
-            allowed_components: vec!["vision".into()],
-            allowed_restart_components: vec!["vision".into()],
+            allowed_components: vec!["file_watcher".into()],
+            allowed_restart_components: vec!["file_watcher".into()],
             allow_escalation_intent: false,
             allow_model_reinstall: false,
             allow_config_rollback: false,
         };
         let server = server_with_grant(tmp.path().to_path_buf(), Some(grant));
-        assert!(server.require_repair_restart_component("vision").is_ok());
+        assert!(server
+            .require_repair_restart_component("file_watcher")
+            .is_ok());
         assert!(server.require_repair_restart_component("triage").is_err());
     }
 
