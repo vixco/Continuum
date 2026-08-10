@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/patch_finalizer_clippy.py
+          python scripts/patch_finalizer_clippy_v2.py
           if git diff --quiet; then
             echo "Finalizer already patched."
             exit 0
