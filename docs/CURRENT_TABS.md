@@ -25,10 +25,10 @@ The ten tabs are grouped as:
 | Logs               | live           | `get_logs` + `continuum:log` stream                           | Fully live; layer filter updated to real emitters in this PR.                  |
 | Settings (system)  | live           | `get_config`, `update_*`, model-directory picker/downloader, provider secrets, GitHub CLI connect/disconnect | Fully live; model storage rewrites the configured local-model paths together, AI keys use the OS credential store, and GitHub accepts only keyring-backed official CLI auth. |
 
-The shell-level circular privacy power control is live on every tab. It writes
-a durable local pause lease and the real `pause_all` runtime intent; red means
-all observation is stopped, while the normal accent color means the configured
-individual sources may observe.
+The shell-level observation status control is live on every tab. It derives
+one explanatory state from the runtime heartbeat, durable pause lease, source
+toggles, component health and model readiness. Pause/resume writes the real
+durable lease and runtime intent; no frontend-only power state is maintained.
 
 ## Disabling / removing a tab
 
@@ -41,3 +41,9 @@ If a tab is being deprecated or its scope shrinks, prefer:
 The Brain tab's model selects are an example: the underlying fields are not
 yet wired into the runtime, so the controls are rendered disabled with
 tooltips explaining why. The table above records that fact.
+
+## Cross-tab observation status
+
+- **Data source:** live Zustand state published by the runtime, durable observation-pause status, and runtime heartbeat. No sample state is presented as live.
+- **Controls:** supported screen, microphone, file and Git toggles write context intents; pause/resume uses the durable observation lease; screenshot storage uses the native config command.
+- **Explanation:** disabled, idle, unavailable and degraded remain distinct, and current activity keeps the session contract's confidence, evidence and privacy uncertainty. Historical context also separates retention off, a live healthy writer, last-known projected data, missing writer state and a degraded writer.
