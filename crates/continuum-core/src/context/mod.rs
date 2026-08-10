@@ -25,6 +25,7 @@ pub mod continuation;
 pub mod intents;
 pub mod package;
 pub mod project;
+pub mod sensitivity;
 pub mod session_state;
 pub mod temporal;
 
