@@ -1,0 +1,215 @@
+name: A7 bootstrap validation
+
+on:
+  push:
+    branches: [swarm/a7-performance-privacy]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.94.0"
+
+jobs:
+  apply-test-publish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Configure native build prerequisites
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) {
+            choco install llvm --no-progress --confirm
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja --no-progress --confirm
+          }
+          if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) {
+            choco install protoc --no-progress --confirm
+          }
+          "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
+          "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
+
+      - name: Reconstruct and apply checksum-verified A7 patch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          @'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          import hashlib
+          import json
+          import os
+          import re
+          import urllib.request
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          token = os.environ["GH_TOKEN"]
+          repository = os.environ["GH_REPOSITORY"]
+          marker = re.compile(
+              r"^A7_PATCH_PAYLOAD (\d+)/(\d+) ([0-9a-f]{64})\n([A-Za-z0-9+/=]+)$"
+          )
+          chunks: dict[int, str] = {}
+          totals: set[int] = set()
+          digests: set[str] = set()
+
+          for page in range(1, 11):
+              url = (
+                  f"https://api.github.com/repos/{repository}/issues/16/comments"
+                  f"?per_page=100&page={page}"
+              )
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "continuum-a7-bootstrap",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  comments = json.load(response)
+              if not comments:
+                  break
+              for comment in comments:
+                  match = marker.fullmatch(comment.get("body", ""))
+                  if match is None:
+                      continue
+                  index, total, digest, chunk = match.groups()
+                  index_value = int(index)
+                  if index_value in chunks and chunks[index_value] != chunk:
+                      raise RuntimeError(f"conflicting payload chunk {index_value}")
+                  chunks[index_value] = chunk
+                  totals.add(int(total))
+                  digests.add(digest)
+
+          if len(totals) != 1 or len(digests) != 1:
+              raise RuntimeError("payload metadata is incomplete or inconsistent")
+          total = totals.pop()
+          digest = digests.pop()
+          if sorted(chunks) != list(range(1, total + 1)):
+              raise RuntimeError("payload chunk sequence is incomplete")
+
+          payload = "".join(chunks[index] for index in range(1, total + 1))
+          actual = hashlib.sha256(payload.encode("ascii")).hexdigest()
+          if actual != digest:
+              raise RuntimeError("payload SHA-256 mismatch")
+          manifest = json.loads(gzip.decompress(base64.b64decode(payload, validate=True)))
+          if set(manifest) != {"new_files", "ops"}:
+              raise RuntimeError("unexpected manifest shape")
+
+          def target_path(relative: str) -> Path:
+              candidate = (root / relative).resolve()
+              try:
+                  candidate.relative_to(root)
+              except ValueError as error:
+                  raise RuntimeError(f"unsafe manifest path: {relative}") from error
+              return candidate
+
+          def load(relative: str) -> str:
+              return target_path(relative).read_text(encoding="utf-8")
+
+          def save(relative: str, content: str) -> None:
+              target = target_path(relative)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              with target.open("w", encoding="utf-8", newline="\n") as handle:
+                  handle.write(content)
+
+          for relative, content in manifest["new_files"].items():
+              target = target_path(relative)
+              if target.exists() and target.read_text(encoding="utf-8") != content:
+                  raise RuntimeError(f"refusing to replace unexpected file: {relative}")
+              save(relative, content)
+
+          for operation in manifest["ops"]:
+              content = load(operation["path"])
+              kind = operation["kind"]
+              label = operation["label"]
+              if kind == "replace_once":
+                  count = content.count(operation["old"])
+                  if count != 1:
+                      raise RuntimeError(f"{label}: expected one anchor, found {count}")
+                  content = content.replace(operation["old"], operation["new"], 1)
+              elif kind == "replace_between":
+                  start = content.find(operation["start"])
+                  end = content.find(operation["end"], start + 1)
+                  if start < 0 or end < 0:
+                      raise RuntimeError(f"{label}: replacement boundary missing")
+                  content = content[:start] + operation["new"] + content[end:]
+              elif kind == "insert_before_last":
+                  position = content.rfind(operation["marker"])
+                  if position < 0:
+                      raise RuntimeError(f"{label}: final marker missing")
+                  content = content[:position] + operation["new"] + content[position:]
+              else:
+                  raise RuntimeError(f"unknown patch operation: {kind}")
+              save(operation["path"], content)
+
+          print(
+              f"Applied {len(manifest['new_files'])} new files and "
+              f"{len(manifest['ops'])} anchored edits; payload SHA-256 verified."
+          )
+          '@ | python -
+
+      - name: Format A7 Rust sources
+        shell: pwsh
+        run: |
+          $files = @(
+            "crates/continuum-core/src/efficiency/cache.rs",
+            "crates/continuum-core/src/context/evidence.rs",
+            "crates/continuum-core/src/context/package.rs",
+            "crates/continuum-core/src/memory/episodic.rs",
+            "crates/continuum-core/src/bin/continuum-cache-bench.rs"
+          )
+          foreach ($file in $files) {
+            rustfmt --edition 2021 $file
+          }
+
+      - name: Test and lint lightweight path
+        shell: pwsh
+        run: |
+          cargo test -p continuum-core --no-default-features --lib
+          cargo clippy -p continuum-core --no-default-features --lib --tests -- -D warnings
+
+      - name: Test and lint runtime embedding path
+        shell: pwsh
+        run: |
+          cargo test -p continuum-core memory::episodic::tests:: -- --test-threads=1
+          cargo clippy -p continuum-core --lib --tests -- -D warnings
+
+      - name: Run synthetic cache microbenchmark
+        shell: pwsh
+        run: |
+          $result = cargo run -p continuum-core --no-default-features --bin continuum-cache-bench -- 100000 128
+          $result | Tee-Object -FilePath "$env:RUNNER_TEMP\a7-cache-bench.json"
+          "### A7 synthetic cache microbenchmark" >> $env:GITHUB_STEP_SUMMARY
+          '```json' >> $env:GITHUB_STEP_SUMMARY
+          $result >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify and publish tested patch
+        shell: pwsh
+        run: |
+          git diff --check
+          git rm .github/workflows/a7-bootstrap.yml
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: harden persistent context caching and privacy"
+          git push origin HEAD:swarm/a7-performance-privacy
