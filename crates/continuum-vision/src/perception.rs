@@ -108,7 +108,7 @@ pub struct FrameFingerprint {
 
 impl FrameFingerprint {
     /// Build a deterministic fingerprint from an RGBA frame.
-    pub fn from_rgba(image: &RgbaImage) -> Self {
+    fn from_rgba(image: &RgbaImage) -> Self {
         let width = image.width();
         let height = image.height();
         let mut digest = Sha256::new();
@@ -149,6 +149,130 @@ impl FrameFingerprint {
         let luminance = self.mean_luma.abs_diff(other.mean_luma) as f32 / 255.0;
         structural.max(luminance)
     }
+
+    /// Strong digest for cache/provenance identity.
+    pub fn content_digest(&self) -> &[u8; 32] {
+        &self.content_digest
+    }
+
+    /// Original frame width.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Original frame height.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Pixel format bound into the strong digest.
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+}
+
+/// Privacy-admitted result of fingerprinting and change gating one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FrameEvaluation {
+    fingerprint: FrameFingerprint,
+    decision: GateDecision,
+}
+
+impl FrameEvaluation {
+    /// Fingerprint produced only after privacy admission.
+    pub fn fingerprint(&self) -> FrameFingerprint {
+        self.fingerprint
+    }
+
+    /// Change-gate decision for this occurrence.
+    pub fn decision(&self) -> GateDecision {
+        self.decision
+    }
+}
+
+/// Public privacy choke point for frame-derived metadata.
+///
+/// `never_observe` returns `None` before hashing, gating, cache-key creation,
+/// or semantic-selection hooks can run. Consumers should not call lower-level
+/// frame primitives directly; their constructors are crate-private.
+#[derive(Debug)]
+pub struct PrivacyGatedFrameGate {
+    gate: ChangeGate,
+}
+
+impl PrivacyGatedFrameGate {
+    /// Build a bounded gate with the default cardinality cap.
+    pub fn new(threshold: f32, fallback_after: Duration) -> Self {
+        Self {
+            gate: ChangeGate::new(threshold, fallback_after),
+        }
+    }
+
+    /// Build a bounded gate with an explicit cardinality cap.
+    pub fn with_max_keys(threshold: f32, fallback_after: Duration, max_keys: usize) -> Self {
+        Self {
+            gate: ChangeGate::with_max_keys(threshold, fallback_after, max_keys),
+        }
+    }
+
+    /// Privacy-admit, fingerprint, and change-gate one RGBA frame.
+    pub fn evaluate_rgba_at(
+        &mut self,
+        sensitivity: Sensitivity,
+        key: ObservationKey,
+        image: &RgbaImage,
+        now: Instant,
+    ) -> Option<FrameEvaluation> {
+        self.evaluate_with_hooks(
+            sensitivity,
+            key,
+            now,
+            || FrameFingerprint::from_rgba(image),
+            |_| {},
+        )
+    }
+
+    /// Number of display/region states currently retained.
+    pub fn tracked_keys(&self) -> usize {
+        self.gate.tracked_keys()
+    }
+
+    /// Total cardinality evictions since this gate was created.
+    pub fn evicted_keys(&self) -> u64 {
+        self.gate.evicted_keys()
+    }
+
+    /// Invalidate one display after disconnect/reconfiguration.
+    pub fn invalidate_display(&mut self, display_id: &str) {
+        self.gate.invalidate_display(display_id);
+    }
+
+    fn evaluate_with_hooks<Hash, Semantic>(
+        &mut self,
+        sensitivity: Sensitivity,
+        key: ObservationKey,
+        now: Instant,
+        hash: Hash,
+        semantic_selected: Semantic,
+    ) -> Option<FrameEvaluation>
+    where
+        Hash: FnOnce() -> FrameFingerprint,
+        Semantic: FnOnce(&FrameEvaluation),
+    {
+        if sensitivity == Sensitivity::NeverObserve {
+            return None;
+        }
+        let fingerprint = hash();
+        let decision = self.gate.evaluate_at(key, fingerprint, now);
+        let evaluation = FrameEvaluation {
+            fingerprint,
+            decision,
+        };
+        if decision.should_encode {
+            semantic_selected(&evaluation);
+        }
+        Some(evaluation)
+    }
 }
 
 /// Unique identity for a whole display or bounded dirty region.
@@ -170,13 +294,7 @@ impl ObservationKey {
     }
 
     /// Construct a bounded region key.
-    pub fn region(
-        display_id: impl Into<String>,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn region(display_id: impl Into<String>, x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
             display_id: display_id.into(),
             region: Some((x, y, width, height)),
@@ -280,8 +398,8 @@ impl ChangeGate {
             .expect("key presence checked immediately above");
         previous.last_seen_sequence = sequence;
 
-        let fallback_due = now.saturating_duration_since(previous.last_semantic_at)
-            >= self.fallback_after;
+        let fallback_due =
+            now.saturating_duration_since(previous.last_semantic_at) >= self.fallback_after;
         if previous.fingerprint.content_digest == fingerprint.content_digest {
             previous.fingerprint = fingerprint;
             if fallback_due {
@@ -463,7 +581,10 @@ impl AmbientObservation {
     }
 
     /// Build an insertion cache key only for semantically processed eligible observations.
-    pub fn semantic_cache_key(&self, encoder_revision: impl Into<String>) -> Option<SemanticCacheKey> {
+    pub fn semantic_cache_key(
+        &self,
+        encoder_revision: impl Into<String>,
+    ) -> Option<SemanticCacheKey> {
         if !self.semantic_processed || !self.sensitivity.reusable_semantic_cache_allowed() {
             return None;
         }
@@ -492,6 +613,26 @@ impl AmbientObservation {
             && !self.source.trim().is_empty()
             && self.timestamp_unix_ms > 0
     }
+
+    /// Compact metadata-only evidence line for the existing world/context channel.
+    /// No semantic text or screenshot path is included.
+    pub fn compact_evidence_line(&self) -> String {
+        let digest = self
+            .content_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!(
+            "[screen_observation] id={} display={} digest={} change={:.3} semantic={} confidence={:.3} sensitivity={:?}",
+            self.observation_id,
+            self.key.display_id,
+            digest,
+            self.change_score,
+            self.semantic_processed,
+            self.confidence,
+            self.sensitivity
+        )
+    }
 }
 
 /// Monotonic runtime counters and latest measured latencies.
@@ -518,7 +659,7 @@ pub struct PerceptionMetrics {
     /// Latest semantic inference latency in microseconds.
     pub last_inference_latency_us: u64,
     /// Latest capture-to-searchable-observation latency in microseconds.
-    pub last_searchable_latency_us: u64,
+    pub last_observation_emit_latency_us: u64,
 }
 
 impl PerceptionMetrics {
@@ -575,12 +716,39 @@ mod tests {
     }
 
     #[test]
+    fn never_observe_admission_runs_neither_hash_nor_semantic_hook() {
+        use std::cell::Cell;
+
+        let hash_calls = Cell::new(0u32);
+        let semantic_calls = Cell::new(0u32);
+        let mut gate = PrivacyGatedFrameGate::new(0.05, Duration::from_secs(5));
+        let image = solid(32, 18, 10);
+        let result = gate.evaluate_with_hooks(
+            Sensitivity::NeverObserve,
+            ObservationKey::display("display-private"),
+            Instant::now(),
+            || {
+                hash_calls.set(hash_calls.get() + 1);
+                FrameFingerprint::from_rgba(&image)
+            },
+            |_| semantic_calls.set(semantic_calls.get() + 1),
+        );
+        assert!(result.is_none());
+        assert_eq!(hash_calls.get(), 0);
+        assert_eq!(semantic_calls.get(), 0);
+        assert_eq!(gate.tracked_keys(), 0);
+    }
+
+    #[test]
     fn unchanged_frames_are_deduplicated_before_fallback() {
         let now = Instant::now();
         let mut gate = ChangeGate::new(0.05, Duration::from_secs(30));
         let key = ObservationKey::display("display-1");
         let fingerprint = FrameFingerprint::from_rgba(&solid(32, 18, 10));
-        assert!(gate.evaluate_at(key.clone(), fingerprint, now).should_encode);
+        assert!(
+            gate.evaluate_at(key.clone(), fingerprint, now)
+                .should_encode
+        );
         let decision = gate.evaluate_at(key, fingerprint, now + Duration::from_millis(20));
         assert!(!decision.should_encode);
         assert_eq!(decision.reason, GateReason::ExactDuplicate);
@@ -642,12 +810,14 @@ mod tests {
         let now = Instant::now();
         let mut gate = ChangeGate::new(0.05, Duration::from_secs(30));
         let fingerprint = FrameFingerprint::from_rgba(&solid(32, 18, 7));
-        assert!(gate
-            .evaluate_at(ObservationKey::display("display-1"), fingerprint, now)
-            .should_encode);
-        assert!(gate
-            .evaluate_at(ObservationKey::display("display-2"), fingerprint, now)
-            .should_encode);
+        assert!(
+            gate.evaluate_at(ObservationKey::display("display-1"), fingerprint, now)
+                .should_encode
+        );
+        assert!(
+            gate.evaluate_at(ObservationKey::display("display-2"), fingerprint, now)
+                .should_encode
+        );
         assert_eq!(gate.tracked_keys(), 2);
     }
 
@@ -683,7 +853,11 @@ mod tests {
         let now = Instant::now();
         let mut gate = ChangeGate::new(0.90, Duration::from_secs(5));
         let key = ObservationKey::display("display-1");
-        gate.evaluate_at(key.clone(), FrameFingerprint::from_rgba(&split(20, 20)), now);
+        gate.evaluate_at(
+            key.clone(),
+            FrameFingerprint::from_rgba(&split(20, 20)),
+            now,
+        );
         let decision = gate.evaluate_at(
             key,
             FrameFingerprint::from_rgba(&split(20, 21)),
@@ -714,8 +888,13 @@ mod tests {
         assert_ne!(v1, v2);
         assert_eq!(v2.encoder_revision(), "encoder-v2");
         assert_eq!(v2.content_digest(), &fingerprint.content_digest);
-        assert!(SemanticCacheKey::for_frame(Sensitivity::LocalOnly, key.clone(), fingerprint, "v").is_none());
-        assert!(SemanticCacheKey::for_frame(Sensitivity::NeverObserve, key, fingerprint, "v").is_none());
+        assert!(
+            SemanticCacheKey::for_frame(Sensitivity::LocalOnly, key.clone(), fingerprint, "v")
+                .is_none()
+        );
+        assert!(
+            SemanticCacheKey::for_frame(Sensitivity::NeverObserve, key, fingerprint, "v").is_none()
+        );
     }
 
     #[test]
@@ -769,7 +948,7 @@ mod tests {
 
     #[test]
     fn identical_content_occurrences_keep_distinct_evidence_ids_and_timestamps() {
-        let mut first = synthetic_observation("obs-1");
+        let first = synthetic_observation("obs-1");
         let mut second = first.clone();
         second.observation_id = "obs-2".into();
         second.timestamp_unix_ms += 1_000;
