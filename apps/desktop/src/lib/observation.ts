@@ -21,6 +21,7 @@ export type ObservationStatusKind =
 export type ObservationSourceState =
   "active" | "idle" | "last_known" | "off" | "unavailable" | "degraded";
 export type PrivacyImpact = "higher" | "moderate" | "lower";
+export type RuntimeDataFreshness = "live" | "last_known" | "unavailable";
 
 export interface ObservationSourceView {
   id: "screen" | "files" | "git" | "microphone" | "processes" | "triage" | "history";
@@ -41,6 +42,7 @@ export interface CurrentActivityView {
   evidence: string;
   updatedAt: string | null;
   known: boolean;
+  freshness: RuntimeDataFreshness;
 }
 
 export interface ObservationSummary {
@@ -133,6 +135,7 @@ function currentActivity(state: ContinuumState): CurrentActivityView {
       evidence: "The runtime has not published a current session.",
       updatedAt: null,
       known: false,
+      freshness: "unavailable",
     };
   }
 
@@ -161,7 +164,82 @@ function currentActivity(state: ContinuumState): CurrentActivityView {
     evidence,
     updatedAt: session.updated,
     known,
+    freshness: "live",
   };
+}
+
+function latestHistoricalEventAt(state: ContinuumState): string | null {
+  return (
+    state.context.page?.recent_events.reduce<string | null>(
+      (latest, event) => (!latest || event.ts > latest ? event.ts : latest),
+      null
+    ) ?? null
+  );
+}
+
+function activityWithoutLiveRuntime(
+  activity: CurrentActivityView,
+  runtimeStarting: boolean
+): CurrentActivityView {
+  if (!activity.known) {
+    return {
+      title: runtimeStarting ? "Waiting for the runtime" : "Current activity unavailable",
+      project: null,
+      confidence: null,
+      evidence: runtimeStarting
+        ? "The runtime is starting; no current activity is available yet."
+        : "The runtime heartbeat is unavailable; no current activity can be confirmed.",
+      updatedAt: activity.updatedAt,
+      known: false,
+      freshness: "unavailable",
+    };
+  }
+
+  const timestamp = activity.updatedAt
+    ? ` from ${new Date(activity.updatedAt).toLocaleString()}`
+    : "";
+  return {
+    ...activity,
+    confidence: null,
+    evidence: `${
+      runtimeStarting ? "The runtime is starting" : "The runtime heartbeat is unavailable"
+    }; showing the last published activity${timestamp}. This is not a live inference. ${activity.evidence}`,
+    freshness: "last_known",
+  };
+}
+
+function sourcesWithoutLiveRuntime(
+  sources: ObservationSourceView[],
+  state: ContinuumState,
+  config: ContinuumConfig,
+  runtimeStarting: boolean
+): ObservationSourceView[] {
+  const latestEventAt = latestHistoricalEventAt(state);
+  return sources.map((source) => {
+    if (source.id === "history") {
+      if (config.storage.retention_days <= 0) return source;
+      if (state.context.page) {
+        const timestamp = latestEventAt
+          ? ` Latest retained event: ${new Date(latestEventAt).toLocaleString()}.`
+          : " No retained events have been published yet.";
+        return {
+          ...source,
+          state: "last_known",
+          reason: `${
+            runtimeStarting ? "The runtime is starting" : "The runtime heartbeat is unavailable"
+          }; showing last-known historical context.${timestamp} New events and writer health are not being confirmed.`,
+        };
+      }
+    }
+
+    return {
+      ...source,
+      state: "unavailable",
+      reason: runtimeStarting
+        ? `Waiting for the runtime to confirm ${source.label.toLowerCase()} state.`
+        : `The runtime heartbeat is unavailable; the last published ${source.label.toLowerCase()} state cannot be treated as live.`,
+    };
+  });
 }
 
 function historicalContextSource(
@@ -179,10 +257,7 @@ function historicalContextSource(
 
   const page = state.context.page;
   const writer = state.context.engine?.events_writer;
-  const latestEventAt = page?.recent_events.reduce<string | null>(
-    (latest, event) => (!latest || event.ts > latest ? event.ts : latest),
-    null
-  );
+  const latestEventAt = latestHistoricalEventAt(state);
   const retentionLabel = `${retentionDays} day${retentionDays === 1 ? "" : "s"}`;
   const latestLabel = latestEventAt
     ? ` Latest retained event: ${new Date(latestEventAt).toLocaleString()}.`
@@ -373,18 +448,44 @@ function sourceViews(state: ContinuumState, config: ContinuumConfig): Observatio
 
 export function deriveObservationSummary(input: ObservationSummaryInput): ObservationSummary {
   const { state, config } = input;
-  const sources = sourceViews(state, config);
+  const liveSources = sourceViews(state, config);
+  const liveActivity = currentActivity(state);
+  const lastUpdatedAt =
+    state.context.session?.updated ??
+    state.perception.last_capture_at ??
+    state.health.last_check_ts ??
+    null;
+
+  if (input.runtimeStarting) {
+    return {
+      kind: "processing",
+      label: "Starting observation",
+      reason: "The local runtime is starting and has not confirmed source state yet.",
+      sources: sourcesWithoutLiveRuntime(liveSources, state, config, true),
+      activeCount: 0,
+      currentActivity: activityWithoutLiveRuntime(liveActivity, true),
+      lastUpdatedAt,
+    };
+  }
+  if (!input.runtimeAvailable) {
+    return {
+      kind: "unavailable",
+      label: "Observation unavailable",
+      reason: "The local runtime is not publishing a heartbeat; last-known data is labeled.",
+      sources: sourcesWithoutLiveRuntime(liveSources, state, config, false),
+      activeCount: 0,
+      currentActivity: activityWithoutLiveRuntime(liveActivity, false),
+      lastUpdatedAt,
+    };
+  }
+
+  const sources = liveSources;
   const activeCount = sources.filter(
     (source) =>
       source.id !== "history" &&
       source.id !== "triage" &&
       (source.state === "active" || source.state === "idle")
   ).length;
-  const lastUpdatedAt =
-    state.context.session?.updated ??
-    state.perception.last_capture_at ??
-    state.health.last_check_ts ??
-    null;
 
   // Pause signals come from three live boundaries (durable lease, context
   // projection and the general runtime state). Treat any positive signal as
@@ -397,26 +498,10 @@ export function deriveObservationSummary(input: ObservationSummaryInput): Observ
   const base = {
     sources,
     activeCount,
-    currentActivity: currentActivity(state),
+    currentActivity: liveActivity,
     lastUpdatedAt,
   };
 
-  if (input.runtimeStarting) {
-    return {
-      ...base,
-      kind: "processing",
-      label: "Starting observation",
-      reason: "The local runtime is starting and has not published source state yet.",
-    };
-  }
-  if (!input.runtimeAvailable) {
-    return {
-      ...base,
-      kind: "unavailable",
-      label: "Observation unavailable",
-      reason: "The local runtime is not publishing a heartbeat.",
-    };
-  }
   if (paused) {
     const until = input.pauseStatus?.until;
     return {
