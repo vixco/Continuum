@@ -26,6 +26,28 @@ Last updated: 2026-08-09.
   external certificates and secrets. Users may therefore see SmartScreen or
   Gatekeeper warnings until those are configured.
 - A missing `TAURI_SIGNING_PRIVATE_KEY` blocks publication by design.
+
+### Opening the macOS DMG (no Apple Developer ID yet)
+
+Because the DMG is not Apple Developer ID-signed and notarized, macOS attaches a
+quarantine flag when the file is downloaded from a browser. On macOS 13+ this
+surfaces as **"Continuum" is damaged and can't be opened. You should move it to
+the Trash.** — the app is *not* actually corrupt; Gatekeeper is refusing an
+unnotarized download. Pick one workaround:
+
+- **Easiest:** drag Continuum into `/Applications`, then in Finder right-click
+  (or Control-click) the app and choose **Open**. Confirm the prompt. This is a
+  one-time per-version step.
+- **From the terminal:** `xattr -cr /Applications/Continuum.app` strips the
+  quarantine attribute, after which a normal double-click opens it.
+- **Before installing:** `xattr -cr ~/Downloads/continuum-*-macos-aarch64.dmg`
+  removes the flag on the installer itself so the drag-and-drop path is clean.
+
+The release pipeline deep ad-hoc signs the `.app` bundle (including the bundled
+`continuum`, `continuum-mcp` and `continuum-agent-os` executables) so that once
+the quarantine flag is removed `codesign --verify` passes and the app launches
+cleanly. Ad-hoc signing is *not* a Gatekeeper trust anchor, so it does not
+remove the warning on its own — only Apple notarization can do that.
 - Release publication refuses to publish binaries when `main` changes while the
   platform builds are running. A later successful CI run will retry from the new
   commit.
