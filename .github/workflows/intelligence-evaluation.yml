@@ -1,0 +1,53 @@
+name: Persistent intelligence evaluation
+
+on:
+  push:
+    branches:
+      - main
+      - "swarm/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  synthetic-contract:
+    name: Synthetic cross-layer contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run evaluator regression tests
+        run: python -m unittest -v scripts/test_persistent_intelligence_eval.py
+
+      - name: Evaluate committed synthetic suite
+        run: >-
+          python scripts/persistent_intelligence_eval.py
+          --suite evals/persistent-intelligence/reference-suite.json
+          --report persistent-intelligence-report.json
+
+      - name: Publish sanitized evaluation summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f persistent-intelligence-report.json ]]; then
+            {
+              echo '## Persistent-intelligence contract'
+              echo
+              echo 'The committed suite is synthetic contract evidence, not runtime proof.'
+              echo
+              echo '```json'
+              cat persistent-intelligence-report.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
