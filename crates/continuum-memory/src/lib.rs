@@ -19,12 +19,14 @@ mod sensitivity_label;
 pub mod slug; // Task 2
 pub mod vault; // Task 5
 pub mod watcher; // Task 7
+pub mod world_model;
 
 pub use error::{MemoryError, Result};
 pub use migrate::migrate_legacy_semantic;
 pub use model::*;
 pub use vault::{Vault, VaultOptions};
 pub use watcher::VaultWatcher;
+pub use world_model::*;
 
 #[cfg(test)]
 mod fts_gate {
