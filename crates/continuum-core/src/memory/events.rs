@@ -51,6 +51,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+pub use crate::context::sensitivity::EventSensitivity;
+
 use crate::config::EventsConfig;
 use crate::context::project::CurrentProjectHandle;
 use crate::memory::raw_log::{self, DedupeCandidate, RawLog};
@@ -253,20 +255,6 @@ impl EventType {
             | EventsDropped => source == EventSource::System,
         }
     }
-}
-
-/// Event sensitivity, inherited from the strictest zone of the event's
-/// inputs (spec §4.1 propagation rule). `never_observe` rows cannot exist —
-/// excluded windows only ever appear as the synthetic `[excluded]` bucket
-/// endpoint, tagged `local_only`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventSensitivity {
-    /// Persisted and visible to local models; stripped from everything
-    /// cloud-bound.
-    LocalOnly,
-    /// Eligible for cloud-bound context (already scrubbed).
-    CloudAllowed,
 }
 
 /// One context event, destined for the `context_events` table.
