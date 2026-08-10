@@ -177,6 +177,17 @@ jobs:
           echo "LIBCLANG_PATH=$llvmBin" >> $env:GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
 
+      - name: Cache Rust release artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-cargo-release-
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -288,6 +299,17 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS=-isysroot $(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Cache Rust release artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-rust-${{ env.RUST_VERSION }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-rust-${{ env.RUST_VERSION }}-cargo-release-
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
