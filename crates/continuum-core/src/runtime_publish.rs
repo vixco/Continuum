@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::hardware::{HardwareSpecs, ResolvedResourcePlan};
+use crate::operational_state::{ComponentDiagnostic, OperationalEvent, OperationalState};
+use crate::runtime_control::RuntimeServiceSnapshot;
 
 /// The shared shape the runtime writes and the dashboard reads. This is
 /// the single source of truth for the state.json contract — both the
@@ -141,6 +143,10 @@ pub struct RuntimeSnapshot {
     /// state.
     #[serde(default)]
     pub context_page: Option<ContextPageSnapshot>,
+    /// Bounded, deduplicated health/watcher/repair transition history. The
+    /// runtime never publishes raw logs or paths here.
+    #[serde(default)]
+    pub operational_events: Vec<OperationalEvent>,
 }
 
 /// Per-component health summary inside [`ContextEngineSnapshot`]. The
@@ -165,6 +171,13 @@ pub struct ComponentHealthSummary {
     /// depths, per-root unavailability.
     #[serde(default)]
     pub detail: Option<String>,
+    /// Typed lifecycle state. This disambiguates idle from disabled while the
+    /// legacy booleans remain for older dashboard builds.
+    #[serde(default)]
+    pub state: OperationalState,
+    /// Public-safe root-cause diagnosis and repair policy.
+    #[serde(default)]
+    pub diagnostic: Option<ComponentDiagnostic>,
 }
 
 /// Context-engine health section of [`RuntimeSnapshot`] (Task A8, spec
@@ -376,6 +389,10 @@ pub struct ContextPageSnapshot {
     /// Live toggle values (what the switches must show).
     #[serde(default)]
     pub toggles: ObservationTogglesView,
+    /// Live optional-service requests. Privacy toggles remain a separate,
+    /// stricter gate and can never be weakened by this control.
+    #[serde(default)]
+    pub services: RuntimeServiceSnapshot,
     /// Ranked continuation candidates.
     #[serde(default)]
     pub continuation: Vec<ContinuationCandidateView>,
@@ -581,42 +598,49 @@ mod tests {
                     enabled: true,
                     should_restart: false,
                     detail: Some("last poll 1s ago".into()),
+                    ..ComponentHealthSummary::default()
                 }),
                 live_context: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: true,
                     should_restart: false,
                     detail: None,
+                    ..ComponentHealthSummary::default()
                 }),
                 git_watcher: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: false,
                     should_restart: false,
                     detail: Some("disabled by [git_context].enabled".into()),
+                    ..ComponentHealthSummary::default()
                 }),
                 file_watcher: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: false,
                     should_restart: false,
                     detail: Some("disabled by [file_watcher].enabled".into()),
+                    ..ComponentHealthSummary::default()
                 }),
                 process_watcher: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: false,
                     should_restart: false,
                     detail: Some("disabled by [process_watcher].enabled".into()),
+                    ..ComponentHealthSummary::default()
                 }),
                 events_writer: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: true,
                     should_restart: false,
                     detail: Some("queue_depth=0".into()),
+                    ..ComponentHealthSummary::default()
                 }),
                 triage: Some(ComponentHealthSummary {
                     healthy: true,
                     enabled: true,
                     should_restart: false,
                     detail: Some("idle".into()),
+                    ..ComponentHealthSummary::default()
                 }),
             }),
             ..RuntimeSnapshot::default()

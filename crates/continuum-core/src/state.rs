@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::context::session_state::SessionState;
+use crate::operational_state::OperationalEvent;
 use crate::runtime_publish::{ContextEngineSnapshot, ContextPageSnapshot, CuratorSnapshot};
 use crate::senses::types::PerceptionFrame;
 use crate::triage::TriageDecision;
@@ -72,6 +73,10 @@ pub struct ContextState {
     /// candidates. The dashboard cannot read the raw-log database itself,
     /// so this section is the page's only source for those lists.
     pub page: Option<ContextPageSnapshot>,
+    /// Bounded public-safe health, watcher and repair timeline published by
+    /// the runtime. Raw logs and private paths never enter this surface.
+    #[serde(default)]
+    pub operational_events: Vec<OperationalEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -607,12 +612,14 @@ impl StateHandle {
         session: Option<SessionState>,
         engine: Option<ContextEngineSnapshot>,
         page: Option<ContextPageSnapshot>,
+        operational_events: Vec<OperationalEvent>,
     ) {
         {
             let mut s = self.inner.write().await;
             s.context.session = session;
             s.context.engine = engine;
             s.context.page = page;
+            s.context.operational_events = operational_events;
         }
         self.notify(StateEvent::Context);
     }
@@ -833,6 +840,7 @@ mod tests {
                         enabled: true,
                         should_restart: false,
                         detail: Some("last poll 1s ago".into()),
+                        ..ComponentHealthSummary::default()
                     }),
                     ..ContextEngineSnapshot::default()
                 }),
@@ -846,6 +854,7 @@ mod tests {
                     }],
                     ..ContextPageSnapshot::default()
                 }),
+                Vec::new(),
             )
             .await;
 
@@ -866,7 +875,9 @@ mod tests {
             .expect("event not lost");
         assert!(matches!(got, StateEvent::Context));
 
-        handle.set_context_snapshot(None, None, None).await;
+        handle
+            .set_context_snapshot(None, None, None, Vec::new())
+            .await;
         let cleared = handle.snapshot().await;
         assert!(cleared.context.session.is_none());
         assert!(cleared.context.engine.is_none());

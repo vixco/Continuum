@@ -76,6 +76,7 @@ const INTENT_LABELS: Record<ContextIntentInput["kind"], string> = {
   forget: "Forget",
   delete_range: "Range deletion",
   set_toggle: "Observation toggle",
+  set_runtime_service: "Runtime service",
 };
 
 /** Narrows a persisted pin's free-form `field` back to the intent union. */

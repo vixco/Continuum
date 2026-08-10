@@ -74,6 +74,7 @@ The triage prompt documents which perception signals to trust:
 
 | Setting | Default | Description |
 |---|---|---|
+| `triage.evaluation_enabled` | `true` | Live request for interactive per-frame evaluation; does not override privacy policy |
 | `triage.path` | `~/.continuum-dev/models/triage/qwen3-4b-q4_k_m.gguf` | Model path |
 | `triage.gpu_layers` | `0` | GPU offload layers (0 = CPU only) |
 | `frame.salience_threshold` | `0.10` | Minimum salience to reach triage |

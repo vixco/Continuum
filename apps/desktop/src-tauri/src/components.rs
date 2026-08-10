@@ -19,7 +19,9 @@ use tokio::sync::RwLock;
 use continuum_core::config::ContinuumConfig;
 use continuum_core::hardware::{self, HardwareSpecs, ResolvedResourcePlan};
 use continuum_core::health::{HealthCheck, HealthRegistry, HealthResult};
+use continuum_core::operational_state::OperationalState;
 use continuum_core::runtime::ContinuumRuntime;
+use continuum_core::runtime_publish::ComponentHealthSummary;
 use continuum_core::state::StateHandle;
 
 use crate::memory::MemoryState;
@@ -106,6 +108,14 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     registry.register(McpCheck {});
     registry.register(ContextCheck {
         state: state.clone(),
+        dev_dir: dev_dir.clone(),
+    });
+    registry.register(RuntimeContextComponentCheck {
+        component: "file_watcher",
+        dev_dir: dev_dir.clone(),
+    });
+    registry.register(RuntimeContextComponentCheck {
+        component: "process_watcher",
         dev_dir: dev_dir.clone(),
     });
     registry.register(WorkersCheck {
@@ -670,6 +680,91 @@ impl HealthCheck for ChatProvidersCheck {
     }
 }
 
+struct RuntimeContextComponentCheck {
+    component: &'static str,
+    dev_dir: PathBuf,
+}
+
+impl RuntimeContextComponentCheck {
+    fn summary(&self) -> Result<ComponentHealthSummary, HealthResult> {
+        if !runtime_alive(&self.dev_dir) {
+            return Err(HealthResult::unknown("runtime offline", 1));
+        }
+        let bytes = std::fs::read(self.dev_dir.join("state.json"))
+            .map_err(|_| HealthResult::unknown("runtime state unavailable", 1))?;
+        let snapshot: continuum_core::runtime_publish::RuntimeSnapshot =
+            serde_json::from_slice(&bytes)
+                .map_err(|_| HealthResult::error("runtime state could not be parsed", 1))?;
+        let engine = snapshot
+            .context_engine
+            .ok_or_else(|| HealthResult::unknown("context-engine health not published", 1))?;
+        match self.component {
+            "file_watcher" => engine.file_watcher,
+            "process_watcher" => engine.process_watcher,
+            _ => None,
+        }
+        .ok_or_else(|| HealthResult::unknown("component health not published", 1))
+    }
+}
+
+fn runtime_component_health(summary: &ComponentHealthSummary) -> HealthResult {
+    let explanation = summary
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.explanation.clone())
+        .or_else(|| summary.detail.clone())
+        .unwrap_or_else(|| "runtime component published no public-safe detail".into());
+    // Snapshots from runtimes predating the typed state contract deserialize
+    // `state` as unavailable. Fall back to their legacy health flags rather
+    // than inventing a new failure during a rolling desktop/runtime upgrade.
+    if summary.diagnostic.is_none() {
+        return if summary.should_restart || !summary.healthy {
+            HealthResult::error(explanation, 1)
+        } else {
+            HealthResult::healthy_with(explanation, 1)
+        };
+    }
+    match summary.state {
+        OperationalState::Degraded => HealthResult::degrading(explanation, 1),
+        OperationalState::PermissionRequired
+        | OperationalState::Unavailable
+        | OperationalState::Failed => HealthResult::error(explanation, 1),
+        OperationalState::Starting
+        | OperationalState::Running
+        | OperationalState::Idle
+        | OperationalState::Stopping
+        | OperationalState::DisabledByUser
+        | OperationalState::DisabledByPolicy => HealthResult::healthy_with(explanation, 1),
+    }
+}
+
+#[async_trait]
+impl HealthCheck for RuntimeContextComponentCheck {
+    fn name(&self) -> &str {
+        self.component
+    }
+
+    fn recovery_note(&self) -> Option<String> {
+        Some(match self.component {
+            "file_watcher" => {
+                "Use the verified in-process restart only when the live diagnostic marks it automatically safe; permission failures require manual access changes."
+            }
+            "process_watcher" => {
+                "Use the verified in-process restart only for a stalled collector; disabled or policy-blocked states must remain untouched."
+            }
+            _ => "Inspect the live runtime diagnostic before taking action.",
+        }
+        .into())
+    }
+
+    async fn probe(&self) -> HealthResult {
+        match self.summary() {
+            Ok(summary) => runtime_component_health(&summary),
+            Err(result) => result,
+        }
+    }
+}
+
 struct ContextCheck {
     state: Arc<RwLock<StateHandle>>,
     dev_dir: PathBuf,
@@ -822,5 +917,51 @@ impl HealthCheck for SystemResourceCheck {
             }
             hardware::LoadStatus::Ok => HealthResult::healthy_with(plan_summary, 1),
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_component_health_tests {
+    use super::*;
+    use continuum_core::operational_state::{ComponentDiagnostic, RootCauseCategory};
+
+    fn summary(state: OperationalState) -> ComponentHealthSummary {
+        ComponentHealthSummary {
+            state,
+            diagnostic: Some(ComponentDiagnostic::new(
+                "file_watcher",
+                "file_activity",
+                state,
+                "synthetic",
+                "Synthetic public-safe state.",
+                RootCauseCategory::Unknown,
+                state.faulted(),
+            )),
+            ..ComponentHealthSummary::default()
+        }
+    }
+
+    #[test]
+    fn idle_and_disabled_are_not_reported_as_failures() {
+        assert_eq!(
+            runtime_component_health(&summary(OperationalState::Idle)).status,
+            continuum_core::state::ComponentStatus::Healthy
+        );
+        assert_eq!(
+            runtime_component_health(&summary(OperationalState::DisabledByUser)).status,
+            continuum_core::state::ComponentStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn degraded_and_failed_remain_actionable() {
+        assert_eq!(
+            runtime_component_health(&summary(OperationalState::Degraded)).status,
+            continuum_core::state::ComponentStatus::Degrading
+        );
+        assert_eq!(
+            runtime_component_health(&summary(OperationalState::Failed)).status,
+            continuum_core::state::ComponentStatus::Error
+        );
     }
 }

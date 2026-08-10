@@ -57,6 +57,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::runtime_control::RuntimeServiceName;
+
 /// Subdirectory under the Continuum data dir where the dashboard writes
 /// context intents.
 pub const CONTEXT_INTENTS_SUBDIR: &str = "context-intents";
@@ -239,6 +241,14 @@ pub enum ContextAction {
         /// New value.
         value: bool,
     },
+    /// Start or stop an optional runtime service live and persist the
+    /// requested state. Privacy and policy gates still take precedence.
+    SetRuntimeService {
+        /// Which service.
+        service: RuntimeServiceName,
+        /// Requested state.
+        enabled: bool,
+    },
     /// Record what the user just asked for, from a producer outside the
     /// runtime process (spec §4.8 `last_user_command` "voice/chat/hotkey").
     ///
@@ -266,6 +276,7 @@ impl ContextAction {
             ContextAction::Forget { .. } => "forget",
             ContextAction::DeleteRange { .. } => "delete_range",
             ContextAction::SetToggle { .. } => "set_toggle",
+            ContextAction::SetRuntimeService { .. } => "set_runtime_service",
             ContextAction::RecordUserCommand { .. } => "record_user_command",
         }
     }
@@ -503,6 +514,10 @@ mod tests {
             ContextAction::SetToggle {
                 name: ToggleName::Files,
                 value: false,
+            },
+            ContextAction::SetRuntimeService {
+                service: RuntimeServiceName::BackgroundActivity,
+                enabled: true,
             },
             ContextAction::RecordUserCommand {
                 text: "run the focused tests".into(),

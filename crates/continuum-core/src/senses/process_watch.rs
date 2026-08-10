@@ -19,6 +19,10 @@ use sysinfo::{ProcessesToUpdate, System};
 use tracing::{info, warn};
 
 use crate::config::{ContextConfig, PrivacyConfig, ProcessWatcherConfig};
+use crate::operational_state::{
+    ComponentDiagnostic, OperationalState, RepairPolicyClass, RootCauseCategory,
+};
+use crate::runtime_control::{RuntimeServiceControl, RuntimeServiceName};
 use crate::senses::privacy::{strictest, PrivacyFilter, Zone};
 use crate::senses::toggles::ToggleControl;
 
@@ -72,22 +76,131 @@ pub struct ProcessActivityEntry {
 }
 
 /// Health snapshot consumed by `RuntimeSnapshot.context_engine`.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcessWatchHealth {
-    /// Whether sampling is enabled.
+    /// Legacy compatibility bit. Prefer [`ProcessWatchHealth::state`].
     pub enabled: bool,
-    /// Deliberate disabled reason.
+    /// Deliberate public-safe disabled reason.
     pub disabled_reason: Option<String>,
+    /// Typed lifecycle state.
+    pub state: OperationalState,
+    /// Stable public reason code.
+    pub reason_code: String,
+    /// Public-safe explanation; never a raw process or filesystem error.
+    pub explanation: String,
     /// Last successful process-table sample.
     pub last_poll_at: Option<DateTime<Utc>>,
+    /// When the current active generation started.
+    pub activated_at: Option<DateTime<Utc>>,
     /// Successful sample count.
     pub polls: u64,
     /// Lifecycle/pressure events handed to the events channel.
     pub events_emitted: u64,
-    /// Relevant processes in the most recent snapshot.
+    /// Relevant processes in the most recent bounded snapshot.
     pub active_processes: usize,
-    /// Most recent snapshot-publication error; cleared by the next success.
+    /// Public-safe snapshot-publication error; cleared by the next success.
     pub last_error: Option<String>,
+    /// Number of real inactive→active or restart transitions.
+    pub activation_count: u64,
+    /// Number of currently active collector generations (zero or one).
+    pub current_instances: usize,
+    /// Highest number of collector loops active concurrently. The single
+    /// supervisor design guarantees this is at most one.
+    pub max_concurrent_instances: usize,
+}
+
+impl Default for ProcessWatchHealth {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            disabled_reason: Some("disabled by [process_watcher].enabled".to_string()),
+            state: OperationalState::DisabledByUser,
+            reason_code: "disabled_by_user".to_string(),
+            explanation: "Background activity observation is turned off.".to_string(),
+            last_poll_at: None,
+            activated_at: None,
+            polls: 0,
+            events_emitted: 0,
+            active_processes: 0,
+            last_error: None,
+            activation_count: 0,
+            current_instances: 0,
+            max_concurrent_instances: 0,
+        }
+    }
+}
+
+impl ProcessWatchHealth {
+    pub fn should_restart(&self, now: DateTime<Utc>, poll_interval: Duration) -> bool {
+        if !self.enabled
+            || !matches!(
+                self.state,
+                OperationalState::Starting | OperationalState::Running | OperationalState::Idle
+            )
+        {
+            return false;
+        }
+        let grace = chrono::Duration::from_std(
+            poll_interval.saturating_mul(3).max(Duration::from_secs(15)),
+        )
+        .unwrap_or_else(|_| chrono::Duration::seconds(30));
+        let anchor = self.last_poll_at.or(self.activated_at);
+        anchor.is_some_and(|ts| now.signed_duration_since(ts) > grace)
+    }
+
+    pub fn diagnostic(&self, now: DateTime<Utc>, poll_interval: Duration) -> ComponentDiagnostic {
+        let stalled = self.should_restart(now, poll_interval);
+        let (state, reason, explanation, root_cause, retryable) = if stalled {
+            (
+                OperationalState::Failed,
+                "collector_stalled".to_string(),
+                "Background activity observation stopped producing bounded samples.".to_string(),
+                RootCauseCategory::Internal,
+                true,
+            )
+        } else {
+            (
+                self.state,
+                self.reason_code.clone(),
+                self.explanation.clone(),
+                match self.state {
+                    OperationalState::DisabledByUser => RootCauseCategory::UserChoice,
+                    OperationalState::DisabledByPolicy => RootCauseCategory::Policy,
+                    OperationalState::PermissionRequired => RootCauseCategory::Permission,
+                    OperationalState::Degraded | OperationalState::Failed => {
+                        RootCauseCategory::Internal
+                    }
+                    _ => RootCauseCategory::Unknown,
+                },
+                self.state == OperationalState::Degraded,
+            )
+        };
+        let mut diagnostic = ComponentDiagnostic::new(
+            "process_watcher",
+            "bounded_background_activity",
+            state,
+            reason,
+            explanation,
+            root_cause,
+            retryable,
+        )
+        .with_evidence("runtime_state", "context_engine.process_watcher")
+        .with_evidence("metric", "process_watcher.last_poll_at");
+        if stalled {
+            diagnostic = diagnostic
+                .with_action("Restart the process watcher and verify a fresh bounded sample.")
+                .with_repair(
+                    RepairPolicyClass::AutomaticallySafe,
+                    true,
+                    Some("restart_process_watcher"),
+                );
+        } else if self.state == OperationalState::PermissionRequired {
+            diagnostic = diagnostic
+                .with_action("Restore write permission for the local runtime state directory.")
+                .with_repair(RepairPolicyClass::ManualOnly, false, None);
+        }
+        diagnostic
+    }
 }
 
 /// Shared process-watcher health handle.
@@ -143,8 +256,9 @@ pub fn resolve_process_zone(
     ])
 }
 
-/// Event-driven process watcher. Poll failures are transient and a restart
-/// cannot improve them, so `should_restart()` is always false.
+/// Bounded process watcher with one process-local supervisor. Transient
+/// sample/publication failures self-heal on the next poll; a genuinely stale
+/// enabled collector may request one verified in-process reinitialization.
 pub struct ProcessWatcher {
     config: ProcessWatcherConfig,
     privacy: Arc<PrivacyFilter>,
@@ -152,6 +266,8 @@ pub struct ProcessWatcher {
     snapshot_path: PathBuf,
     health: SharedProcessWatchHealth,
     toggles: ToggleControl,
+    /// Live optional-service request, separate from the privacy pause.
+    service_control: Option<RuntimeServiceControl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +331,7 @@ impl ProcessWatcher {
             snapshot_path: dev_dir.join("processes.json"),
             health: SharedProcessWatchHealth::default(),
             toggles: ToggleControl::default(),
+            service_control: None,
         }
     }
 
@@ -230,6 +347,27 @@ impl ProcessWatcher {
         self
     }
 
+    /// Attaches the live service control. The same supervisor task performs
+    /// every start/stop/restart, preventing duplicate collectors.
+    pub fn with_service_control(mut self, control: RuntimeServiceControl) -> Self {
+        self.service_control = Some(control);
+        self
+    }
+
+    fn requested(&self) -> bool {
+        self.service_control
+            .as_ref()
+            .map(|control| control.enabled(RuntimeServiceName::BackgroundActivity))
+            .unwrap_or(self.config.enabled)
+    }
+
+    fn restart_generation(&self) -> u64 {
+        self.service_control
+            .as_ref()
+            .map(|control| control.restart_generation(RuntimeServiceName::BackgroundActivity))
+            .unwrap_or(0)
+    }
+
     /// Attaches the deduped events transport.
     #[cfg(feature = "runtime")]
     pub fn with_event_sender(mut self, events: EventSender) -> Self {
@@ -242,9 +380,12 @@ impl ProcessWatcher {
         self.health.clone()
     }
 
-    /// Poll failures self-heal on the next interval; restarting is not useful.
+    /// A stale enabled collector can be safely reinitialized in process.
     pub fn should_restart(&self) -> bool {
-        false
+        self.health.read().should_restart(
+            Utc::now(),
+            Duration::from_secs(self.config.poll_secs.max(1)),
+        )
     }
 
     fn emit(&self, kind: ProcessEventKind, process: &TrackedProcess, pid: u32, summary: String) {
@@ -254,26 +395,45 @@ impl ProcessWatcher {
         }
     }
 
-    /// Runs until shutdown. Disabled mode performs no process-table refresh.
-    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        if !self.config.enabled {
-            {
-                let mut health = self.health.write();
-                health.enabled = false;
-                health.disabled_reason = Some("disabled by [process_watcher].enabled".to_string());
-            }
-            while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
-            return;
+    fn set_state(
+        &self,
+        state: OperationalState,
+        reason_code: &str,
+        explanation: &str,
+        disabled_reason: Option<&str>,
+    ) {
+        let mut health = self.health.write();
+        health.enabled = state.enabled();
+        health.state = state;
+        health.reason_code = reason_code.to_string();
+        health.explanation = explanation.to_string();
+        health.disabled_reason = disabled_reason.map(ToOwned::to_owned);
+        if !state.enabled() {
+            health.active_processes = 0;
+            health.activated_at = None;
+            health.current_instances = 0;
         }
+    }
 
-        self.health.write().enabled = true;
-        info!(
-            layer = "senses",
-            component = "process_watch",
-            poll_secs = self.config.poll_secs.max(1),
-            "Background-process collector started"
-        );
+    fn clear_snapshot(&self) {
+        let snapshot = ProcessActivitySnapshot {
+            version: 1,
+            observed_at: Utc::now(),
+            active: Vec::new(),
+        };
+        if let Err(error) = write_process_snapshot(&self.snapshot_path, &snapshot) {
+            warn!(
+                layer = "senses",
+                component = "process_watch",
+                error = %error,
+                "Failed to clear process snapshot"
+            );
+        }
+    }
 
+    /// Runs one supervisor until shutdown. Disabled states perform no process
+    /// table refresh. Repeated enable requests cannot create another loop.
+    pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let includes: HashSet<String> = self
             .config
             .include_names
@@ -286,35 +446,88 @@ impl ProcessWatcher {
             .iter()
             .map(|name| normalize_process_name(name))
             .collect();
+        let poll_interval = Duration::from_secs(self.config.poll_secs.max(1));
+        let mut control_tick = tokio::time::interval(Duration::from_millis(100));
+        control_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut system = System::new();
         let mut tracked: HashMap<u32, TrackedProcess> = HashMap::new();
-        let mut ticker = tokio::time::interval(Duration::from_secs(self.config.poll_secs.max(1)));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut active = false;
+        let mut snapshot_cleared = false;
+        let mut generation = self.restart_generation();
+        let mut next_poll = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
-                    if self.toggles.paused() {
-                        let snapshot = ProcessActivitySnapshot {
-                            version: 1,
-                            observed_at: Utc::now(),
-                            active: Vec::new(),
-                        };
-                        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
-                            let _ = std::fs::write(&self.snapshot_path, bytes);
+                _ = control_tick.tick() => {
+                    let requested = self.requested();
+                    let paused = self.toggles.paused();
+                    let next_generation = self.restart_generation();
+                    if !requested || paused {
+                        if active || !snapshot_cleared {
+                            self.clear_snapshot();
+                            snapshot_cleared = true;
+                            tracked.clear();
+                            system = System::new();
+                            active = false;
                         }
-                        let mut health = self.health.write();
-                        health.enabled = false;
-                        health.disabled_reason = Some("all observation paused by user".to_string());
-                        drop(health);
-                        tracked.clear();
+                        if paused {
+                            self.set_state(
+                                OperationalState::DisabledByPolicy,
+                                "disabled_by_policy",
+                                "Background activity observation is blocked while all observation is paused.",
+                                Some("all observation paused by user"),
+                            );
+                        } else {
+                            let legacy = if self.service_control.is_some() {
+                                "disabled by user"
+                            } else {
+                                "disabled by [process_watcher].enabled"
+                            };
+                            self.set_state(
+                                OperationalState::DisabledByUser,
+                                "disabled_by_user",
+                                "Background activity observation is turned off.",
+                                Some(legacy),
+                            );
+                        }
+                        generation = next_generation;
                         continue;
                     }
-                    {
+
+                    if !active || next_generation != generation {
+                        tracked.clear();
+                        system = System::new();
+                        generation = next_generation;
+                        active = true;
+                        snapshot_cleared = false;
+                        next_poll = tokio::time::Instant::now();
                         let mut health = self.health.write();
                         health.enabled = true;
                         health.disabled_reason = None;
+                        health.state = OperationalState::Starting;
+                        health.reason_code = if health.activation_count == 0 {
+                            "starting".to_string()
+                        } else {
+                            "restart_requested".to_string()
+                        };
+                        health.explanation = "Background activity observation is starting.".to_string();
+                        health.activated_at = Some(Utc::now());
+                        health.activation_count = health.activation_count.saturating_add(1);
+                        health.current_instances = 1;
+                        health.max_concurrent_instances = health.max_concurrent_instances.max(health.current_instances);
+                        info!(
+                            layer = "senses",
+                            component = "process_watch",
+                            generation,
+                            poll_secs = self.config.poll_secs.max(1),
+                            "Background-process collector activated"
+                        );
                     }
+
+                    if tokio::time::Instant::now() < next_poll {
+                        continue;
+                    }
+                    next_poll = tokio::time::Instant::now() + poll_interval;
                     system.refresh_processes(ProcessesToUpdate::All, true);
                     let observed_at = Utc::now();
                     let mut current = HashMap::new();
@@ -328,9 +541,6 @@ impl ProcessWatcher {
                         let exe_path = process
                             .exe()
                             .map(|path| self.privacy.scrub_path(path.to_string_lossy().as_ref()));
-                        // Reuse title-keyword privacy rules for executable
-                        // paths, so a private project/directory rule also
-                        // protects a generically named runtime such as node.
                         let zone = resolve_process_zone(&self.privacy, &name, exe_path.as_deref());
                         if zone == Zone::NeverObserve {
                             continue;
@@ -412,7 +622,7 @@ impl ProcessWatcher {
                         }
                     }
 
-                    let mut active: Vec<ProcessActivityEntry> = current
+                    let mut active_entries: Vec<ProcessActivityEntry> = current
                         .iter()
                         .filter(|(_, process)| process.significant)
                         .map(|(pid, process)| ProcessActivityEntry {
@@ -426,26 +636,60 @@ impl ProcessWatcher {
                             sensitivity: process.sensitivity,
                         })
                         .collect();
-                    active.sort_by(|a, b| {
+                    active_entries.sort_by(|a, b| {
                         b.cpu_percent
                             .total_cmp(&a.cpu_percent)
                             .then_with(|| b.memory_mb.cmp(&a.memory_mb))
                     });
-                    active.truncate(self.config.snapshot_limit.max(1));
-                    let snapshot = ProcessActivitySnapshot { version: 1, observed_at, active };
-                    match serde_json::to_vec_pretty(&snapshot)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|bytes| std::fs::write(&self.snapshot_path, bytes).map_err(anyhow::Error::from))
-                    {
+                    active_entries.truncate(self.config.snapshot_limit.max(1));
+                    let snapshot = ProcessActivitySnapshot {
+                        version: 1,
+                        observed_at,
+                        active: active_entries,
+                    };
+                    match write_process_snapshot(&self.snapshot_path, &snapshot) {
                         Ok(()) => {
                             let mut health = self.health.write();
-                            health.polls += 1;
+                            health.polls = health.polls.saturating_add(1);
                             health.last_poll_at = Some(observed_at);
                             health.active_processes = snapshot.active.len();
                             health.last_error = None;
+                            health.enabled = true;
+                            health.disabled_reason = None;
+                            if snapshot.active.is_empty() {
+                                health.state = OperationalState::Idle;
+                                health.reason_code = "no_relevant_activity".to_string();
+                                health.explanation = "Background activity is enabled and currently idle.".to_string();
+                            } else {
+                                health.state = OperationalState::Running;
+                                health.reason_code = "sampling".to_string();
+                                health.explanation = format!(
+                                    "Background activity is sampling {} relevant process(es).",
+                                    snapshot.active.len()
+                                );
+                            }
                         }
                         Err(error) => {
-                            self.health.write().last_error = Some(error.to_string());
+                            let permission = error
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+                            let mut health = self.health.write();
+                            health.last_error = Some("process snapshot publication failed".to_string());
+                            health.state = if permission {
+                                OperationalState::PermissionRequired
+                            } else {
+                                OperationalState::Degraded
+                            };
+                            health.reason_code = if permission {
+                                "state_directory_permission_required".to_string()
+                            } else {
+                                "snapshot_publish_failed".to_string()
+                            };
+                            health.explanation = if permission {
+                                "Background activity was sampled, but the local state directory is not writable.".to_string()
+                            } else {
+                                "Background activity was sampled, but its bounded snapshot could not be published.".to_string()
+                            };
                             warn!(
                                 layer = "senses",
                                 component = "process_watch",
@@ -458,12 +702,48 @@ impl ProcessWatcher {
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
+                        self.set_state(
+                            OperationalState::Stopping,
+                            "shutdown",
+                            "Background activity observation is stopping.",
+                            None,
+                        );
                         break;
                     }
                 }
             }
         }
+        let mut health = self.health.write();
+        health.current_instances = 0;
+        health.activated_at = None;
     }
+}
+
+fn write_process_snapshot(
+    path: &std::path::Path,
+    snapshot: &ProcessActivitySnapshot,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(snapshot)?;
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    std::fs::rename(&temp, path).or_else(|error| {
+        // Windows does not replace an existing destination with rename. The
+        // bounded snapshot is derived state, so remove-and-replace is safe;
+        // failure still remains visible as degraded/permission-required.
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            std::fs::rename(&temp, path)
+        } else {
+            Err(error)
+        }
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -492,6 +772,91 @@ mod tests {
             resolve_process_zone(&filter, "1password", None),
             Zone::NeverObserve
         );
+    }
+
+    async fn wait_until(mut check: impl FnMut() -> bool, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if check() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        check()
+    }
+
+    #[tokio::test]
+    async fn live_control_starts_stops_and_restarts_one_collector() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ProcessWatcherConfig {
+            enabled: false,
+            poll_secs: 1,
+            include_names: Vec::new(),
+            ..ProcessWatcherConfig::default()
+        };
+        let control = RuntimeServiceControl::default();
+        let watcher = ProcessWatcher::new(config, dir.path().to_path_buf())
+            .with_service_control(control.clone());
+        let health = watcher.health_handle();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move { watcher.run(shutdown_rx).await });
+
+        assert!(
+            wait_until(
+                || health.read().state == OperationalState::DisabledByUser,
+                Duration::from_secs(2),
+            )
+            .await
+        );
+        assert_eq!(health.read().polls, 0);
+
+        assert!(control.set(RuntimeServiceName::BackgroundActivity, true));
+        assert!(
+            wait_until(
+                || health.read().activation_count == 1 && health.read().polls > 0,
+                Duration::from_secs(4),
+            )
+            .await
+        );
+        assert_eq!(health.read().current_instances, 1);
+
+        control.request_restart(RuntimeServiceName::BackgroundActivity);
+        assert!(
+            wait_until(
+                || health.read().activation_count >= 2,
+                Duration::from_secs(2),
+            )
+            .await
+        );
+        assert_eq!(health.read().max_concurrent_instances, 1);
+
+        assert!(control.set(RuntimeServiceName::BackgroundActivity, false));
+        assert!(
+            wait_until(
+                || {
+                    let snapshot = health.read();
+                    snapshot.state == OperationalState::DisabledByUser
+                        && snapshot.current_instances == 0
+                },
+                Duration::from_secs(2),
+            )
+            .await
+        );
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn stale_enabled_collector_requests_verified_restart() {
+        let mut health = ProcessWatchHealth::default();
+        health.enabled = true;
+        health.state = OperationalState::Running;
+        health.activated_at = Some(Utc::now() - chrono::Duration::minutes(2));
+        assert!(health.should_restart(Utc::now(), Duration::from_secs(1)));
+        let diagnostic = health.diagnostic(Utc::now(), Duration::from_secs(1));
+        assert_eq!(diagnostic.reason_code, "collector_stalled");
+        assert!(diagnostic.repair.available);
     }
 
     #[tokio::test]

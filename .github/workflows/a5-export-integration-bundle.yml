@@ -1,0 +1,33 @@
+name: A5 temporary integration bundle
+
+on:
+  push:
+    branches:
+      - swarm/a5-health-and-watchers
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Bundle A5 and integration history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin swarm/agi-integration
+          git bundle create /tmp/a5-integration.bundle \
+            HEAD \
+            refs/remotes/origin/swarm/agi-integration
+      - name: Upload temporary bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: a5-integration-bundle
+          path: /tmp/a5-integration.bundle
+          retention-days: 1
+          if-no-files-found: error

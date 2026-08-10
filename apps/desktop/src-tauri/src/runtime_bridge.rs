@@ -159,6 +159,7 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
             snap.session_state.clone(),
             snap.context_engine.clone(),
             snap.context_page.clone(),
+            snap.operational_events.clone(),
         )
         .await;
     if let Some(mode) = snap.voice_mode.as_deref() {
@@ -267,6 +268,9 @@ mod tests {
     #[tokio::test]
     async fn applies_session_state_and_context_engine_from_runtime_snapshot() {
         use continuum_core::context::session_state::{SessionState, StampedText};
+        use continuum_core::operational_state::{
+            OperationalEvent, OperationalEventKind, OperationalState,
+        };
         use continuum_core::runtime_publish::{ComponentHealthSummary, ContextEngineSnapshot};
 
         let state = StateHandle::new();
@@ -290,9 +294,20 @@ mod tests {
                         enabled: false,
                         should_restart: false,
                         detail: Some("disabled by [file_watcher].enabled".into()),
+                        ..ComponentHealthSummary::default()
                     }),
                     ..ContextEngineSnapshot::default()
                 }),
+                operational_events: vec![OperationalEvent {
+                    sequence: 1,
+                    kind: OperationalEventKind::WatcherStateTransition,
+                    component: "file_watcher".into(),
+                    from: Some(OperationalState::Starting),
+                    to: OperationalState::Idle,
+                    reason_code: "awaiting_activity".into(),
+                    explanation: "File observation is ready and awaiting activity.".into(),
+                    ts: now,
+                }],
                 ..RuntimeSnapshot::default()
             },
             &state,
@@ -314,6 +329,11 @@ mod tests {
         let engine = applied.context.engine.expect("context engine applied");
         let file_watcher = engine.file_watcher.expect("file watcher summary");
         assert!(file_watcher.healthy && !file_watcher.enabled);
+        assert_eq!(applied.context.operational_events.len(), 1);
+        assert_eq!(
+            applied.context.operational_events[0].reason_code,
+            "awaiting_activity"
+        );
     }
 
     /// Task C5: the Context page's list data (projects, rules, pins, the
@@ -438,6 +458,7 @@ mod tests {
         assert!(applied.context.session.is_none());
         assert!(applied.context.engine.is_none());
         assert!(applied.context.page.is_none());
+        assert!(applied.context.operational_events.is_empty());
     }
 
     /// Task C1 end-to-end: the bytes the runtime publisher actually writes

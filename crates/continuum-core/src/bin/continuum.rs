@@ -47,6 +47,10 @@ use continuum_core::context::session_state::{
 };
 use continuum_core::curator;
 use continuum_core::guard::FallbackGuard;
+use continuum_core::health::runtime_repair::{
+    RuntimeRepairCoordinator, RuntimeRepairIntentDrainer, RuntimeRepairObservation,
+    RuntimeRepairTarget,
+};
 use continuum_core::memory::distill::run_memory_distiller;
 use continuum_core::memory::episodic::{EpisodicEvent, EpisodicStore, EventKind};
 use continuum_core::memory::events::{
@@ -56,12 +60,17 @@ use continuum_core::memory::events::{
 use continuum_core::memory::raw_log::{ContextEventRow, RawLog};
 use continuum_core::memory::retrieval::{filter_pending, retrieve_context, retrieve_vault_context};
 use continuum_core::memory::semantic::SemanticStore;
+use continuum_core::operational_state::{
+    ComponentDiagnostic, OperationalEventBuffer, OperationalEventKind, OperationalState,
+    RepairPolicyClass, RootCauseCategory,
+};
 use continuum_core::orchestrator::spawn::{
     wake_orchestrator, OrchestratorConfig, OrchestratorEvent,
 };
 use continuum_core::orchestrator::wake_context::{
     self as wake_context, build_wake_package, FrameRing, WakeContextInputs,
 };
+use continuum_core::runtime_control::{RuntimeServiceControl, RuntimeServiceName};
 use continuum_core::runtime_publish::{
     ComponentHealthSummary, ContextEngineSnapshot, ContextEventView, ContextPageSnapshot,
     ContinuationCandidateView, ObservationTogglesView, OverrideRuleView, ProjectSummaryView,
@@ -596,6 +605,14 @@ async fn main() -> Result<()> {
     // Watchers always spawn and park behind these atomics while paused, so
     // pause and resume both work live, including after a paused boot.
     let toggle_control = ToggleControl::new(&observation_toggles);
+    // Optional collectors use a separate live control plane. Privacy toggles
+    // remain the stricter gate and can always stop observation regardless of
+    // this requested service state.
+    let service_control = RuntimeServiceControl::new(
+        config.file_watcher.enabled,
+        config.process_watcher.enabled,
+        config.triage.evaluation_enabled,
+    );
     // --- Action audit log (Task C5, spec §4.13) ---
     // Append-only JSONL of wakes, toggle changes, corrections and
     // deletions at `<data_dir>/logs/actions.jsonl`.
@@ -751,6 +768,7 @@ async fn main() -> Result<()> {
         let file_watcher = FileWatcher::new(config.file_watcher.clone())
             .with_privacy(privacy_filter.clone(), observation_toggles.clone())
             .with_toggle_control(toggle_control.clone())
+            .with_service_control(service_control.clone())
             .with_projects_provider(projects_provider)
             .with_event_sender(event_sender.clone())
             .with_recent_file(recent_file_handle.clone());
@@ -767,6 +785,7 @@ async fn main() -> Result<()> {
         let process_watcher = ProcessWatcher::new(config.process_watcher.clone(), dev_dir.clone())
             .with_privacy(privacy_filter.clone())
             .with_toggle_control(toggle_control.clone())
+            .with_service_control(service_control.clone())
             .with_event_sender(event_sender.clone());
         process_watch_health = Some(process_watcher.health_handle());
         let process_shutdown = shutdown_rx.clone();
@@ -1020,9 +1039,12 @@ async fn main() -> Result<()> {
     // thread touches the coalescer itself; its cloneable health handle is
     // read by the publish closure below (C1 stuck detection), which is why
     // it is constructed here rather than next to the loop.
-    let triage_coalescer: TriageCoalescer<(PerceptionFrame, Option<CurrentProject>)> =
+    let triage_coalescer: TriageCoalescer<(u64, PerceptionFrame, Option<CurrentProject>)> =
         TriageCoalescer::new();
     let triage_busy_health = triage_coalescer.health();
+    // Shared bounded transition history for health, watcher and repair events.
+    // Repeated polls are deduplicated before publication.
+    let operational_events = OperationalEventBuffer::default();
 
     // --- Runtime state publisher ---
     //
@@ -1066,6 +1088,7 @@ async fn main() -> Result<()> {
                 context_engine: None,
                 session_state: None,
                 context_page: None,
+                operational_events: Vec::new(),
             },
         ));
     // Moshi S2S front-end (feature = "moshi"): now that `runtime_state` is in
@@ -1126,9 +1149,12 @@ async fn main() -> Result<()> {
         let health_process = process_watch_health.clone();
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
-        let triage_enabled = triage.is_some();
+        let health_services = service_control.clone();
+        let health_events = operational_events.clone();
+        let triage_model_loaded = triage.is_some();
         let screen_capture_configured = config.screen.enabled;
         let context_poll_interval = Duration::from_secs(config.context.poll_interval_secs.max(1));
+        let process_poll_interval = Duration::from_secs(config.process_watcher.poll_secs.max(1));
         // Task C1 (spec §4.8 consumers): publish the live session state on
         // every tick. Three consumers read this key straight out of
         // `state.json` — boot rehydration (B5), the desktop chat profile
@@ -1149,6 +1175,7 @@ async fn main() -> Result<()> {
                 session: session_state.clone(),
                 project_handle: project_handle.clone(),
                 toggles: toggle_control.clone(),
+                services: service_control.clone(),
                 privacy: privacy_filter.clone(),
                 continuation: config.continuation.clone(),
             };
@@ -1203,7 +1230,7 @@ async fn main() -> Result<()> {
                 snap.paused = Some(paused);
                 snap.session_state = Some(session_for_publisher.snapshot());
                 snap.context_page = Some(context_page_for_publisher.read().clone());
-                snap.context_engine = Some(build_context_engine_snapshot(
+                let context_engine = build_context_engine_snapshot(
                     &health_cadence,
                     &health_hub,
                     health_context.as_ref(),
@@ -1212,10 +1239,15 @@ async fn main() -> Result<()> {
                     health_process.as_ref(),
                     &health_writer,
                     &health_triage,
-                    triage_enabled,
+                    &health_services,
+                    triage_model_loaded,
                     screen_capture_configured && !paused,
                     context_poll_interval,
-                ));
+                    process_poll_interval,
+                );
+                observe_context_engine(&health_events, &context_engine);
+                snap.operational_events = health_events.recent();
+                snap.context_engine = Some(context_engine);
                 snap
             },
         );
@@ -1376,6 +1408,8 @@ async fn main() -> Result<()> {
     // dashboard→runtime filesystem messages, and neither may block the
     // loop: intent handlers touch SQLite/LanceDB/the vault, never the LLM.
     let mut context_intents = IntentDrainer::new();
+    let mut runtime_repair_intents = RuntimeRepairIntentDrainer::default();
+    let mut runtime_repair_coordinator = RuntimeRepairCoordinator::new(operational_events.clone());
     let mut project_pin_guard = ProjectPinGuard::new();
     if let Err(e) = context_intent::ensure_intents_dir(&dev_dir) {
         tracing::warn!(
@@ -1701,8 +1735,19 @@ async fn main() -> Result<()> {
                 // This arm never awaits the LLM.
                 let mut inline_decision: Option<TriageDecision> = None;
                 let mut submitted_for_triage = false;
+                let triage_requested =
+                    service_control.enabled(RuntimeServiceName::TriageEvaluation);
+                let triage_generation =
+                    service_control.restart_generation(RuntimeServiceName::TriageEvaluation);
                 if let Some(ref triage_layer) = triage {
-                    if skip_triage {
+                    if !triage_requested {
+                        tracing::trace!(
+                            layer = "triage",
+                            component = "continuum",
+                            frame_id = %frame.id,
+                            "Skipped triage — evaluation disabled by user"
+                        );
+                    } else if skip_triage {
                         tracing::trace!(
                             layer = "triage",
                             component = "continuum",
@@ -1712,10 +1757,15 @@ async fn main() -> Result<()> {
                         );
                         inline_decision = Some(TriageDecision::Ignore);
                     } else {
-                        match triage_coalescer.submit((frame.clone(), current_project.clone())) {
-                            Submitted::Evaluate((eval_frame, eval_project)) => {
+                        match triage_coalescer.submit((
+                            triage_generation,
+                            frame.clone(),
+                            current_project.clone(),
+                        )) {
+                            Submitted::Evaluate((eval_generation, eval_frame, eval_project)) => {
                                 spawn_triage_eval(
                                     triage_layer.clone(),
+                                    eval_generation,
                                     eval_frame,
                                     eval_project,
                                     session_state.clone(),
@@ -1724,7 +1774,7 @@ async fn main() -> Result<()> {
                                 );
                             }
                             Submitted::Coalesced { replaced } => {
-                                if let Some((old, _)) = replaced {
+                                if let Some((_, old, _)) = replaced {
                                     // The displaced frame will never produce
                                     // a triage result — drop any supersede
                                     // bookkeeping keyed on it.
@@ -1875,7 +1925,16 @@ async fn main() -> Result<()> {
                 // to the pre-B2 inline path — the frame's own log line
                 // prints, then the decision routes through the same
                 // handler the voice path uses.
-                let TriageEvalResult { frame_id, outcome } = eval;
+                let TriageEvalResult {
+                    frame_id,
+                    generation,
+                    outcome,
+                } = eval;
+                let current_generation = service_control
+                    .restart_generation(RuntimeServiceName::TriageEvaluation);
+                let current_enabled =
+                    service_control.enabled(RuntimeServiceName::TriageEvaluation);
+                let stale_generation = generation != current_generation || !current_enabled;
                 let Some(TriageEvalOutcome {
                     frame: eval_frame,
                     current_project: eval_project,
@@ -1899,13 +1958,24 @@ async fn main() -> Result<()> {
                         &triage_coalescer,
                         &mut voice_superseded,
                         triage.as_ref(),
+                        &service_control,
                         &session_state,
                         config.session_state.confidence_floor,
                         &triage_result_tx,
                     );
                     continue;
                 };
-                if let Some(pos) = voice_superseded.iter().position(|id| *id == eval_frame.id) {
+                if stale_generation {
+                    voice_superseded.retain(|id| *id != eval_frame.id);
+                    tracing::debug!(
+                        layer = "triage",
+                        component = "continuum",
+                        frame_id = %eval_frame.id,
+                        generation,
+                        current_generation,
+                        "Dropping triage result from an inactive runtime-service generation"
+                    );
+                } else if let Some(pos) = voice_superseded.iter().position(|id| *id == eval_frame.id) {
                     voice_superseded.remove(pos);
                     tracing::debug!(
                         layer = "triage",
@@ -1962,6 +2032,7 @@ async fn main() -> Result<()> {
                     &triage_coalescer,
                     &mut voice_superseded,
                     triage.as_ref(),
+                    &service_control,
                     &session_state,
                     config.session_state.confidence_floor,
                     &triage_result_tx,
@@ -2002,6 +2073,7 @@ async fn main() -> Result<()> {
                         session: &session_state,
                         resolver: &mut project_resolver,
                         toggles: &toggle_control,
+                        services: &service_control,
                         audit: &audit,
                         config_path: config_path.clone(),
                         screenshot_policy: ScreenshotPolicy::from(&config.storage),
@@ -2030,6 +2102,106 @@ async fn main() -> Result<()> {
                         }
                         let _ = apply_intent(&mut intent_ctx, intent).await;
                     }
+                }
+
+                // Authorized repair requests use the same bounded local-file
+                // transport, but have a separate capability validator and
+                // coordinator. Queueing a restart never becomes a success
+                // event: only the fresh observations below can verify it.
+                let repairs = runtime_repair_intents.drain(&dev_dir);
+                for rejected in repairs.rejected {
+                    operational_events.record(
+                        OperationalEventKind::RepairFailed,
+                        "runtime_repair",
+                        None,
+                        OperationalState::Unavailable,
+                        rejected.reason_code.clone(),
+                        rejected.explanation.clone(),
+                    );
+                    audit.record(
+                        "repair_rejected",
+                        Actor::Agent,
+                        rejected.explanation,
+                        Some(serde_json::json!({ "reason_code": rejected.reason_code })),
+                    );
+                }
+                for repair in repairs.accepted {
+                    match runtime_repair_observation(
+                        repair.target,
+                        file_watch_health.as_ref(),
+                        process_watch_health.as_ref(),
+                        Duration::from_secs(config.process_watcher.poll_secs.max(1)),
+                    ) {
+                        Some(before) => {
+                            let target = repair.target;
+                            if runtime_repair_coordinator.start(
+                                repair,
+                                &service_control,
+                                before,
+                            ) {
+                                audit.record(
+                                    "repair_started",
+                                    Actor::Agent,
+                                    format!(
+                                        "Authorized in-process restart started for {}",
+                                        target.as_str()
+                                    ),
+                                    Some(serde_json::json!({ "component": target.as_str() })),
+                                );
+                            }
+                        }
+                        None => {
+                            operational_events.record(
+                                OperationalEventKind::RepairFailed,
+                                repair.target.as_str(),
+                                None,
+                                OperationalState::Unavailable,
+                                "health_probe_unavailable",
+                                "The component did not expose a live health observation, so no restart was executed.",
+                            );
+                        }
+                    }
+                }
+
+                let repair_verifications = runtime_repair_coordinator.verify(
+                    Utc::now(),
+                    |target| {
+                        runtime_repair_observation(
+                            target,
+                            file_watch_health.as_ref(),
+                            process_watch_health.as_ref(),
+                            Duration::from_secs(config.process_watcher.poll_secs.max(1)),
+                        )
+                    },
+                );
+                for verification in repair_verifications {
+                    let success = verification.outcome
+                        == continuum_core::health::verified::VerifiedRepairOutcome::VerifiedSuccess;
+                    audit.record(
+                        "repair_verification",
+                        Actor::Agent,
+                        verification.explanation.clone(),
+                        Some(serde_json::json!({
+                            "component": verification.component.clone(),
+                            "outcome": verification.outcome,
+                            "before_state": verification.before.state,
+                            "after_state": verification.after.state,
+                            "requested_generation": verification.requested_generation,
+                            "success": success,
+                        })),
+                    );
+                    let _ = continuum_core::health::repair::append_repair_audit(
+                        &dev_dir,
+                        "runtime_verification",
+                        serde_json::json!({
+                            "component": verification.component,
+                            "outcome": verification.outcome,
+                            "before_state": verification.before.state,
+                            "after_state": verification.after.state,
+                            "requested_generation": verification.requested_generation,
+                            "verified_at": verification.verified_at,
+                        }),
+                    );
                 }
             }
             _ = main_shutdown.changed() => {
@@ -2816,6 +2988,7 @@ struct ContextPageSources {
     session: SessionStateHub,
     project_handle: CurrentProjectHandle,
     toggles: ToggleControl,
+    services: RuntimeServiceControl,
     privacy: Arc<PrivacyFilter>,
     continuation: ContinuationConfig,
 }
@@ -2954,6 +3127,7 @@ async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPag
         pins,
         recent_events,
         toggles: ObservationTogglesView::from(&sources.toggles.snapshot()),
+        services: sources.services.snapshot(),
         continuation,
     }
 }
@@ -2965,7 +3139,73 @@ async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPag
 /// folded into a uniform [`ComponentHealthSummary`]. Handles that are
 /// `None` (pause_all — no watcher ever spawned) report as
 /// disabled-with-reason, which is a healthy state (spec §7).
+fn component_summary(
+    diagnostic: ComponentDiagnostic,
+    should_restart: bool,
+    detail: Option<String>,
+) -> ComponentHealthSummary {
+    ComponentHealthSummary {
+        healthy: !diagnostic.state.faulted(),
+        enabled: diagnostic.state.enabled(),
+        should_restart,
+        detail,
+        state: diagnostic.state,
+        diagnostic: Some(diagnostic),
+    }
+}
+
+fn observe_context_engine(events: &OperationalEventBuffer, snapshot: &ContextEngineSnapshot) {
+    for summary in [
+        snapshot.context_watcher.as_ref(),
+        snapshot.live_context.as_ref(),
+        snapshot.git_watcher.as_ref(),
+        snapshot.file_watcher.as_ref(),
+        snapshot.process_watcher.as_ref(),
+        snapshot.events_writer.as_ref(),
+        snapshot.triage.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(diagnostic) = summary.diagnostic.as_ref() {
+            let kind = if matches!(
+                diagnostic.component.as_str(),
+                "context_watcher" | "git_watcher" | "file_watcher" | "process_watcher" | "triage"
+            ) {
+                OperationalEventKind::WatcherStateTransition
+            } else {
+                OperationalEventKind::HealthTransition
+            };
+            events.observe(kind, diagnostic);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
+fn runtime_repair_observation(
+    target: RuntimeRepairTarget,
+    file_watch: Option<&SharedFileWatchHealth>,
+    process_watch: Option<&SharedProcessWatchHealth>,
+    process_poll_interval: Duration,
+) -> Option<RuntimeRepairObservation> {
+    match target {
+        RuntimeRepairTarget::FileWatcher => file_watch.map(|handle| {
+            let health = handle.read().clone();
+            RuntimeRepairObservation {
+                diagnostic: health.diagnostic(),
+                activation_count: health.activation_count,
+            }
+        }),
+        RuntimeRepairTarget::ProcessWatcher => process_watch.map(|handle| {
+            let health = handle.read().clone();
+            RuntimeRepairObservation {
+                diagnostic: health.diagnostic(Utc::now(), process_poll_interval),
+                activation_count: health.activation_count,
+            }
+        }),
+    }
+}
+
 fn build_context_engine_snapshot(
     cadence: &CadenceControl,
     hub: &LiveContextHub,
@@ -2975,27 +3215,84 @@ fn build_context_engine_snapshot(
     process_watch: Option<&SharedProcessWatchHealth>,
     event_writer: &continuum_core::memory::events::EventWriterHandle,
     triage_busy: &TriageBusyHandle,
-    triage_enabled: bool,
+    services: &RuntimeServiceControl,
+    triage_model_loaded: bool,
     screen_capture_enabled: bool,
     context_poll_interval: Duration,
+    process_poll_interval: Duration,
 ) -> ContextEngineSnapshot {
     let now = chrono::Utc::now();
 
-    let not_running = || ComponentHealthSummary {
-        healthy: true,
-        enabled: false,
-        should_restart: false,
-        detail: Some("not running (pause_all set in [privacy.toggles])".to_string()),
+    let not_running = |component: &str, capability: &str| {
+        component_summary(
+            ComponentDiagnostic::new(
+                component,
+                capability,
+                OperationalState::DisabledByPolicy,
+                "observation_paused",
+                "The component is parked while all observation is paused.",
+                RootCauseCategory::Policy,
+                false,
+            )
+            .with_evidence("runtime_state", "privacy.pause_all"),
+            false,
+            Some("not running (pause_all set in [privacy.toggles])".to_string()),
+        )
     };
 
     let context_watcher = context_watch
         .map(|handle| {
             let health = handle.read().clone();
-            ComponentHealthSummary {
-                healthy: health.is_healthy(now, context_poll_interval),
-                enabled: health.enabled,
-                should_restart: health.should_restart(now, context_poll_interval),
-                detail: health.disabled_reason.clone().or_else(|| {
+            let stalled = health.should_restart(now, context_poll_interval);
+            let (state, reason, explanation, cause) = if !health.enabled {
+                (
+                    OperationalState::DisabledByPolicy,
+                    "disabled_by_policy",
+                    "Foreground context observation is disabled by policy.",
+                    RootCauseCategory::Policy,
+                )
+            } else if stalled {
+                (
+                    OperationalState::Failed,
+                    "collector_stalled",
+                    "Foreground context observation stopped producing fresh samples.",
+                    RootCauseCategory::Internal,
+                )
+            } else if health.last_poll_at.is_none() {
+                (
+                    OperationalState::Starting,
+                    "starting",
+                    "Foreground context observation is waiting for its first sample.",
+                    RootCauseCategory::Unknown,
+                )
+            } else {
+                (
+                    OperationalState::Running,
+                    "polling",
+                    "Foreground context observation is producing fresh samples.",
+                    RootCauseCategory::Unknown,
+                )
+            };
+            let mut diagnostic = ComponentDiagnostic::new(
+                "context_watcher",
+                "foreground_application_context",
+                state,
+                reason,
+                explanation,
+                cause,
+                stalled,
+            )
+            .with_evidence("runtime_state", "context_engine.context_watcher")
+            .with_evidence("metric", "context_watcher.last_poll_at");
+            if stalled {
+                diagnostic = diagnostic
+                    .with_action("Restart the Continuum runtime and verify a fresh context sample.")
+                    .with_repair(RepairPolicyClass::ManualOnly, false, None);
+            }
+            component_summary(
+                diagnostic,
+                stalled,
+                health.disabled_reason.clone().or_else(|| {
                     Some(format!(
                         "polls={} last_poll_at={}",
                         health.polls,
@@ -3005,19 +3302,63 @@ fn build_context_engine_snapshot(
                             .unwrap_or_else(|| "never".to_string()),
                     ))
                 }),
-            }
+            )
         })
-        .unwrap_or_else(not_running);
+        .unwrap_or_else(|| not_running("context_watcher", "foreground_application_context"));
 
     let live_context = {
         let health = hub.health();
         let interval = Duration::from_millis(cadence.capture_interval_ms().max(50));
-        let should_restart = health.should_restart(now, screen_capture_enabled, interval);
-        ComponentHealthSummary {
-            healthy: !should_restart,
-            enabled: screen_capture_enabled,
-            should_restart,
-            detail: Some(format!(
+        let stalled = health.should_restart(now, screen_capture_enabled, interval);
+        let (state, reason, explanation, cause) = if !screen_capture_enabled {
+            (
+                OperationalState::DisabledByPolicy,
+                "screen_capture_disabled",
+                "Screen context capture is disabled by configuration or privacy policy.",
+                RootCauseCategory::Policy,
+            )
+        } else if stalled {
+            (
+                OperationalState::Failed,
+                "capture_stalled",
+                "Screen context capture stopped producing fresh frames.",
+                RootCauseCategory::Internal,
+            )
+        } else if health.last_capture_at.is_none() {
+            (
+                OperationalState::Starting,
+                "starting",
+                "Screen context capture is waiting for its first frame.",
+                RootCauseCategory::Unknown,
+            )
+        } else {
+            (
+                OperationalState::Running,
+                "capturing",
+                "Screen context capture is producing fresh frames.",
+                RootCauseCategory::Unknown,
+            )
+        };
+        let mut diagnostic = ComponentDiagnostic::new(
+            "live_context",
+            "current_visual_context",
+            state,
+            reason,
+            explanation,
+            cause,
+            stalled,
+        )
+        .with_evidence("runtime_state", "context_engine.live_context")
+        .with_evidence("metric", "live_context.last_capture_at");
+        if stalled {
+            diagnostic = diagnostic
+                .with_action("Restart visual capture and verify a fresh frame timestamp.")
+                .with_repair(RepairPolicyClass::ManualOnly, false, None);
+        }
+        component_summary(
+            diagnostic,
+            stalled,
+            Some(format!(
                 "captures={} vision_updates={} dropped={} failures={} last_capture_at={}",
                 health.capture_events,
                 health.vision_updates,
@@ -3028,19 +3369,47 @@ fn build_context_engine_snapshot(
                     .map(|ts| ts.to_rfc3339())
                     .unwrap_or_else(|| "never".to_string()),
             )),
-        }
+        )
     };
 
     let git_watcher = git_watch
         .map(|handle| {
             let health = handle.read().clone();
-            ComponentHealthSummary {
-                // Spec §4.4: disabled-with-reason and probe failures are
-                // healthy states; a restart can never fix a missing git.
-                healthy: true,
-                enabled: health.enabled,
-                should_restart: false,
-                detail: health.disabled_reason.clone().or_else(|| {
+            let (state, reason, explanation, cause) = if !health.enabled {
+                (
+                    OperationalState::DisabledByPolicy,
+                    "disabled_by_policy",
+                    "Git activity observation is not active for the current context.",
+                    RootCauseCategory::Policy,
+                )
+            } else if health.consecutive_failures > 0 {
+                (
+                    OperationalState::Degraded,
+                    "probe_failed",
+                    "Git activity observation is active, but recent repository probes failed.",
+                    RootCauseCategory::Dependency,
+                )
+            } else {
+                (
+                    OperationalState::Running,
+                    "probing",
+                    "Git activity observation is probing the active confirmed project.",
+                    RootCauseCategory::Unknown,
+                )
+            };
+            component_summary(
+                ComponentDiagnostic::new(
+                    "git_watcher",
+                    "project_git_activity",
+                    state,
+                    reason,
+                    explanation,
+                    cause,
+                    false,
+                )
+                .with_evidence("runtime_state", "context_engine.git_watcher"),
+                false,
+                health.disabled_reason.clone().or_else(|| {
                     Some(format!(
                         "probes={} consecutive_failures={} events={} last_probe_at={}",
                         health.probes,
@@ -3052,40 +3421,42 @@ fn build_context_engine_snapshot(
                             .unwrap_or_else(|| "never".to_string()),
                     ))
                 }),
-            }
+            )
         })
-        .unwrap_or_else(not_running);
+        .unwrap_or_else(|| not_running("git_watcher", "project_git_activity"));
 
     let file_watcher = file_watch
         .map(|handle| {
             let health = handle.read().clone();
-            ComponentHealthSummary {
-                // Spec §4.5: per-root unavailability rearms on backoff
-                // and stays healthy; only notify channel death is a
-                // genuine break (and the ONLY restart state).
-                healthy: !health.channel_dead,
-                enabled: health.enabled,
-                should_restart: health.channel_dead,
-                detail: health.disabled_reason.clone().or_else(|| {
+            let diagnostic = health.diagnostic();
+            let should_restart = diagnostic.repair.available
+                && diagnostic.repair.class == RepairPolicyClass::AutomaticallySafe;
+            component_summary(
+                diagnostic,
+                should_restart,
+                health.disabled_reason.clone().or_else(|| {
                     Some(format!(
-                        "roots_active={} roots_unavailable={} events={}",
+                        "roots_active={} roots_unavailable={} events={} instances={}",
                         health.roots_active,
                         health.roots_unavailable.len(),
                         health.events_emitted,
+                        health.current_instances,
                     ))
                 }),
-            }
+            )
         })
-        .unwrap_or_else(not_running);
+        .unwrap_or_else(|| not_running("file_watcher", "project_scoped_file_activity"));
 
     let process_watcher = process_watch
         .map(|handle| {
             let health = handle.read().clone();
-            ComponentHealthSummary {
-                healthy: !health.enabled || health.last_error.is_none(),
-                enabled: health.enabled,
-                should_restart: false,
-                detail: health
+            let diagnostic = health.diagnostic(now, process_poll_interval);
+            let should_restart = diagnostic.repair.available
+                && diagnostic.repair.class == RepairPolicyClass::AutomaticallySafe;
+            component_summary(
+                diagnostic,
+                should_restart,
+                health
                     .disabled_reason
                     .clone()
                     .or_else(|| health.last_error.clone())
@@ -3101,15 +3472,47 @@ fn build_context_engine_snapshot(
                                 .unwrap_or_else(|| "never".to_string()),
                         ))
                     }),
-            }
+            )
         })
-        .unwrap_or_else(not_running);
+        .unwrap_or_else(|| not_running("process_watcher", "bounded_background_activity"));
 
-    let events_writer = ComponentHealthSummary {
-        healthy: event_writer.is_healthy(),
-        enabled: true,
-        should_restart: event_writer.should_restart(),
-        detail: Some(format!(
+    let writer_failed = event_writer.should_restart();
+    let mut writer_diagnostic = ComponentDiagnostic::new(
+        "events_writer",
+        "durable_activity_events",
+        if writer_failed {
+            OperationalState::Failed
+        } else {
+            OperationalState::Running
+        },
+        if writer_failed {
+            "writer_stopped"
+        } else {
+            "writing"
+        },
+        if writer_failed {
+            "The activity-event writer stopped unexpectedly."
+        } else {
+            "The activity-event writer is accepting and flushing bounded batches."
+        },
+        if writer_failed {
+            RootCauseCategory::Internal
+        } else {
+            RootCauseCategory::Unknown
+        },
+        writer_failed,
+    )
+    .with_evidence("runtime_state", "context_engine.events_writer")
+    .with_evidence("metric", "events_writer.queue_depth");
+    if writer_failed {
+        writer_diagnostic = writer_diagnostic
+            .with_action("Restart the Continuum runtime and verify that event rows flush again.")
+            .with_repair(RepairPolicyClass::ManualOnly, false, None);
+    }
+    let events_writer = component_summary(
+        writer_diagnostic,
+        writer_failed,
+        Some(format!(
             "queue_depth={} rows_written={} last_flush_at={}",
             event_writer.queue_depth(),
             event_writer.rows_written(),
@@ -3118,31 +3521,84 @@ fn build_context_engine_snapshot(
                 .map(|ts| ts.to_rfc3339())
                 .unwrap_or_else(|| "never".to_string()),
         )),
-    };
+    );
 
-    // C1: the coalescer's busy flag is claimed by the frame arm and
-    // released by the result arm. If an evaluation ever fails to report
-    // (the drop guard is the first line of defence), every later frame is
-    // parked silently — so the busy-since clock is a health surface: an
-    // evaluation "in flight" for a minute means triage is wedged and a
-    // restart is the only cure.
-    let triage = {
-        let stuck = triage_busy.is_stuck(now, chrono::Duration::seconds(TRIAGE_STUCK_SECS));
-        ComponentHealthSummary {
-            healthy: !stuck,
-            enabled: triage_enabled,
-            should_restart: stuck,
-            detail: Some(match triage_busy.busy_since() {
-                Some(since) if stuck => format!(
-                    "evaluation stuck since {} ({}s)",
-                    since.to_rfc3339(),
-                    (now - since).num_seconds()
-                ),
-                Some(since) => format!("evaluating since {}", since.to_rfc3339()),
-                None => "idle".to_string(),
-            }),
-        }
+    let triage_requested = services.enabled(RuntimeServiceName::TriageEvaluation);
+    let triage_stuck = triage_requested
+        && triage_model_loaded
+        && triage_busy.is_stuck(now, chrono::Duration::seconds(TRIAGE_STUCK_SECS));
+    let triage_busy_since = triage_busy.busy_since();
+    let (triage_state, triage_reason, triage_explanation, triage_cause) = if !triage_requested {
+        (
+            OperationalState::DisabledByUser,
+            "disabled_by_user",
+            "Triage evaluation is turned off. Voice and explicit user commands remain available.",
+            RootCauseCategory::UserChoice,
+        )
+    } else if !triage_model_loaded {
+        (
+            OperationalState::Unavailable,
+            "model_missing_or_unavailable",
+            "Triage evaluation cannot start because its configured local model is unavailable.",
+            RootCauseCategory::Dependency,
+        )
+    } else if triage_stuck {
+        (
+            OperationalState::Failed,
+            "evaluation_stuck",
+            "A triage evaluation exceeded the bounded health threshold and did not report back.",
+            RootCauseCategory::Internal,
+        )
+    } else if triage_busy_since.is_some() {
+        (
+            OperationalState::Running,
+            "evaluating",
+            "Triage evaluation is processing a salient frame.",
+            RootCauseCategory::Unknown,
+        )
+    } else {
+        (
+            OperationalState::Idle,
+            "idle",
+            "Triage evaluation is enabled and waiting for a salient frame.",
+            RootCauseCategory::Unknown,
+        )
     };
+    let mut triage_diagnostic = ComponentDiagnostic::new(
+        "triage",
+        "salience_evaluation_and_orchestrator_wake",
+        triage_state,
+        triage_reason,
+        triage_explanation,
+        triage_cause,
+        triage_stuck,
+    )
+    .with_evidence("runtime_state", "context_engine.triage")
+    .with_evidence("metric", "triage.busy_since");
+    if triage_stuck {
+        triage_diagnostic = triage_diagnostic
+            .with_action("Restart the Continuum runtime; in-flight local model work cannot be safely killed in place.")
+            .with_repair(RepairPolicyClass::ManualOnly, false, None);
+    } else if !triage_model_loaded && triage_requested {
+        triage_diagnostic = triage_diagnostic
+            .with_action("Restore the configured triage model, then reload Continuum.")
+            .with_repair(RepairPolicyClass::RequiresUserApproval, false, None);
+    }
+    let triage = component_summary(
+        triage_diagnostic,
+        false,
+        Some(match triage_busy_since {
+            Some(since) if triage_stuck => format!(
+                "evaluation stuck since {} ({}s)",
+                since.to_rfc3339(),
+                (now - since).num_seconds()
+            ),
+            Some(since) => format!("evaluating since {}", since.to_rfc3339()),
+            None if !triage_requested => "disabled by user".to_string(),
+            None if !triage_model_loaded => "model unavailable".to_string(),
+            None => "idle".to_string(),
+        }),
+    );
 
     ContextEngineSnapshot {
         idle: cadence.is_idle(),
@@ -3218,6 +3674,9 @@ struct TriageEvalResult {
     /// The frame the evaluation was for — always present, so the result
     /// arm can clean up its supersede bookkeeping either way.
     frame_id: uuid::Uuid,
+    /// Runtime-service generation captured at submission. Results from older
+    /// generations are discarded after a stop/restart transition.
+    generation: u64,
     outcome: Option<TriageEvalOutcome>,
 }
 
@@ -3245,6 +3704,7 @@ struct TriageEvalOutcome {
 /// so this render is deliberately NOT the `cloud_view`.
 fn spawn_triage_eval(
     triage_layer: TriageLayer,
+    generation: u64,
     frame: PerceptionFrame,
     current_project: Option<CurrentProject>,
     session_state: SessionStateHub,
@@ -3270,6 +3730,7 @@ fn spawn_triage_eval(
                 );
                 let _ = tx.send(TriageEvalResult {
                     frame_id,
+                    generation,
                     outcome: None,
                 });
             })
@@ -3285,6 +3746,7 @@ fn spawn_triage_eval(
         guard.disarm();
         let _ = tx.send(TriageEvalResult {
             frame_id,
+            generation,
             outcome: Some(TriageEvalOutcome {
                 frame,
                 current_project,
@@ -3304,14 +3766,17 @@ fn spawn_triage_eval(
 /// superseded while they waited are skipped rather than evaluated (no
 /// point burning a GPU pass on a result we would drop).
 fn chain_next_triage_eval(
-    coalescer: &TriageCoalescer<(PerceptionFrame, Option<CurrentProject>)>,
+    coalescer: &TriageCoalescer<(u64, PerceptionFrame, Option<CurrentProject>)>,
     voice_superseded: &mut Vec<uuid::Uuid>,
     triage: Option<&TriageLayer>,
+    services: &RuntimeServiceControl,
     session_state: &SessionStateHub,
     confidence_floor: f32,
     tx: &mpsc::UnboundedSender<TriageEvalResult>,
 ) {
-    while let Some((next_frame, next_project)) = coalescer.complete() {
+    let current_generation = services.restart_generation(RuntimeServiceName::TriageEvaluation);
+    let enabled = services.enabled(RuntimeServiceName::TriageEvaluation);
+    while let Some((generation, next_frame, next_project)) = coalescer.complete() {
         if let Some(pos) = voice_superseded.iter().position(|id| *id == next_frame.id) {
             voice_superseded.remove(pos);
             tracing::debug!(
@@ -3322,9 +3787,21 @@ fn chain_next_triage_eval(
             );
             continue;
         }
+        if !enabled || generation != current_generation {
+            tracing::debug!(
+                layer = "triage",
+                component = "continuum",
+                frame_id = %next_frame.id,
+                generation,
+                current_generation,
+                "Discarding parked frame from an inactive triage generation"
+            );
+            continue;
+        }
         if let Some(triage_layer) = triage {
             spawn_triage_eval(
                 triage_layer.clone(),
+                generation,
                 next_frame,
                 next_project,
                 session_state.clone(),
