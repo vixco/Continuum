@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use continuum_memory::{NodeStatus, NodeType, NoteDraft, Source, Vault};
+use continuum_vision::perception::Sensitivity as PerceptionSensitivity;
 
 use crate::config::CandidateTtlDays;
 use crate::context::project::CurrentProject;
@@ -276,6 +277,19 @@ pub fn frame_zone(
     strictest([window_zone, project_zone.unwrap_or_default()])
 }
 
+/// Total bridge from A2's three-state observation sensitivity to the
+/// two-state persisted event vocabulary. `never_observe` returns `None`
+/// because such an event row is forbidden by construction.
+pub fn event_sensitivity_from_perception(
+    sensitivity: PerceptionSensitivity,
+) -> Option<EventSensitivity> {
+    match sensitivity {
+        PerceptionSensitivity::CloudAllowed => Some(EventSensitivity::CloudAllowed),
+        PerceptionSensitivity::LocalOnly => Some(EventSensitivity::LocalOnly),
+        PerceptionSensitivity::NeverObserve => None,
+    }
+}
+
 /// Truncates a summary into a vault title: char-boundary safe, trimmed,
 /// with an ellipsis when it was cut (so a reviewer can tell).
 fn title_from_summary(summary: &str) -> String {
@@ -365,10 +379,13 @@ pub fn plan_consumption(
         };
     }
 
-    let sensitivity = match zone {
-        Zone::LocalOnly => EventSensitivity::LocalOnly,
-        _ => EventSensitivity::CloudAllowed,
+    let observation_sensitivity = match zone {
+        Zone::CloudAllowed => PerceptionSensitivity::CloudAllowed,
+        Zone::LocalOnly => PerceptionSensitivity::LocalOnly,
+        Zone::NeverObserve => PerceptionSensitivity::NeverObserve,
     };
+    let sensitivity = event_sensitivity_from_perception(observation_sensitivity)
+        .expect("never_observe returned before event construction");
     let resolver_project = current_project.map(|p| p.id.clone());
     let project_id = resolve_project(classification, policy.known_projects, resolver_project);
 
@@ -804,6 +821,22 @@ mod tests {
     }
 
     // -- mapping table (spec §4.7) --
+
+    #[test]
+    fn perception_event_sensitivity_bridge_is_total() {
+        assert_eq!(
+            event_sensitivity_from_perception(PerceptionSensitivity::CloudAllowed),
+            Some(EventSensitivity::CloudAllowed)
+        );
+        assert_eq!(
+            event_sensitivity_from_perception(PerceptionSensitivity::LocalOnly),
+            Some(EventSensitivity::LocalOnly)
+        );
+        assert_eq!(
+            event_sensitivity_from_perception(PerceptionSensitivity::NeverObserve),
+            None
+        );
+    }
 
     #[test]
     fn mapping_table_is_exhaustive_over_the_registry() {

@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use continuum_vision::perception::{ChangeGate, FrameFingerprint, ObservationKey};
+use continuum_vision::perception::{ObservationKey, PrivacyGatedFrameGate, Sensitivity};
 use image::{Rgba, RgbaImage};
 
 fn frame(iteration: u64) -> RgbaImage {
@@ -25,26 +25,31 @@ fn frame(iteration: u64) -> RgbaImage {
 fn main() {
     const ITERATIONS: u64 = 2_000;
     let key = ObservationKey::display("synthetic-display-1");
-    let mut gate = ChangeGate::new(0.05, Duration::from_secs(30));
+    let mut gate = PrivacyGatedFrameGate::new(0.05, Duration::from_secs(30));
     let clock = Instant::now();
     let started = Instant::now();
     let mut semantic_requests = 0u64;
 
     for iteration in 0..ITERATIONS {
         let image = frame(iteration);
-        let fingerprint = FrameFingerprint::from_rgba(&image);
-        let decision = gate.evaluate_at(
-            key.clone(),
-            fingerprint,
-            clock + Duration::from_millis(iteration * 20),
-        );
-        semantic_requests += u64::from(decision.should_encode);
+        let evaluation = gate
+            .evaluate_rgba_at(
+                Sensitivity::CloudAllowed,
+                key.clone(),
+                &image,
+                clock + Duration::from_millis(iteration * 20),
+            )
+            .expect("synthetic cloud-allowed frame should be admitted");
+        semantic_requests += u64::from(evaluation.decision().should_encode);
     }
 
     let elapsed = started.elapsed();
     println!("synthetic frames: {ITERATIONS}");
     println!("semantic requests: {semantic_requests}");
-    println!("semantic skip rate: {:.2}%", 100.0 * (1.0 - semantic_requests as f64 / ITERATIONS as f64));
+    println!(
+        "semantic skip rate: {:.2}%",
+        100.0 * (1.0 - semantic_requests as f64 / ITERATIONS as f64)
+    );
     println!("fingerprint+gate total: {elapsed:?}");
     println!("average per frame: {:?}", elapsed / ITERATIONS as u32);
 }

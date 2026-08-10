@@ -19,6 +19,12 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 use xcap::Monitor;
 
+use continuum_vision::perception::{
+    AmbientObservation, GateReason, ObservationKey, PerceptionHealth, PerceptionMetrics,
+    PrivacyGatedFrameGate, RetentionClass, Sensitivity as PerceptionSensitivity,
+    OBSERVATION_SCHEMA_VERSION,
+};
+
 use crate::config::{ContextConfig, ObservationToggles, PrivacyConfig, ScreenConfig};
 use crate::senses::cadence::CadenceControl;
 use crate::senses::live_context::{
@@ -383,6 +389,11 @@ impl VisionWatcher {
             shutdown.clone(),
         ));
         let mut cache: HashMap<String, VisionCache> = HashMap::new();
+        let mut perception_gate = PrivacyGatedFrameGate::new(
+            self.config.meaningful_change_threshold,
+            Duration::from_millis(self.config.vision_min_interval_ms.max(100)),
+        );
+        let mut perception_metrics = PerceptionMetrics::default();
 
         loop {
             tokio::select! {
@@ -390,7 +401,14 @@ impl VisionWatcher {
                     if tx.is_closed() {
                         break;
                     }
-                    self.process_capture(packet, &tx, &mut cache).await;
+                    self.process_capture(
+                        packet,
+                        &tx,
+                        &mut cache,
+                        &mut perception_gate,
+                        &mut perception_metrics,
+                    )
+                    .await;
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -414,6 +432,8 @@ impl VisionWatcher {
         buffered: Buffered<CapturePacket>,
         tx: &mpsc::Sender<ScreenObservation>,
         cache: &mut HashMap<String, VisionCache>,
+        perception_gate: &mut PrivacyGatedFrameGate,
+        perception_metrics: &mut PerceptionMetrics,
     ) {
         tracing::trace!(
             layer = "senses",
@@ -433,6 +453,46 @@ impl VisionWatcher {
         // make processing stricter, but never less strict for this bitmap.
         let current_privacy = self.live_context.monitor_privacy(&packet.target.id);
         let privacy = strictest_disposition(packet.privacy, current_privacy);
+        perception_metrics.frames_captured = perception_metrics.frames_captured.saturating_add(1);
+        perception_metrics.buffered_frames_dropped = perception_metrics
+            .buffered_frames_dropped
+            .saturating_add(buffered.dropped_before);
+        perception_metrics.last_capture_latency_us =
+            packet.capture_latency_ms.saturating_mul(1_000);
+
+        // The xcap worker already applied the cheapest 64x36 luma gate. Only
+        // packets that survived that stage can carry a bitmap here. Resolve
+        // privacy *before* any stronger fingerprint: `never_observe` returns
+        // None without hashing or touching the semantic gate.
+        let perception_sensitivity = perception_sensitivity(privacy);
+        let change_started = Instant::now();
+        let frame_evaluation = packet.image.as_ref().and_then(|image| {
+            perception_gate.evaluate_rgba_at(
+                perception_sensitivity,
+                ObservationKey::display(packet.target.id.clone()),
+                image,
+                Instant::now(),
+            )
+        });
+        perception_metrics.last_change_detection_latency_us =
+            duration_micros_u64(change_started.elapsed());
+        if let Some(evaluation) = frame_evaluation.as_ref() {
+            match evaluation.decision().reason {
+                GateReason::ExactDuplicate => {
+                    perception_metrics.exact_duplicates_discarded = perception_metrics
+                        .exact_duplicates_discarded
+                        .saturating_add(1);
+                }
+                GateReason::BelowThreshold => {
+                    perception_metrics.low_change_discarded =
+                        perception_metrics.low_change_discarded.saturating_add(1);
+                }
+                GateReason::FirstObservation
+                | GateReason::MeaningfulChange
+                | GateReason::FallbackSample => {}
+            }
+        }
+        perception_metrics.gate_state_evictions = perception_gate.evicted_keys();
         let monitor_cache = cache.entry(packet.target.id.clone()).or_default();
         // Vision minimum interval is read per packet from the shared
         // cadence (spec §3 sanctioned pattern): the idle controller may
@@ -465,9 +525,13 @@ impl VisionWatcher {
         let should_describe = privacy == PrivacyDisposition::Visible
             && packet.meaningful_change
             && packet.image.is_some()
+            && frame_evaluation
+                .as_ref()
+                .is_some_and(|evaluation| evaluation.decision().should_encode)
             && inference_due;
         let mut screenshot_path = None;
         let mut vision_updated = false;
+        let mut perception_health = PerceptionHealth::Observing;
 
         if privacy == PrivacyDisposition::Excluded {
             // Sentinel semantics (spec §4.1): a never_observe monitor gets
@@ -501,6 +565,9 @@ impl VisionWatcher {
                 }
             }
             monitor_cache.last_inference = Some(Instant::now());
+            perception_metrics.semantic_inferences =
+                perception_metrics.semantic_inferences.saturating_add(1);
+            let inference_started = Instant::now();
             match self.vision_model.describe(&image).await {
                 Ok(output) => {
                     // Caption is free text: scrub at collector emit
@@ -514,14 +581,21 @@ impl VisionWatcher {
                     monitor_cache.updated_at = Some(Utc::now());
                     vision_updated = true;
                 }
-                Err(error) => tracing::warn!(
-                    layer = "senses",
-                    component = "vision",
-                    monitor_id = %packet.target.id,
-                    error = %error,
-                    "Local vision inference failed; capture continues"
-                ),
+                Err(error) => {
+                    perception_health = PerceptionHealth::EncoderUnavailable {
+                        reason: "local vision inference failed; capture continues".into(),
+                    };
+                    tracing::warn!(
+                        layer = "senses",
+                        component = "vision",
+                        monitor_id = %packet.target.id,
+                        error = %error,
+                        "Local vision inference failed; capture continues"
+                    );
+                }
             }
+            perception_metrics.last_inference_latency_us =
+                duration_micros_u64(inference_started.elapsed());
         }
 
         // Re-check at publication time (monotonic tightening — the zone may
@@ -560,14 +634,59 @@ impl VisionWatcher {
             vision_updated,
         );
 
+        let ambient_observation = if publication_privacy == PrivacyDisposition::Excluded {
+            None
+        } else {
+            frame_evaluation.as_ref().map(|evaluation| {
+                let fingerprint = evaluation.fingerprint();
+                AmbientObservation {
+                    schema_version: OBSERVATION_SCHEMA_VERSION,
+                    observation_id: format!(
+                        "screen:{}:{}:{}",
+                        packet.target.id,
+                        packet.captured_at.timestamp_millis(),
+                        packet.capture_sequence
+                    ),
+                    timestamp_unix_ms: packet.captured_at.timestamp_millis(),
+                    key: ObservationKey::display(packet.target.id.clone()),
+                    content_digest: *fingerprint.content_digest(),
+                    frame_width: fingerprint.width(),
+                    frame_height: fingerprint.height(),
+                    pixel_format: fingerprint.pixel_format(),
+                    change_score: evaluation.decision().change_score,
+                    semantic_summary: vision_updated.then(|| caption.clone()),
+                    embedding_ref: None,
+                    confidence: if vision_updated {
+                        monitor_cache.confidence
+                    } else {
+                        0.0
+                    },
+                    source: "screen:xcap".into(),
+                    sensitivity: perception_sensitivity(publication_privacy),
+                    retention: RetentionClass::RecentHistory,
+                    semantic_processed: vision_updated,
+                }
+            })
+        };
+
         let snapshot = self.live_context.snapshot();
+        let mut world_compact = snapshot.compact_for_agents(1_400);
+        if let Some(ambient) = ambient_observation.as_ref() {
+            world_compact.push('\n');
+            world_compact.push_str(&ambient.compact_evidence_line());
+        }
+        world_compact.push('\n');
+        world_compact.push_str(&perception_runtime_line(
+            &perception_health,
+            perception_metrics,
+        ));
+
         let observation = ScreenObservation {
-            // Caption only (spec §4.10). The compact world-state blob used
-            // to live here, which put ~1.4 kB of monitor/window/project
-            // text into every triage prompt; it now rides `world_compact`
-            // and is consumed by the context packager instead.
+            // Caption only (spec §4.10). Compact ambient evidence rides the
+            // existing world/context channel and therefore reaches raw-frame
+            // provenance without adding pixels or text to triage prompts.
             description: caption,
-            world_compact: Some(snapshot.compact_for_agents(1_400)),
+            world_compact: Some(world_compact),
             foreground_app: String::new(),
             has_error_visible: snapshot.monitors.iter().any(|monitor| {
                 cache
@@ -582,6 +701,11 @@ impl VisionWatcher {
             screenshot_path,
             ts: packet.captured_at,
         };
+        perception_metrics.last_observation_emit_latency_us = Utc::now()
+            .signed_duration_since(packet.captured_at)
+            .num_microseconds()
+            .unwrap_or(i64::MAX)
+            .max(0) as u64;
         match tx.try_send(observation) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => self.live_context.record_output_drop(1),
@@ -878,6 +1002,33 @@ fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorDescriptor>> {
     Ok(targets)
 }
 
+fn perception_sensitivity(privacy: PrivacyDisposition) -> PerceptionSensitivity {
+    match privacy {
+        PrivacyDisposition::Visible => PerceptionSensitivity::CloudAllowed,
+        PrivacyDisposition::Redacted => PerceptionSensitivity::LocalOnly,
+        PrivacyDisposition::Excluded => PerceptionSensitivity::NeverObserve,
+    }
+}
+
+fn duration_micros_u64(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn perception_runtime_line(health: &PerceptionHealth, metrics: &PerceptionMetrics) -> String {
+    format!(
+        "[perception] health={health:?} captured={} exact_dedup={} low_change={} semantic_inferences={} gate_evictions={} capture_us={} change_us={} inference_us={} emit_us={}",
+        metrics.frames_captured,
+        metrics.exact_duplicates_discarded,
+        metrics.low_change_discarded,
+        metrics.semantic_inferences,
+        metrics.gate_state_evictions,
+        metrics.last_capture_latency_us,
+        metrics.last_change_detection_latency_us,
+        metrics.last_inference_latency_us,
+        metrics.last_observation_emit_latency_us
+    )
+}
+
 fn change_signature(image: &image::RgbaImage) -> Vec<u8> {
     let reduced = image::imageops::resize(image, 64, 36, FilterType::Triangle);
     DynamicImage::ImageRgba8(reduced).to_luma8().into_raw()
@@ -898,6 +1049,22 @@ fn mean_luma_difference(previous: &[u8], current: &[u8]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_disposition_bridge_is_exhaustive_and_fail_closed() {
+        assert_eq!(
+            perception_sensitivity(PrivacyDisposition::Visible),
+            PerceptionSensitivity::CloudAllowed
+        );
+        assert_eq!(
+            perception_sensitivity(PrivacyDisposition::Redacted),
+            PerceptionSensitivity::LocalOnly
+        );
+        assert_eq!(
+            perception_sensitivity(PrivacyDisposition::Excluded),
+            PerceptionSensitivity::NeverObserve
+        );
+    }
 
     #[test]
     fn luma_difference_ignores_identical_frames() {
