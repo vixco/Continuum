@@ -19,7 +19,8 @@ use crate::world_model::{
 pub enum ObservationPrivacy {
     /// Eligible for normal candidate-memory processing after ordinary salience checks.
     CloudAllowed,
-    /// May exist in bounded local history, but durable memory requires explicit user confirmation.
+    /// May exist in bounded local history, but ambient/session evidence may not create
+    /// a memory candidate without a separate explicit-confirmation path.
     LocalOnly,
     /// Must not create a memory candidate or evidence object at all.
     NeverObserve,
@@ -30,30 +31,27 @@ pub enum ObservationPrivacy {
 pub enum MemoryAdmission {
     /// The observation must be dropped at this boundary; do not construct candidate/evidence.
     RejectBeforeCandidate,
+    /// The observation may remain in bounded local history, but automatic memory-candidate
+    /// construction is forbidden. A separately recorded explicit user confirmation may
+    /// create a manual/sensitive candidate through a non-observation flow.
+    RequireExplicitConfirmation,
     /// Candidate construction is allowed with the given legacy-vault sensitivity.
     Candidate {
         sensitivity: Sensitivity,
-        /// Whether recurrence/salience alone may ever auto-promote this candidate.
-        auto_promotion_allowed: bool,
     },
 }
 
 /// Map canonical observation privacy into the legacy vault boundary.
 ///
-/// `never_observe` is rejected before candidate construction. `local_only` maps to
-/// `Sensitivity::Sensitive` but cannot auto-promote; only an explicit user-confirmation
-/// path may subsequently make it durable. `cloud_allowed` maps to the normal internal
-/// memory class and may be evaluated by the consolidation policy.
+/// `never_observe` is rejected before candidate construction. `local_only` is not admitted
+/// to automatic memory-candidate construction at all; retaining it in bounded local history
+/// is a different permission. Only `cloud_allowed` enters normal consolidation.
 pub fn memory_admission(privacy: ObservationPrivacy) -> MemoryAdmission {
     match privacy {
         ObservationPrivacy::NeverObserve => MemoryAdmission::RejectBeforeCandidate,
-        ObservationPrivacy::LocalOnly => MemoryAdmission::Candidate {
-            sensitivity: Sensitivity::Sensitive,
-            auto_promotion_allowed: false,
-        },
+        ObservationPrivacy::LocalOnly => MemoryAdmission::RequireExplicitConfirmation,
         ObservationPrivacy::CloudAllowed => MemoryAdmission::Candidate {
             sensitivity: Sensitivity::Internal,
-            auto_promotion_allowed: true,
         },
     }
 }
@@ -61,12 +59,12 @@ pub fn memory_admission(privacy: ObservationPrivacy) -> MemoryAdmission {
 /// Evaluate a candidate that originated from ambient/session observation using the
 /// canonical privacy state as an unskippable gate.
 ///
-/// `None` means the source was `never_observe` and the caller must not retain a candidate
-/// or evidence record. `local_only` can be scored and retained as a candidate, but even a
-/// generic policy that allows promotion of sensitive memories cannot turn ambient local-only
-/// evidence into a durable memory. Explicit user-confirmation flows should not call this
-/// function; they may use the generic consolidation primitives with separately recorded
-/// confirmation evidence.
+/// `None` means the source is not eligible for automatic memory-candidate processing.
+/// This covers both `never_observe` (which must not leave a candidate/evidence object at
+/// all) and `local_only` (which may exist only in bounded local history until a separate
+/// explicit-confirmation/manual flow creates memory). Explicit confirmation flows should
+/// not call this function; they may use the generic consolidation primitives with separately
+/// recorded confirmation provenance.
 pub fn assess_observation_consolidation(
     candidate: &MemoryCandidate,
     privacy: ObservationPrivacy,
@@ -74,18 +72,10 @@ pub fn assess_observation_consolidation(
     now: DateTime<Utc>,
 ) -> Option<ConsolidationDecision> {
     match memory_admission(privacy) {
-        MemoryAdmission::RejectBeforeCandidate => None,
-        MemoryAdmission::Candidate {
-            auto_promotion_allowed,
-            ..
-        } => {
-            let decision = assess_consolidation(candidate, policy, now);
-            if !auto_promotion_allowed && decision == ConsolidationDecision::PromoteDurable {
-                Some(ConsolidationDecision::KeepCandidate)
-            } else {
-                Some(decision)
-            }
+        MemoryAdmission::RejectBeforeCandidate | MemoryAdmission::RequireExplicitConfirmation => {
+            None
         }
+        MemoryAdmission::Candidate { .. } => Some(assess_consolidation(candidate, policy, now)),
     }
 }
 
@@ -104,7 +94,7 @@ mod tests {
             project: Some("continuum".into()),
             salience: 1.0,
             confidence: 1.0,
-            sensitivity: Sensitivity::Sensitive,
+            sensitivity: Sensitivity::Internal,
             evidence: vec![
                 EvidenceRef {
                     reference: "observation:hash-a".into(),
@@ -140,13 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn local_only_is_sensitive_and_cannot_auto_promote() {
+    fn local_only_requires_explicit_confirmation_before_candidate_construction() {
         assert_eq!(
             memory_admission(ObservationPrivacy::LocalOnly),
-            MemoryAdmission::Candidate {
-                sensitivity: Sensitivity::Sensitive,
-                auto_promotion_allowed: false,
-            }
+            MemoryAdmission::RequireExplicitConfirmation
         );
     }
 
@@ -156,7 +143,6 @@ mod tests {
             memory_admission(ObservationPrivacy::CloudAllowed),
             MemoryAdmission::Candidate {
                 sensitivity: Sensitivity::Internal,
-                auto_promotion_allowed: true,
             }
         );
     }
@@ -177,9 +163,10 @@ mod tests {
     }
 
     #[test]
-    fn local_only_cannot_use_sensitive_policy_as_promotion_escape_hatch() {
+    fn local_only_never_enters_automatic_candidate_consolidation() {
         let now = Utc::now();
-        let candidate = strong_candidate(now);
+        let mut candidate = strong_candidate(now);
+        candidate.sensitivity = Sensitivity::Sensitive;
         let mut policy = ConsolidationPolicy::default();
         policy.auto_promote_sensitive = true;
         assert_eq!(
@@ -189,15 +176,14 @@ mod tests {
                 &policy,
                 now,
             ),
-            Some(ConsolidationDecision::KeepCandidate)
+            None
         );
     }
 
     #[test]
     fn cloud_allowed_strong_recurrence_can_promote() {
         let now = Utc::now();
-        let mut candidate = strong_candidate(now);
-        candidate.sensitivity = Sensitivity::Internal;
+        let candidate = strong_candidate(now);
         assert_eq!(
             assess_observation_consolidation(
                 &candidate,
