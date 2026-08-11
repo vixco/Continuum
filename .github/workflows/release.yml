@@ -221,19 +221,6 @@ jobs:
           Copy-Item "target/release/continuum-mcp.exe" "$binDir/continuum-mcp.exe" -Force
           Copy-Item "target/release/continuum-agent-os.exe" "$binDir/continuum-agent-os.exe" -Force
 
-      - name: Clean stale bundle artifacts
-        # The Rust target cache (restored above) can carry over bundle outputs
-        # from a previous version's build — e.g. an old *-setup.exe from the
-        # last alpha. Tauri does not delete stale installers, so the "exactly
-        # one NSIS installer" assertion below then sees two and fails. Drop the
-        # whole bundle dir before the build so only this run's artifacts exist.
-        shell: pwsh
-        run: |
-          $bundleDir = "target/release/bundle"
-          if (Test-Path $bundleDir) {
-            Remove-Item -Recurse -Force $bundleDir
-          }
-
       - name: Build signed NSIS installer
         working-directory: apps/desktop
         env:
@@ -358,14 +345,6 @@ jobs:
             apps/desktop/src-tauri/resources/bin/continuum \
             apps/desktop/src-tauri/resources/bin/continuum-mcp \
             apps/desktop/src-tauri/resources/bin/continuum-agent-os
-
-      - name: Clean stale bundle artifacts
-        # Same reason as the Windows job: the restored target cache can carry
-        # over a prior version's DMG / .app.tar.gz updater archive, which would
-        # break the "exactly one DMG" / "exactly one updater archive" assertions
-        # below. Tauri does not prune stale bundle outputs, so we drop the whole
-        # bundle dir first and let the build repopulate it cleanly.
-        run: rm -rf "target/${{ matrix.target }}/release/bundle"
 
       - name: Build signed DMG and updater archive
         working-directory: apps/desktop
