@@ -25,6 +25,7 @@ runtime = [
     "dep:rubato",
     "dep:futures",
     "dep:notify",
+    "dep:tracing-appender",
 ]
 raw-log = ["dep:sqlx"]
 cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
@@ -86,6 +87,11 @@ futures = { version = "0.3", optional = true }
 # File watcher (senses/file_watch.rs, context engine §4.5). Same version as
 # the vault watcher in continuum-memory — keep them in lockstep.
 notify = { version = "6.1", optional = true }
+# Rolling file appender for the runtime binary's on-disk log
+# (`~/.continuum-dev/logs/continuum.log`), which the repair agent tails for
+# diagnose→restart context (feature = "runtime"; the desktop app build does
+# not compile the runtime binary and so does not need it).
+tracing-appender = { version = "0.2", optional = true }
 cpal = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 rubato = { version = "2", optional = true }
@@ -113,6 +119,27 @@ windows = { version = "0.59", features = [
     "Win32_System_Power",
     "Win32_System_LibraryLoader",
 ] }
+
+# macOS context watcher (senses/context.rs `mod mac`). Follows the same
+# unconditional target-specific pattern as the `windows` crate above: these are
+# lightweight framework bindings (dynamically-linked system frameworks), not
+# heavy native build deps, so the context watcher compiles with a real
+# implementation under `--no-default-features` (the desktop app build) on macOS
+# instead of the empty stub. Versions match what xcap already resolves in the
+# lock, so no new crate versions are introduced.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSString",
+    "NSURL",
+    "NSObject",
+] }
+core-graphics = "0.25"
+core-foundation = "0.10"
 
 [[bin]]
 name = "continuum"

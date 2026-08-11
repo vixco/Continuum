@@ -99,6 +99,32 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   Every successful `main` CI run now publishes signed updater artifacts plus
   DMG and portable archives for Apple Silicon and Intel Macs alongside Windows.
 
+- **Self-repairing sense layer**: a runtime `Supervisor` now owns the vision,
+  audio, and context-watcher tasks (plus the auto-heal-only git, file, and
+  process collectors). It reaps dead/stuck tasks and respawns a faithful
+  reconstruction on a watch tick, draining `~/.continuum-dev/repair-intents/`
+  `restart` intents written by the repair agent and archiving them to
+  `processed/`. Each supervised component keeps a stable shared health
+  `Arc<RwLock<Health>>` across restarts via a `with_health` builder, so a
+  respawn never orphans the health handle the dashboard and `system_health`
+  MCP tool read. The repair agent's `allowed_restart_components` is seeded
+  from `SUPERVISED_REPAIR_TARGETS` (`vision`, `audio`, `context_watcher`), so
+  an authorised diagnose→restart loop can now actually revive a component
+  without a full runtime restart. Runtime structured logs tee to a fixed
+  `~/.continuum-dev/logs/continuum.log` (non-blocking appender) that the
+  repair agent tails for diagnose context.
+
+- **macOS ambient context watcher (meekijken)**: the foreground-window,
+  idle-state, and in-call context collector now has a real macOS
+  implementation alongside the Windows one. It enumerates on-screen windows
+  via the CGWindowList API, resolves the focused window's title through the
+  Accessibility framework (`AXFocusedWindow`/`AXTitle`), and detects active
+  calls from platform-aware process-name and title-keyword matching. The
+  context watcher compiles under `--no-default-features` on macOS (lightweight
+  system-framework bindings, not heavy native build deps) so the desktop build
+  gets a working implementation rather than an empty stub; call-detection
+  tests are platform-aware.
+
 - **Moshi full-duplex S2S voice front-end** (cargo feature `moshi`): an
   alternative realtime voice path that runs Kyutai
   [Moshi](https://github.com/kyutai-labs/moshi) as a `moshi-backend.exe`

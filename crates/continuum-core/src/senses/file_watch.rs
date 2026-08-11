@@ -755,6 +755,15 @@ impl FileWatcher {
         self.health.clone()
     }
 
+    /// Attach a health handle created externally — used by the runtime
+    /// supervisor respawn path so a respawned watcher keeps writing to the
+    /// same shared health Arc the publisher already holds (health survives
+    /// restarts instead of orphaning on the dead instance).
+    pub fn with_health(mut self, health: SharedFileWatchHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     /// Always `true`: disabled-with-reason and per-root unavailability are
     /// healthy, deliberate states (spec §7). Details in
     /// [`FileWatcher::health`].

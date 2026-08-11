@@ -242,6 +242,15 @@ impl ProcessWatcher {
         self.health.clone()
     }
 
+    /// Attach a health handle created externally — used by the runtime
+    /// supervisor respawn path so a respawned watcher keeps writing to the
+    /// same shared health Arc the publisher already holds (health survives
+    /// restarts instead of orphaning on the dead instance).
+    pub fn with_health(mut self, health: SharedProcessWatchHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     /// Poll failures self-heal on the next interval; restarting is not useful.
     pub fn should_restart(&self) -> bool {
         false

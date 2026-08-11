@@ -691,6 +691,15 @@ impl GitWatcher {
         self.health.clone()
     }
 
+    /// Attach a health handle created externally — used by the runtime
+    /// supervisor respawn path so a respawned watcher keeps writing to the
+    /// same shared health Arc the publisher already holds (health survives
+    /// restarts instead of orphaning on the dead instance).
+    pub fn with_health(mut self, health: SharedGitWatchHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     /// Always `true`: probe failures keep the last state and
     /// disabled-with-reason is a healthy, deliberate state (spec §7). The
     /// details live in [`GitWatcher::health`].

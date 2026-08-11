@@ -91,7 +91,11 @@ pub struct VisibleWindow {
 }
 
 /// Processes whose presence in the foreground strongly indicate the user is
-/// in a voice/video call.
+/// in a voice/video call. Matched by exact, case-insensitive equality against
+/// the foreground process image basename — so the names must match what each
+/// platform reports (`.exe` image basename on Windows; `localizedName` on
+/// macOS, which has no suffix and uses display names like `Discord`).
+#[cfg(windows)]
 const CALL_PROCESSES: &[&str] = &[
     "discord.exe",
     "teams.exe",
@@ -99,13 +103,25 @@ const CALL_PROCESSES: &[&str] = &[
     "zoom.exe",
     "slack.exe",
 ];
+#[cfg(not(windows))]
+const CALL_PROCESSES: &[&str] = &["discord", "microsoft teams", "teams", "zoom.us", "slack"];
 
 /// Substrings in the foreground window title that indicate a browser-based
 /// call (Google Meet, Zoom web, etc.) when the foreground process is a browser.
 const CALL_TITLE_KEYWORDS: &[&str] = &["meet", "zoom"];
 
-/// Browser process names to check for title-based call detection.
+/// Browser process names to check for title-based call detection. Same
+/// platform-aware naming rule as [`CALL_PROCESSES`].
+#[cfg(windows)]
 const BROWSER_PROCESSES: &[&str] = &["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"];
+#[cfg(not(windows))]
+const BROWSER_PROCESSES: &[&str] = &[
+    "google chrome",
+    "microsoft edge",
+    "firefox",
+    "brave browser",
+    "safari",
+];
 
 // ---------------------------------------------------------------------------
 // Windows implementation
@@ -394,18 +410,27 @@ mod win {
         let elapsed_ms = now.wrapping_sub(info.dwTime);
         u64::from(elapsed_ms) / 1000
     }
+
+    /// Windows has no equivalent of the macOS Accessibility/Screen Recording
+    /// gates for foreground-window polling, so there is never a permission
+    /// warning. (UI Automation access is governed by per-app trust prompts
+    /// handled at the editor level, not a blanket OS permission.)
+    pub fn permission_warning() -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Non-Windows stubs
 // ---------------------------------------------------------------------------
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod win {
-    //! Stub implementations for non-Windows platforms.
+    //! Stub implementations for platforms without a native context watcher.
     //!
-    //! These allow the crate to compile on Linux/macOS for CI and testing,
-    //! even though Continuum is a Windows-only application.
+    //! Windows has `mod win` (Win32 APIs); macOS has `mod mac` (AppKit +
+    //! CoreGraphics + Accessibility). This stub keeps the crate compilable on
+    //! Linux/other targets for CI, returning empty observations.
 
     /// Returns empty strings on non-Windows platforms.
     pub fn get_foreground_window_info() -> (String, String) {
@@ -426,7 +451,379 @@ mod win {
     pub fn enumerate_visible_windows() -> Option<Vec<super::VisibleWindow>> {
         Some(Vec::new())
     }
+
+    /// No permission gate on stub platforms.
+    pub fn permission_warning() -> Option<String> {
+        None
+    }
 }
+
+// ---------------------------------------------------------------------------
+// macOS implementation
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+mod mac {
+    //! macOS-specific context polling via AppKit + CoreGraphics + the
+    //! Accessibility API.
+    //!
+    //! Every function returns safe Rust types and never panics — all failures
+    //! degrade to empty/default, mirroring `mod win`. Process identity (pid,
+    //! name, bundle path) needs no special permission. The focused window
+    //! **title** needs Accessibility trust (`AXIsProcessTrusted`); without it
+    //! the title is empty and the watcher continues with process+idle only.
+    //! Visible-window **titles** need Screen Recording; without it the sweep
+    //! returns owner names only and privacy-zone matching falls back to
+    //! process-name matching (never relaxes privacy).
+
+    use tracing::{trace, warn};
+
+    use super::{RawForegroundInfo, VisibleWindow};
+
+    // CoreFoundation / CoreGraphics imports shared by the window-enumeration
+    // and bounds-parsing helpers below. Kept at module scope so both
+    // `enumerate_visible_windows` and `parse_bounds` reference the same
+    // `CFDictionary<CFString, CFType>` shape without per-function `use` blocks.
+    use core_foundation::base::{CFType, ItemRef, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
+        CGWindowListCopyWindowInfo,
+    };
+
+    // --- CoreGraphics: idle time (no permission required) ---
+    extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state_id: u32, event_type: u32) -> f64;
+    }
+    // kCGEventSourceStateHIDSystemState = 1; kCGAnyInputEventType = ~0u32.
+    const K_CG_HID_SYSTEM_STATE: u32 = 1;
+    const K_CG_ANY_INPUT_EVENT: u32 = 0xFFFF_FFFF;
+
+    // --- Accessibility API (HIServices / ApplicationServices framework) ---
+    // Stable C functions; not exposed by objc2-accessibility's safe bindings,
+    // so we declare them directly. `AXUIElementRef`/`CFStringRef` are opaque
+    // `c_void` pointers we release via `CFRelease`.
+    //
+    // The `kAXFocusedWindowAttribute` / `kAXTitleAttribute` *constants* are not
+    // reliably linkable symbols in the modern SDK (the linker drops them as
+    // undefined even though the functions resolve), so we build the attribute
+    // CFStrings from their known string values (`"AXFocusedWindow"`,
+    // `"AXTitle"`) in [`ax_focused_window_title`] instead of extern-static'ing
+    // them.
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateApplication(pid: i32) -> *mut std::ffi::c_void;
+        fn AXUIElementCopyAttributeValue(
+            element: *mut std::ffi::c_void,
+            attribute: *const std::ffi::c_void,
+            value: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        // `AXIsProcessTrusted` (macOS 10.4+): returns a `Boolean` (`u8`) —
+        // nonzero when this process holds Accessibility trust. Used by
+        // [`permission_warning`] to detect the silent "watcher runs but cannot
+        // read the focused window title" state without prompting.
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+
+    /// Convert a CFStringRef (`*mut c_void`) to a Rust `String`, releasing it.
+    /// Returns `String::new()` if the ref is null or not a CFString.
+    unsafe fn cf_string_to_owned(cf: *mut std::ffi::c_void) -> String {
+        if cf.is_null() {
+            return String::new();
+        }
+        let s = CFString::wrap_under_get_rule(cf as _).to_string();
+        CFRelease(cf as _);
+        s
+    }
+
+    /// Focused window title of `pid` via the Accessibility API.
+    /// Empty string if Accessibility is not granted or any step fails.
+    fn ax_focused_window_title(pid: i32) -> String {
+        if pid <= 0 {
+            return String::new();
+        }
+        // AX attribute names are CFStrings with stable, documented values:
+        // `kAXFocusedWindowAttribute = "AXFocusedWindow"`,
+        // `kAXTitleAttribute = "AXTitle"`. Building them from the string
+        // values avoids linking the framework's extern-static constants
+        // (which the modern linker drops as undefined — see the extern block
+        // comment above).
+        let focused_attr = CFString::new("AXFocusedWindow");
+        let title_attr = CFString::new("AXTitle");
+        // SAFETY: AXUIElementCreateApplication takes a pid and returns a
+        // retained AXUIElementRef (null only on allocation failure). We
+        // release it below unconditionally. The attribute args are CFStringRefs
+        // we own for the duration of the call.
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            if app.is_null() {
+                return String::new();
+            }
+            let mut focused: *mut std::ffi::c_void = std::ptr::null_mut();
+            let err = AXUIElementCopyAttributeValue(
+                app,
+                focused_attr.as_concrete_TypeRef() as *const std::ffi::c_void,
+                &mut focused,
+            );
+            if err != 0 || focused.is_null() {
+                CFRelease(app as _);
+                return String::new();
+            }
+            let mut title: *mut std::ffi::c_void = std::ptr::null_mut();
+            let err = AXUIElementCopyAttributeValue(
+                focused,
+                title_attr.as_concrete_TypeRef() as *const std::ffi::c_void,
+                &mut title,
+            );
+            CFRelease(app as _);
+            CFRelease(focused as _);
+            if err != 0 || title.is_null() {
+                return String::new();
+            }
+            cf_string_to_owned(title)
+        }
+    }
+
+    pub fn get_foreground_info() -> RawForegroundInfo {
+        use objc2_app_kit::NSWorkspace;
+
+        // NSWorkspace is safe to query from any thread in practice for the
+        // frontmost application; this is best-effort and mirrors the Windows
+        // impl's swallow-errors contract (any failure → empty/default).
+        let ws = NSWorkspace::sharedWorkspace();
+        let frontmost = ws.frontmostApplication();
+        let Some(app) = frontmost else {
+            trace!(layer = "senses", component = "context", "no frontmost app");
+            return RawForegroundInfo::default();
+        };
+
+        let pid = app.processIdentifier();
+        let process_name = app
+            .localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        // bundleURL gives e.g. `file:///Applications/Code.app/`; NSURL.path
+        // yields `/Applications/Code.app`. Keep the basename for parity with
+        // the Windows `image_basename` behaviour.
+        let exe_path = app
+            .bundleURL()
+            .and_then(|url| url.path().map(|s| s.to_string()))
+            .map(|p| exe_basename(&p).map(|b| b.to_string()).unwrap_or(p));
+        let title = ax_focused_window_title(pid);
+        // monitor_rect: precise matching needs the AX window position joined
+        // to NSScreen frames. Returned as None for now; the monitor-id join
+        // treats None as "unknown monitor" (graceful). TODO: NSScreen match.
+
+        RawForegroundInfo {
+            title,
+            process_name,
+            pid: if pid > 0 { Some(pid as u32) } else { None },
+            exe_path,
+            monitor_rect: None,
+        }
+    }
+
+    pub fn get_foreground_window_info() -> (String, String) {
+        let info = get_foreground_info();
+        (info.title, info.process_name)
+    }
+
+    pub fn get_idle_seconds() -> u64 {
+        // SAFETY: CGEventSourceSecondsSinceLastEventType is a pure query of
+        // HID state; no pointers, no retain. Returns a CFTimeInterval (f64).
+        unsafe {
+            let secs =
+                CGEventSourceSecondsSinceLastEventType(K_CG_HID_SYSTEM_STATE, K_CG_ANY_INPUT_EVENT);
+            if secs.is_finite() && secs >= 0.0 {
+                secs as u64
+            } else {
+                0
+            }
+        }
+    }
+
+    pub fn enumerate_visible_windows() -> Option<Vec<VisibleWindow>> {
+        let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+        // `kCGNullWindowID` is `0` (core-graphics 0.25 keeps the constant
+        // private; passing 0 means "no relative window" — enumerate all).
+        // SAFETY: CGWindowListCopyWindowInfo returns a CFArray of CFDictionary
+        // refs (or NULL). We copy out values under get-rule and release via
+        // TCFType drops.
+        let array = unsafe { CGWindowListCopyWindowInfo(options, 0) };
+        if array.is_null() {
+            warn!(
+                layer = "senses",
+                component = "context",
+                "CGWindowListCopyWindowInfo failed; monitor zones keep previous value"
+            );
+            return None;
+        }
+        let array: core_foundation::array::CFArray<CFType> =
+            unsafe { core_foundation::array::CFArray::wrap_under_create_rule(array) };
+
+        let mut result = Vec::new();
+        for item in array.iter() {
+            // Each item is a CFDictionary wrapped as CFType.
+            let dict_ref = item.as_concrete_TypeRef();
+            let dict: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(dict_ref as _) };
+
+            // Only normal windows (layer 0).
+            let layer = dict
+                .find(CFString::new("kCGWindowLayer"))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_i32())
+                .unwrap_or(-1);
+            if layer != 0 {
+                continue;
+            }
+
+            // Owner/window names are CFString values; downcast before stringifying
+            // (CFType itself has no Display impl).
+            let owner_name = dict
+                .find(CFString::new("kCGWindowOwnerName"))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFString>())
+                .map(|s| s.to_string());
+            let window_name = dict
+                .find(CFString::new("kCGWindowName"))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFString>())
+                .map(|s| s.to_string());
+            let title = window_name.unwrap_or_default();
+            let process_name = owner_name.unwrap_or_default();
+            if title.is_empty() && process_name.is_empty() {
+                continue;
+            }
+
+            // Bounds: a CFDictionary with X/Y/Width/Height keys. We can't
+            // `downcast` to a typed `CFDictionary<CFString, CFType>` (it isn't
+            // a `ConcreteCFType`), so wrap the raw ref under the get-rule,
+            // mirroring how the top-level window dict is wrapped above.
+            let bounds = dict
+                .find(CFString::new("kCGWindowBounds"))
+                .map(|v: ItemRef<'_, CFType>| {
+                    let bounds_ref = v.as_concrete_TypeRef();
+                    unsafe {
+                        CFDictionary::<CFString, CFType>::wrap_under_get_rule(bounds_ref as _)
+                    }
+                })
+                .map(|d| parse_bounds(&d));
+            let Some((x, y, w, h)) = bounds else {
+                continue;
+            };
+
+            result.push(VisibleWindow {
+                title,
+                process_name,
+                rect: (x, y, x + w, y + h),
+            });
+        }
+        Some(result)
+    }
+
+    /// Extract the executable basename from a bundle URL path like
+    /// `/Applications/Code.app/Contents/MacOS/Electron` → `Electron`. If the
+    /// shape is unexpected, returns None and the caller keeps the full path.
+    fn exe_basename(path: &str) -> Option<&str> {
+        path.rsplit('/').next().filter(|s| !s.is_empty())
+    }
+
+    fn parse_bounds(d: &CFDictionary<CFString, CFType>) -> (i32, i32, i32, i32) {
+        let get = |key: &str| -> i32 {
+            d.find(CFString::new(key))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_i32())
+                .unwrap_or(0)
+        };
+        (get("X"), get("Y"), get("Width"), get("Height"))
+    }
+
+    /// Detect macOS permission gaps that silently blind the watcher. Returns
+    /// `None` when permissions are sufficient (or the check is inconclusive).
+    ///
+    /// Accessibility (AX) trust gates the focused-window-title path and is
+    /// checked directly via `AXIsProcessTrusted`. Screen Recording gates the
+    /// visible-window enumeration (call detection by title, monitor-zone
+    /// joins); without it `CGWindowList` returns entries but strips other
+    /// apps' owner/window names, so the gap is inferred from a total absence
+    /// of named on-screen windows.
+    pub fn permission_warning() -> Option<String> {
+        // Accessibility — cheap single C call, no enumeration.
+        if unsafe { AXIsProcessTrusted() } == 0 {
+            return Some(
+                "macOS Accessibility permission not granted — Continuum cannot read the \
+                 focused window title. Grant it in System Settings → Privacy & Security \
+                 → Accessibility."
+                    .to_string(),
+            );
+        }
+        // Screen Recording — inferred from whether any other app's window
+        // owner name is visible. Without the permission, only the current
+        // process's own windows carry names, and the headless runtime has
+        // none, so a total absence of named windows signals the gap.
+        if !screen_recording_appears_granted() {
+            return Some(
+                "macOS Screen Recording permission not granted — Continuum cannot see other \
+                 apps' window titles, so call detection and monitor zones are blind. Grant \
+                 it in System Settings → Privacy & Security → Screen Recording."
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    /// Heuristic: Screen Recording appears granted when `CGWindowList` exposes
+    /// at least one on-screen, layer-0 window with a non-empty owner name.
+    /// Returns `true` when enumeration itself fails (avoid a false warning;
+    /// the empty-result path is logged separately).
+    fn screen_recording_appears_granted() -> bool {
+        let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+        let array = unsafe { CGWindowListCopyWindowInfo(options, 0) };
+        if array.is_null() {
+            return true;
+        }
+        let array: core_foundation::array::CFArray<CFType> =
+            unsafe { core_foundation::array::CFArray::wrap_under_create_rule(array) };
+        for item in array.iter() {
+            let dict_ref = item.as_concrete_TypeRef();
+            let dict: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(dict_ref as _) };
+            let layer = dict
+                .find(CFString::new("kCGWindowLayer"))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_i32())
+                .unwrap_or(-1);
+            if layer != 0 {
+                continue;
+            }
+            let has_owner = dict
+                .find(CFString::new("kCGWindowOwnerName"))
+                .and_then(|v: ItemRef<'_, CFType>| v.downcast::<CFString>())
+                .map(|s| !s.to_string().is_empty())
+                .unwrap_or(false);
+            if has_owner {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// Platform dispatch: the cross-platform `run` loop, `sanitize_observation`,
+// dwell tracker, and zone math are platform-agnostic; only these four
+// functions differ. `platform::` resolves to `win` on Windows, `mac` on macOS,
+// and the stub elsewhere.
+#[cfg(target_os = "macos")]
+use self::mac as platform;
+#[cfg(windows)]
+use self::win as platform;
+#[cfg(not(any(windows, target_os = "macos")))]
+use self::win as platform;
 
 // ---------------------------------------------------------------------------
 // Public helpers for external crates
@@ -439,7 +836,16 @@ mod win {
 /// best-effort lookup. Added in Phase 4 to back the `system_active_window`
 /// MCP tool.
 pub fn foreground_window() -> (String, String) {
-    win::get_foreground_window_info()
+    platform::get_foreground_window_info()
+}
+
+/// Returns a platform permission warning when the context watcher is running
+/// but blind because of a missing OS permission (macOS Accessibility / Screen
+/// Recording), or `None` when permissions are sufficient. The poll loop stamps
+/// this into `ContextWatchHealth` so the dashboard and repair agent can
+/// distinguish "blind because of permissions" from a real stall.
+pub fn permission_warning() -> Option<String> {
+    platform::permission_warning()
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +906,13 @@ pub struct ContextWatchHealth {
     pub last_poll_at: Option<DateTime<Utc>>,
     /// Total completed polls.
     pub polls: u64,
+    /// A platform permission gap that silently prevents the watcher from
+    /// seeing context (macOS Accessibility / Screen Recording). `None` when
+    /// permissions are fine or the platform has no such gate. The repair
+    /// agent reads this to distinguish "watcher is healthy but blind because
+    /// of a missing OS permission" from a real stall — the fix is a user
+    /// grant in System Settings, not a restart.
+    pub permission_warning: Option<String>,
 }
 
 impl ContextWatchHealth {
@@ -618,6 +1031,16 @@ impl ContextWatcher {
     /// before `tokio::spawn` moves the watcher (Task A8, spec §7).
     pub fn health_handle(&self) -> SharedContextWatchHealth {
         self.health.clone()
+    }
+
+    /// Attach a health handle created externally — used by the runtime
+    /// supervisor respawn path. A respawned watcher writes into the same
+    /// shared `Arc<RwLock<ContextWatchHealth>>` the health publisher already
+    /// holds, so the published health snapshot stays valid across restarts
+    /// instead of orphaning on the old (dead) watcher instance.
+    pub fn with_health(mut self, health: SharedContextWatchHealth) -> Self {
+        self.health = health;
+        self
     }
 
     /// Attaches the shared boot-time privacy filter and observation
@@ -787,10 +1210,14 @@ impl ContextWatcher {
                     {
                         // Health stamp (Task A8): every completed poll
                         // refreshes the freshness timestamp the runtime's
-                        // health publisher judges this component by.
+                        // health publisher judges this component by, and the
+                        // platform permission warning (macOS Accessibility /
+                        // Screen Recording) so the repair agent can tell a
+                        // blind-but-healthy watcher from a real stall.
                         let mut health = self.health.write();
                         health.last_poll_at = Some(obs.ts);
                         health.polls = health.polls.saturating_add(1);
+                        health.permission_warning = permission_warning();
                     }
                     let sample = dwell.observe(
                         &obs.foreground_process_name,
@@ -864,7 +1291,7 @@ impl ContextWatcher {
                         // keeps the previous zones (never relax privacy
                         // from incomplete data).
                         if !geometries.is_empty() {
-                            if let Some(visible) = win::enumerate_visible_windows() {
+                            if let Some(visible) = platform::enumerate_visible_windows() {
                                 hub.set_monitor_zones(compute_monitor_zones(
                                     &self.privacy,
                                     &visible,
@@ -945,8 +1372,8 @@ impl ContextWatcher {
     }
 
     fn poll_once_with_privacy(&self) -> PolledContext {
-        let raw = win::get_foreground_info();
-        let idle_seconds = win::get_idle_seconds();
+        let raw = platform::get_foreground_info();
+        let idle_seconds = platform::get_idle_seconds();
         sanitize_observation(&self.privacy, &self.config, raw, idle_seconds)
     }
 
@@ -1875,44 +2302,83 @@ mod tests {
         assert!(diff.num_seconds() < 2, "Timestamp should be recent");
     }
 
+    // Platform-aware process image names for the call-detection tests. The
+    // detection constants (`CALL_PROCESSES`/`BROWSER_PROCESSES`) match what
+    // each platform reports — `.exe` image basename on Windows, `localizedName`
+    // display names on macOS — so the test inputs must match too or they'd
+    // spuriously fail on the non-build-platform OS.
+    const DISCORD: &str = if cfg!(windows) {
+        "Discord.exe"
+    } else {
+        "Discord"
+    };
+    const TEAMS: &str = if cfg!(windows) {
+        "Teams.exe"
+    } else {
+        "Microsoft Teams"
+    };
+    const MS_TEAMS: &str = if cfg!(windows) {
+        "ms-teams.exe"
+    } else {
+        "Teams"
+    };
+    const ZOOM: &str = if cfg!(windows) { "Zoom.exe" } else { "zoom.us" };
+    const SLACK: &str = if cfg!(windows) { "Slack.exe" } else { "Slack" };
+    const CHROME: &str = if cfg!(windows) {
+        "chrome.exe"
+    } else {
+        "Google Chrome"
+    };
+    const EDGE: &str = if cfg!(windows) {
+        "msedge.exe"
+    } else {
+        "Microsoft Edge"
+    };
+    const CODE: &str = if cfg!(windows) { "Code.exe" } else { "Code" };
+    const NOTEPAD: &str = if cfg!(windows) {
+        "notepad.exe"
+    } else {
+        "TextEdit"
+    };
+
     #[test]
     fn test_is_in_call_discord() {
-        assert!(is_in_call("Discord.exe", "General - Discord"));
-        assert!(is_in_call("discord.exe", "Voice Channel"));
+        assert!(is_in_call(DISCORD, "General - Discord"));
+        assert!(is_in_call(&DISCORD.to_lowercase(), "Voice Channel"));
     }
 
     #[test]
     fn test_is_in_call_teams() {
-        assert!(is_in_call("Teams.exe", "Meeting | Microsoft Teams"));
-        assert!(is_in_call("ms-teams.exe", "Chat"));
+        assert!(is_in_call(TEAMS, "Meeting | Microsoft Teams"));
+        assert!(is_in_call(MS_TEAMS, "Chat"));
     }
 
     #[test]
     fn test_is_in_call_zoom() {
-        assert!(is_in_call("Zoom.exe", "Zoom Meeting"));
+        assert!(is_in_call(ZOOM, "Zoom Meeting"));
     }
 
     #[test]
     fn test_is_in_call_browser_meet() {
-        assert!(is_in_call("chrome.exe", "Meeting - Google Meet"));
-        assert!(is_in_call("msedge.exe", "Google Meet - abc-defg-hij"));
+        assert!(is_in_call(CHROME, "Meeting - Google Meet"));
+        assert!(is_in_call(EDGE, "Google Meet - abc-defg-hij"));
     }
 
     #[test]
     fn test_is_in_call_browser_zoom_web() {
-        assert!(is_in_call("chrome.exe", "Zoom - Web Client"));
+        assert!(is_in_call(CHROME, "Zoom - Web Client"));
     }
 
     #[test]
     fn test_is_not_in_call_regular_browser() {
-        assert!(!is_in_call("chrome.exe", "GitHub - Google Chrome"));
-        assert!(!is_in_call("msedge.exe", "Bing - Microsoft Edge"));
+        assert!(!is_in_call(CHROME, "GitHub - Google Chrome"));
+        assert!(!is_in_call(EDGE, "Bing - Microsoft Edge"));
     }
 
     #[test]
     fn test_is_not_in_call_editor() {
-        assert!(!is_in_call("Code.exe", "main.rs - continuum-ai"));
-        assert!(!is_in_call("notepad.exe", "Untitled - Notepad"));
+        assert!(!is_in_call(CODE, "main.rs - continuum-ai"));
+        assert!(!is_in_call(NOTEPAD, "Untitled - Notepad"));
     }
 
     #[test]
@@ -1922,14 +2388,14 @@ mod tests {
 
     #[test]
     fn test_is_in_call_slack() {
-        assert!(is_in_call("Slack.exe", "Huddle - #general"));
+        assert!(is_in_call(SLACK, "Huddle - #general"));
     }
 
     #[test]
     fn test_is_in_call_case_insensitive() {
         // Process name matching should be case-insensitive.
-        assert!(is_in_call("DISCORD.EXE", "Voice"));
-        assert!(is_in_call("CHROME.EXE", "Google Meet"));
+        assert!(is_in_call(&DISCORD.to_uppercase(), "Voice"));
+        assert!(is_in_call(&CHROME.to_uppercase(), "Google Meet"));
     }
 
     #[test]
@@ -1992,6 +2458,7 @@ mod tests {
             disabled_reason: Some("paused by [privacy.toggles].pause_all".into()),
             last_poll_at: Some(now - chrono::Duration::seconds(600)),
             polls: 3,
+            permission_warning: None,
         };
         assert!(health.is_healthy(now, interval));
         assert!(!health.should_restart(now, interval));

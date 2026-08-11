@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::sync::{mpsc, watch, Mutex};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
 
 use continuum_vision::VisionModel;
@@ -85,6 +86,7 @@ use continuum_core::senses::types::{
 };
 use continuum_core::senses::vision::VisionWatcher;
 use continuum_core::skills::{MatchContext, SkillLoader, SkillMatcher};
+use continuum_core::supervisor::Supervisor;
 use continuum_core::triage::coalesce::{Submitted, TriageBusyHandle, TriageCoalescer};
 use continuum_core::triage::consume::ClassificationConsumer;
 use continuum_core::triage::handlers::handle_decision;
@@ -203,9 +205,22 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.storage.screenshots_dir)
         .context("Failed to create screenshots directory")?;
 
-    // Structured logging.
+    // Structured logging — tee to stdout AND a fixed file at
+    // `<dev_dir>/logs/continuum.log`. The repair agent tails that file for
+    // diagnose→restart context (health/repair.rs `runtime_log_tail`).
+    // `rolling::never` keeps a single stable filename the repair agent can
+    // rely on (no per-rotation guessing); `non_blocking` decouples the write
+    // path so a slow disk never stalls a sense/orchestrator task. The
+    // `_log_guard` must outlive the subscriber — bound here, it lives until
+    // `main` returns (an underscore-*prefixed* name suppresses the unused
+    // warning without triggering an immediate drop the way a bare `_` would).
     let default_filter = "info,continuum_core=debug,continuum_vision=info,continuum_llm=info";
+    let logs_dir = dev_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir).context("Failed to create runtime logs directory")?;
+    let file_writer = tracing_appender::rolling::never(&logs_dir, "continuum.log");
+    let (non_blocking_file, _log_guard) = tracing_appender::non_blocking(file_writer);
     tracing_subscriber::fmt()
+        .with_writer(non_blocking_file.and(std::io::stdout))
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
@@ -655,11 +670,24 @@ async fn main() -> Result<()> {
     let moshi_tap: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> = None;
 
     // Health-snapshot registration (Task A8, spec §7): shared health
-    // handles grabbed before each watcher is moved into its task.
+    // handles grabbed before each watcher is moved into its task. For the
+    // supervisor-managed watchers these are created once here and passed into
+    // every (re)spawn via `with_health`, so the published snapshot stays valid
+    // across restarts instead of orphaning on the dead instance.
     let context_watch_health: Option<SharedContextWatchHealth>;
     let git_watch_health: Option<SharedGitWatchHealth>;
     let file_watch_health: Option<SharedFileWatchHealth>;
     let process_watch_health: Option<SharedProcessWatchHealth>;
+
+    // Runtime component supervisor (self-healing, spec §7): owns the lifecycle
+    // of every long-running sense task. A watch loop reaps dead `JoinHandle`s
+    // and respawns them via the registered `restarter` closures (up to a
+    // per-hour backstop), and drains `~/.continuum-dev/repair-intents/` so a
+    // `repair_restart_component` intent for vision/audio/context_watcher
+    // aborts the live task and respawns it. `supervisor_stats` is the clone
+    // the health publisher reads; `supervisor` is moved into the run loop.
+    let supervisor = Supervisor::new();
+    let supervisor_stats = supervisor.clone();
 
     if observation_toggles.pause_all {
         emit_system_event(
@@ -668,111 +696,269 @@ async fn main() -> Result<()> {
         );
     }
     {
-        // --- Vision ---
-        let vision_model = init_vision_model(&config, &resource_plan).await;
+        // Each sense watcher is registered with the runtime supervisor
+        // instead of bare `tokio::spawn`. The supervisor reaps dead tasks and
+        // respawns them via the `restarter` closures below, and drains
+        // repair-restart intents — closing the self-healing loop (spec §7).
+        //
+        // Restarters capture clones of the shared state each task needs and
+        // re-clone per invocation (they are `Fn`, callable many times), so a
+        // respawn faithfully reconstructs the task without re-running one-shot
+        // boot logic. Vision/audio have no shared health handle; context, git,
+        // file and process publish one, so their health Arc is created here and
+        // threaded into every (re)spawn via `with_health` — the published
+        // snapshot then stays valid across restarts instead of orphaning on
+        // the dead instance.
 
-        let vision_watcher = VisionWatcher::new_with_live_context(
-            config.screen.clone(),
-            vision_model,
-            PathBuf::from(&config.storage.screenshots_dir),
-            live_context.clone(),
-        )
-        .with_privacy(privacy_filter.clone(), observation_toggles.clone())
-        .with_toggle_control(toggle_control.clone())
-        .with_cadence(cadence.clone());
-        let vision_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            vision_watcher.run(screen_tx, vision_shutdown).await;
-        });
+        // --- Vision --- (repair target "vision")
+        {
+            let config = config.clone();
+            let resource_plan = resource_plan.clone();
+            let live_context = live_context.clone();
+            let privacy = privacy_filter.clone();
+            let toggles = observation_toggles.clone();
+            let toggle_control = toggle_control.clone();
+            let cadence = cadence.clone();
+            let screen_tx = screen_tx.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    // Clone every captured handle into locals for THIS
+                    // invocation before `async move` takes them — the closure
+                    // is `Fn` (callable many times), so it cannot move the
+                    // shared captures into the spawned task directly.
+                    let config = config.clone();
+                    let resource_plan = resource_plan.clone();
+                    let live_context = live_context.clone();
+                    let privacy = privacy.clone();
+                    let toggles = toggles.clone();
+                    let toggle_control = toggle_control.clone();
+                    let cadence = cadence.clone();
+                    let screen_tx = screen_tx.clone();
+                    let shutdown = shutdown.clone();
+                    tokio::spawn(async move {
+                        // Re-init the vision model on each (re)spawn: the prior
+                        // Arc may belong to a dead task, and a fresh load is the
+                        // faithful reconstruction. Runs in the task, so boot no
+                        // longer blocks on vision model load.
+                        let vision_model = init_vision_model(&config, &resource_plan).await;
+                        let vision_watcher = VisionWatcher::new_with_live_context(
+                            config.screen.clone(),
+                            vision_model,
+                            PathBuf::from(&config.storage.screenshots_dir),
+                            live_context,
+                        )
+                        .with_privacy(privacy, toggles)
+                        .with_toggle_control(toggle_control)
+                        .with_cadence(cadence);
+                        vision_watcher.run(screen_tx, shutdown).await;
+                    })
+                });
+            supervisor.register("vision", Some("vision"), restarter);
+        }
 
-        // --- Audio ---
-        let audio_watcher = AudioWatcher::new(config.audio.clone())
-            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
-            .with_toggle_control(toggle_control.clone());
-        let audio_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            audio_watcher.run(audio_tx, audio_shutdown, moshi_tap).await;
-        });
+        // --- Audio --- (repair target "audio")
+        {
+            let config = config.clone();
+            let privacy = privacy_filter.clone();
+            let toggles = observation_toggles.clone();
+            let toggle_control = toggle_control.clone();
+            let audio_tx = audio_tx.clone();
+            let moshi_tap = moshi_tap.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    let config = config.clone();
+                    let privacy = privacy.clone();
+                    let toggles = toggles.clone();
+                    let toggle_control = toggle_control.clone();
+                    let audio_tx = audio_tx.clone();
+                    let moshi_tap = moshi_tap.clone();
+                    let shutdown = shutdown.clone();
+                    tokio::spawn(async move {
+                        let audio_watcher = AudioWatcher::new(config.audio.clone())
+                            .with_privacy(privacy, toggles)
+                            .with_toggle_control(toggle_control);
+                        audio_watcher.run(audio_tx, shutdown, moshi_tap).await;
+                    })
+                });
+            supervisor.register("audio", Some("audio"), restarter);
+        }
 
-        // --- Context ---
-        let context_watcher = ContextWatcher::new(config.context.clone())
-            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
-            .with_toggle_control(toggle_control.clone())
-            .with_project_handle(project_handle.clone())
-            .with_event_sender(event_sender.clone());
-        context_watch_health = Some(context_watcher.health_handle());
-        let context_shutdown = shutdown_rx.clone();
-        let context_live_context = live_context.clone();
-        tokio::spawn(async move {
-            let _ = context_watcher
-                .run_with_live_context(ctx_tx, context_shutdown, context_live_context)
-                .await;
-        });
+        // --- Context --- (repair target "context_watcher")
+        {
+            let health = SharedContextWatchHealth::default();
+            context_watch_health = Some(health.clone());
+            let config = config.clone();
+            let privacy = privacy_filter.clone();
+            let toggles = observation_toggles.clone();
+            let toggle_control = toggle_control.clone();
+            let project_handle = project_handle.clone();
+            let event_sender = event_sender.clone();
+            let live_context = live_context.clone();
+            let ctx_tx = ctx_tx.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    let config = config.clone();
+                    let privacy = privacy.clone();
+                    let toggles = toggles.clone();
+                    let toggle_control = toggle_control.clone();
+                    let project_handle = project_handle.clone();
+                    let event_sender = event_sender.clone();
+                    let ctx_tx = ctx_tx.clone();
+                    let shutdown = shutdown.clone();
+                    let live_context = live_context.clone();
+                    let health = health.clone();
+                    tokio::spawn(async move {
+                        let context_watcher = ContextWatcher::new(config.context.clone())
+                            .with_privacy(privacy, toggles)
+                            .with_toggle_control(toggle_control)
+                            .with_project_handle(project_handle)
+                            .with_event_sender(event_sender)
+                            .with_health(health);
+                        let _ = context_watcher
+                            .run_with_live_context(ctx_tx, shutdown, live_context)
+                            .await;
+                    })
+                });
+            supervisor.register("context_watcher", Some("context_watcher"), restarter);
+        }
 
-        // --- Git collector (Task A5, spec §4.4) ---
-        // Watches the resolver's active confirmed project only; parks in
-        // disabled-with-reason when git is absent or the source is off.
-        let git_watcher = GitWatcher::new(config.git_context.clone())
-            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
-            .with_toggle_control(toggle_control.clone())
-            .with_project_handle(project_handle.clone())
-            .with_event_sender(event_sender.clone());
-        git_watch_health = Some(git_watcher.health_handle());
-        let git_shutdown = shutdown_rx.clone();
-        let git_live_context = live_context.clone();
-        tokio::spawn(async move {
-            git_watcher.run(git_shutdown, Some(git_live_context)).await;
-        });
+        // --- Git collector (Task A5, spec §4.4) --- (auto-heal only; no
+        // repair target). Watches the resolver's active confirmed project
+        // only; parks in disabled-with-reason when git is absent or the
+        // source is off.
+        {
+            let health = SharedGitWatchHealth::default();
+            git_watch_health = Some(health.clone());
+            let config = config.clone();
+            let privacy = privacy_filter.clone();
+            let toggles = observation_toggles.clone();
+            let toggle_control = toggle_control.clone();
+            let project_handle = project_handle.clone();
+            let event_sender = event_sender.clone();
+            let live_context = live_context.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    let config = config.clone();
+                    let privacy = privacy.clone();
+                    let toggles = toggles.clone();
+                    let toggle_control = toggle_control.clone();
+                    let project_handle = project_handle.clone();
+                    let event_sender = event_sender.clone();
+                    let shutdown = shutdown.clone();
+                    let live_context = live_context.clone();
+                    let health = health.clone();
+                    tokio::spawn(async move {
+                        let git_watcher = GitWatcher::new(config.git_context.clone())
+                            .with_privacy(privacy, toggles)
+                            .with_toggle_control(toggle_control)
+                            .with_project_handle(project_handle)
+                            .with_event_sender(event_sender)
+                            .with_health(health);
+                        git_watcher.run(shutdown, Some(live_context)).await;
+                    })
+                });
+            supervisor.register("git", None, restarter);
+        }
 
         // --- File watcher (Task A7, spec §4.5) --- opt-in, default OFF.
-        // Watches every confirmed/configured project root whose zone
-        // allows; re-reads the Projects table each rearm tick so projects
-        // confirmed at runtime get watched without a restart. Parks in
-        // disabled-with-reason when [file_watcher].enabled or the files
-        // toggle is off — no notify watch is ever armed then.
-        let file_watch_log = raw_log.clone();
-        let projects_provider: ProjectsProvider = Arc::new(move || {
-            let raw_log = file_watch_log.clone();
-            Box::pin(async move {
-                match raw_log.list_projects().await {
-                    Ok(rows) => Some(rows.into_iter().map(|row| row.entry).collect()),
-                    Err(e) => {
-                        tracing::warn!(
-                            layer = "senses",
-                            component = "file_watch",
-                            error = %e,
-                            "Projects table read failed; keeping current watch set"
-                        );
-                        None
+        // (auto-heal only; no repair target). Watches every
+        // confirmed/configured project root whose zone allows; re-reads the
+        // Projects table each rearm tick so projects confirmed at runtime get
+        // watched without a restart. Parks in disabled-with-reason when
+        // [file_watcher].enabled or the files toggle is off — no notify watch
+        // is ever armed then.
+        {
+            let health = SharedFileWatchHealth::default();
+            file_watch_health = Some(health.clone());
+            let file_watch_log = raw_log.clone();
+            let projects_provider: ProjectsProvider = Arc::new(move || {
+                let raw_log = file_watch_log.clone();
+                Box::pin(async move {
+                    match raw_log.list_projects().await {
+                        Ok(rows) => Some(rows.into_iter().map(|row| row.entry).collect()),
+                        Err(e) => {
+                            tracing::warn!(
+                                layer = "senses",
+                                component = "file_watch",
+                                error = %e,
+                                "Projects table read failed; keeping current watch set"
+                            );
+                            None
+                        }
                     }
-                }
-            })
-        });
-        let file_watcher = FileWatcher::new(config.file_watcher.clone())
-            .with_privacy(privacy_filter.clone(), observation_toggles.clone())
-            .with_toggle_control(toggle_control.clone())
-            .with_projects_provider(projects_provider)
-            .with_event_sender(event_sender.clone())
-            .with_recent_file(recent_file_handle.clone());
-        file_watch_health = Some(file_watcher.health_handle());
-        let file_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            file_watcher.run(file_shutdown).await;
-        });
+                })
+            });
+            let config = config.clone();
+            let privacy = privacy_filter.clone();
+            let toggles = observation_toggles.clone();
+            let toggle_control = toggle_control.clone();
+            let event_sender = event_sender.clone();
+            let recent_file_handle = recent_file_handle.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    let config = config.clone();
+                    let privacy = privacy.clone();
+                    let toggles = toggles.clone();
+                    let toggle_control = toggle_control.clone();
+                    let projects_provider = projects_provider.clone();
+                    let event_sender = event_sender.clone();
+                    let recent_file_handle = recent_file_handle.clone();
+                    let shutdown = shutdown.clone();
+                    let health = health.clone();
+                    tokio::spawn(async move {
+                        let file_watcher = FileWatcher::new(config.file_watcher.clone())
+                            .with_privacy(privacy, toggles)
+                            .with_toggle_control(toggle_control)
+                            .with_projects_provider(projects_provider)
+                            .with_event_sender(event_sender)
+                            .with_recent_file(recent_file_handle)
+                            .with_health(health);
+                        file_watcher.run(shutdown).await;
+                    })
+                });
+            supervisor.register("file", None, restarter);
+        }
 
         // --- Background-process collector --- opt-in, default OFF.
-        // Emits only configured lifecycle events and sustained resource
-        // pressure; command lines, environment and process memory are never
-        // read. A compact current snapshot backs `context_processes`.
-        let process_watcher = ProcessWatcher::new(config.process_watcher.clone(), dev_dir.clone())
-            .with_privacy(privacy_filter.clone())
-            .with_toggle_control(toggle_control.clone())
-            .with_event_sender(event_sender.clone());
-        process_watch_health = Some(process_watcher.health_handle());
-        let process_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            process_watcher.run(process_shutdown).await;
-        });
+        // (auto-heal only; no repair target). Emits only configured lifecycle
+        // events and sustained resource pressure; command lines, environment
+        // and process memory are never read. A compact current snapshot backs
+        // `context_processes`.
+        {
+            let health = SharedProcessWatchHealth::default();
+            process_watch_health = Some(health.clone());
+            let config = config.clone();
+            let dev_dir = dev_dir.clone();
+            let privacy = privacy_filter.clone();
+            let toggle_control = toggle_control.clone();
+            let event_sender = event_sender.clone();
+            let shutdown = shutdown_rx.clone();
+            let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
+                Box::new(move || {
+                    let config = config.clone();
+                    let dev_dir = dev_dir.clone();
+                    let privacy = privacy.clone();
+                    let toggle_control = toggle_control.clone();
+                    let event_sender = event_sender.clone();
+                    let shutdown = shutdown.clone();
+                    let health = health.clone();
+                    tokio::spawn(async move {
+                        let process_watcher =
+                            ProcessWatcher::new(config.process_watcher.clone(), dev_dir)
+                                .with_privacy(privacy)
+                                .with_toggle_control(toggle_control)
+                                .with_event_sender(event_sender)
+                                .with_health(health);
+                        process_watcher.run(shutdown).await;
+                    })
+                });
+            supervisor.register("process", None, restarter);
+        }
 
         // --- Frame builder ---
         let frame_builder = PerceptionFrameBuilder::new(config.frame.clone());
@@ -781,6 +967,21 @@ async fn main() -> Result<()> {
             frame_builder
                 .run(screen_rx, audio_rx, ctx_rx, frame_tx, builder_shutdown)
                 .await;
+        });
+    }
+
+    // Supervisor watch loop: reaps dead sense tasks + drains repair-restart
+    // intents every `WATCH_TICK_SECS`. Runs until shutdown. The frame builder
+    // above stays a plain spawn — its channel receivers are single-consumer
+    // and cannot be reconstructed across a respawn, so it is not
+    // supervisor-managed (a frame-builder death breaks perception
+    // irrecoverably without rebuilding the channel topology).
+    {
+        let sup = supervisor;
+        let sup_dev = dev_dir.clone();
+        let sup_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            sup.run(sup_dev, sup_shutdown).await;
         });
     }
 
@@ -1124,6 +1325,11 @@ async fn main() -> Result<()> {
         let health_git = git_watch_health.clone();
         let health_file = file_watch_health.clone();
         let health_process = process_watch_health.clone();
+        // Supervisor liveness/restart counts — logged each tick at debug so a
+        // death or restart-loop is observable in the runtime log (which the
+        // repair agent tails). Per-task `alive`/`restarts` mirror what the
+        // supervisor's watch loop is acting on.
+        let health_supervisor = supervisor_stats.clone();
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
         let triage_enabled = triage.is_some();
@@ -1199,6 +1405,19 @@ async fn main() -> Result<()> {
                     curator_status_for_publisher.as_ref(),
                     curator_enabled,
                 ));
+                // Supervisor liveness snapshot — debug-level so it doesn't
+                // spam the log every tick, but a death/restart-loop surfaces
+                // here and in the supervisor's own warn lines (which the
+                // repair agent's log tail reads).
+                let sup_stats = health_supervisor.stats();
+                if sup_stats.iter().any(|s| !s.alive || s.restarts > 0) {
+                    tracing::debug!(
+                        layer = "system",
+                        component = "supervisor",
+                        stats = ?sup_stats,
+                        "supervisor snapshot"
+                    );
+                }
                 let paused = pause_for_publisher.paused();
                 snap.paused = Some(paused);
                 snap.session_state = Some(session_for_publisher.snapshot());

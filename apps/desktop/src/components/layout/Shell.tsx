@@ -93,7 +93,8 @@ const COMMAND_ENTRIES: NavEntry[] = [
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
-type UpdatePhase = "idle" | "checking" | "current" | "available" | "downloading" | "error";
+type UpdatePhase =
+  "idle" | "checking" | "current" | "available" | "downloading" | "ready" | "error";
 
 interface UpdateState {
   phase: UpdatePhase;
@@ -155,19 +156,37 @@ function useUpdates() {
     setPreferencesReady(true);
   }, []);
 
-  const installUpdate = useCallback(async () => {
+  const downloadUpdate = useCallback(async () => {
     const pendingVersion = pendingVersionRef.current;
     if (pendingVersion) {
       rememberUpdateAttempt(pendingVersion);
     }
     setState((current) => ({ ...current, phase: "downloading", message: null, progress: 0 }));
     try {
-      await continuum.installPendingUpdate((downloaded, total) => {
+      await continuum.downloadAndInstallPendingUpdate((downloaded, total) => {
         setState((current) => ({
           ...current,
           progress: total ? Math.round((downloaded / total) * 100) : null,
         }));
       });
+      setState((current) => ({
+        ...current,
+        phase: "ready",
+        message: `Update v${pendingVersion ?? ""} is ready. Restart when it suits you to apply it.`,
+        progress: 100,
+      }));
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        phase: "error",
+        message: updateErrorMessage(error, "install"),
+      }));
+    }
+  }, []);
+
+  const restartToApplyUpdate = useCallback(async () => {
+    try {
+      await continuum.restartToApplyUpdate();
     } catch (error) {
       setState((current) => ({
         ...current,
@@ -199,7 +218,7 @@ function useUpdates() {
             : null,
           progress: null,
         });
-        if (automatic && autoUpdateEnabled && !previousAttemptDidNotFinish) await installUpdate();
+        if (automatic && autoUpdateEnabled && !previousAttemptDidNotFinish) await downloadUpdate();
       } catch (error) {
         setState({
           phase: "error",
@@ -209,7 +228,7 @@ function useUpdates() {
         });
       }
     },
-    [autoUpdateEnabled, installUpdate]
+    [autoUpdateEnabled, downloadUpdate]
   );
 
   useEffect(() => {
@@ -221,7 +240,14 @@ function useUpdates() {
     window.localStorage.setItem(AUTO_UPDATE_STORAGE_KEY, String(enabled));
   };
 
-  return { autoUpdateEnabled, setAutoUpdate, state, checkForUpdates, installUpdate };
+  return {
+    autoUpdateEnabled,
+    setAutoUpdate,
+    state,
+    checkForUpdates,
+    downloadUpdate,
+    restartToApplyUpdate,
+  };
 }
 
 export function Shell() {
@@ -289,7 +315,11 @@ export function Shell() {
       <div className="app-body">
         <Sidebar active={tab} onSelect={setTab} />
         <main className="main">
-          <UpdateBanner state={updates.state} onInstall={updates.installUpdate} />
+          <UpdateBanner
+            state={updates.state}
+            onDownload={updates.downloadUpdate}
+            onRestart={updates.restartToApplyUpdate}
+          />
           <div className={clsx("main-scroll", (tab === "chat" || tab === "memory") && "is-flush")}>
             {tab === "home" && <HomeTab />}
             {tab === "chat" && <ChatTab />}
@@ -307,7 +337,8 @@ export function Shell() {
                 onAutoUpdateChange={updates.setAutoUpdate}
                 updateState={updates.state}
                 onCheckForUpdates={() => void updates.checkForUpdates()}
-                onInstallUpdate={() => void updates.installUpdate()}
+                onInstallUpdate={() => void updates.downloadUpdate()}
+                onRestartToApplyUpdate={() => void updates.restartToApplyUpdate()}
                 onResetEverything={() => setOnboarding(true)}
               />
             )}
@@ -460,7 +491,15 @@ function useRuntime() {
   return runtime;
 }
 
-function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () => void }) {
+function UpdateBanner({
+  state,
+  onDownload,
+  onRestart,
+}: {
+  state: UpdateState;
+  onDownload: () => void;
+  onRestart: () => void;
+}) {
   if (state.phase === "idle" || state.phase === "current" || state.phase === "checking")
     return null;
 
@@ -472,7 +511,7 @@ function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () 
           <span className="flex-1 text-red-300">{state.message}</span>
           {state.update && (
             <button
-              onClick={onInstall}
+              onClick={onDownload}
               className="press rounded-md border border-red-300/50 px-3 py-1 text-[10px] font-medium text-red-200 hover:bg-red-300/10"
             >
               Retry install
@@ -487,15 +526,26 @@ function UpdateBanner({ state, onInstall }: { state: UpdateState; onInstall: () 
             {state.progress !== null ? ` (${state.progress}%)` : ""}…
           </span>
         </>
+      ) : state.phase === "ready" ? (
+        <>
+          <Check size={14} className="text-green-300" />
+          <span className="flex-1">{state.message ?? `Update ready: ${updateLabel}`}</span>
+          <button
+            onClick={onRestart}
+            className="press rounded-md border border-green-300/50 px-3 py-1 text-[10px] font-medium text-green-200 hover:bg-green-300/10"
+          >
+            Restart to update
+          </button>
+        </>
       ) : (
         <>
           <Check size={14} className="text-amber-400" />
           <span className="flex-1">{state.message ?? `Update available: ${updateLabel}`}</span>
           <button
-            onClick={onInstall}
+            onClick={onDownload}
             className="press rounded-md border border-amber-400/50 px-3 py-1 text-[10px] font-medium text-amber-300 hover:bg-amber-400/10"
           >
-            Install update
+            Download update
           </button>
         </>
       )}

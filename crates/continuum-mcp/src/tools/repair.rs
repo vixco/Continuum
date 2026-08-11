@@ -1,17 +1,19 @@
 //! # Repair tools (`mcp__continuum__repair_*`)
 //!
-//! Published compatibility tools for repair sessions. The restart, reinstall,
-//! and escalation helpers can write intent files under
-//! `~/.continuum-dev/repair-intents/`, but this release has no runtime consumer
-//! for those files. The guarded Health flow therefore denies those tools and
-//! performs its one supported mutation (starting an offline runtime) directly
-//! in the desktop after preview and backup authorization.
+//! Published compatibility tools for repair sessions. The `restart` helper
+//! writes an intent file under `~/.continuum-dev/repair-intents/` that the
+//! runtime **supervisor** (`continuum_core::supervisor`) drains: it aborts
+//! the live task for the targeted component and respawns it, then archives
+//! the intent under `processed/`. The guarded Health flow authorises restart
+//! for the supervisor-managed component set (see
+//! `SUPERVISED_REPAIR_TARGETS`); other components remain fail-closed.
+//!
+//! `reinstall` and `escalate` still only write intent files — no runtime
+//! consumer for those yet — so the Health flow denies them and surfaces the
+//! limitation truthfully in the repair agent's streamed output.
 //!
 //! For `rollback_config` and `test_component` we can answer directly from
 //! the MCP process because the work is pure disk I/O.
-//!
-//! `escalate` also remains only a compatibility intent writer. Manual actions
-//! are surfaced truthfully in the repair agent's streamed output.
 
 use std::path::{Path, PathBuf};
 
@@ -95,7 +97,10 @@ pub struct TestResponse {
     pub note: Option<String>,
 }
 
-/// Queue a legacy restart intent. No consumer exists in this release.
+/// Queue a restart intent. The runtime supervisor drains
+/// `~/.continuum-dev/repair-intents/` and respawns the targeted component
+/// (when it is one of the supervisor-managed set; otherwise the intent is
+/// archived unacted-upon so the caller is not lied to).
 pub fn restart(data_dir: &Path, target: RepairTarget) -> anyhow::Result<IntentResponse> {
     queue_intent(
         data_dir,

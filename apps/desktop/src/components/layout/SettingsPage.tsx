@@ -26,6 +26,7 @@ export function SettingsPage({
   updateState,
   onCheckForUpdates,
   onInstallUpdate,
+  onRestartToApplyUpdate,
   onResetEverything,
 }: {
   autoUpdateEnabled: boolean;
@@ -33,6 +34,7 @@ export function SettingsPage({
   updateState: UpdateState;
   onCheckForUpdates: () => void;
   onInstallUpdate: () => void;
+  onRestartToApplyUpdate: () => void;
   onResetEverything: () => void;
 }) {
   const version = useStore((s) => s.state.system.version);
@@ -71,7 +73,7 @@ export function SettingsPage({
               onChange={(e) => onAutoUpdateChange(e.target.checked)}
               className="h-4 w-4 accent-amber-500"
             />
-            Install updates automatically
+            Download updates automatically
           </label>
           <Button size="sm" variant="default" onClick={onCheckForUpdates}>
             <RefreshCw
@@ -88,15 +90,23 @@ export function SettingsPage({
             <span className="flex flex-wrap items-center gap-3 text-amber-300">
               {updateState.message ?? `Update v${updateState.update.version} is available.`}
               <Button size="sm" variant="primary" onClick={onInstallUpdate}>
-                Install now
+                Download now
               </Button>
             </span>
           )}
           {updateState.phase === "downloading" && (
             <>
-              Installing update
+              Downloading update
               {updateState.progress !== null ? ` (${updateState.progress}%)` : ""}…
             </>
+          )}
+          {updateState.phase === "ready" && (
+            <span className="flex flex-wrap items-center gap-3 text-green-300">
+              {updateState.message ?? "Update ready to apply."}
+              <Button size="sm" variant="primary" onClick={onRestartToApplyUpdate}>
+                Restart to update
+              </Button>
+            </span>
           )}
           {updateState.phase === "error" && (
             <span className="flex flex-wrap items-center gap-3 text-red-300">

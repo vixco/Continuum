@@ -182,7 +182,8 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   };
 }
 
-export async function installPendingUpdate(
+/** Downloads and stages the pending signed update without interrupting the user. */
+export async function downloadAndInstallPendingUpdate(
   onProgress?: (downloaded: number, total: number | null) => void
 ): Promise<void> {
   if (!pendingUpdate) {
@@ -201,6 +202,11 @@ export async function installPendingUpdate(
   });
 
   pendingUpdate = null;
+}
+
+/** Restarts Continuum only after the user explicitly chooses to apply a staged update. */
+export async function restartToApplyUpdate(): Promise<void> {
+  if (!(await isTauri())) return;
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }
@@ -209,7 +215,8 @@ export async function installPendingUpdate(
 
 export const continuum = {
   checkForUpdate,
-  installPendingUpdate,
+  downloadAndInstallPendingUpdate,
+  restartToApplyUpdate,
   getState: () => invoke<ContinuumState>("get_state", undefined, DEFAULT_STATE),
   getConfig: () => invoke<ContinuumConfig>("get_config", undefined, DEFAULT_CONFIG),
   getResourceProfile: () =>

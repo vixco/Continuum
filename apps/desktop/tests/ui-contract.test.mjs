@@ -49,6 +49,20 @@ test("runtime startup is automatic and Settings owns the model directory", async
   assert.doesNotMatch(observation, /start_runtime/);
 });
 
+test("automatic updates stage in the background and require an explicit restart", async () => {
+  const shell = await read("src/components/layout/Shell.tsx");
+  const tauri = await read("src/lib/tauri.ts");
+
+  assert.match(shell, /automatic && autoUpdateEnabled[\s\S]*await downloadUpdate\(\)/);
+  assert.match(shell, /Restart to update/);
+  assert.match(tauri, /downloadAndInstallPendingUpdate/);
+  assert.match(tauri, /restartToApplyUpdate/);
+  assert.ok(
+    tauri.indexOf("pendingUpdate = null;") < tauri.indexOf("export async function restartToApplyUpdate"),
+    "the staged-update function must finish before the explicit restart function begins"
+  );
+});
+
 test("chat stays virtualized and respects explicit scroll intent", async () => {
   const messages = await read("src/components/chat/MessageList.tsx");
   assert.match(messages, /VirtuosoHandle/);

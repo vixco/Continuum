@@ -187,13 +187,20 @@ Output:
 
 ### Context watcher
 
-Pure Rust code that polls Windows APIs once per second. It captures:
+Pure Rust code that polls the OS once per second. On Windows it uses the Win32
+foreground-window, UI Automation, and Media Session APIs; on macOS it enumerates
+on-screen windows via the Core Graphics `CGWindowList` API and resolves the
+focused window's title through the Accessibility framework
+(`AXFocusedWindow` / `AXTitle`). The macOS implementation is built from
+lightweight system-framework bindings (not heavy native build deps), so it
+compiles under `--no-default-features` on macOS and the desktop build gets a
+working watcher rather than an empty stub. It captures:
 
 - Foreground window title and process name
 - Active file path from editors that expose it via UI Automation (VS Code, JetBrains, Sublime, etc.)
 - Currently playing media (via Windows Media Session)
 - Idle time (last user input)
-- Whether the user is in a call (detects Discord, Teams, Zoom, Meet)
+- Whether the user is in a call (detects Discord, Teams, Zoom, Meet) — process-name and title-keyword matching is platform-aware (`Discord.exe` on Windows vs `Discord` on macOS, etc.)
 - Active Chrome/Edge tab URL (via accessibility tree)
 
 This layer uses **no AI**. It is just structured polling. It is cheap, fast, and deterministic.
@@ -968,6 +975,14 @@ The repair agent is instructed to:
 - Ask for confirmation before destructive fixes (reinstall a model, modify core config, rollback to backup)
 - Test the fix by calling `repair_test_component`
 - Report what it did and whether the issue is resolved
+
+### Runtime supervisor
+
+A `Supervisor` (`crates/continuum-core/src/supervisor.rs`) owns the long-lived sense tasks so a dead or stuck component is revived without a full runtime restart. It manages the three triage-relevant collectors — `vision`, `audio`, `context_watcher` (`SUPERVISED_REPAIR_TARGETS`) — plus the auto-heal-only `git`, `file`, and `process` collectors. On a watch tick it reaps any task whose `JoinHandle` has resolved (clean exit or panic) and respawns a faithful reconstruction through the restarter closure registered at boot. Each supervised component is constructed with a stable shared `Arc<RwLock<Health>>` (via a `with_health` builder), so a respawn reuses the same health handle the dashboard and `system_health` MCP tool read — a restart never orphans health state.
+
+The supervisor also drains `~/.continuum-dev/repair-intents/`: each `restart` intent whose `component` matches a supervised target calls `restart_named`, then the file is archived to `processed/`. This is the wire that makes the repair agent's `repair_restart_component` call actually take effect — the repair agent writes an intent, the supervisor consumes it on the next tick and respawns the component in-process. The repair session's `allowed_restart_components` is seeded from `SUPERVISED_REPAIR_TARGETS`, so only those three components are restartable by the agent; the git/file/process collectors have no repair key and auto-heal on death only (no public API change to `continuum-mcp`).
+
+Runtime structured logs tee to a fixed `~/.continuum-dev/logs/continuum.log` via a non-blocking `tracing-appender` writer; `runtime_log_tail` (`health/repair.rs`) reads its tail to build the diagnose context handed to the repair agent.
 
 ### Backup rotation
 

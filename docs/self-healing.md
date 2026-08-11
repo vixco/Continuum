@@ -141,13 +141,13 @@ All under the `repair_*` namespace (routed via `continuum-mcp`):
 
 | Tool                       | Effect                                                                 |
 |----------------------------|------------------------------------------------------------------------|
-| `repair_restart_component` | Published MCP compatibility boundary, but denied in the safe Health session because restart intents have no runtime consumer. |
+| `repair_restart_component` | Writes a `restart` intent to `~/.continuum-dev/repair-intents/`. The runtime `Supervisor` drains that directory on each watch tick and respawns the named component in-process. Only `vision`, `audio`, and `context_watcher` (the `SUPERVISED_REPAIR_TARGETS`) are restartable this way; the repair session's `allowed_restart_components` is seeded from that list, so any other component name is rejected before the intent is written. Other repair tools below remain published for API compatibility but are denied in the safe Health session. |
 | `repair_reinstall_model`   | Published MCP compatibility boundary; denied in the safe Health session. |
 | `repair_rollback_config`   | Published MCP compatibility boundary; denied in the safe Health session. The separate desktop rollback command is guarded and reversible. |
 | `repair_test_component`    | Lightweight file-presence probe. Returns `healthy / degrading / error / unknown`; it is not live recovery proof. |
 | `repair_escalate`          | Published MCP compatibility boundary; denied because escalation intents have no dashboard consumer. |
 
-The desktop now runs that same guarded startup path automatically after onboarding: it creates and re-verifies a backup, refuses duplicate runtime processes, starts the packaged runtime once, and keeps the UI in a loading state until a fresh `state.json` heartbeat arrives (90 seconds by default, clamped to 10–300 seconds). A timeout stops the child process and the title bar preserves the concrete startup error. The Health preview can still request the same idempotent repair, but there is no manual Start runtime control. Component restart intent files are not consumed in this release and must never be presented as successful repair.
+The desktop now runs that same guarded startup path automatically after onboarding: it creates and re-verifies a backup, refuses duplicate runtime processes, starts the packaged runtime once, and keeps the UI in a loading state until a fresh `state.json` heartbeat arrives (90 seconds by default, clamped to 10–300 seconds). A timeout stops the child process and the title bar preserves the concrete startup error. The Health preview can still request the same idempotent repair, but there is no manual Start runtime control. Restart intents for `vision` / `audio` / `context_watcher` are now consumed by the runtime supervisor; intents for any other component (or non-`restart` kinds) are archived to `repair-intents/processed/` without action.
 
 Missing local models do not stop the rest of the runtime, but the affected
 component degrades visibly. Settings → Local model storage selects one shared
@@ -213,9 +213,15 @@ Recovery:
 2. Inspect `live-context.json` health counters and recent source-attributed
    events. If drops rise, increase `screen.buffer_capacity`, increase
    `screen.vision_min_interval_ms`, or relax capture cadence.
-3. Restart the Continuum runtime to re-enumerate displays and restart all
-   monitor workers. Hot-plug discovery normally repairs topology within 2 s.
-4. Persistent xcap failures require checking the interactive Windows desktop
+3. The runtime `Supervisor` auto-heals the vision task — a dead/stuck
+   capture loop is reaped and respawned in-process on the next watch tick
+   (the restarter re-initialises the vision model and re-enumerates
+   displays), so most stalls clear without a full runtime restart. The
+   repair agent can also queue a `repair_restart_component` intent for
+   `vision`. Hot-plug discovery normally repairs topology within 2 s.
+4. If a supervisor respawn does not clear it, restart the Continuum runtime
+   to re-enumerate displays and restart all monitor workers.
+5. Persistent xcap failures require checking the interactive Windows desktop
    session and display drivers; do not delete local user data.
 
 Runtime proof boundary: unit tests cover event ordering, bounded oldest-drop
@@ -272,10 +278,25 @@ probe.
 - Health: the 1 Hz poll loop stamps `last_poll_at` every tick. Healthy while
   the last poll is within 3 poll intervals (min 5 s); `should_restart` only
   after a sustained stall of 10 intervals (min 30 s) of an *enabled* loop.
-- Recovery: restart the `continuum` runtime (the poller is stateless). A
-  stall almost always means the tokio runtime itself is wedged — check the
-  log tail for a panic in another senses task first. `pause_all` parks the
-  poller disabled-with-reason; clear the toggle and restart.
+- `permission_warning` (macOS): when the watcher runs but is blind because of
+  a missing OS permission, the health snapshot carries an English message
+  naming the gate. **Accessibility** (gates the focused-window title) is
+  checked via `AXIsProcessTrusted`; **Screen Recording** (gates other apps'
+  window titles, so call detection by title and monitor zones) is inferred
+  from a total absence of named on-screen windows. The fix is a user grant in
+  System Settings → Privacy & Security (Accessibility / Screen Recording),
+  *not* a restart — the repair agent should surface this warning rather than
+  loop on `repair_restart_component`.
+- Recovery: the runtime `Supervisor` owns this task and auto-heals it — a
+  dead/stuck poll loop is reaped and respawned in-process on the next watch
+  tick (the shared health `Arc` survives the respawn, so the dashboard keeps a
+  valid handle). The repair agent can also queue a `repair_restart_component`
+  intent for `context_watcher`, which the supervisor drains and acts on. If a
+  restart does not clear it, restart the `continuum` runtime (the poller is
+  stateless). A stall that persists across respawns almost always means the
+  tokio runtime itself is wedged — check the log tail for a panic in another
+  senses task first. `pause_all` parks the poller disabled-with-reason; clear
+  the toggle and restart.
 
 ### Project resolver
 
@@ -586,6 +607,11 @@ Health check:
 
 Recovery:
 
+- The runtime `Supervisor` auto-heals the `audio` task — a dead/stuck
+  capture loop is reaped and respawned in-process on the next watch tick.
+  The repair agent can also queue a `repair_restart_component` intent for
+  `audio`. If a respawn does not restore capture, restart the Continuum
+  runtime.
 - If wake detection never fires, verify `[voice].wake_keyword` and the microphone path.
 - Run `continuum --reset-audio` to re-pick the microphone if hardware changed.
 - If Whisper is degraded, re-run `scripts/download-models.ps1` and check `audio.whisper_model_path`.

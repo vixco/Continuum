@@ -400,10 +400,15 @@ fn create_repair_session(input: &RepairInput<'_>) -> Result<RepairSessionFiles> 
         created_at: now,
         expires_at: now + chrono::Duration::seconds(ttl as i64),
         allowed_components: input.allowed_components.clone(),
-        // Component restart intents do not yet have a runtime consumer.
-        // The desktop performs the one genuinely supported action (starting
-        // an offline runtime) directly under its preview and backup guard.
-        allowed_restart_components: Vec::new(),
+        // The runtime supervisor (see `continuum_core::supervisor`) consumes
+        // `restart` intent files for the components it manages and respawns
+        // them. An authorised repair session may therefore queue a restart
+        // for exactly that supervised set; anything else stays fail-closed so
+        // the agent cannot promise a restart no consumer will act on.
+        allowed_restart_components: crate::supervisor::SUPERVISED_REPAIR_TARGETS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         allow_escalation_intent: false,
         // The Health-tab safe flow intentionally cannot authorize downloads or
         // config rollback. Those require a separate, explicit user workflow.
@@ -660,10 +665,66 @@ pub fn write_repair_context(input: &RepairInput<'_>) -> Result<PathBuf> {
     }
     out.push_str("```\n");
 
+    // The in-memory `LogBuffer` above only carries events emitted inside the
+    // desktop process. The standalone `continuum` runtime is a *separate*
+    // process whose logs never reach that buffer — it writes them to
+    // `~/.continuum-dev/logs/continuum.log` (tracing-appender rolling file,
+    // see `bin/continuum.rs`). Tail that file so the repair agent can see what
+    // the perception/triage/orchestrator loops actually logged, including the
+    // last lines before a crash (which the in-memory buffer loses when the
+    // runtime process dies).
+    if let Some(tail) = runtime_log_tail(input.dev_dir) {
+        out.push_str("\n## Runtime log tail (from disk)\n\n```\n");
+        out.push_str(&tail);
+        out.push_str("```\n");
+    }
+
     let path = input.dev_dir.join("repair-context.md");
     std::fs::create_dir_all(input.dev_dir).ok();
     std::fs::write(&path, out).context("write repair context file")?;
     Ok(path)
+}
+
+/// Read the tail of the runtime's on-disk log (`<dev_dir>/logs/continuum.log`)
+/// for the repair context. Returns `None` when the file is absent (the runtime
+/// has not run yet, or file logging is not enabled) so the repair context
+/// degrades gracefully rather than failing. Keeps the last ~500 lines and
+/// caps the output so a runaway log cannot blow up the context file.
+fn runtime_log_tail(dev_dir: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let path = dev_dir.join("logs").join("continuum.log");
+    let file = std::fs::File::open(&path).ok()?;
+    let reader = BufReader::new(file);
+    const TAIL_LINES: usize = 500;
+    const MAX_BYTES: usize = 64 * 1024;
+    let mut ring: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(TAIL_LINES);
+    let mut total_bytes: usize = 0;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        total_bytes = total_bytes.saturating_add(line.len() + 1);
+        if ring.len() == TAIL_LINES {
+            if let Some(old) = ring.pop_front() {
+                total_bytes = total_bytes.saturating_sub(old.len() + 1);
+            }
+        }
+        ring.push_back(line);
+        if total_bytes >= MAX_BYTES {
+            break;
+        }
+    }
+    if ring.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for line in ring {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Build the `## System resources` block for the repair context.
@@ -974,6 +1035,40 @@ mod tests {
         assert!(text.contains("Configuration snapshot"));
         assert!(text.contains("<redacted>"));
         assert!(!text.contains("secret-test-key"));
+    }
+
+    #[test]
+    fn runtime_log_tail_reads_disk_log() {
+        let tmp = TempDir::new().unwrap();
+        let dev = tmp.path().join("dev");
+        let logs_dir = dev.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("continuum.log"),
+            "line one\nline two\ntriage decided\n",
+        )
+        .unwrap();
+        let tail = runtime_log_tail(&dev).expect("should read the log");
+        assert!(tail.contains("triage decided"));
+        assert!(tail.contains("line one"));
+    }
+
+    #[test]
+    fn runtime_log_tail_none_when_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let dev = tmp.path().join("dev");
+        std::fs::create_dir_all(&dev).unwrap();
+        assert!(runtime_log_tail(&dev).is_none());
+    }
+
+    #[test]
+    fn repair_grant_allows_supervised_restart_targets() {
+        // The supervisor-managed set must be authorised for restart so the
+        // repair agent can queue a restart the supervisor will consume.
+        let targets = crate::supervisor::SUPERVISED_REPAIR_TARGETS;
+        assert!(targets.contains(&"vision"));
+        assert!(targets.contains(&"audio"));
+        assert!(targets.contains(&"context_watcher"));
     }
 
     #[test]
