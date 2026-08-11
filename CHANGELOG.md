@@ -190,14 +190,6 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
-- **Release builds blocked by stale cached bundle artifacts**: the Rust target
-  cache (restored across release runs) carried over a previous version's NSIS
-  installer and macOS DMG / updater archive, so Tauri — which never prunes stale
-  bundle outputs — left two installers side by side and the "exactly one
-  installer" assertion failed, aborting publication. The Windows and macOS build
-  jobs now wipe `target/.../release/bundle` before the Tauri build so only the
-  current run's artifacts exist when the count checks run.
-
 - **Stable streaming chat position**: growing assistant and tool output now stays pinned only when the reader was already near the bottom. Deliberate upward scrolling is preserved, streaming updates no longer stack smooth-scroll calls, and an unobtrusive new-messages action returns to the live response.
 
 - **Local runtime start on Windows**: `scripts/dev.ps1` now resolves and
