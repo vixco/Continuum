@@ -10,7 +10,7 @@
     "ci:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 -Stage Full",
     "ci:release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 -Stage ReleaseWindows -StrictToolchain",
     "dev": "pnpm --filter desktop dev",
-    "dev:app": "pnpm --filter @continuum/desktop tauri dev",
+    "dev:app": "pnpm dev:local",
     "dev:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "build": "pnpm run build:desktop && pnpm run build:docs",
     "build:desktop": "pnpm --filter @continuum/desktop build",

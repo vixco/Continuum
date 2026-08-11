@@ -28,6 +28,53 @@ function Write-Ok($msg) { Write-Host "  OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  !   $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "  X   $msg" -ForegroundColor Red }
 
+# whisper-rs-sys runs bindgen while Tauri compiles the Rust backend. On a
+# regular PowerShell session (rather than a Visual Studio Developer Prompt),
+# clang cannot locate the Windows C headers such as stdbool.h unless we import
+# the MSVC environment first. Keep this process-local: it must not mutate the
+# maintainer's global shell configuration.
+function Initialize-NativeToolchain {
+  if ($env:OS -eq "Windows_NT" -and [string]::IsNullOrWhiteSpace($env:INCLUDE)) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+      throw "Visual Studio Build Tools were not found. Run scripts/dev-setup.ps1 first."
+    }
+    $installationPath = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+    if ([string]::IsNullOrWhiteSpace($installationPath)) {
+      throw "Visual Studio C++ Build Tools were not found. Run scripts/dev-setup.ps1 first."
+    }
+    $devCommand = Join-Path $installationPath "Common7\Tools\VsDevCmd.bat"
+    if (-not (Test-Path -LiteralPath $devCommand -PathType Leaf)) {
+      throw "VsDevCmd.bat was not found under $installationPath."
+    }
+
+    $environmentLines = & cmd.exe /d /s /c "`"$devCommand`" -no_logo -arch=x64 -host_arch=x64 >nul && set"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to initialize the Visual Studio C++ environment."
+    }
+    foreach ($line in $environmentLines) {
+      $separator = $line.IndexOf('=')
+      if ($separator -gt 0) {
+        [Environment]::SetEnvironmentVariable($line.Substring(0, $separator), $line.Substring($separator + 1), "Process")
+      }
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+    foreach ($candidate in @("C:\LLVM\bin", "C:\Program Files\LLVM\bin")) {
+      if (Test-Path -LiteralPath (Join-Path $candidate "libclang.dll") -PathType Leaf) {
+        $env:LIBCLANG_PATH = $candidate
+        break
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH) -or -not (Test-Path -LiteralPath (Join-Path $env:LIBCLANG_PATH "libclang.dll") -PathType Leaf)) {
+    throw "LLVM/libclang is not configured. Install LLVM or set LIBCLANG_PATH, then rerun scripts/dev-setup.ps1."
+  }
+
+  Write-Ok "Native toolchain ready (MSVC + LLVM)"
+}
+
 # Find the first free TCP port starting at $Start. Next.js and the Tauri
 # devUrl are both pointed at this port, so a stale dev server (or any other
 # app) on the default 3000 never breaks `dev.ps1` — it just rolls on to the
@@ -108,6 +155,12 @@ if ($FrontendOnly) {
 # --- Default + -WithRuntime: Tauri desktop app --------------------------
 Write-Step "Tauri desktop app (frameless dashboard)"
 if (-not (Test-Preqs -NeedRust)) { exit 1 }
+try {
+  Initialize-NativeToolchain
+} catch {
+  Write-Err $_.Exception.Message
+  exit 1
+}
 
 # ort uses dynamic loading. Without an explicit path, Windows can silently pick
 # its old System32 copy (currently 1.17 on some Windows builds), while ort rc.11
