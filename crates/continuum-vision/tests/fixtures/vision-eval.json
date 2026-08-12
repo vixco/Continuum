@@ -1,0 +1,32 @@
+[
+  {
+    "name": "natural-youtube-scene",
+    "file": "youtube-browser-screenshot.jpg",
+    "required_any": [["man", "person"], ["point", "gesture"], ["elf"]],
+    "forbidden": ["holding", "wordpress", "online test preparation", "steam application"]
+  },
+  {
+    "name": "ide-build-error",
+    "file": "generated/ide-build-error.png",
+    "required_any": [["error", "failed"], ["config.toml", "file not found"], ["code", "editor", "visual studio"]],
+    "forbidden": ["successful", "operational"]
+  },
+  {
+    "name": "runtime-dashboard",
+    "file": "generated/runtime-dashboard.png",
+    "required_any": [["dashboard", "runtime"], ["operational", "healthy"], ["chart", "graph", "bars"]],
+    "forbidden": ["crash", "fatal", "error dialog", "build failed"]
+  },
+  {
+    "name": "privacy-settings",
+    "file": "generated/privacy-settings.png",
+    "required_any": [["privacy", "settings"], ["screen", "observation"], ["screenshot", "screenshots"], ["off", "disabled"]],
+    "forbidden": ["error", "crash"]
+  },
+  {
+    "name": "team-calendar",
+    "file": "generated/team-calendar.png",
+    "required_any": [["calendar", "schedule"], ["design review"], ["14:00", "2:00"], ["project sync", "meeting"]],
+    "forbidden": ["error", "crash"]
+  }
+]

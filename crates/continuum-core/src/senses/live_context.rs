@@ -814,12 +814,12 @@ impl LiveContextHub {
         if meaningful || privacy_changed {
             self.bump_content_version();
         }
-        // Spec §4.11: no "unchanged" ring events during idle — the
-        // bounded ring must not fill with idle churn. Degraded unchanged
-        // captures (drops, cadence misses) still push so overload
-        // evidence is never hidden.
+        // At the 20 ms capture cadence, unchanged samples must never consume
+        // the bounded semantic event history. Health/current-state metadata
+        // above still updates for every capture; only meaningful changes,
+        // privacy transitions, or queue drops become timeline events.
         let degraded = dropped_before > 0 || deadline_missed;
-        if self.idle.load(Ordering::Acquire) && !meaningful && !privacy_changed && !degraded {
+        if !meaningful && !privacy_changed && dropped_before == 0 {
             return self.sequence.load(Ordering::Acquire);
         }
         self.push_event_locked(
@@ -852,6 +852,7 @@ impl LiveContextHub {
         monitor.confidence = confidence;
         monitor.vision_updated_at = vision_updated_at;
         monitor.privacy = privacy;
+        let event_summary = monitor.description.clone();
         if vision_updated {
             inner.health.vision_updates = inner.health.vision_updates.saturating_add(1);
         }
@@ -865,7 +866,7 @@ impl LiveContextHub {
                 LiveContextSource::Monitor,
                 monitor_id.to_string(),
                 if privacy == PrivacyDisposition::Visible {
-                    "local vision summary updated".into()
+                    format!("local vision: {event_summary}")
                 } else {
                     "visual context redacted by local privacy policy".into()
                 },
@@ -1999,9 +2000,8 @@ mod tests {
         assert!(hub.content_version() > v7, "dirty-count change must bump");
     }
 
-    /// Spec §4.11: while idle, unchanged-capture and no-change context
-    /// polls push no ring events (the bounded ring must not fill with
-    /// idle churn); meaningful changes still push.
+    /// Unchanged captures never consume semantic history at the 20 ms
+    /// cadence; meaningful changes still push in active and idle modes.
     #[test]
     fn idle_suppresses_unchanged_ring_events() {
         let hub = LiveContextHub::default();
@@ -2036,8 +2036,8 @@ mod tests {
         hub.record_monitor_capture(unchanged_monitor("display-1", 4));
         assert_eq!(
             hub.snapshot().recent_events.len(),
-            before + 2,
-            "active-mode unchanged captures keep pushing (existing behavior)"
+            before + 1,
+            "active unchanged captures must not erase meaningful history"
         );
     }
 

@@ -2,13 +2,14 @@
 # Override in ~/.continuum/config.toml under [models]
 
 [vision]
-name = "SmolVLM-256M"
-variant = "smolvlm-256m"
-path = "~/.continuum-dev/models/vision/smolvlm-256m"
-size_mb = 500
-runtime = "onnx"
-gpu_enabled = false  # Phase 1: CPU only. Set true for CUDA acceleration.
-# Alternatives: moondream-2b (recommended for GPU users), florence-2-base, florence-2-large, minicpm-v-2.6
+name = "SmolVLM2-2.2B Q4_K_M"
+variant = "smolvlm2-2.2b-q4"
+path = "~/.continuum-dev/models/vision/smolvlm2-2.2b-q4"
+fallback_path = "~/.continuum-dev/models/vision/smolvlm-500m"
+size_mb = 1900
+runtime = "llama-cpp-mtmd"
+gpu_enabled = true   # CPU fallback is automatic in builds without CUDA/Vulkan.
+# Safe fallback: SmolVLM-500M ONNX. Low-resource fallback: SmolVLM-256M ONNX.
 
 [triage]
 name = "Qwen 3 8B"

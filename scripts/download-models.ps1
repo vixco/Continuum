@@ -1,6 +1,9 @@
 ﻿# Continuum download-models.ps1
 # Downloads default model files for Continuum's local inference.
 # Idempotent -- skips files that already exist with valid sizes.
+# For the vision model only, use `scripts/ensure-vision-model.ps1`: its
+# default Check mode is offline/read-only, while Repair and Update download
+# only files that need attention.
 #
 # Uses curl.exe (ships with Windows 10+) instead of Invoke-WebRequest
 # because HuggingFace requires following redirects (302 -> CDN) and
@@ -128,40 +131,58 @@ function Download-Sidecar {
 }
 
 # ============================================================================
-# SmolVLM-256M (Vision -- Layer 1)
+# SmolVLM-500M (Vision -- Layer 1)
 # ============================================================================
 # Source: HuggingFaceTB official repo (onnx-community is now auth-gated).
 # The continuum-vision crate expects: vision_encoder.onnx, embed_tokens.onnx,
 # decoder.onnx, and tokenizer.json in the same directory.
 
-Write-Host "`n--- SmolVLM-256M (Vision) ---" -ForegroundColor Cyan
+$VisionEnsure = Join-Path $PSScriptRoot "ensure-vision-model.ps1"
+Write-Host "`n--- SmolVLM2-2.2B Q4_K_M (Preferred Vision) ---" -ForegroundColor Cyan
+& $VisionEnsure -Mode Repair -Variant smolvlm2-2.2b-q4 -ModelsDir $ModelsBase
+if ($LASTEXITCODE -ne 0) { throw "Preferred SmolVLM2 vision model repair failed." }
 
-$VisionDir = Join-Path $ModelsBase "vision\smolvlm-256m"
-$HfVisionBase = "https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct/resolve/main"
+Write-Host "`n--- SmolVLM-500M (Vision Fallback) ---" -ForegroundColor Cyan
+
+$VisionDir = Join-Path $ModelsBase "vision\smolvlm-500m"
+$HfVisionBase = "https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct/resolve/main"
 
 Download-Model `
     -Name "SmolVLM vision encoder" `
     -Url "$HfVisionBase/onnx/vision_encoder.onnx" `
     -OutPath (Join-Path $VisionDir "vision_encoder.onnx") `
-    -ExpectedSizeMB "374"
+    -ExpectedSizeMB "393"
 
 Download-Model `
     -Name "SmolVLM embed_tokens" `
     -Url "$HfVisionBase/onnx/embed_tokens.onnx" `
     -OutPath (Join-Path $VisionDir "embed_tokens.onnx") `
-    -ExpectedSizeMB "113"
+    -ExpectedSizeMB "189"
 
 Download-Model `
     -Name "SmolVLM decoder" `
     -Url "$HfVisionBase/onnx/decoder_model_merged.onnx" `
     -OutPath (Join-Path $VisionDir "decoder.onnx") `
-    -ExpectedSizeMB "86"
+    -ExpectedSizeMB "1450"
 
 Download-Model `
     -Name "SmolVLM tokenizer" `
     -Url "$HfVisionBase/tokenizer.json" `
     -OutPath (Join-Path $VisionDir "tokenizer.json") `
     -ExpectedSizeMB "3"
+
+foreach ($sidecar in @(
+    @("SmolVLM preprocessor config", "preprocessor_config.json"),
+    @("SmolVLM processor config", "processor_config.json"),
+    @("SmolVLM generation config", "generation_config.json"),
+    @("SmolVLM chat template", "chat_template.json"),
+    @("SmolVLM model config", "config.json")
+)) {
+    Download-Sidecar `
+        -Name $sidecar[0] `
+        -Url "$HfVisionBase/$($sidecar[1])" `
+        -OutPath (Join-Path $VisionDir $sidecar[1])
+}
 
 # Clean up stale encoder.onnx if it exists (previous script saved 401 error as file)
 $StaleEncoder = Join-Path $VisionDir "encoder.onnx"
@@ -463,6 +484,11 @@ $critical = @(
     @("Vision embed_tokens",    (Join-Path $VisionDir "embed_tokens.onnx"),        $MinValidSize),
     @("Vision decoder",         (Join-Path $VisionDir "decoder.onnx"),             $MinValidSize),
     @("Vision tokenizer",       (Join-Path $VisionDir "tokenizer.json"),           10000),
+    @("Vision preprocessor",    (Join-Path $VisionDir "preprocessor_config.json"), 100),
+    @("Vision processor",       (Join-Path $VisionDir "processor_config.json"),     50),
+    @("Vision generation",      (Join-Path $VisionDir "generation_config.json"),   100),
+    @("Vision chat template",   (Join-Path $VisionDir "chat_template.json"),       100),
+    @("Vision model config",    (Join-Path $VisionDir "config.json"),             1000),
     @("Triage model (8B)",      (Join-Path $ModelsBase "triage\$Qwen8BOutName"),       $MinValidSize),
     @("Triage model (4B fallback)", (Join-Path $ModelsBase "triage\qwen3-4b-q4_k_m.gguf"), $MinValidSize),
     @("Whisper medium",         (Join-Path $ModelsBase "stt\whisper-medium.bin"),  $MinValidSize),

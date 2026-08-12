@@ -3,9 +3,9 @@
 //! Local vision model runtime for Continuum's senses layer (Layer 1).
 //!
 //! This crate provides the [`VisionModel`] trait for abstracting over different
-//! vision backends, and an [`OnnxVisionModel`](onnx::OnnxVisionModel) implementation
-//! that uses SmolVLM-256M via ONNX Runtime to produce one-sentence screen
-//! descriptions for the perception frame builder.
+//! vision backends, a higher-quality [`GgufVisionModel`](gguf::GgufVisionModel)
+//! implementation for SmolVLM2, and an
+//! [`OnnxVisionModel`](onnx::OnnxVisionModel) fallback for SmolVLM-500M.
 //!
 //! # Architecture
 //!
@@ -25,9 +25,8 @@
 //! Model files live in `~/.continuum/models/vision/` and are **never** checked
 //! into git. Use `scripts/download-models.ps1` to fetch them.
 //!
-//! Default model: SmolVLM-256M (0.25B parameters, ~200 MB RAM, ~500ms per
-//! image on CPU). FP16 quantization by default, configurable via the
-//! dashboard.
+//! Default model: SmolVLM2-2.2B Q4_K_M. SmolVLM-500M is the automatic ONNX
+//! fallback, and SmolVLM-256M remains a configurable low-resource option.
 //!
 //! # Example
 //!
@@ -36,7 +35,7 @@
 //! use continuum_vision::onnx::OnnxVisionModel;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let model = OnnxVisionModel::new("~/.continuum/models/vision/smolvlm-256m", false).await?;
+//! let model = OnnxVisionModel::new("~/.continuum-dev/models/vision/smolvlm-500m", false).await?;
 //! model.warmup().await?;
 //!
 //! let img = image::open("screenshot.png")?;
@@ -47,6 +46,7 @@
 //! ```
 
 pub mod error;
+pub mod gguf;
 pub mod onnx;
 
 use anyhow::Result;
@@ -63,7 +63,8 @@ pub struct VisionOutput {
     pub description: String,
     /// Whether the model detected an error dialog, stack trace, or similar.
     pub has_error_visible: bool,
-    /// Model's confidence in the description (0.0 to 1.0).
+    /// Mean greedy-token probability (0.0 to 1.0). This is a decoding
+    /// confidence signal, not a calibrated estimate of semantic correctness.
     pub confidence: f32,
 }
 
@@ -77,10 +78,8 @@ pub struct VisionOutput {
 ///
 /// # Implementors
 ///
-/// - [`onnx::OnnxVisionModel`] — ONNX Runtime backend (default)
-///
-/// Additional backends (e.g., llama.cpp multimodal, direct CUDA) can be
-/// added by implementing this trait.
+/// - [`gguf::GgufVisionModel`] - preferred llama.cpp MTMD backend
+/// - [`onnx::OnnxVisionModel`] - ONNX Runtime fallback
 #[async_trait]
 pub trait VisionModel: Send + Sync {
     /// Describe the contents of a screenshot image.

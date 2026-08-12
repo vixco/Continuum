@@ -41,7 +41,7 @@ pub struct CadenceControl {
 #[derive(Debug)]
 struct CadenceInner {
     /// Current per-monitor capture interval (ms). Capture loops clamp to
-    /// a 50 ms floor themselves.
+    /// a 20 ms floor themselves.
     capture_interval_ms: AtomicU64,
     /// Current minimum delay between local vision calls per monitor
     /// (ms). `0` means vision is fully paused (spec §4.11).

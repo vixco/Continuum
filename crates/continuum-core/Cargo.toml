@@ -28,8 +28,8 @@ runtime = [
     "dep:tracing-appender",
 ]
 raw-log = ["dep:sqlx"]
-cuda = ["runtime", "continuum-llm/cuda", "whisper-rs/cuda"]
-vulkan = ["runtime", "continuum-llm/vulkan"]
+cuda = ["runtime", "continuum-llm/cuda", "continuum-vision/cuda", "whisper-rs/cuda"]
+vulkan = ["runtime", "continuum-llm/vulkan", "continuum-vision/vulkan"]
 # Moshi full-duplex speech-to-speech front-end (kyutai-labs/moshi). Off by
 # default: it pulls in `tokio-tungstenite` + `native-tls` and requires a
 # separately-built `moshi-backend.exe` (CUDA) at runtime. The base `moshi`

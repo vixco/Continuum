@@ -357,6 +357,17 @@ if (-not $SkipModels) {
     Write-Header "Local models"
     $configPath = Join-Path $repoRoot "config\config.example.toml"
     $downloadScript = Join-Path $repoRoot "scripts\download-models.ps1"
+    $visionPreflightScript = Join-Path $repoRoot "scripts\ensure-vision-model.ps1"
+    if (Test-Path $visionPreflightScript) {
+        Write-Info "Checking the local vision model before optional model downloads"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $visionPreflightScript -Mode Check -Variant smolvlm2-2.2b-q4
+        $preferredVisionReady = $LASTEXITCODE -eq 0
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $visionPreflightScript -Mode Check -Variant smolvlm-500m
+        $fallbackVisionReady = $LASTEXITCODE -eq 0
+        if (-not $preferredVisionReady -or -not $fallbackVisionReady) {
+            Write-Info "Vision model is unavailable or incomplete. Run download-models.ps1 or repair the reported variant."
+        }
+    }
     if (Test-Path $downloadScript) {
         $response = Read-Host "Download recommended local models now? This can require several GB. [y/N]"
         if ($response -eq "y" -or $response -eq "Y") {

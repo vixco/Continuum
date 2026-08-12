@@ -76,11 +76,21 @@ Embeddings help retrieval, but never decide whether a fact is current or true.
 ### Continuous live context
 
 Layer 1 continuously captures every connected monitor through an independent
-local worker (200 ms target cadence by default). Capture events enter one
-bounded, globally ordered FIFO; when downstream vision work falls behind, the
-oldest pending image is dropped and the gap is recorded instead of silently
-stopping capture. Cheap luma differencing keeps unchanged frames out of the
-local vision model while preserving capture timestamps and counters.
+local worker (20 ms best-effort target cadence by default). Capture scheduling
+and change detection are mechanical and contain no AI. Unchanged samples update
+capture health/current state without entering the inference queue. Meaningful,
+already-downscaled keyframes enter one bounded, globally ordered FIFO; when
+downstream vision work falls behind, the oldest pending image is dropped and the
+gap is recorded instead of silently stopping capture. Cheap luma differencing
+keeps unchanged frames out of the local vision model while preserving capture
+timestamps and counters. The local vision consumer runs continuously but at the
+throughput the selected model and hardware can actually sustain; the 20 ms
+capture target is not a 50-inferences-per-second guarantee.
+
+On Windows, each worker takes its mechanical change sample directly at 64x36
+with GDI `StretchBlt` and captures selected keyframes directly at the configured
+model-facing resolution. `xcap` provides monitor enumeration and the automatic
+fallback capture path.
 
 The senses layer projects monitor descriptions, foreground application/window,
 coarse keyboard/mouse activity (idle/active only), and local terminal/project

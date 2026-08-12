@@ -126,11 +126,20 @@ The senses layer runs as a dedicated subprocess inside Continuum Core. It has on
 
 Enumerates every connected monitor through `xcap` and gives each display an
 independent capture worker with a stable `display-<xcap id>` identity. The
-default target is one capture per monitor every 200 ms. A bounded ordered FIFO
-decouples capture from local vision inference: overload drops the oldest pending
-image, increments explicit degradation counters, and never silently pauses the
-capture loop. A cheap 64×36 luma difference selects meaningful changes; only
-selected changes are downscaled and sent to the local vision model.
+default target is one best-effort capture per monitor every 20 ms (50 captures
+per second). Capture itself is mechanical and contains no AI. A bounded ordered
+FIFO decouples it from local vision inference: unchanged samples update only
+health/current-state metadata, while selected keyframes enter the queue;
+overload drops the oldest pending keyframe, increments explicit degradation
+counters, and never silently pauses capture. A cheap 64×36 luma difference
+selects meaningful changes against the last selected keyframe so gradual change
+accumulates. On Windows the hot path samples directly at 64x36 through GDI
+`StretchBlt`; selected frames are captured directly at the configured keyframe
+resolution before queue admission. `xcap` remains the display-enumeration and
+capture-fallback boundary. The
+single local vision consumer runs continuously at actual model throughput.
+Twenty milliseconds is a target, not a claim that the OS capture API or VLM can
+always sustain 50 completed captures or inferences per second.
 
 Visual summaries join foreground-window, coarse idle/active input, and local
 terminal/project events in the shared `live-context.json` projection. The
@@ -143,12 +152,17 @@ source-attributed state available to agent roles that do not accept images. Sens
 applications/titles fail closed to redacted context, and screenshot persistence
 is disabled unless the user explicitly enables it.
 
-Capture uses GDI (BitBlt) via the `xcap` crate. GDI was chosen over the Windows
-Graphics Capture API because WGC shows a yellow border on Windows 10 (the
+Windows capture uses direct GDI `StretchBlt` for scaled samples and keyframes,
+with `xcap` as the automatic fallback. GDI was chosen over the Windows Graphics
+Capture API because WGC shows a yellow border on Windows 10 (the
 `IsBorderRequired = false` flag is Windows 11 only), which is unacceptable for
 ambient polling.
 
-**Default model:** SmolVLM-256M (256M parameters, ~2–3 seconds per image on CPU, ~500 MB RAM). SmolVLM was chosen over Moondream 2 because it has HuggingFace-maintained ONNX exports (Moondream's ONNX exports are fragile across revisions) and is 8× smaller, resulting in faster CPU inference. It runs via ONNX Runtime through the `ort` crate.
+**Default model:** SmolVLM2-2.2B Instruct, quantized to Q4_K_M, through
+llama.cpp's MTMD pipeline. A verified SmolVLM-500M ONNX pipeline is the
+automatic load/warmup fallback; SmolVLM-256M remains the low-resource option.
+Both paths run fully locally and produce compact text observations rather than
+exposing raw screenshots above the Senses layer.
 
 **Alternatives user can select:**
 - Moondream 2 (1.8B) — better captioning quality, recommended for GPU users
@@ -999,6 +1013,11 @@ The user can trigger the repair agent with voice: *"Continuum, something isn't r
 ---
 
 ## Resource policy
+
+Vision now prefers SmolVLM2-2.2B Q4_K_M through llama.cpp MTMD and requests
+GPU offload only in CUDA- or Vulkan-enabled builds. On CPU-only builds it stays
+local on CPU. A failed primary load or warmup automatically retries the
+SmolVLM-500M ONNX fallback before vision degrades to the stub.
 
 Continuum runs several local models continuously (a triage LLM, Whisper STT, an ONNX vision model) plus screen/context pollers and a worker pool. On a laptop these can eat the whole machine if each picks "all cores / full GPU" naively. So the runtime probes the host once at boot and resolves a concrete resource plan that tunes every resource-affecting knob. This is **not a cognitive layer** — it sits *outside* the Senses → Triage → Orchestrator → Workers hierarchy: it never feeds perception frames upward and never makes triage decisions. It only tunes downward-facing knobs before components spawn. Data still flows up, commands still flow down.
 

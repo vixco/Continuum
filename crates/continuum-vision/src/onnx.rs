@@ -1,13 +1,13 @@
 //! ONNX Runtime-backed vision model with full autoregressive decoding.
 //!
-//! Provides [`OnnxVisionModel`], which loads SmolVLM-256M via three ONNX
+//! Provides [`OnnxVisionModel`], which loads SmolVLM via three ONNX
 //! sessions (vision encoder, token embedder, text decoder) and a HuggingFace
 //! tokenizer. It implements the [`VisionModel`] trait to produce one-sentence
 //! screen descriptions.
 //!
 //! # Model directory layout
 //!
-//! The model directory (typically `~/.continuum-dev/models/vision/smolvlm-256m/`)
+//! The model directory (typically `~/.continuum-dev/models/vision/smolvlm-500m/`)
 //! must contain:
 //!
 //! - `vision_encoder.onnx` — the image encoder (or `encoder.onnx`)
@@ -32,61 +32,130 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use async_trait::async_trait;
-use image::DynamicImage;
-use ndarray::{Array2, Array4, ArrayD, IxDyn};
+use image::{DynamicImage, GenericImageView};
+use ndarray::{Array2, Array4, Array5, ArrayD, IxDyn};
 use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
 use ort::session::Session;
 use ort::value::Tensor;
+use serde::Deserialize;
 use tracing::{debug, info, instrument, warn};
 
 use crate::error::VisionError;
 use crate::{VisionModel, VisionOutput};
 
 // ---------------------------------------------------------------------------
-// SmolVLM-256M model constants (from HuggingFace config.json)
+// SmolVLM model constants and metadata
 // ---------------------------------------------------------------------------
 
-/// Vision encoder input size (pixels).
+// Kept only for the legacy preprocessing regression comparison below.
+#[cfg(test)]
 const IMAGE_SIZE: u32 = 512;
-
-/// SmolVLM normalization means (all channels identical).
+#[cfg(test)]
 const CHANNEL_MEANS: [f32; 3] = [0.5, 0.5, 0.5];
-
-/// SmolVLM normalization stds (all channels identical).
+#[cfg(test)]
 const CHANNEL_STDS: [f32; 3] = [0.5, 0.5, 0.5];
+const DEFAULT_PROMPT: &str = "Describe only what is visibly happening in the central scene in one concise factual sentence. Prioritize the main subject and action, and distinguish pointing from holding. Then name the visible application and specific page or file when clearly legible. Include only clearly readable text and never guess.";
 
-/// Token ID that marks image-feature positions in the input sequence.
-const IMAGE_TOKEN_ID: i64 = 49190;
+/// Runtime-tunable behavior for the local SmolVLM screen describer.
+#[derive(Debug, Clone)]
+pub struct VisionOptions {
+    /// User prompt inserted into the model's official chat template.
+    pub prompt: String,
+    /// Maximum number of generated text tokens.
+    pub max_new_tokens: usize,
+    /// Longest edge used before 512px tiling. `None` uses the model config.
+    pub processor_max_edge: Option<u32>,
+    /// Whether to create local-detail tiles plus a global overview image.
+    pub image_splitting: bool,
+}
 
-/// Sentinel token that wraps image-token sequences.
-const FAKE_TOKEN_AROUND_IMAGE: i64 = 49189;
+impl Default for VisionOptions {
+    fn default() -> Self {
+        Self {
+            prompt: DEFAULT_PROMPT.to_string(),
+            max_new_tokens: 64,
+            // 1536 preserves enough UI detail for application/site identity
+            // while remaining bounded below the model's official 2048px max.
+            processor_max_edge: Some(1536),
+            image_splitting: true,
+        }
+    }
+}
 
-/// `<|im_start|>` chat template token.
-const IM_START: i64 = 1;
+#[derive(Debug, Deserialize)]
+struct EdgeSize {
+    longest_edge: u32,
+}
 
-/// `<|im_end|>` / EOS token.
-const IM_END: i64 = 2;
+#[derive(Debug, Deserialize)]
+struct PreprocessorFile {
+    do_image_splitting: bool,
+    do_normalize: bool,
+    do_rescale: bool,
+    image_mean: [f32; 3],
+    image_std: [f32; 3],
+    max_image_size: EdgeSize,
+    resample: u32,
+    size: EdgeSize,
+}
 
-/// Number of transformer layers in the text decoder.
-const NUM_HIDDEN_LAYERS: usize = 30;
+#[derive(Debug, Deserialize)]
+struct ProcessorFile {
+    image_seq_len: usize,
+}
 
-/// Number of key-value attention heads per layer.
-const NUM_KV_HEADS: usize = 3;
+#[derive(Debug, Deserialize)]
+struct GenerationFile {
+    eos_token_id: i64,
+    pad_token_id: i64,
+}
 
-/// Dimension of each attention head.
-const HEAD_DIM: usize = 64;
+#[derive(Debug, Deserialize)]
+struct ModelFile {
+    image_token_id: i64,
+    text_config: TextModelFile,
+}
 
-/// Maximum tokens to generate.
-const MAX_NEW_TOKENS: usize = 64;
+#[derive(Debug, Deserialize)]
+struct TextModelFile {
+    num_hidden_layers: usize,
+    num_key_value_heads: usize,
+    head_dim: usize,
+}
 
-/// Repetition penalty for the decoder (>1.0 penalizes repeated tokens).
-const REP_PENALTY: f32 = 1.15;
+#[derive(Debug, Deserialize)]
+struct ChatTemplateFile {
+    chat_template: String,
+}
 
-/// Decoder sampling temperature.
-const VISION_TEMPERATURE: f32 = 0.2;
+#[derive(Debug)]
+struct ModelMetadata {
+    image_size: u32,
+    processor_max_edge: u32,
+    image_seq_len: usize,
+    means: [f32; 3],
+    stds: [f32; 3],
+    image_token_id: i64,
+    eos_token_id: i64,
+    pad_token_id: i64,
+    hidden_layers: usize,
+    kv_heads: usize,
+    head_dim: usize,
+}
 
-/// Top-p sampling threshold.
-const VISION_TOP_P: f32 = 0.85;
+#[derive(Debug)]
+struct PreparedImage {
+    pixel_values: Array5<f32>,
+    pixel_mask: Array4<bool>,
+    rows: usize,
+    cols: usize,
+}
+
+#[derive(Debug)]
+struct InferenceText {
+    description: String,
+    confidence: f32,
+}
 
 // ---------------------------------------------------------------------------
 // Internal session bundle
@@ -144,9 +213,171 @@ fn build_session(path: &Path, gpu: bool) -> anyhow::Result<Session> {
     }
 }
 
+fn initialize_onnx_runtime() -> anyhow::Result<Option<PathBuf>> {
+    let configured = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
+
+    #[cfg(target_os = "windows")]
+    let candidates = {
+        let mut paths = Vec::new();
+        if let Some(path) = configured {
+            paths.push(path);
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            paths.push(
+                PathBuf::from(local_app_data)
+                    .join("Continuum")
+                    .join("onnxruntime")
+                    .join("onnxruntime.dll"),
+            );
+        }
+        paths.push(PathBuf::from(r"C:\onnxruntime\onnxruntime.dll"));
+        paths
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let candidates = configured.into_iter().collect::<Vec<_>>();
+
+    for candidate in candidates {
+        let path = if candidate.is_dir() {
+            #[cfg(target_os = "windows")]
+            let filename = "onnxruntime.dll";
+            #[cfg(target_os = "linux")]
+            let filename = "libonnxruntime.so";
+            #[cfg(target_os = "macos")]
+            let filename = "libonnxruntime.dylib";
+            candidate.join(filename)
+        } else {
+            candidate
+        };
+        if !path.is_file() {
+            continue;
+        }
+
+        ort::init_from(&path)
+            .with_context(|| format!("loading ONNX Runtime from {}", path.display()))?
+            .commit();
+        return Ok(Some(path));
+    }
+
+    #[cfg(target_os = "windows")]
+    anyhow::bail!(
+        "compatible ONNX Runtime not found; set ORT_DYLIB_PATH or install it at C:\\onnxruntime\\onnxruntime.dll"
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    Ok(None)
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading model metadata {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing model metadata {}", path.display()))
+}
+
+fn validate_model_contract(
+    preprocessor: &PreprocessorFile,
+    processor: &ProcessorFile,
+    chat_template: &ChatTemplateFile,
+    options: &VisionOptions,
+) -> anyhow::Result<()> {
+    if !preprocessor.do_rescale || !preprocessor.do_normalize {
+        anyhow::bail!("SmolVLM metadata disables required rescale/normalize processing");
+    }
+    if preprocessor.resample != 1 {
+        anyhow::bail!(
+            "unsupported SmolVLM resample mode {}; expected Lanczos (1)",
+            preprocessor.resample
+        );
+    }
+    if preprocessor.max_image_size.longest_edge == 0 || processor.image_seq_len == 0 {
+        anyhow::bail!("SmolVLM processor metadata contains zero-sized image settings");
+    }
+    if !chat_template.chat_template.contains("<|im_start|>")
+        || !chat_template.chat_template.contains("<image>")
+        || !chat_template.chat_template.contains("<end_of_utterance>")
+        || !chat_template.chat_template.contains("Assistant:")
+    {
+        anyhow::bail!("unsupported SmolVLM chat template contract");
+    }
+    if options.prompt.trim().is_empty() {
+        anyhow::bail!("vision prompt must not be empty");
+    }
+    if !(1..=256).contains(&options.max_new_tokens) {
+        anyhow::bail!("vision max_new_tokens must be between 1 and 256");
+    }
+    let processor_edge = options
+        .processor_max_edge
+        .unwrap_or(preprocessor.size.longest_edge);
+    let tile_edge = preprocessor.max_image_size.longest_edge;
+    if processor_edge < tile_edge
+        || processor_edge > preprocessor.size.longest_edge
+        || !processor_edge.is_multiple_of(tile_edge)
+    {
+        anyhow::bail!(
+            "vision processor_max_edge must be a multiple of {tile_edge} between {tile_edge} and {}",
+            preprocessor.size.longest_edge
+        );
+    }
+    if options.image_splitting && !preprocessor.do_image_splitting {
+        anyhow::bail!("vision image splitting requested but disabled by model metadata");
+    }
+    Ok(())
+}
+
+fn build_image_prompt(rows: usize, cols: usize, image_seq_len: usize) -> String {
+    let image_tokens = "<image>".repeat(image_seq_len);
+    if rows == 0 || cols == 0 {
+        return format!(
+            "<fake_token_around_image><global-img>{image_tokens}<fake_token_around_image>"
+        );
+    }
+
+    let mut prompt = String::new();
+    for row in 1..=rows {
+        for col in 1..=cols {
+            prompt.push_str("<fake_token_around_image>");
+            prompt.push_str(&format!("<row_{row}_col_{col}>"));
+            prompt.push_str(&image_tokens);
+        }
+        prompt.push('\n');
+    }
+    prompt.push('\n');
+    prompt.push_str("<fake_token_around_image><global-img>");
+    prompt.push_str(&image_tokens);
+    prompt.push_str("<fake_token_around_image>");
+    prompt
+}
+
+fn detects_visible_error(description: &str) -> bool {
+    let normalized = description.to_lowercase();
+    if ["no error", "without errors", "error-free"]
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
+    {
+        return false;
+    }
+
+    [
+        "error dialog",
+        "error message",
+        "error screen",
+        "fatal error",
+        "unhandled exception",
+        "stack trace",
+        "traceback",
+        "has crashed",
+        "not responding",
+        "shows an error",
+        "displaying an error",
+        "an error is displayed",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
+}
+
 /// ONNX Runtime-backed vision model with full autoregressive text generation.
 ///
-/// Loads SmolVLM-256M from three ONNX files plus a tokenizer. The
+/// Loads SmolVLM from three ONNX files plus its tokenizer and processor metadata. The
 /// [`describe`](VisionModel::describe) method runs the complete
 /// encode → embed → decode pipeline to produce natural-language descriptions
 /// of screenshot images.
@@ -159,6 +390,9 @@ fn build_session(path: &Path, gpu: bool) -> anyhow::Result<Session> {
 pub struct OnnxVisionModel {
     sessions: Arc<Mutex<ModelSessions>>,
     tokenizer: Arc<tokenizers::Tokenizer>,
+    metadata: Arc<ModelMetadata>,
+    options: VisionOptions,
+    model_name: String,
     #[allow(dead_code)]
     model_dir: PathBuf,
 }
@@ -170,6 +404,16 @@ impl OnnxVisionModel {
     /// `decoder.onnx`, and `tokenizer.json` in the directory.
     #[instrument(skip_all, fields(layer = "senses", component = "vision", model_dir = %model_dir.as_ref().display()))]
     pub async fn new(model_dir: impl AsRef<Path>, gpu: bool) -> anyhow::Result<Self> {
+        Self::new_with_options(model_dir, gpu, VisionOptions::default()).await
+    }
+
+    /// Load SmolVLM with explicit, configurable processor and generation options.
+    #[instrument(skip_all, fields(layer = "senses", component = "vision", model_dir = %model_dir.as_ref().display()))]
+    pub async fn new_with_options(
+        model_dir: impl AsRef<Path>,
+        gpu: bool,
+        options: VisionOptions,
+    ) -> anyhow::Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
 
         if !model_dir.is_dir() {
@@ -177,6 +421,16 @@ impl OnnxVisionModel {
                 path: model_dir.display().to_string(),
             }
             .into());
+        }
+
+        let runtime_path = initialize_onnx_runtime()?;
+        if let Some(path) = &runtime_path {
+            info!(
+                layer = "senses",
+                component = "vision",
+                runtime_path = %path.display(),
+                "selected explicit ONNX Runtime"
+            );
         }
 
         // Resolve file paths (support both naming conventions).
@@ -188,12 +442,22 @@ impl OnnxVisionModel {
         let embed_path = model_dir.join("embed_tokens.onnx");
         let decoder_path = model_dir.join("decoder.onnx");
         let tokenizer_path = model_dir.join("tokenizer.json");
+        let preprocessor_path = model_dir.join("preprocessor_config.json");
+        let processor_path = model_dir.join("processor_config.json");
+        let generation_path = model_dir.join("generation_config.json");
+        let chat_template_path = model_dir.join("chat_template.json");
+        let config_path = model_dir.join("config.json");
 
         for (name, path) in [
             ("vision encoder", &encoder_path),
             ("embed_tokens", &embed_path),
             ("decoder", &decoder_path),
             ("tokenizer", &tokenizer_path),
+            ("preprocessor config", &preprocessor_path),
+            ("processor config", &processor_path),
+            ("generation config", &generation_path),
+            ("chat template", &chat_template_path),
+            ("model config", &config_path),
         ] {
             if !path.exists() {
                 return Err(VisionError::ModelFileNotFound {
@@ -217,6 +481,37 @@ impl OnnxVisionModel {
                 reason: format!("{e}"),
             }
         })?;
+
+        let preprocessor: PreprocessorFile = read_json(&preprocessor_path)?;
+        let processor: ProcessorFile = read_json(&processor_path)?;
+        let generation: GenerationFile = read_json(&generation_path)?;
+        let chat_template: ChatTemplateFile = read_json(&chat_template_path)?;
+        let model_config: ModelFile = read_json(&config_path)?;
+        validate_model_contract(&preprocessor, &processor, &chat_template, &options)?;
+        let tokenizer_image_token_id = tokenizer
+            .token_to_id("<image>")
+            .context("tokenizer does not define the required <image> token")?
+            as i64;
+        if tokenizer_image_token_id != model_config.image_token_id {
+            anyhow::bail!(
+                "model/tokenizer image token mismatch: {} != {}",
+                model_config.image_token_id,
+                tokenizer_image_token_id
+            );
+        }
+        let metadata = ModelMetadata {
+            image_size: preprocessor.max_image_size.longest_edge,
+            processor_max_edge: preprocessor.size.longest_edge,
+            image_seq_len: processor.image_seq_len,
+            means: preprocessor.image_mean,
+            stds: preprocessor.image_std,
+            image_token_id: model_config.image_token_id,
+            eos_token_id: generation.eos_token_id,
+            pad_token_id: generation.pad_token_id,
+            hidden_layers: model_config.text_config.num_hidden_layers,
+            kv_heads: model_config.text_config.num_key_value_heads,
+            head_dim: model_config.text_config.head_dim,
+        };
 
         // Load ONNX sessions on a blocking thread.
         let ep = encoder_path.clone();
@@ -252,6 +547,15 @@ impl OnnxVisionModel {
         Ok(Self {
             sessions: Arc::new(Mutex::new(sessions)),
             tokenizer: Arc::new(tokenizer),
+            metadata: Arc::new(metadata),
+            options,
+            model_name: format!(
+                "{}-onnx",
+                model_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("smolvlm")
+            ),
             model_dir,
         })
     }
@@ -261,6 +565,7 @@ impl OnnxVisionModel {
     /// Returns `(pixel_values, pixel_attention_mask)`:
     /// - pixel_values: `[1, 1, 3, IMAGE_SIZE, IMAGE_SIZE]`
     /// - pixel_attention_mask: `[1, 1, IMAGE_SIZE, IMAGE_SIZE]` (bool, true where real pixels)
+    #[cfg(test)]
     fn preprocess(image: &DynamicImage) -> (ndarray::Array5<f32>, Array4<bool>) {
         let sz = IMAGE_SIZE as usize;
 
@@ -296,12 +601,110 @@ impl OnnxVisionModel {
     ///
     /// This is the core inference function. It is called inside
     /// `tokio::task::spawn_blocking` from [`describe`](VisionModel::describe).
+    /// Reproduce the official Idefics3 image processor for one screenshot.
+    fn preprocess_official(
+        image: &DynamicImage,
+        metadata: &ModelMetadata,
+        options: &VisionOptions,
+    ) -> PreparedImage {
+        let tile_edge = metadata.image_size;
+        let processor_edge = options
+            .processor_max_edge
+            .unwrap_or(metadata.processor_max_edge);
+        let (source_width, source_height) = image.dimensions();
+        let aspect_ratio = source_width as f64 / source_height.max(1) as f64;
+        let (resized_width, resized_height) = if source_width >= source_height {
+            let width = processor_edge;
+            let mut height = (width as f64 / aspect_ratio) as u32;
+            if !height.is_multiple_of(2) {
+                height += 1;
+            }
+            (width, height.max(1))
+        } else {
+            let height = processor_edge;
+            let mut width = (height as f64 * aspect_ratio) as u32;
+            if !width.is_multiple_of(2) {
+                width += 1;
+            }
+            (width.max(1), height)
+        };
+        let resized = image.resize_exact(
+            resized_width,
+            resized_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        let (frames, rows, cols) = if options.image_splitting {
+            let grid_width = resized_width.div_ceil(tile_edge) * tile_edge;
+            let grid_height = resized_height.div_ceil(tile_edge) * tile_edge;
+            let tiled = resized.resize_exact(
+                grid_width,
+                grid_height,
+                image::imageops::FilterType::Lanczos3,
+            );
+            let rows = (grid_height / tile_edge) as usize;
+            let cols = (grid_width / tile_edge) as usize;
+            let mut frames = Vec::with_capacity(rows * cols + 1);
+            for row in 0..rows {
+                for col in 0..cols {
+                    frames.push(tiled.crop_imm(
+                        col as u32 * tile_edge,
+                        row as u32 * tile_edge,
+                        tile_edge,
+                        tile_edge,
+                    ));
+                }
+            }
+            frames.push(tiled.resize_exact(
+                tile_edge,
+                tile_edge,
+                image::imageops::FilterType::Lanczos3,
+            ));
+            (frames, rows, cols)
+        } else {
+            (
+                vec![resized.resize_exact(
+                    tile_edge,
+                    tile_edge,
+                    image::imageops::FilterType::Lanczos3,
+                )],
+                0,
+                0,
+            )
+        };
+
+        let sz = tile_edge as usize;
+        let mut tensor = Array5::<f32>::zeros((1, frames.len(), 3, sz, sz));
+        let mask = Array4::<bool>::from_elem((1, frames.len(), sz, sz), true);
+        for (frame_index, frame) in frames.iter().enumerate() {
+            let rgb = frame.to_rgb8();
+            for y in 0..sz {
+                for x in 0..sz {
+                    let pixel = rgb.get_pixel(x as u32, y as u32);
+                    for channel in 0..3 {
+                        let value = pixel[channel] as f32 / 255.0;
+                        tensor[[0, frame_index, channel, y, x]] =
+                            (value - metadata.means[channel]) / metadata.stds[channel];
+                    }
+                }
+            }
+        }
+
+        PreparedImage {
+            pixel_values: tensor,
+            pixel_mask: mask,
+            rows,
+            cols,
+        }
+    }
+
     fn run_inference(
         sessions: &mut ModelSessions,
         tokenizer: &tokenizers::Tokenizer,
-        pixel_values: ndarray::Array5<f32>,
-        pixel_mask: Array4<bool>,
-    ) -> anyhow::Result<String> {
+        prepared: PreparedImage,
+        metadata: &ModelMetadata,
+        options: &VisionOptions,
+    ) -> anyhow::Result<InferenceText> {
         // Helper: extract owned f32 ndarray from session output at given index.
         fn extract(
             outputs: &ort::session::SessionOutputs<'_>,
@@ -317,8 +720,9 @@ impl OnnxVisionModel {
         }
 
         // ---- Step 1: Vision encoder ----
-        let pv_tensor = Tensor::from_array(pixel_values).context("pixel_values tensor")?;
-        let pm_tensor = Tensor::from_array(pixel_mask).context("pixel_attention_mask tensor")?;
+        let pv_tensor = Tensor::from_array(prepared.pixel_values).context("pixel_values tensor")?;
+        let pm_tensor =
+            Tensor::from_array(prepared.pixel_mask).context("pixel_attention_mask tensor")?;
 
         let encoder_out = sessions
             .encoder
@@ -328,8 +732,14 @@ impl OnnxVisionModel {
         let image_features = extract(&encoder_out, 0, "image_features")?;
         drop(encoder_out); // release borrow on encoder session
 
-        let num_image_tokens = image_features.shape()[1];
-        let hidden_size = image_features.shape()[2];
+        let hidden_size = *image_features
+            .shape()
+            .last()
+            .context("vision encoder returned a scalar")?;
+        let feature_values = image_features
+            .as_slice()
+            .context("vision encoder output is not contiguous")?;
+        let num_image_tokens = feature_values.len() / hidden_size;
 
         debug!(
             layer = "senses",
@@ -339,51 +749,40 @@ impl OnnxVisionModel {
             "encoder produced image features"
         );
 
-        // ---- Step 2: Build prompt token IDs ----
-        // SmolVLM chat format:
-        //   <|im_start|>user\n
-        //   <fake_token_around_image><image>...<image><fake_token_around_image>
-        //   \nDescribe what you see on this screen in one sentence.<|im_end|>\n
-        //   <|im_start|>assistant\n
-        let user_text = "\nDescribe the user's current computer task in one concise sentence. Name the visible application and the specific page, file, or action when legible. Mention only details you can actually see; do not guess.";
-        let user_enc = tokenizer
-            .encode(user_text, false)
-            .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;
-        let user_ids: Vec<i64> = user_enc.get_ids().iter().map(|&id| id as i64).collect();
-
-        let assistant_text = "\nassistant\n";
-        let asst_enc = tokenizer
-            .encode(assistant_text, false)
-            .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;
-        let asst_ids: Vec<i64> = asst_enc.get_ids().iter().map(|&id| id as i64).collect();
-
-        let mut input_ids: Vec<i64> = Vec::new();
-        // <|im_start|>user\n
-        input_ids.push(IM_START);
-        let user_hdr = tokenizer
-            .encode("user\n", false)
-            .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-        input_ids.extend(user_hdr.get_ids().iter().map(|&id| id as i64));
+        // ---- Step 2: Build prompt token IDs from the model contract. ----
         // <fake_token_around_image> <image>×N <fake_token_around_image>
-        input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
-        input_ids.extend(std::iter::repeat_n(IMAGE_TOKEN_ID, num_image_tokens));
-        input_ids.push(FAKE_TOKEN_AROUND_IMAGE);
-        // \nDescribe...<|im_end|>
-        input_ids.extend_from_slice(&user_ids);
-        input_ids.push(IM_END);
-        // \n<|im_start|>assistant\n
-        input_ids.push(IM_START);
-        input_ids.extend_from_slice(&asst_ids);
-
+        // Use the exact official Idefics3 chat-template expansion.
+        let image_prompt = build_image_prompt(prepared.rows, prepared.cols, metadata.image_seq_len);
+        let prompt = format!(
+            "<|im_start|>User:{image_prompt}{}<end_of_utterance>\nAssistant:",
+            options.prompt.trim()
+        );
+        let encoding = tokenizer
+            .encode(prompt, false)
+            .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;
+        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
         let total_len = input_ids.len();
 
         debug!(
             layer = "senses",
             component = "vision",
             total_len,
-            prompt_tokens = user_ids.len(),
+            image_frames = prepared
+                .rows
+                .saturating_mul(prepared.cols)
+                .saturating_add(1),
             "built input token sequence"
         );
+
+        let placeholder_count = input_ids
+            .iter()
+            .filter(|&&token| token == metadata.image_token_id)
+            .count();
+        if placeholder_count != num_image_tokens {
+            anyhow::bail!(
+                "image prompt/encoder mismatch: {placeholder_count} placeholders for {num_image_tokens} features"
+            );
+        }
 
         // ---- Step 3: Embed tokens ----
         let ids_array =
@@ -399,12 +798,12 @@ impl OnnxVisionModel {
         drop(embed_out); // release borrow so embed_tokens can be used again later
 
         // ---- Step 4: Replace image-token positions with vision features ----
-        // Find positions where input_ids == IMAGE_TOKEN_ID and replace embeddings.
+        // Replace model-defined image placeholders with encoder features.
         let mut feat_idx = 0;
         for pos in 0..total_len {
-            if input_ids[pos] == IMAGE_TOKEN_ID && feat_idx < num_image_tokens {
+            if input_ids[pos] == metadata.image_token_id && feat_idx < num_image_tokens {
                 for j in 0..hidden_size {
-                    inputs_embeds[[0, pos, j]] = image_features[[0, feat_idx, j]];
+                    inputs_embeds[[0, pos, j]] = feature_values[feat_idx * hidden_size + j];
                 }
                 feat_idx += 1;
             }
@@ -414,14 +813,15 @@ impl OnnxVisionModel {
         let mut attn_vec: Vec<i64> = vec![1i64; total_len];
         let mut pos_vec: Vec<i64> = (0..total_len as i64).collect();
 
-        let mut kv_cache: Vec<ArrayD<f32>> = (0..(NUM_HIDDEN_LAYERS * 2))
-            .map(|_| ArrayD::zeros(IxDyn(&[1, NUM_KV_HEADS, 0, HEAD_DIM])))
+        let mut kv_cache: Vec<ArrayD<f32>> = (0..(metadata.hidden_layers * 2))
+            .map(|_| ArrayD::zeros(IxDyn(&[1, metadata.kv_heads, 0, metadata.head_dim])))
             .collect();
 
         let mut generated: Vec<i64> = Vec::new();
         let mut cur_embeds = inputs_embeds;
 
-        for step in 0..MAX_NEW_TOKENS {
+        let mut confidence_sum = 0.0f32;
+        for step in 0..options.max_new_tokens {
             let seq_len = cur_embeds.shape()[1];
 
             let embeds_t = Tensor::from_array(cur_embeds.clone()).context("embeds")?;
@@ -439,7 +839,7 @@ impl OnnxVisionModel {
                 "position_ids" => pos_t,
             ];
 
-            for layer in 0..NUM_HIDDEN_LAYERS {
+            for layer in 0..metadata.hidden_layers {
                 dec_inputs.push((
                     format!("past_key_values.{layer}.key").into(),
                     Tensor::from_array(kv_cache[layer * 2].clone())
@@ -461,90 +861,20 @@ impl OnnxVisionModel {
             let vocab = logits.shape()[2];
             let last = logits.shape()[1] - 1;
 
-            // ---- Sampling with repetition penalty, n-gram blocking, temperature, top-p ----
-            let mut token_logits: Vec<f32> = (0..vocab).map(|v| logits[[0, last, v]]).collect();
-
-            // (a) Repetition penalty: penalize tokens already in output.
-            for &prev_tok in &generated {
-                let idx = prev_tok as usize;
-                if idx < vocab {
-                    if token_logits[idx] > 0.0 {
-                        token_logits[idx] /= REP_PENALTY;
-                    } else {
-                        token_logits[idx] *= REP_PENALTY;
-                    }
-                }
-            }
-
-            // (b) No-repeat 3-gram blocking: if the last 2 generated tokens match
-            // a previous bigram, block whatever token followed that bigram.
-            if generated.len() >= 2 {
-                let tail = (
-                    generated[generated.len() - 2],
-                    generated[generated.len() - 1],
-                );
-                for w in generated.windows(3) {
-                    if (w[0], w[1]) == tail {
-                        let blocked = w[2] as usize;
-                        if blocked < vocab {
-                            token_logits[blocked] = f32::NEG_INFINITY;
-                        }
-                    }
-                }
-            }
-
-            // (c) Temperature scaling.
-            for l in token_logits.iter_mut() {
-                *l /= VISION_TEMPERATURE;
-            }
-
             // (d) Softmax → probabilities.
-            let max_l = token_logits
-                .iter()
-                .cloned()
-                .fold(f32::NEG_INFINITY, f32::max);
-            let exps: Vec<f32> = token_logits.iter().map(|&l| (l - max_l).exp()).collect();
-            let sum_exp: f32 = exps.iter().sum();
-            let probs: Vec<f32> = exps.iter().map(|e| e / sum_exp).collect();
+            // The official generation config specifies `do_sample=false`.
+            // Greedy argmax keeps identical screenshots deterministic.
+            let (best_index, best_logit) = (0..vocab)
+                .map(|index| (index, logits[[0, last, index]]))
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .context("decoder returned an empty vocabulary")?;
+            let denominator: f32 = (0..vocab)
+                .map(|index| (logits[[0, last, index]] - best_logit).exp())
+                .sum();
+            confidence_sum += 1.0 / denominator.max(1.0);
+            let best_tok = best_index as i64;
 
-            // (e) Top-p (nucleus) sampling: keep tokens until cumulative prob >= TOP_P.
-            let mut sorted_idx: Vec<usize> = (0..vocab).collect();
-            sorted_idx.sort_unstable_by(|&a, &b| {
-                probs[b]
-                    .partial_cmp(&probs[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let mut cumul = 0.0f32;
-            let mut nucleus: Vec<(usize, f32)> = Vec::new();
-            for &idx in &sorted_idx {
-                nucleus.push((idx, probs[idx]));
-                cumul += probs[idx];
-                if cumul >= VISION_TOP_P {
-                    break;
-                }
-            }
-
-            // (f) Sample from nucleus using hash-based PRNG (avoids rand dep).
-            let norm: f32 = nucleus.iter().map(|(_, p)| p).sum();
-            let r = {
-                let seed = step as u64 ^ (generated.len() as u64).wrapping_mul(0x517cc1b727220a95);
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(&seed, &mut h);
-                let hash = std::hash::Hasher::finish(&h);
-                (hash % 1_000_000) as f32 / 1_000_000.0 * norm
-            };
-            let mut acc = 0.0f32;
-            let mut best_tok: i64 = nucleus[0].0 as i64;
-            for &(idx, p) in &nucleus {
-                acc += p;
-                if acc >= r {
-                    best_tok = idx as i64;
-                    break;
-                }
-            }
-
-            if best_tok == IM_END || best_tok == 0 {
+            if best_tok == metadata.eos_token_id || best_tok == metadata.pad_token_id {
                 debug!(layer = "senses", component = "vision", step, "EOS");
                 break;
             }
@@ -614,7 +944,15 @@ impl OnnxVisionModel {
             "generated description"
         );
 
-        Ok(description)
+        let confidence = if generated.is_empty() {
+            0.0
+        } else {
+            (confidence_sum / generated.len() as f32).clamp(0.0, 1.0)
+        };
+        Ok(InferenceText {
+            description,
+            confidence,
+        })
     }
 }
 
@@ -630,41 +968,30 @@ impl VisionModel for OnnxVisionModel {
         let image_clone = image.clone();
         let sessions = Arc::clone(&self.sessions);
         let tokenizer = Arc::clone(&self.tokenizer);
+        let metadata = Arc::clone(&self.metadata);
+        let options = self.options.clone();
 
-        let description = tokio::task::spawn_blocking(move || {
-            let (pixel_values, pixel_mask) = Self::preprocess(&image_clone);
+        let inference = tokio::task::spawn_blocking(move || {
+            let prepared = Self::preprocess_official(&image_clone, &metadata, &options);
 
             let mut guard = sessions
                 .lock()
                 .map_err(|e| anyhow::anyhow!("session mutex poisoned: {e}"))?;
 
-            Self::run_inference(&mut guard, &tokenizer, pixel_values, pixel_mask)
+            Self::run_inference(&mut guard, &tokenizer, prepared, &metadata, &options)
         })
         .await
         .context("vision inference task panicked")??;
 
-        // Simple keyword-based error detection.
-        let lower = description.to_lowercase();
-        let has_error = [
-            "error",
-            "exception",
-            "crash",
-            "fatal",
-            "traceback",
-            "not responding",
-        ]
-        .iter()
-        .any(|kw| lower.contains(kw));
-
         Ok(VisionOutput {
-            description,
-            has_error_visible: has_error,
-            confidence: 0.8,
+            has_error_visible: detects_visible_error(&inference.description),
+            description: inference.description,
+            confidence: inference.confidence,
         })
     }
 
     fn model_name(&self) -> &str {
-        "smolvlm-256m-onnx"
+        &self.model_name
     }
 
     /// Warm up all three ONNX sessions.
@@ -676,7 +1003,7 @@ impl VisionModel for OnnxVisionModel {
             "warming up SmolVLM model"
         );
 
-        let dummy = DynamicImage::new_rgb8(IMAGE_SIZE, IMAGE_SIZE);
+        let dummy = DynamicImage::new_rgb8(self.metadata.image_size, self.metadata.image_size);
         let _ = self.describe(&dummy).await?;
 
         info!(
@@ -691,6 +1018,22 @@ impl VisionModel for OnnxVisionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_metadata() -> ModelMetadata {
+        ModelMetadata {
+            image_size: 512,
+            processor_max_edge: 2048,
+            image_seq_len: 64,
+            means: [0.5; 3],
+            stds: [0.5; 3],
+            image_token_id: 49190,
+            eos_token_id: 49279,
+            pad_token_id: 2,
+            hidden_layers: 30,
+            kv_heads: 3,
+            head_dim: 64,
+        }
+    }
 
     #[tokio::test]
     async fn test_new_with_nonexistent_directory_returns_error() {
@@ -737,6 +1080,39 @@ mod tests {
         assert!((r - 1.0).abs() < 0.01, "expected ~1.0, got {r}");
     }
 
+    #[test]
+    fn official_processor_splits_wide_desktop_into_tiles_and_global_view() {
+        let img = DynamicImage::new_rgb8(1280, 720);
+        let prepared =
+            OnnxVisionModel::preprocess_official(&img, &test_metadata(), &VisionOptions::default());
+        assert_eq!((prepared.rows, prepared.cols), (2, 3));
+        assert_eq!(prepared.pixel_values.shape(), &[1, 7, 3, 512, 512]);
+        assert_eq!(prepared.pixel_mask.shape(), &[1, 7, 512, 512]);
+    }
+
+    #[test]
+    fn official_prompt_has_one_placeholder_block_per_encoder_frame() {
+        let prompt = build_image_prompt(2, 3, 64);
+        assert_eq!(prompt.matches("<image>").count(), 7 * 64);
+        assert!(prompt.contains("<row_1_col_1>"));
+        assert!(prompt.contains("<row_2_col_3>"));
+        assert!(prompt.contains("<global-img>"));
+    }
+
+    #[test]
+    fn visible_error_detection_avoids_bare_keyword_false_positives() {
+        assert!(detects_visible_error(
+            "A fatal error dialog is displayed in the editor."
+        ));
+        assert!(detects_visible_error("The application is not responding."));
+        assert!(!detects_visible_error(
+            "A documentation page explains error handling."
+        ));
+        assert!(!detects_visible_error(
+            "The test suite completed without errors."
+        ));
+    }
+
     /// Integration test: load real model and describe a screenshot.
     ///
     /// This test requires the SmolVLM model files to be downloaded.
@@ -744,9 +1120,13 @@ mod tests {
     /// Skipped if models are not present.
     #[tokio::test]
     async fn test_describe_real_screenshot() {
-        let model_dir = dirs::home_dir()
-            .unwrap()
-            .join(".continuum-dev/models/vision/smolvlm-256m");
+        let model_dir = std::env::var_os("CONTINUUM_VISION_TEST_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .expect("home directory")
+                    .join(".continuum-dev/models/vision/smolvlm-500m")
+            });
 
         if !model_dir.join("decoder.onnx").exists() {
             eprintln!("Skipping integration test: model files not downloaded");
@@ -758,8 +1138,8 @@ mod tests {
             .expect("should load model");
 
         // Use the test fixture screenshot.
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vscode-screenshot.jpg");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/youtube-browser-screenshot.jpg");
 
         if !fixture.exists() {
             eprintln!("Skipping: test fixture not found at {}", fixture.display());
@@ -769,7 +1149,10 @@ mod tests {
         let img = image::open(&fixture).expect("should open test image");
         let output = model.describe(&img).await.expect("describe should succeed");
 
-        eprintln!("Description: {}", output.description);
+        eprintln!(
+            "Description: {} (confidence {:.3})",
+            output.description, output.confidence
+        );
         assert!(
             !output.description.is_empty(),
             "description should not be empty"
@@ -778,5 +1161,24 @@ mod tests {
             !output.description.contains("placeholder"),
             "should not contain placeholder text"
         );
+        let normalized = output.description.to_lowercase();
+        assert!(
+            normalized.contains("point") && normalized.contains("elf"),
+            "caption should recognize the visible pointing action and Elf image: {}",
+            output.description
+        );
+        assert!(
+            !normalized.contains("holding"),
+            "caption should not claim the man is holding the wall image: {}",
+            output.description
+        );
+        assert!(
+            !["wordpress", "online test preparation", "steam application"]
+                .iter()
+                .any(|term| normalized.contains(term)),
+            "caption repeated a known hallucination: {}",
+            output.description
+        );
+        assert!((0.0..=1.0).contains(&output.confidence));
     }
 }

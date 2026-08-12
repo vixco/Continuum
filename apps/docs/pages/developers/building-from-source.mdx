@@ -59,6 +59,11 @@ $env:PROTOC = "C:\protoc\bin\protoc.exe"
 standard `C:\onnxruntime\onnxruntime.dll` location. This prevents Windows' older
 System32 ONNX Runtime from being selected by the dynamic loader.
 
+If no compatible ONNX Runtime is found, `scripts/dev-setup.ps1` will
+automatically download ONNX Runtime 1.23.0 from the official Microsoft GitHub
+release into `C:\onnxruntime\onnxruntime.dll` and re-check. To opt out, set
+`ORT_DYLIB_PATH` to an existing compatible DLL before running the script.
+
 ## Building a release bundle locally
 
 ```powershell

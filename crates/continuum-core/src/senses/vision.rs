@@ -19,7 +19,16 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, Notify};
 use xcap::Monitor;
 
-use crate::config::{ContextConfig, ObservationToggles, PrivacyConfig, ScreenConfig};
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetWindowDC,
+    ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER,
+    COLORONCOLOR, DIB_RGB_COLORS, HALFTONE, SRCCOPY,
+};
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+use crate::config::{ContextConfig, ObservationToggles, PrivacyConfig, ScreenConfig, VisionConfig};
 use crate::senses::cadence::CadenceControl;
 use crate::senses::live_context::{
     strictest_disposition, LiveContextHub, MonitorWorldState, PrivacyDisposition,
@@ -27,6 +36,103 @@ use crate::senses::live_context::{
 use crate::senses::privacy::{emit_system_event, source_enabled, ObservedSource, PrivacyFilter};
 use crate::senses::toggles::ToggleControl;
 use crate::senses::types::ScreenObservation;
+
+/// Fastest supported best-effort capture cadence (50 captures/second).
+pub const MIN_CAPTURE_INTERVAL_MS: u64 = 20;
+
+/// Fastest supported local-vision scheduling interval. Actual throughput is
+/// bounded by inference latency; the watcher never runs concurrent calls on
+/// one model instance.
+pub const MIN_VISION_INTERVAL_MS: u64 = 20;
+
+const CHANGE_SIGNATURE_WIDTH: u32 = 64;
+const CHANGE_SIGNATURE_HEIGHT: u32 = 36;
+
+/// Load and warm the configured local vision backend, with the ONNX model as
+/// a self-healing fallback when the preferred GGUF model cannot start.
+pub async fn load_configured_vision_model(
+    config: &VisionConfig,
+    gpu: bool,
+) -> Result<Arc<dyn continuum_vision::VisionModel>> {
+    use continuum_vision::VisionModel;
+
+    let primary_path = Path::new(&config.model_path);
+    let use_gguf = match config.backend.as_str() {
+        "gguf" => true,
+        "onnx" => false,
+        "auto" => primary_path.join("model-q4_k_m.gguf").is_file(),
+        backend => anyhow::bail!("unsupported vision backend: {backend}"),
+    };
+
+    let primary: Result<Arc<dyn VisionModel>> = if use_gguf {
+        let max_tokens = u32::try_from(config.max_new_tokens)
+            .context("vision.max_new_tokens does not fit the GGUF backend")?;
+        match continuum_vision::gguf::GgufVisionModel::new(
+            primary_path,
+            gpu && config.gpu_enabled,
+            config.prompt.clone(),
+            max_tokens,
+        )
+        .await
+        {
+            Ok(model) => match model.warmup().await {
+                Ok(()) => Ok(Arc::new(model)),
+                Err(error) => Err(error.context("GGUF vision warmup failed")),
+            },
+            Err(error) => Err(error.context("GGUF vision load failed")),
+        }
+    } else {
+        load_onnx_vision(config, primary_path, gpu).await
+    };
+
+    match primary {
+        Ok(model) => Ok(model),
+        Err(primary_error) => {
+            tracing::warn!(
+                layer = "senses",
+                component = "vision",
+                model_path = %primary_path.display(),
+                error = %primary_error,
+                "primary vision backend failed; trying ONNX fallback"
+            );
+            let fallback_path = Path::new(&config.fallback_model_path);
+            if config.fallback_model_path.trim().is_empty() || fallback_path == primary_path {
+                return Err(primary_error);
+            }
+            load_onnx_vision(config, fallback_path, gpu)
+                .await
+                .with_context(|| {
+                    format!(
+                        "primary failed ({primary_error}); ONNX fallback {} also failed",
+                        fallback_path.display()
+                    )
+                })
+        }
+    }
+}
+
+async fn load_onnx_vision(
+    config: &VisionConfig,
+    model_path: &Path,
+    gpu: bool,
+) -> Result<Arc<dyn continuum_vision::VisionModel>> {
+    use continuum_vision::VisionModel;
+
+    let options = continuum_vision::onnx::VisionOptions {
+        prompt: config.prompt.clone(),
+        max_new_tokens: config.max_new_tokens,
+        processor_max_edge: Some(config.processor_max_edge),
+        image_splitting: config.image_splitting,
+    };
+    let model = continuum_vision::onnx::OnnxVisionModel::new_with_options(
+        model_path,
+        gpu && config.gpu_enabled,
+        options,
+    )
+    .await?;
+    model.warmup().await.context("ONNX vision warmup failed")?;
+    Ok(Arc::new(model))
+}
 
 /// Capture the primary monitor once. Retained for diagnostics and compatibility.
 pub fn capture_primary_monitor() -> Result<image::RgbaImage> {
@@ -65,20 +171,29 @@ pub fn save_screenshot(image: &DynamicImage, screenshots_dir: &Path) -> Result<P
 
 fn description_indicates_error(description: &str) -> bool {
     let lower = description.to_lowercase();
+    if ["no error", "without errors", "error-free"]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return false;
+    }
     [
-        "error",
-        "exception",
+        "error dialog",
+        "error message",
+        "error screen",
+        "fatal error",
+        "unhandled exception",
         "stack trace",
         "stacktrace",
-        "crash",
-        "fatal",
-        "failed",
         "traceback",
-        "panic",
+        "panic screen",
         "blue screen",
         "bsod",
         "not responding",
-        "error dialog",
+        "has crashed",
+        "shows an error",
+        "displaying an error",
+        "an error is displayed",
     ]
     .iter()
     .any(|keyword| lower.contains(keyword))
@@ -110,7 +225,9 @@ struct CapturePacket {
     capture_sequence: u64,
     captured_at: chrono::DateTime<Utc>,
     target: MonitorDescriptor,
-    image: Option<image::RgbaImage>,
+    /// Selected, already-downscaled keyframe. Full-resolution captures never
+    /// enter the inference queue.
+    image: Option<DynamicImage>,
     change_score: f32,
     meaningful_change: bool,
     privacy: PrivacyDisposition,
@@ -162,12 +279,20 @@ impl<T> OrderedBuffer<T> {
 
     #[cfg(test)]
     fn push(&self, value: T) -> (u64, u64) {
-        self.push_with(value, |_| {})
+        self.publish_with(value, true, |_| {})
     }
 
-    fn push_with(&self, value: T, publish: impl FnOnce(&Buffered<T>)) -> (u64, u64) {
+    /// Assign one global capture-event sequence and optionally enqueue it.
+    /// Unchanged captures publish health/current-state metadata without
+    /// occupying the slower vision queue.
+    fn publish_with(
+        &self,
+        value: T,
+        enqueue: bool,
+        publish: impl FnOnce(&Buffered<T>),
+    ) -> (u64, u64) {
         let mut inner = self.inner.lock();
-        let dropped_before = if inner.items.len() == self.capacity {
+        let dropped_before = if enqueue && inner.items.len() == self.capacity {
             1
         } else {
             0
@@ -177,16 +302,19 @@ impl<T> OrderedBuffer<T> {
         }
         inner.next_sequence = inner.next_sequence.saturating_add(1);
         let sequence = inner.next_sequence;
-        inner.items.push_back(Buffered {
+        let buffered = Buffered {
             sequence,
             dropped_before,
             value,
-        });
-        if let Some(buffered) = inner.items.back() {
-            publish(buffered);
+        };
+        publish(&buffered);
+        if enqueue {
+            inner.items.push_back(buffered);
         }
         drop(inner);
-        self.notify.notify_one();
+        if enqueue {
+            self.notify.notify_one();
+        }
         (sequence, dropped_before)
     }
 
@@ -458,7 +586,8 @@ impl VisionWatcher {
             monitor_cache
                 .last_inference
                 .map(|last| {
-                    last.elapsed() >= Duration::from_millis(vision_min_interval_ms.max(100))
+                    last.elapsed()
+                        >= Duration::from_millis(vision_min_interval_ms.max(MIN_VISION_INTERVAL_MS))
                 })
                 .unwrap_or(true)
         };
@@ -484,9 +613,7 @@ impl VisionWatcher {
             monitor_cache.confidence = 1.0;
             packet.image = None;
         } else if should_describe {
-            let raw = packet.image.take().expect("image checked above");
-            let image =
-                downscale_screenshot(raw, self.config.capture_width, self.config.capture_height);
+            let image = packet.image.take().expect("image checked above");
             if self.config.save_screenshots {
                 let monitor_dir = self.screenshots_dir.join(&packet.target.id);
                 match save_screenshot(&image, &monitor_dir) {
@@ -728,7 +855,10 @@ fn run_monitor_capture_loop(
             return;
         }
     };
-    let mut previous_signature: Option<Vec<u8>> = None;
+    // Compare against the last selected keyframe, not merely the immediately
+    // preceding 20 ms sample. Small gradual changes therefore accumulate
+    // until they become meaningful instead of disappearing forever.
+    let mut selected_signature: Option<Vec<u8>> = None;
     let mut previous_privacy = PrivacyDisposition::Redacted;
     let mut capture_sequence = 0u64;
     // Wake-nudge tracking (spec §4.11): initialized to the current
@@ -745,40 +875,79 @@ fn run_monitor_capture_loop(
         // Interval is re-read every iteration from the shared cadence
         // (spec §3 sanctioned pattern) — the idle controller adjusts it
         // without restarting this thread.
-        let target_interval_ms = cadence.capture_interval_ms().max(50);
-        match monitor.capture_image() {
+        let target_interval_ms = cadence.capture_interval_ms().max(MIN_CAPTURE_INTERVAL_MS);
+        // Resolve privacy before collecting pixels. A redacted/excluded
+        // monitor publishes mechanical cadence metadata but no bitmap is
+        // captured, queued, persisted, or shown to the model.
+        let privacy = live_context.monitor_privacy(&target.id);
+        let sampled = if privacy == PrivacyDisposition::Visible {
+            capture_scaled_monitor(
+                &monitor,
+                &target,
+                CHANGE_SIGNATURE_WIDTH,
+                CHANGE_SIGNATURE_HEIGHT,
+            )
+        } else {
+            Ok(image::RgbaImage::new(
+                CHANGE_SIGNATURE_WIDTH,
+                CHANGE_SIGNATURE_HEIGHT,
+            ))
+        };
+        match sampled {
             Ok(image) => {
-                let signature = change_signature(&image);
-                let change_score = previous_signature
+                let signature = DynamicImage::ImageRgba8(image).to_luma8().into_raw();
+                let change_score = selected_signature
                     .as_deref()
                     .map(|previous| mean_luma_difference(previous, &signature))
                     .unwrap_or(1.0);
-                // Per-monitor disposition: strictest of the foreground
-                // window and this monitor's sweep-derived zone (spec §4.1).
-                let privacy = live_context.monitor_privacy(&target.id);
                 let privacy_became_visible = previous_privacy != PrivacyDisposition::Visible
                     && privacy == PrivacyDisposition::Visible;
                 // A wake nudge marks this capture meaningful (image
                 // attached) so the wake gets a fresh caption even when
                 // the screen didn't change while idle (spec §4.11).
-                let meaningful_change = previous_signature.is_none()
+                let meaningful_change = selected_signature.is_none()
                     || change_score >= config.meaningful_change_threshold
                     || privacy_became_visible
                     || nudged;
-                previous_signature = Some(signature);
+                if meaningful_change {
+                    selected_signature = Some(signature);
+                }
                 previous_privacy = privacy;
+                // Only a visible, meaningful change gets a quality keyframe.
+                // Windows captures directly at the model resolution so a
+                // full-resolution desktop image never crosses into Rust.
+                let queued_image = if meaningful_change && privacy == PrivacyDisposition::Visible {
+                    match capture_scaled_monitor(
+                        &monitor,
+                        &target,
+                        config.capture_width,
+                        config.capture_height,
+                    ) {
+                        Ok(image) => Some(DynamicImage::ImageRgba8(image)),
+                        Err(error) => {
+                            live_context.record_capture_failure(format!(
+                                "monitor {} keyframe capture failed: {error}",
+                                target.id
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let capture_latency_ms = started.elapsed().as_millis() as u64;
                 let packet = CapturePacket {
                     capture_sequence,
                     captured_at,
                     target: target.clone(),
-                    image: meaningful_change.then_some(image),
+                    image: queued_image,
                     change_score,
                     meaningful_change,
                     privacy,
                     capture_latency_ms,
                 };
-                buffer.push_with(packet, |buffered| {
+                let enqueue_for_vision = packet.image.is_some();
+                buffer.publish_with(packet, enqueue_for_vision, |buffered| {
                     if buffered.dropped_before > 0 {
                         live_context.record_capture_drop(buffered.dropped_before);
                     }
@@ -810,7 +979,7 @@ fn run_monitor_capture_loop(
                 .record_capture_failure(format!("monitor {} capture failed: {error}", target.id)),
         }
 
-        // The deadline is recomputed every ≤50 ms slice from the *current*
+        // The deadline is recomputed every ≤20 ms slice from the *current*
         // cadence (spec §3): when the idle controller shortens the
         // interval mid-sleep the shorter deadline applies immediately,
         // and a pending wake nudge breaks the wait for an instant
@@ -819,7 +988,8 @@ fn run_monitor_capture_loop(
             if shutdown.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) {
                 break;
             }
-            let deadline = started + Duration::from_millis(cadence.capture_interval_ms().max(50));
+            let deadline = started
+                + Duration::from_millis(cadence.capture_interval_ms().max(MIN_CAPTURE_INTERVAL_MS));
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -830,7 +1000,7 @@ fn run_monitor_capture_loop(
             std::thread::sleep(
                 deadline
                     .saturating_duration_since(now)
-                    .min(Duration::from_millis(50)),
+                    .min(Duration::from_millis(MIN_CAPTURE_INTERVAL_MS)),
             );
         }
     }
@@ -842,6 +1012,169 @@ fn monitor_by_native_id(native_id: u32) -> Result<Monitor> {
         .into_iter()
         .find(|monitor| monitor.id().is_ok_and(|id| id == native_id))
         .ok_or_else(|| anyhow::anyhow!("monitor id {native_id} is no longer connected"))
+}
+
+/// Capture a monitor directly at the requested size.
+///
+/// On Windows `StretchBlt` performs the reduction before the bitmap enters
+/// Rust memory. Other platforms retain the xcap path and resize locally.
+#[cfg(windows)]
+fn capture_scaled_monitor(
+    fallback: &Monitor,
+    target: &MonitorDescriptor,
+    output_width: u32,
+    output_height: u32,
+) -> Result<image::RgbaImage> {
+    match capture_scaled_monitor_gdi(target, output_width, output_height) {
+        Ok(image) => Ok(image),
+        Err(fast_error) => {
+            let image = fallback.capture_image().with_context(|| {
+                format!("fast scaled capture failed ({fast_error}); xcap fallback failed")
+            })?;
+            Ok(image::imageops::resize(
+                &image,
+                output_width,
+                output_height,
+                FilterType::Triangle,
+            ))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn capture_scaled_monitor(
+    fallback: &Monitor,
+    _target: &MonitorDescriptor,
+    output_width: u32,
+    output_height: u32,
+) -> Result<image::RgbaImage> {
+    let image = fallback
+        .capture_image()
+        .context("xcap monitor capture failed")?;
+    Ok(image::imageops::resize(
+        &image,
+        output_width,
+        output_height,
+        FilterType::Triangle,
+    ))
+}
+
+#[cfg(windows)]
+fn capture_scaled_monitor_gdi(
+    target: &MonitorDescriptor,
+    output_width: u32,
+    output_height: u32,
+) -> Result<image::RgbaImage> {
+    let output_width_i32 = i32::try_from(output_width).context("capture width exceeds i32")?;
+    let output_height_i32 = i32::try_from(output_height).context("capture height exceeds i32")?;
+    let source_width = i32::try_from(target.width).context("monitor width exceeds i32")?;
+    let source_height = i32::try_from(target.height).context("monitor height exceeds i32")?;
+    if output_width == 0 || output_height == 0 || source_width <= 0 || source_height <= 0 {
+        anyhow::bail!("capture dimensions must be positive");
+    }
+
+    // SAFETY: all handles are checked and released on every path. The
+    // previously selected object is restored before bitmap deletion, and
+    // GetDIBits writes into a checked 32-bit top-down buffer.
+    unsafe {
+        let desktop = GetDesktopWindow();
+        let source_dc = GetWindowDC(Some(desktop));
+        if source_dc.0.is_null() {
+            anyhow::bail!("GetWindowDC returned an invalid handle");
+        }
+        let memory_dc = CreateCompatibleDC(Some(source_dc));
+        if memory_dc.0.is_null() {
+            ReleaseDC(Some(desktop), source_dc);
+            anyhow::bail!("CreateCompatibleDC returned an invalid handle");
+        }
+        let bitmap = CreateCompatibleBitmap(source_dc, output_width_i32, output_height_i32);
+        if bitmap.0.is_null() {
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(Some(desktop), source_dc);
+            anyhow::bail!("CreateCompatibleBitmap returned an invalid handle");
+        }
+        let previous = SelectObject(memory_dc, bitmap.into());
+
+        let capture_result = (|| -> Result<image::RgbaImage> {
+            // The 64x36 change signature is sampled every 20 ms and does not
+            // benefit from interpolation. Reserve HALFTONE for model-facing
+            // keyframes, where scaling quality affects the caption.
+            let stretch_mode = if output_width == CHANGE_SIGNATURE_WIDTH
+                && output_height == CHANGE_SIGNATURE_HEIGHT
+            {
+                COLORONCOLOR
+            } else {
+                HALFTONE
+            };
+            if SetStretchBltMode(memory_dc, stretch_mode) == 0 {
+                anyhow::bail!("SetStretchBltMode failed");
+            }
+            if !StretchBlt(
+                memory_dc,
+                0,
+                0,
+                output_width_i32,
+                output_height_i32,
+                Some(source_dc),
+                target.x,
+                target.y,
+                source_width,
+                source_height,
+                SRCCOPY,
+            )
+            .as_bool()
+            {
+                anyhow::bail!("StretchBlt failed");
+            }
+
+            let byte_len = usize::try_from(output_width)
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(output_height)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
+                .and_then(|pixels| pixels.checked_mul(4))
+                .context("capture buffer size overflow")?;
+            let mut pixels = vec![0u8; byte_len];
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: output_width_i32,
+                    biHeight: -output_height_i32,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    biSizeImage: u32::try_from(byte_len).unwrap_or(u32::MAX),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            if GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                output_height,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS,
+            ) == 0
+            {
+                anyhow::bail!("GetDIBits failed");
+            }
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            image::RgbaImage::from_raw(output_width, output_height, pixels)
+                .context("scaled capture buffer shape mismatch")
+        })();
+
+        SelectObject(memory_dc, previous);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(Some(desktop), source_dc);
+        capture_result
+    }
 }
 
 fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorDescriptor>> {
@@ -878,11 +1211,6 @@ fn enumerate_monitors(config: &ScreenConfig) -> Result<Vec<MonitorDescriptor>> {
     Ok(targets)
 }
 
-fn change_signature(image: &image::RgbaImage) -> Vec<u8> {
-    let reduced = image::imageops::resize(image, 64, 36, FilterType::Triangle);
-    DynamicImage::ImageRgba8(reduced).to_luma8().into_raw()
-}
-
 fn mean_luma_difference(previous: &[u8], current: &[u8]) -> f32 {
     if previous.len() != current.len() || current.is_empty() {
         return 1.0;
@@ -898,6 +1226,46 @@ fn mean_luma_difference(previous: &[u8], current: &[u8]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires locally downloaded GGUF vision model"]
+    async fn configured_loader_prefers_local_gguf_model() {
+        let config = VisionConfig::default();
+        let model = load_configured_vision_model(&config, false)
+            .await
+            .expect("preferred local vision model should load and warm up");
+        assert_eq!(model.model_name(), "smolvlm2-2.2b-q4-llama.cpp");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires locally downloaded ONNX fallback model"]
+    async fn configured_loader_recovers_with_onnx_fallback() {
+        let config = VisionConfig {
+            backend: "gguf".into(),
+            model_path: "Z:/continuum-deliberately-missing-vision-model".into(),
+            ..VisionConfig::default()
+        };
+        let model = load_configured_vision_model(&config, false)
+            .await
+            .expect("ONNX fallback should load and warm up");
+        assert_eq!(model.model_name(), "smolvlm-500m-onnx");
+    }
+
+    #[test]
+    fn error_rollup_requires_visible_failure_language() {
+        assert!(description_indicates_error(
+            "A fatal error dialog is displayed."
+        ));
+        assert!(description_indicates_error(
+            "The application is not responding."
+        ));
+        assert!(!description_indicates_error(
+            "Documentation about error handling is open."
+        ));
+        assert!(!description_indicates_error(
+            "The tests completed without errors."
+        ));
+    }
 
     #[test]
     fn luma_difference_ignores_identical_frames() {
@@ -922,6 +1290,78 @@ mod tests {
         assert_eq!(second.value, "three");
         assert!(first.sequence < second.sequence);
         assert_eq!(second.dropped_before, 1);
+    }
+
+    #[tokio::test]
+    async fn unchanged_metadata_does_not_occupy_the_vision_queue() {
+        let buffer = OrderedBuffer::new(1);
+        let mut published_sequence = 0;
+        buffer.publish_with("unchanged", false, |buffered| {
+            published_sequence = buffered.sequence;
+        });
+        assert_eq!(published_sequence, 1);
+
+        let queued = buffer.push("changed");
+        assert_eq!(queued, (2, 0));
+        assert_eq!(buffer.pop().await.value, "changed");
+    }
+
+    #[test]
+    fn fast_capture_contract_is_twenty_milliseconds() {
+        let config = ScreenConfig::default();
+        assert_eq!(MIN_CAPTURE_INTERVAL_MS, 20);
+        assert_eq!(config.capture_interval_ms, MIN_CAPTURE_INTERVAL_MS);
+        assert_eq!(config.vision_min_interval_ms, MIN_VISION_INTERVAL_MS);
+    }
+
+    #[test]
+    #[ignore = "captures a scaled local monitor sample; run manually for diagnostics"]
+    fn live_fast_sampler_reports_twenty_ms_cadence_capacity() {
+        const SAMPLES: u32 = 50;
+        let config = ScreenConfig {
+            all_monitors: false,
+            ..ScreenConfig::default()
+        };
+        let target = enumerate_monitors(&config)
+            .expect("enumerate primary monitor")
+            .into_iter()
+            .next()
+            .expect("primary monitor");
+        let monitor = monitor_by_native_id(target.native_id).expect("open primary monitor");
+        let interval = Duration::from_millis(MIN_CAPTURE_INTERVAL_MS);
+        let test_started = Instant::now();
+        let mut deadline_misses = 0u32;
+        let mut latency_total = Duration::ZERO;
+        let mut latency_max = Duration::ZERO;
+
+        for _ in 0..SAMPLES {
+            let sample_started = Instant::now();
+            let image = capture_scaled_monitor(
+                &monitor,
+                &target,
+                CHANGE_SIGNATURE_WIDTH,
+                CHANGE_SIGNATURE_HEIGHT,
+            )
+            .expect("capture scaled primary monitor sample");
+            std::hint::black_box(image.dimensions());
+            let latency = sample_started.elapsed();
+            latency_total += latency;
+            latency_max = latency_max.max(latency);
+            if latency > interval {
+                deadline_misses += 1;
+            } else {
+                std::thread::sleep(interval - latency);
+            }
+        }
+
+        let elapsed = test_started.elapsed();
+        let captures_per_second = f64::from(SAMPLES) / elapsed.as_secs_f64();
+        let mean_latency_ms = latency_total.as_secs_f64() * 1_000.0 / f64::from(SAMPLES);
+        println!(
+            "fast capture diagnostic: samples={SAMPLES} rate={captures_per_second:.1}/s mean_latency={mean_latency_ms:.2}ms max_latency={:.2}ms deadline_misses={deadline_misses}",
+            latency_max.as_secs_f64() * 1_000.0,
+        );
+        assert_eq!(SAMPLES, 50);
     }
 
     #[test]

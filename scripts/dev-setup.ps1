@@ -127,7 +127,26 @@ $onnxRuntime = $null
 try {
     $onnxRuntime = Resolve-ContinuumOnnxRuntime -RepoRoot $repoRoot
 } catch {
-    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+    # No compatible DLL in any of the recognized locations. Try to install one
+    # automatically from the official Microsoft release. This keeps the script
+    # self-healing: a fresh clone on a machine with only the System32 v1.0 copy
+    # no longer needs a manual download step before the dashboard can start.
+    $installError = $null
+    try {
+        $installed = Install-ContinuumOnnxRuntime -RepoRoot $repoRoot -DestinationPath "C:\onnxruntime\onnxruntime.dll"
+        $onnxRuntime = Resolve-ContinuumOnnxRuntime -RepoRoot $repoRoot
+        Write-Host "  Installed ONNX Runtime $($installed.Version) to $($installed.Path)" -ForegroundColor Green
+    } catch {
+        $installError = $_.Exception.Message
+    }
+    if ($installError) {
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  Automatic install failed: $installError" -ForegroundColor Yellow
+        Write-Host "  Manual install: download the latest Windows x64 release from" -ForegroundColor Yellow
+        Write-Host "    https://github.com/microsoft/onnxruntime/releases" -ForegroundColor Yellow
+        Write-Host "  and place onnxruntime.dll at C:\onnxruntime\onnxruntime.dll" -ForegroundColor Yellow
+        Write-Host "  (or set ORT_DYLIB_PATH to the full DLL path)." -ForegroundColor Yellow
+    }
 }
 Write-CheckResult -Name "ONNX Runtime >= 1.23" -Ok ($null -ne $onnxRuntime) -Detail $(if ($onnxRuntime) { "$($onnxRuntime.Version) at $($onnxRuntime.Path)" } else { "" })
 if ($onnxRuntime -and $env:ORT_DYLIB_PATH -ne $onnxRuntime.Path) {

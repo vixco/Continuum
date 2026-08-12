@@ -6,6 +6,15 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Continuous 20 ms visual context capture**: each monitor now targets a
+  mechanical 20 ms capture cadence while changed, downscaled keyframes feed the
+  local vision model continuously at sustainable inference throughput.
+  Unchanged samples bypass the vision queue and semantic history, gradual visual
+  changes accumulate against the last selected keyframe, and privacy filtering
+  happens before any bitmap enters the queue. Idle mode no longer silently
+  reduces the default visual sampling cadence; slower idle capture remains an
+  explicit configuration option.
+
 - **Configurable four-layer Brain and persistent live voice**: Brain now shows
   the actual model and usage for vision, local triage, orchestration, and
   workers; Claude Code, Codex, and Hermes can be selected when their CLI is
@@ -30,6 +39,14 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
   "go back to the app I was in" from historical process/title evidence before
   focusing and verifying a live window, while Windows clicks show a
   configurable amber `AI` action marker.
+- **Verified local screen vision pipeline**: Continuum now prefers the local
+  SmolVLM2-2.2B Q4_K_M llama.cpp/MTMD backend and automatically falls back to
+  the official SmolVLM-500M ONNX pipeline when load or warmup fails. A
+  five-screen semantic benchmark measured 70.6% concept coverage at 9.81 s
+  mean CPU latency for 2.2B versus 41.2% at 23.58 s for 500M, with zero
+  forbidden hallucinations in both runs. The startup-safe checker now detects,
+  repairs, or updates either model variant, and deterministic generated UI
+  fixtures keep the comparison reproducible without including user content.
 
 - **One-command local CI and Windows release rehearsal**: `pnpm ci:local`
   runs the deterministic CI graph before push, while

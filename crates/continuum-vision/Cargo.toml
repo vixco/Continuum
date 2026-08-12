@@ -3,7 +3,7 @@ name = "continuum-vision"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Local vision model runtime (SmolVLM-256M) for Continuum's senses layer"
+description = "Local SmolVLM vision runtime for Continuum's senses layer"
 
 [dependencies]
 tokio = { workspace = true }
@@ -17,6 +17,13 @@ ort = { workspace = true }
 image = { workspace = true }
 ndarray = { workspace = true }
 tokenizers = { workspace = true }
+llama-cpp-2 = { workspace = true }
+encoding_rs = "0.8"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -495,11 +495,12 @@ current moment, session state and pending decisions are never dropped.
 ### `[performance]`
 
 `idle_pause_after_secs = 300` (`0` disables idle mode),
-`idle_capture_interval_ms = 2000`, `idle_vision_interval_ms = 15000` (`0` pauses
+`idle_capture_interval_ms = 20`, `idle_vision_interval_ms = 20` (`0` pauses
 vision entirely while idle).
 
-Idle mode is deliberately not a full stop: vision keeps running every 15 s so a
-build failing while you are at lunch still produces an event.
+Continuous visual context does not throttle by default when idle, so unattended
+screen changes remain observable. Users can explicitly choose slower idle
+cadences when resource or battery use matters more than timeline completeness.
 
 ### `[context_tools]`
 

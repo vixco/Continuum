@@ -24,8 +24,6 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
 
-use continuum_vision::VisionModel;
-
 use continuum_core::audit::{Actor, AuditLog};
 use continuum_core::config::{
     continuum_dev_dir, env_or_legacy, load_config, ContextPackageConfig, ContinuationConfig,
@@ -85,7 +83,7 @@ use continuum_core::senses::toggles::ToggleControl;
 use continuum_core::senses::types::{
     AudioObservation, ContextObservation, PerceptionFrame, ScreenObservation,
 };
-use continuum_core::senses::vision::VisionWatcher;
+use continuum_core::senses::vision::{VisionWatcher, MIN_CAPTURE_INTERVAL_MS};
 use continuum_core::skills::{MatchContext, SkillLoader, SkillMatcher};
 use continuum_core::supervisor::Supervisor;
 use continuum_core::triage::coalesce::{Submitted, TriageBusyHandle, TriageCoalescer};
@@ -1324,6 +1322,7 @@ async fn main() -> Result<()> {
     let _moshi_frontend: Option<()> = None;
     {
         let state_clone = runtime_state.clone();
+        let vision_model_loaded_for_publisher = vision_model_loaded.clone();
         // Task 11: the curator only actually runs when both the triage
         // model loaded (so `curator_status` is `Some`) and
         // `[memory.curator] enabled = true` — see `build_curator_snapshot`.
@@ -1351,7 +1350,6 @@ async fn main() -> Result<()> {
         let health_supervisor = supervisor_stats.clone();
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
-        let vision_model_loaded_for_publisher = vision_model_loaded.clone();
         let triage_enabled = triage.is_some();
         let screen_capture_configured = config.screen.enabled;
         let context_poll_interval = Duration::from_secs(config.context.poll_interval_secs.max(1));
@@ -3361,7 +3359,8 @@ fn build_context_engine_snapshot(
 
     let live_context = {
         let health = hub.health();
-        let interval = Duration::from_millis(cadence.capture_interval_ms().max(50));
+        let interval =
+            Duration::from_millis(cadence.capture_interval_ms().max(MIN_CAPTURE_INTERVAL_MS));
         let should_restart = health.should_restart(now, screen_capture_enabled, interval);
         ComponentHealthSummary {
             healthy: !should_restart,
@@ -4875,8 +4874,8 @@ fn expand_home(raw: &str) -> PathBuf {
 ///
 /// Honours the resolved resource plan: when `plan.vision_enabled` is false
 /// (e.g. very low RAM), perception runs text-only and we return the stub. When
-/// enabled, `plan.vision_gpu` selects the ONNX CUDA execution provider (with
-/// CPU fallback baked into the model loader).
+/// enabled, `plan.vision_gpu` requests an available GGUF or ONNX GPU backend;
+/// CPU and ONNX model fallback are handled by the shared loader.
 async fn init_vision_model(
     config: &ContinuumConfig,
     plan: &continuum_core::hardware::ResolvedResourcePlan,
@@ -4890,28 +4889,20 @@ async fn init_vision_model(
         return Arc::new(StubVisionModel);
     }
 
-    let model_path = &config.vision.model_path;
-
-    match continuum_vision::onnx::OnnxVisionModel::new(model_path, plan.vision_gpu).await {
-        Ok(model) => {
-            if let Err(e) = model.warmup().await {
-                tracing::warn!(
-                    layer = "senses",
-                    component = "continuum",
-                    error = %e,
-                    "Vision warmup failed, using stub"
-                );
-                return Arc::new(StubVisionModel);
-            }
-            Arc::new(model)
-        }
+    match continuum_core::senses::vision::load_configured_vision_model(
+        &config.vision,
+        plan.vision_gpu,
+    )
+    .await
+    {
+        Ok(model) => model,
         Err(e) => {
             tracing::warn!(
                 layer = "senses",
                 component = "continuum",
-                model_path = model_path,
+                model_path = config.vision.model_path,
                 error = %e,
-                "Failed to load vision model, using stub"
+                "Primary and fallback vision models failed, using stub"
             );
             Arc::new(StubVisionModel)
         }

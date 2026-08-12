@@ -57,7 +57,7 @@ pub struct ResolvedResourcePlan {
     pub triage_gpu_layers: u32,
     /// Whether the vision model should be loaded at all.
     pub vision_enabled: bool,
-    /// Whether the vision model should use a CUDA execution provider.
+    /// Whether the vision model should request an available GPU backend.
     pub vision_gpu: bool,
     /// Threads for Whisper STT.
     pub whisper_threads: u32,

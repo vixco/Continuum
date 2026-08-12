@@ -226,7 +226,10 @@ impl HealthCheck for LiveContextCheck {
             .and_then(|engine| engine.live_context)
             .map(|live| live.should_restart);
         let stalled = runtime_stalled.unwrap_or_else(|| {
-            let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(50));
+            // Keep this in sync with the runtime's documented 20 ms minimum.
+            // The desktop links continuum-core without its runtime feature,
+            // so the vision-module constant is intentionally unavailable here.
+            let interval = std::time::Duration::from_millis(cfg.screen.capture_interval_ms.max(20));
             state
                 .health
                 .should_restart(chrono::Utc::now(), true, interval)

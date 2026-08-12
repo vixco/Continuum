@@ -40,7 +40,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use continuum_vision::VisionModel;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
@@ -501,8 +500,8 @@ async fn main() -> Result<()> {
 ///
 /// Honours the resolved resource plan: when `plan.vision_enabled` is false
 /// (e.g. very low RAM), perception runs text-only and we return the stub.
-/// `plan.vision_gpu` selects the ONNX CUDA execution provider (with CPU
-/// fallback baked into the model loader).
+/// `plan.vision_gpu` requests an available GGUF or ONNX GPU backend; CPU and
+/// ONNX model fallback are handled by the shared loader.
 async fn init_vision_model(
     config: &ContinuumConfig,
     plan: &continuum_core::hardware::ResolvedResourcePlan,
@@ -516,28 +515,20 @@ async fn init_vision_model(
         return Arc::new(StubVisionModel);
     }
 
-    let model_path = &config.vision.model_path;
-
-    match continuum_vision::onnx::OnnxVisionModel::new(model_path, plan.vision_gpu).await {
-        Ok(model) => {
-            // Warm up the model.
-            if let Err(e) = model.warmup().await {
-                tracing::warn!(
-                    layer = "senses",
-                    component = "main",
-                    error = %e,
-                    "Vision model warmup failed, using stub descriptions"
-                );
-            }
-            Arc::new(model)
-        }
+    match continuum_core::senses::vision::load_configured_vision_model(
+        &config.vision,
+        plan.vision_gpu,
+    )
+    .await
+    {
+        Ok(model) => model,
         Err(e) => {
             tracing::warn!(
                 layer = "senses",
                 component = "main",
-                model_path = model_path,
+                model_path = config.vision.model_path,
                 error = %e,
-                "Failed to load vision model, using stub. Download models with \
+                "Primary and fallback vision models failed, using stub. Download models with \
                  scripts/download-models.ps1"
             );
             Arc::new(StubVisionModel)

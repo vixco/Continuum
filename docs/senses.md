@@ -36,18 +36,33 @@ the same compact current world-state without exposing raw screenshots.
 
 ### Vision Watcher
 
-Captures all connected monitors concurrently using `xcap` (GDI backend, no
-yellow border). Each display has a stable `display-<xcap id>` identity, geometry,
-per-monitor capture sequence, and timestamp.
+Captures all connected monitors concurrently. `xcap` supplies enumeration and
+stable `display-<xcap id>` identities; on Windows, direct GDI `StretchBlt`
+captures the scaled hot-path samples and model keyframes without a yellow
+border. A failed direct capture automatically falls back to `xcap`. Each
+display also carries geometry, a per-monitor capture sequence, and a timestamp.
 
 - **Crate:** `continuum-core::senses::vision`
-- **Model:** SmolVLM-256M via `ort` (ONNX Runtime). Falls back to a stub model if model files are missing.
-- **Capture cadence:** `screen.capture_interval_ms` (default 200 ms per monitor).
+- **Model:** SmolVLM2-2.2B Q4_K_M through llama.cpp MTMD by default. The
+  official SmolVLM-500M ONNX pipeline is loaded automatically if the preferred
+  model or its warmup fails; SmolVLM-256M remains a configurable low-resource
+  option. If both configured models fail, vision fails closed to the stub.
+- **Capture cadence:** `screen.capture_interval_ms` (default 20 ms per monitor,
+  a best-effort 50-captures/second target). This loop is mechanical; it does not
+  call AI. GDI and display timing can miss that deadline, which is counted in
+  live-context health rather than presented as a false 50/s guarantee.
 - **Backpressure:** `screen.buffer_capacity` pending captures; oldest pending
-  events are dropped under load and reported in health/event counters.
+  keyframes are dropped under load and reported in health/event counters.
+  Unchanged samples never occupy this queue or the semantic event ring.
 - **Change selection:** a 64×36 luma signature gates local vision using
-  `screen.meaningful_change_threshold`; inference is independently rate-limited
-  by `screen.vision_min_interval_ms`.
+  `screen.meaningful_change_threshold`. It compares against the last selected
+  keyframe, allowing gradual changes to accumulate. Inference is independently
+  scheduled by `screen.vision_min_interval_ms`; the 20 ms default removes an
+  artificial pause but actual throughput remains bounded by model latency.
+- **Context fusion:** the model describes the visible main content. Foreground
+  application and window-title identity come from `ContextWatcher`, so
+  Continuum can combine both signals without forcing the vision model to guess
+  an application from weak visual evidence.
 - **Screenshots:** disabled by default. When explicitly enabled, only selected
   changed frames are saved under a per-monitor local directory.
 - **Privacy:** sensitive foreground applications or titles are redacted before
@@ -108,15 +123,21 @@ All settings are in `~/.continuum-dev/config.toml`. Missing keys fall back to de
 
 ```toml
 [vision]
-name = "SmolVLM-256M"
-model_path = "~/.continuum-dev/models/vision/smolvlm-256m"
-gpu_enabled = false
+name = "SmolVLM2-2.2B Q4_K_M"
+backend = "auto"
+model_path = "~/.continuum-dev/models/vision/smolvlm2-2.2b-q4"
+fallback_model_path = "~/.continuum-dev/models/vision/smolvlm-500m"
+gpu_enabled = true             # Safe CPU fallback without a GPU-enabled build
 input_width = 384
 input_height = 384
+prompt = "Describe the visible computer screen accurately. Include the application or scene, the main action or status, important readable text, and any visible error. Use one concise factual sentence."
+max_new_tokens = 64
+processor_max_edge = 1536
+image_splitting = true
 
 [screen]
 enabled = true              # Visible user consent boundary
-capture_interval_ms = 200   # Per-monitor target cadence
+capture_interval_ms = 20    # Per-monitor best-effort target cadence (50/s)
 capture_width = 1280        # Downscale width
 capture_height = 720        # Downscale height
 save_screenshots = false    # Explicit opt-in for selected local JPEGs
@@ -124,7 +145,7 @@ all_monitors = true          # Capture every connected monitor
 excluded_monitor_ids = []    # Optional stable display IDs to exclude
 buffer_capacity = 64         # Oldest-drop pending capture FIFO
 meaningful_change_threshold = 0.025
-vision_min_interval_ms = 2000
+vision_min_interval_ms = 20 # Continuously consume changed keyframes at model throughput
 
 [audio]
 enabled = true
@@ -164,7 +185,9 @@ This places:
 
 | Model | Path | Size |
 |---|---|---|
-| SmolVLM-256M (ONNX) | `~/.continuum-dev/models/vision/smolvlm-256m/` | ~500 MB |
+| SmolVLM2-2.2B Q4_K_M + projector | `~/.continuum-dev/models/vision/smolvlm2-2.2b-q4/` | ~1.9 GB |
+| SmolVLM-500M fallback (ONNX) | `~/.continuum-dev/models/vision/smolvlm-500m/` | ~2.0 GB |
+| SmolVLM-256M fallback (ONNX) | `~/.continuum-dev/models/vision/smolvlm-256m/` | ~1.0 GB |
 | Whisper small | `~/.continuum-dev/models/stt/whisper-small.bin` | ~466 MB |
 
 Without models, the vision watcher falls back to a stub that returns `"(no vision model loaded)"`. The audio watcher requires its model to function (or disable audio via config).
@@ -183,7 +206,8 @@ All runtime data lives in `~/.continuum-dev/` during development:
       14-30-00.jpg
       14-30-03.jpg
   models/
-    vision/smolvlm-256m/   # ONNX model files
+    vision/smolvlm2-2.2b-q4/ # preferred GGUF model + projector
+    vision/smolvlm-500m/     # automatic ONNX fallback
     stt/whisper-small.bin   # Whisper model
 ```
 

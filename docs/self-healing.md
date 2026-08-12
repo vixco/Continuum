@@ -211,8 +211,13 @@ Recovery:
 1. Confirm **Brain → Continuous local context** is enabled and the intended
    monitor IDs are not in `screen.excluded_monitor_ids`.
 2. Inspect `live-context.json` health counters and recent source-attributed
-   events. If drops rise, increase `screen.buffer_capacity`, increase
-   `screen.vision_min_interval_ms`, or relax capture cadence.
+   events. The default 20 ms cadence is best-effort; deadline misses mean the
+   OS capture path cannot sustain 50 captures/second on that display. If queue
+   drops rise, increase `screen.buffer_capacity`, increase
+   `screen.vision_min_interval_ms`, raise
+   `screen.meaningful_change_threshold`, or relax capture cadence. Unchanged
+   samples do not enter the vision queue, so persistent drops indicate genuine
+   visual churn or an inference backend that is too slow.
 3. The runtime `Supervisor` auto-heals the vision task — a dead/stuck
    capture loop is reaped and respawned in-process on the next watch tick
    (the restarter re-initialises the vision model and re-enumerates
@@ -221,8 +226,18 @@ Recovery:
    `vision`. Hot-plug discovery normally repairs topology within 2 s.
 4. If a supervisor respawn does not clear it, restart the Continuum runtime
    to re-enumerate displays and restart all monitor workers.
-5. Persistent xcap failures require checking the interactive Windows desktop
-   session and display drivers; do not delete local user data.
+5. Persistent direct-GDI and `xcap` fallback failures require checking the
+   interactive Windows desktop session and display drivers; do not delete local
+   user data.
+6. If model loading or warmup fails, repair the preferred model with
+   `scripts/ensure-vision-model.ps1 -Mode Repair -Variant smolvlm2-2.2b-q4`,
+   then repair the automatic fallback with
+   `scripts/ensure-vision-model.ps1 -Mode Repair -Variant smolvlm-500m`.
+   Use `-Mode Update` to compare official Hugging Face ETags and replace only
+   changed files. Downloads use `.partial` files so a failed repair does not
+   overwrite the last complete model. Verify recovery with
+   `cargo run --release -p continuum-vision --bin continuum-vision-bench --
+   "$env:USERPROFILE\.continuum-dev\models\vision\smolvlm2-2.2b-q4"`.
 
 Runtime proof boundary: unit tests cover event ordering, bounded oldest-drop
 behavior, compact projection limits, privacy classification, and restart logic.

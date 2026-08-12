@@ -390,10 +390,10 @@ impl Default for SessionStateConfig {
 /// §4.11/§6). When `idle_seconds` exceeds `idle_pause_after_secs`, the
 /// idle controller switches the shared cadence control to the idle
 /// values; any restore trigger (input activity, voice wake, hotkey, any
-/// orchestrator wake) switches back. Vision keeps running at a reduced
-/// cadence by default so **unattended-error detection stays alive** (a
-/// build failing while you're at lunch still produces events/wakes) —
-/// set `idle_vision_interval_ms = 0` to pause vision entirely instead.
+/// orchestrator wake) switches back. Continuous visual context keeps the same
+/// 20 ms capture/vision scheduling defaults while idle; users who prefer lower
+/// resource use can explicitly configure slower idle values, or set
+/// `idle_vision_interval_ms = 0` to pause vision entirely.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PerformanceConfig {
@@ -413,8 +413,8 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         Self {
             idle_pause_after_secs: 300,
-            idle_capture_interval_ms: 2_000,
-            idle_vision_interval_ms: 15_000,
+            idle_capture_interval_ms: 20,
+            idle_vision_interval_ms: 20,
         }
     }
 }
@@ -1063,14 +1063,52 @@ pub struct TriageSection {
 pub struct VisionConfig {
     /// Name of the vision model (for display).
     pub name: String,
-    /// Path to the ONNX model file.
+    /// Backend selection: `auto`, `gguf`, or `onnx`.
+    pub backend: String,
+    /// Directory containing the primary vision model files.
     pub model_path: String,
-    /// Whether GPU acceleration is enabled (Phase 1: always false).
+    /// ONNX fallback directory used if the primary model fails health checks.
+    pub fallback_model_path: String,
+    /// Whether GPU acceleration is requested when compiled into the runtime.
     pub gpu_enabled: bool,
     /// Input image width for the model.
     pub input_width: u32,
     /// Input image height for the model.
     pub input_height: u32,
+    /// Prompt used to turn local screenshots into compact world-state text.
+    pub prompt: String,
+    /// Maximum number of tokens generated for one screen observation.
+    pub max_new_tokens: usize,
+    /// Longest edge before the image is split into 512px detail tiles.
+    pub processor_max_edge: u32,
+    /// Whether the processor emits detail tiles plus a global overview.
+    pub image_splitting: bool,
+}
+
+impl VisionConfig {
+    /// Validate the configurable SmolVLM generation and tiling contract.
+    pub fn validate(&self) -> Result<()> {
+        if !matches!(self.backend.as_str(), "auto" | "gguf" | "onnx") {
+            anyhow::bail!("vision.backend must be one of: auto, gguf, onnx");
+        }
+        if self.model_path.trim().is_empty() {
+            anyhow::bail!("vision.model_path must not be empty");
+        }
+        if self.prompt.trim().is_empty() {
+            anyhow::bail!("vision.prompt must not be empty");
+        }
+        if !(1..=256).contains(&self.max_new_tokens) {
+            anyhow::bail!("vision.max_new_tokens must be between 1 and 256");
+        }
+        if !(512..=2048).contains(&self.processor_max_edge)
+            || !self.processor_max_edge.is_multiple_of(512)
+        {
+            anyhow::bail!(
+                "vision.processor_max_edge must be a multiple of 512 between 512 and 2048"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for screen capture.
@@ -1081,7 +1119,7 @@ pub struct ScreenConfig {
     pub enabled: bool,
     /// Legacy coarse interval retained for backwards-compatible config/UI reads.
     pub interval_secs: u64,
-    /// Target cadence per monitor. Defaults to 200 ms (5 captures/second).
+    /// Best-effort target cadence per monitor. Defaults to 20 ms (50 captures/second).
     pub capture_interval_ms: u64,
     /// Width to downscale captured images to.
     pub capture_width: u32,
@@ -1099,6 +1137,28 @@ pub struct ScreenConfig {
     pub meaningful_change_threshold: f32,
     /// Minimum delay between expensive local VLM calls for one monitor.
     pub vision_min_interval_ms: u64,
+}
+
+impl ScreenConfig {
+    /// Validate the mechanical capture and local-vision cadence contract.
+    pub fn validate(&self) -> Result<()> {
+        if self.capture_interval_ms < 20 {
+            anyhow::bail!("screen.capture_interval_ms must be at least 20");
+        }
+        if self.capture_width == 0 || self.capture_height == 0 {
+            anyhow::bail!("screen capture dimensions must be greater than zero");
+        }
+        if self.buffer_capacity == 0 {
+            anyhow::bail!("screen.buffer_capacity must be at least 1");
+        }
+        if !(0.0..=1.0).contains(&self.meaningful_change_threshold) {
+            anyhow::bail!("screen.meaningful_change_threshold must be between 0.0 and 1.0");
+        }
+        if self.vision_min_interval_ms != 0 && self.vision_min_interval_ms < 20 {
+            anyhow::bail!("screen.vision_min_interval_ms must be 0 (paused) or at least 20");
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for the audio pipeline.
@@ -1838,14 +1898,23 @@ impl Default for VisionConfig {
     fn default() -> Self {
         let models_dir = continuum_dev_dir().join("models").join("vision");
         Self {
-            name: "SmolVLM-256M".to_string(),
+            name: "SmolVLM2-2.2B Q4_K_M".to_string(),
+            backend: "auto".to_string(),
             model_path: models_dir
-                .join("smolvlm-256m")
+                .join("smolvlm2-2.2b-q4")
                 .to_string_lossy()
                 .into_owned(),
-            gpu_enabled: false,
+            fallback_model_path: models_dir
+                .join("smolvlm-500m")
+                .to_string_lossy()
+                .into_owned(),
+            gpu_enabled: true,
             input_width: 384,
             input_height: 384,
+            prompt: "Describe the visible computer screen accurately. Include the application or scene, the main action or status, important readable text, and any visible error. Use one concise factual sentence.".to_string(),
+            max_new_tokens: 64,
+            processor_max_edge: 1536,
+            image_splitting: true,
         }
     }
 }
@@ -1855,7 +1924,7 @@ impl Default for ScreenConfig {
         Self {
             enabled: true,
             interval_secs: 3,
-            capture_interval_ms: 200,
+            capture_interval_ms: 20,
             capture_width: 1280,
             capture_height: 720,
             save_screenshots: false,
@@ -1863,7 +1932,10 @@ impl Default for ScreenConfig {
             excluded_monitor_ids: Vec::new(),
             buffer_capacity: 64,
             meaningful_change_threshold: 0.025,
-            vision_min_interval_ms: 2_000,
+            // No artificial delay: changed keyframes are described
+            // continuously, at the throughput the selected local model and
+            // hardware can actually sustain.
+            vision_min_interval_ms: 20,
         }
     }
 }
@@ -2146,6 +2218,14 @@ pub fn load_config(path: &Path) -> Result<ContinuumConfig> {
             .resources
             .validate()
             .context("Invalid [resources] config")?;
+        config
+            .vision
+            .validate()
+            .context("Invalid [vision] config")?;
+        config
+            .screen
+            .validate()
+            .context("Invalid [screen] config")?;
         Ok(config)
     } else {
         tracing::info!(
@@ -2165,7 +2245,10 @@ mod tests {
     #[test]
     fn test_default_config_is_valid() {
         let config = ContinuumConfig::default();
+        config.screen.validate().expect("default screen config");
         assert_eq!(config.screen.interval_secs, 3);
+        assert_eq!(config.screen.capture_interval_ms, 20);
+        assert_eq!(config.screen.vision_min_interval_ms, 20);
         assert_eq!(config.health.backup_retention, 7);
         assert_eq!(config.health.runtime_start_timeout_secs, 90);
         assert_eq!(config.frame.salience_threshold, 0.10);
@@ -2184,7 +2267,7 @@ mod tests {
         assert!(config.voice.enabled);
         assert_eq!(config.voice.wake_keyword, "hey continuum");
         assert_eq!(config.audio.max_segment_secs, 8);
-        assert!(!config.vision.gpu_enabled);
+        assert!(config.vision.gpu_enabled);
         assert!(config.tts.enabled);
         assert_eq!(config.tts.primary, "en");
         assert!(config.tts.voices.contains_key("en"));
@@ -2299,6 +2382,21 @@ interval_secs = 5
         assert_eq!(config.screen.interval_secs, 5);
         // Other fields should be defaults
         assert_eq!(config.frame.salience_threshold, 0.10);
+    }
+
+    #[test]
+    fn vision_config_rejects_invalid_generation_contract() {
+        let mut config = VisionConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.prompt.clear();
+        assert!(config.validate().is_err());
+        config = VisionConfig::default();
+        config.max_new_tokens = 0;
+        assert!(config.validate().is_err());
+        config = VisionConfig::default();
+        config.processor_max_edge = 1000;
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -2525,11 +2623,11 @@ zone = "local_only"
 
     #[test]
     fn performance_config_defaults_and_partial_toml() {
-        // Spec §6 defaults for the `[performance]` section (Task A8).
+        // Continuous visual context does not silently throttle after idle.
         let cfg = ContinuumConfig::default();
         assert_eq!(cfg.performance.idle_pause_after_secs, 300);
-        assert_eq!(cfg.performance.idle_capture_interval_ms, 2_000);
-        assert_eq!(cfg.performance.idle_vision_interval_ms, 15_000);
+        assert_eq!(cfg.performance.idle_capture_interval_ms, 20);
+        assert_eq!(cfg.performance.idle_vision_interval_ms, 20);
 
         // Partial TOML backfills the rest with serde defaults; 0 is a
         // meaningful value (vision fully paused during idle).
@@ -2537,7 +2635,7 @@ zone = "local_only"
             toml::from_str("[performance]\nidle_vision_interval_ms = 0\n").unwrap();
         assert_eq!(parsed.performance.idle_vision_interval_ms, 0);
         assert_eq!(parsed.performance.idle_pause_after_secs, 300);
-        assert_eq!(parsed.performance.idle_capture_interval_ms, 2_000);
+        assert_eq!(parsed.performance.idle_capture_interval_ms, 20);
     }
 
     #[test]
