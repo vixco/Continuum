@@ -752,6 +752,45 @@ impl RawLog {
         Ok(rows.iter().map(row_to_frame).collect())
     }
 
+    /// Returns the newest bounded perception frames in a time range, ordered
+    /// chronologically. This is the read path used by short historical-recall
+    /// consumers that need local vision captions without loading an entire
+    /// multi-hour capture window into memory.
+    pub async fn query_recent_frames(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<PerceptionFrame>> {
+        let limit = limit.clamp(1, 500);
+        let rows = sqlx::query(
+            r#"
+            SELECT id, ts, screen_description, screen_foreground_app,
+                   screen_has_error, screen_confidence, screen_screenshot_path,
+                   audio_transcript, audio_language, audio_duration_ms, audio_confidence,
+                   context_window_title, context_process_name,
+                   context_idle_seconds, context_in_call,
+                   context_pid, context_exe_path,
+                   context_active_since_secs, context_monitor_id,
+                   salience, screen_world_compact, context_privacy
+            FROM perception_frames
+            WHERE ts >= ?1 AND ts <= ?2
+            ORDER BY ts DESC
+            LIMIT ?3
+            "#,
+        )
+        .bind(since.to_rfc3339())
+        .bind(until.to_rfc3339())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query recent perception frames")?;
+
+        let mut frames = rows.iter().map(row_to_frame).collect::<Vec<_>>();
+        frames.reverse();
+        Ok(frames)
+    }
+
     /// Returns undistilled frames worth promoting into episodic memory.
     ///
     /// Frames qualify if they have audio, visible errors, or salience above
@@ -2253,6 +2292,30 @@ mod tests {
         assert_eq!(frames[0].screen.description, "VS Code editing main.rs");
         assert_eq!(frames[0].screen.world_compact, None);
         assert!(frames[0].audio.is_none());
+
+        log.close().await;
+    }
+
+    #[tokio::test]
+    async fn query_recent_frames_is_bounded_and_chronological() {
+        let log = RawLog::open("sqlite::memory:").await.unwrap();
+        let base = Utc::now();
+        for (index, description) in ["old", "middle", "new"].into_iter().enumerate() {
+            let mut frame = test_frame(description, false);
+            frame.ts = base + Duration::seconds(index as i64);
+            frame.screen.ts = frame.ts;
+            frame.context.ts = frame.ts;
+            log.write_frame(&frame).await.unwrap();
+        }
+
+        let frames = log
+            .query_recent_frames(base - Duration::seconds(1), base + Duration::seconds(5), 2)
+            .await
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].screen.description, "middle");
+        assert_eq!(frames[1].screen.description, "new");
+        assert!(frames[0].ts < frames[1].ts);
 
         log.close().await;
     }

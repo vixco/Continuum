@@ -11,15 +11,21 @@ use continuum_core::context::temporal::{
 };
 use continuum_core::memory::events::{event_enum_token, EventSensitivity};
 use continuum_core::memory::raw_log::{EventQuery, RawLog, RawLogError};
+use continuum_core::senses::live_context::PrivacyDisposition;
 use continuum_core::senses::privacy::{PrivacyFilter, Zone};
 
 const LOOKBACK_HOURS: i64 = 6;
 const EVENT_LIMIT: usize = 80;
+const FRAME_LIMIT: usize = 240;
+const RENDERED_EVIDENCE_LIMIT: usize = 8;
 
 pub(super) fn historical_activity_intent(message: &str) -> bool {
     let message = message.to_lowercase();
     [
         "what was i doing",
+        "what did i just do",
+        "what have i just done",
+        "what did i do just now",
         "what have i been working on",
         "what changed",
         "since i last asked",
@@ -28,6 +34,12 @@ pub(super) fn historical_activity_intent(message: &str) -> bool {
         "earlier",
         "before this",
         "wat deed ik",
+        "wat heb ik net gedaan",
+        "wat had ik net gedaan",
+        "wat deed ik net",
+        "wat heb ik zojuist gedaan",
+        "wat deed ik zojuist",
+        "wat was ik net aan het doen",
         "waar was ik mee bezig",
         "waar ben ik mee bezig geweest",
         "wat is er veranderd",
@@ -45,6 +57,16 @@ fn unavailable(reason: &str) -> String {
     format!(
         "## Historical activity context\n- Retrieval status: unavailable ({reason}).\n\nUnavailable history is not evidence that no prior activity exists.\n"
     )
+}
+
+fn bounded_evidence_text(value: &str, max_chars: usize) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 pub(super) async fn temporal_context_section(
@@ -101,9 +123,22 @@ pub(super) async fn temporal_context_section(
             return unavailable("history query failed");
         }
     };
+    let frames = match log.query_recent_frames(since, now, FRAME_LIMIT).await {
+        Ok(frames) => frames,
+        Err(error) => {
+            log.close().await;
+            tracing::debug!(
+                layer = "desktop",
+                component = "chat_temporal_context",
+                error = %error,
+                "historical vision query failed"
+            );
+            return unavailable("historical vision query failed");
+        }
+    };
     log.close().await;
 
-    let source_limit_reached = rows.len() >= EVENT_LIMIT;
+    let source_limit_reached = rows.len() >= EVENT_LIMIT || frames.len() >= FRAME_LIMIT;
     let source_high_water = rows
         .iter()
         .map(|row| row.id)
@@ -114,7 +149,7 @@ pub(super) async fn temporal_context_section(
     // cached/displayed synthesis cannot cross a later privacy evaluation.
     let privacy_policy_generation = format!("live-policy@{}", now.timestamp_millis());
 
-    let observations = rows.into_iter().map(|row| {
+    let event_observations = rows.into_iter().map(|row| {
         let live_zone = filter.resolve_zone(&row.application, &row.window_title);
         let sensitivity =
             if row.sensitivity == EventSensitivity::LocalOnly || live_zone != Zone::CloudAllowed {
@@ -122,6 +157,14 @@ pub(super) async fn temporal_context_section(
             } else {
                 EventSensitivity::CloudAllowed
             };
+
+        let summary = bounded_evidence_text(&filter.scrub_text(&row.summary), 280);
+        let window_title = bounded_evidence_text(&filter.scrub_text(&row.window_title), 160);
+        let summary = if window_title.trim().is_empty() || summary.contains(&window_title) {
+            summary
+        } else {
+            format!("{summary}; window: {window_title}")
+        };
 
         TemporalObservation {
             source_reference: format!("context_event:{}", row.id),
@@ -131,11 +174,68 @@ pub(super) async fn temporal_context_section(
             project: row.project_id,
             application: (!row.application.is_empty()).then(|| filter.scrub_text(&row.application)),
             event_type: Some(event_enum_token(&row.event_type)),
-            summary: filter.scrub_text(&row.summary),
+            summary,
             confidence: row.confidence,
             sensitivity,
         }
     });
+
+    // Vision captions are written to perception_frames before Layer 2. Read
+    // them directly so recent-action recall still has visual evidence when the
+    // triage model is disabled. Consecutive identical captions are collapsed;
+    // placeholders and privacy-restricted frames never become evidence.
+    let mut previous_vision_summary = None;
+    let vision_observations = frames.into_iter().filter_map(|frame| {
+        let description = frame.screen.description.trim();
+        if description.is_empty()
+            || description == "(no vision model loaded)"
+            || description == "[redacted by local privacy policy]"
+        {
+            return None;
+        }
+        let live_zone = filter.resolve_zone(
+            &frame.context.foreground_process_name,
+            &frame.context.foreground_window_title,
+        );
+        if frame
+            .context
+            .privacy
+            .is_some_and(|privacy| privacy != PrivacyDisposition::Visible)
+            || live_zone != Zone::CloudAllowed
+        {
+            return None;
+        }
+        let app = bounded_evidence_text(
+            &filter.scrub_text(&frame.context.foreground_process_name),
+            80,
+        );
+        let title = bounded_evidence_text(
+            &filter.scrub_text(&frame.context.foreground_window_title),
+            160,
+        );
+        let caption = bounded_evidence_text(&filter.scrub_text(description), 280);
+        let summary = format!(
+            "local vision inference (supporting evidence): {caption}; deterministic app: {app}; deterministic window: {title}"
+        );
+        if previous_vision_summary.as_deref() == Some(summary.as_str()) {
+            return None;
+        }
+        previous_vision_summary = Some(summary.clone());
+        Some(TemporalObservation {
+            source_reference: format!("perception_frame:{}", frame.id),
+            source: "vision_encoder_inference".to_string(),
+            started_at: frame.ts,
+            ended_at: frame.ts,
+            project: None,
+            application: Some(app),
+            event_type: Some("screen_caption".to_string()),
+            summary,
+            confidence: frame.screen.confidence.clamp(0.0, 1.0),
+            sensitivity: EventSensitivity::CloudAllowed,
+        })
+    });
+
+    let observations = event_observations.chain(vision_observations);
 
     let context = match TemporalSynthesizer::default().synthesize(
         observations,
@@ -208,6 +308,22 @@ pub(super) async fn temporal_context_section(
                     session.dropped_evidence
                 ));
             }
+            output.push_str("  Recent evidence (chronological):\n");
+            for observation in session
+                .evidence
+                .iter()
+                .rev()
+                .take(RENDERED_EVIDENCE_LIMIT)
+                .rev()
+            {
+                output.push_str(&format!(
+                    "  - {} [{} / {}] {}\n",
+                    observation.ended_at.format("%H:%M:%S"),
+                    observation.source,
+                    observation.event_type.as_deref().unwrap_or("unknown"),
+                    observation.summary,
+                ));
+            }
         }
     }
     if context.omitted_private > 0 {
@@ -217,7 +333,7 @@ pub(super) async fn temporal_context_section(
         ));
     }
     output.push_str(
-        "\nSynthesized activity descriptions are inferences; do not present them as directly observed facts. Partial or unavailable history must not be treated as evidence of absence.\n",
+        "\nFor questions equivalent to 'what did I just do?', treat opening or returning to Continuum Chat as the boundary and reconstruct the immediately preceding meaningful activity from the latest evidence. Answer in one or two direct sentences. State the concrete action first, then its reason or goal only when supported by the session state, conversation, window title, or evidence. Deterministic application/window facts override a conflicting local vision inference; vision captions are supporting evidence and may be imprecise. Do not narrate tool calls, monitors, retrieval status, or generic limitations, and do not ask a follow-up question. Synthesized activity descriptions are inferences; do not present them as directly observed facts. Partial or unavailable history must not be treated as evidence of absence.\n",
     );
     output
 }
@@ -225,15 +341,20 @@ pub(super) async fn temporal_context_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use continuum_core::senses::types::{ContextObservation, PerceptionFrame, ScreenObservation};
 
     #[test]
     fn triggers_history_change_and_failure_questions_without_triggering_normal_chat() {
         assert!(historical_activity_intent("What was I doing earlier?"));
+        assert!(historical_activity_intent("What did I just do?"));
         assert!(historical_activity_intent(
             "What changed since I last asked?"
         ));
         assert!(historical_activity_intent("Why did this break?"));
         assert!(historical_activity_intent("Waar was ik mee bezig eerder?"));
+        assert!(historical_activity_intent("Wat heb ik net gedaan?"));
+        assert!(historical_activity_intent("Nee, wat had ik net gedaan?"));
+        assert!(historical_activity_intent("Wat was ik net aan het doen?"));
         assert!(!historical_activity_intent("Write a Rust function for me"));
     }
 
@@ -242,5 +363,55 @@ mod tests {
         let text = unavailable("history query failed");
         assert!(text.contains("unavailable"));
         assert!(text.contains("not evidence"));
+    }
+
+    #[test]
+    fn evidence_text_is_single_line_and_bounded() {
+        let text = bounded_evidence_text("first\nsecond\tthird", 12);
+        assert_eq!(text, "first second");
+        assert!(!text.contains(['\n', '\t']));
+        assert_eq!(text.chars().count(), 12);
+    }
+
+    #[tokio::test]
+    async fn recall_includes_privacy_filtered_historical_vision_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("raw_log.sqlite");
+        let log = RawLog::open(&db.to_string_lossy()).await.unwrap();
+        let ts = Utc::now() - Duration::minutes(2);
+        let frame = PerceptionFrame {
+            id: uuid::Uuid::new_v4(),
+            ts,
+            screen: ScreenObservation {
+                description: "Editing the payment retry flow\nwith tests visible".into(),
+                world_compact: None,
+                foreground_app: "brave.exe".into(),
+                has_error_visible: false,
+                confidence: 0.8,
+                screenshot_path: None,
+                ts,
+            },
+            audio: None,
+            context: ContextObservation {
+                foreground_window_title: "Payment retry tests - Brave".into(),
+                foreground_process_name: "brave.exe".into(),
+                privacy: Some(PrivacyDisposition::Visible),
+                ts,
+                ..Default::default()
+            },
+            salience_hint: 0.5,
+        };
+        log.write_frame(&frame).await.unwrap();
+        log.close().await;
+
+        let cfg = continuum_core::config::ContinuumConfig::default();
+        let filter = PrivacyFilter::from_config(&cfg.context, &cfg.privacy);
+        let section =
+            temporal_context_section(dir.path(), &cfg, &filter, "Wat heb ik net gedaan?").await;
+
+        assert!(section.contains("local vision inference (supporting evidence)"));
+        assert!(section.contains("Editing the payment retry flow with tests visible"));
+        assert!(section.contains("deterministic window: Payment retry tests - Brave"));
+        assert!(section.contains("one or two direct sentences"));
     }
 }

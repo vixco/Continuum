@@ -190,6 +190,14 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **Short, evidence-backed recent-activity recall**: Chat now recognizes Dutch
+  and English variants of "what did I just do?", reconstructs the meaningful
+  activity immediately before returning to Continuum, and answers directly
+  with the action plus a supported reason or goal. Historical local-vision
+  captions are privacy-filtered and bounded, deterministic window facts win on
+  conflicts, and the runtime reports vision as loaded only after the real ONNX
+  model successfully loads and warms up.
+
 - **Stable streaming chat position**: growing assistant and tool output now stays pinned only when the reader was already near the bottom. Deliberate upward scrolling is preserved, streaming updates no longer stack smooth-scroll calls, and an unobtrusive new-messages action returns to the live response.
 
 - **Local runtime start on Windows**: `scripts/dev.ps1` now resolves and

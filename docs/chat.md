@@ -106,6 +106,23 @@ context" instead of leaving the machine.
 Turn the section off entirely with `[chat] include_session_context =
 false`.
 
+### Recent-activity recall
+
+When a user asks what they just did or what they were working on, Chat reads a
+bounded window from the local `context_events` history and injects the latest
+privacy-filtered activity sessions, including their concrete evidence lines.
+It also reads a bounded set of historical `perception_frames`, so captions
+produced locally by the configured vision encoder remain available even when
+Layer 2 triage is disabled. Encoder captions are explicitly treated as
+supporting inference: deterministic process and window facts win if they
+conflict.
+This is distinct from `context_window` and `context_screen`, which describe the
+current moment. The assistant treats returning to Continuum Chat as the
+boundary, answers with the immediately preceding meaningful activity, and
+keeps the response to one or two sentences. A reason or goal is included only
+when it is supported by session state, conversation context, a window title, or
+historical evidence; it is never invented from an app name alone.
+
 ### Tool names
 
 The tool names differ by provider kind: OpenAI-compatible and Anthropic

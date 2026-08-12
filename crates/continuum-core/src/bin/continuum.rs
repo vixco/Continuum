@@ -14,6 +14,7 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -635,6 +636,11 @@ async fn main() -> Result<()> {
 
     // --- Perception channels ---
     let live_context = LiveContextHub::new(config.screen.buffer_capacity.saturating_mul(4));
+    // Updated by the supervised vision task after the real ONNX model has
+    // loaded and warmed up. This must never be inferred from "the watcher is
+    // running": the watcher deliberately stays alive with a stub when model
+    // files or the runtime are unavailable.
+    let vision_model_loaded = Arc::new(AtomicBool::new(false));
     live_context::spawn_publisher(
         live_context.clone(),
         dev_dir.join("live-context.json"),
@@ -719,6 +725,7 @@ async fn main() -> Result<()> {
             let toggles = observation_toggles.clone();
             let toggle_control = toggle_control.clone();
             let cadence = cadence.clone();
+            let vision_model_loaded = vision_model_loaded.clone();
             let screen_tx = screen_tx.clone();
             let shutdown = shutdown_rx.clone();
             let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
@@ -734,6 +741,7 @@ async fn main() -> Result<()> {
                     let toggles = toggles.clone();
                     let toggle_control = toggle_control.clone();
                     let cadence = cadence.clone();
+                    let vision_model_loaded = vision_model_loaded.clone();
                     let screen_tx = screen_tx.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(async move {
@@ -742,6 +750,8 @@ async fn main() -> Result<()> {
                         // faithful reconstruction. Runs in the task, so boot no
                         // longer blocks on vision model load.
                         let vision_model = init_vision_model(&config, &resource_plan).await;
+                        vision_model_loaded
+                            .store(vision_model.model_name() != "stub", Ordering::Release);
                         let vision_watcher = VisionWatcher::new_with_live_context(
                             config.screen.clone(),
                             vision_model,
@@ -752,6 +762,7 @@ async fn main() -> Result<()> {
                         .with_toggle_control(toggle_control)
                         .with_cadence(cadence);
                         vision_watcher.run(screen_tx, shutdown).await;
+                        vision_model_loaded.store(false, Ordering::Release);
                     })
                 });
             supervisor.register("vision", Some("vision"), restarter);
@@ -1236,7 +1247,7 @@ async fn main() -> Result<()> {
         Arc::new(std::sync::Mutex::new(
             continuum_core::runtime_publish::RuntimeSnapshot {
                 triage_model_loaded: triage.is_some(),
-                vision_model_loaded: true,
+                vision_model_loaded: false,
                 tts_loaded: speech.is_some(),
                 stt_loaded: config.audio.enabled,
                 orchestrator_ready: !orch_config.system_prompt_path.is_empty(),
@@ -1332,6 +1343,7 @@ async fn main() -> Result<()> {
         let health_supervisor = supervisor_stats.clone();
         let health_writer = event_writer_health.clone();
         let health_triage = triage_busy_health.clone();
+        let vision_model_loaded_for_publisher = vision_model_loaded.clone();
         let triage_enabled = triage.is_some();
         let screen_capture_configured = config.screen.enabled;
         let context_poll_interval = Duration::from_secs(config.context.poll_interval_secs.max(1));
@@ -1394,6 +1406,8 @@ async fn main() -> Result<()> {
                 // the opposite order, but there's no reason to hold it a
                 // moment longer than the `.clone()` above needs.
                 drop(guard);
+                snap.vision_model_loaded =
+                    vision_model_loaded_for_publisher.load(Ordering::Acquire);
                 if let Some(controller) = speech_clone.as_ref() {
                     snap.tts_queue_len = Some(controller.pending_count());
                     if controller.is_speaking() {
@@ -4770,6 +4784,7 @@ async fn init_vision_model(
                     error = %e,
                     "Vision warmup failed, using stub"
                 );
+                return Arc::new(StubVisionModel);
             }
             Arc::new(model)
         }
