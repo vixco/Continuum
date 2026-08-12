@@ -970,6 +970,9 @@ mod tests {
             &crate::context::session_state::InferenceResult {
                 goal: Some("wrap up the reorg".to_string()),
                 task: Some("reviewing the Q3 layoff list in the private browser".to_string()),
+                activity: None,
+                interpretation: None,
+                suggested_help: None,
                 confidence: 0.9,
             },
             /* local_only */ true,

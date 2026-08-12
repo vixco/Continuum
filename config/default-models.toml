@@ -22,12 +22,16 @@ gpu_layers = -1  # -1 or 999 = offload all layers to GPU (recommended). 0 = CPU 
 # path = "~/.continuum-dev/models/triage/qwen3-4b-q4_k_m.gguf"
 
 [orchestrator]
-name = "Claude Opus 4.6"
+name = "Primary reasoning agent"
+agent = "claude"
+provider = ""
 model_id = "claude-opus-4-6"
-runtime = "claude-cli"
+runtime = "agent-cli"
 # No local model — uses claude CLI subprocess
 
 [workers]
+agent = "claude"
+provider = ""
 mode = "auto"  # "auto" | "budget" (sonnet) | "power" (opus)
 budget_model = "claude-sonnet-4-6"
 power_model = "claude-opus-4-6"

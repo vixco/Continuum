@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { continuum, onMemoryEvent } from "@/lib/tauri";
+import { useStore } from "@/lib/store";
 import { NODE_COLORS, NODE_TYPE_LABELS } from "@/lib/memoryTheme";
 import { useMemoryViews, type SavedView } from "@/lib/memoryViews";
 import { MemoryGraph } from "@/components/memory/MemoryGraph";
@@ -54,6 +55,7 @@ type ActionBanner =
   | { kind: "error"; message: string };
 
 export function MemoryTab() {
+  const curator = useStore((state) => state.state.memory.curator);
   const [filter, setFilter] = useState<MemoryGraphFilter>({});
   const [graph, setGraph] = useState<MemoryGraphData>(EMPTY_GRAPH);
   const [info, setInfo] = useState<MemoryVaultInfo | null>(null);
@@ -536,9 +538,20 @@ export function MemoryTab() {
           <div className="absolute inset-0 flex items-center justify-center">
             <Card title="No memories yet" className="max-w-md">
               <EmptyState
-                title="Your vault is empty"
+                title={
+                  curator?.enabled ? "Local curator is organizing context" : "Your vault is empty"
+                }
                 description="Continuum stores everything it learns about your work here — as plain markdown files you own and can edit."
               />
+              {curator?.enabled && (
+                <div className="mx-auto mt-2 max-w-sm text-center text-[11px] leading-4 text-ink-dim">
+                  {curator.consecutive_failures > 0
+                    ? "The small local LLM could not finish its latest pass. It now receives a fair turn and retries automatically without sending activity off-device."
+                    : curator.last_pass_at
+                      ? `Last local pass ${new Date(curator.last_pass_at).toLocaleTimeString()} · ${curator.candidates_written_total} written`
+                      : "Recent context is waiting for its first private local curation pass."}
+                </div>
+              )}
               <div className="mt-2 flex justify-center gap-2">
                 <Button onClick={() => void continuum.memoryOpenVault()}>
                   <FolderOpen size={13} /> Open vault folder

@@ -45,7 +45,7 @@ export function VoiceTab() {
 
       <Card title="Voice status" subtitle={`mode: ${voice.mode}${voice.muted ? " (muted)" : ""}`}>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Stat label="Volume" value={`${Math.round(voice.volume * 100)}%`} />
+          <InputLevel value={voice.mic_input_level} />
           <Stat label="TTS queue" value={String(voice.tts_queue_len)} />
           <Stat
             label="Ambient mute"
@@ -163,6 +163,14 @@ export function VoiceTab() {
           />
           <div className="hidden md:block" />
           <Toggle
+            checked={config.voice.live_voice_auto_start}
+            onChange={async (v) => {
+              const cfg = await continuum.updateVoiceFlag("live_voice_auto_start", v);
+              setConfig(cfg);
+            }}
+            label="Start live voice automatically"
+          />
+          <Toggle
             checked={config.voice.wake_word_enabled}
             onChange={async (v) => {
               const cfg = await continuum.updateVoiceFlag("wake_word_enabled", v);
@@ -240,6 +248,29 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div>
       <div className="text-[11px] uppercase tracking-wider text-ink-dim">{label}</div>
       <div className="mt-1 text-sm text-ink">{value}</div>
+    </div>
+  );
+}
+
+function InputLevel({ value }: { value: number }) {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-ink-dim">Microphone</div>
+      <div
+        className="bg-bg-deep mt-2 h-1.5 overflow-hidden rounded-full"
+        role="meter"
+        aria-label="Microphone input"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+      >
+        <div
+          className="h-full origin-left bg-accent-blue transition-transform duration-100 ease-[var(--ease-out)]"
+          style={{ transform: `scaleX(${percent / 100})` }}
+        />
+      </div>
+      <div className="mt-1 font-mono text-[11px] text-ink-muted">{percent}% input</div>
     </div>
   );
 }

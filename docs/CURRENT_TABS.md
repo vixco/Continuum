@@ -16,9 +16,9 @@ The ten tabs are grouped as:
 |--------------------|----------------|---------------------------------------------------------------|---------------------------------------------------------------------------------|
 | Home               | hybrid         | `continuum:state` events, runtime status                      | Live runtime flags + last-action feed; some hero panels remain fixture-backed.  |
 | Chat               | live           | `chat_*` Tauri commands, `~/.continuum-dev/chats/*.json`     | Fully live. Streams deltas over `continuum:chat`.                              |
-| Voice              | hybrid         | `continuum:state` + `update_voice_*` + `talk_now`             | Live status, live toggles; per-engine config (Piper / ElevenLabs) live.         |
-| Memory             | hybrid         | `search_episodic`, `list_semantic`, `set_semantic`            | List/CRUD live; episodic search is a stub pending episodic store handoff.       |
-| Brain              | hybrid         | `update_live_context_config`, `update_triage_threshold`       | Live capture consent/cadence/all-monitor status and triage controls; layer-card model selects remain disabled. |
+| Voice              | live           | `continuum:state` + `update_voice_*` + `talk_now`             | Native live voice, real microphone-level feedback, and a persisted auto-start preference. |
+| Memory             | live           | markdown vault/index commands + local curator runtime state    | Editable markdown graph plus locally curated candidates; the empty state reports real curator progress/failures. |
+| Brain              | live           | `update_brain_config`, agent/model discovery, runtime state    | Real vision/triage/orchestrator/worker configuration with installed-agent availability and per-layer usage. |
 | Tools & Skills     | live           | `list_mcp_tools`, permission policy/requests/grants, local MCP server registry, `list_skills`, skill CRUD | Built-in tools and servers are live; per-tool policies are persisted and enforced for Continuum MCP calls, with approval and revocation controls. |
 | Automations        | live           | `list_automations` + `create_/update_/delete_/toggle_`        | Fully live.                                                                     |
 | Health             | live           | `get_health`, `preview_repair`, `trigger_repair`               | Live probes; guarded repair requires a one-time preview and verified backup.    |
@@ -38,9 +38,9 @@ If a tab is being deprecated or its scope shrinks, prefer:
 2. Update the table above to reflect the new scope.
 3. Add a `KNOWN_ISSUES.md` entry if the gap is user-visible.
 
-The Brain tab's model selects are an example: the underlying fields are not
-yet wired into the runtime, so the controls are rendered disabled with
-tooltips explaining why. The table above records that fact.
+Never render a configurable Brain control unless its value is persisted and
+consumed by the corresponding runtime on the next start. Unsupported vision
+backends stay absent instead of appearing as decorative options.
 
 ## Cross-tab observation status
 

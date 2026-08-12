@@ -461,6 +461,8 @@ impl WorkerPool {
             id: id.clone(),
             spec: spec.clone(),
             model: snapshot.model.clone(),
+            agent: cfg.agent.clone(),
+            provider: cfg.provider.clone(),
             claude_bin: self.claude_bin.clone(),
             system_prompt_path: prompt_path,
             mcp_config_path: self.mcp_config_path.clone(),

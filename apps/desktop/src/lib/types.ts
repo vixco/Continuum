@@ -69,6 +69,7 @@ export interface WorkersState {
 export interface VoiceState {
   mode: VoiceMode;
   partial_transcript: string;
+  mic_input_level: number;
   tts_queue_len: number;
   volume: number;
   muted: boolean;
@@ -745,9 +746,14 @@ export interface ContinuumConfig {
     distillation_lookback_minutes: number;
     distillation_min_salience: number;
     distillation_batch_size: number;
+    curator?: {
+      enabled: boolean;
+      interval_minutes: number;
+    };
   };
   voice: {
     enabled: boolean;
+    live_voice_auto_start: boolean;
     wake_word_enabled: boolean;
     wake_keyword: string;
     wake_sensitivity: number;
@@ -794,6 +800,8 @@ export interface ContinuumConfig {
     };
   };
   workers: {
+    agent: string;
+    provider: string;
     mode: string;
     budget_model: string;
     power_model: string;
@@ -803,6 +811,21 @@ export interface ContinuumConfig {
     status_refresh_ms: number;
     failure_streak_limit: number;
     failure_window_secs: number;
+  };
+  orchestrator: {
+    agent: string;
+    provider: string;
+    model_id: string;
+    wake_timeout_secs: number;
+    bare_mode: boolean;
+  };
+  triage: {
+    model_path: string;
+    context_size: number;
+    max_tokens: number;
+    temperature: number;
+    gpu_layers: number;
+    latency_warn_ms: number;
   };
   skills: {
     enabled: boolean;

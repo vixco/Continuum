@@ -34,6 +34,7 @@ import { VoiceTab } from "@/components/tabs/VoiceTab";
 import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
 import { ProviderRefreshCoordinator } from "@/components/providers/ProviderRefreshCoordinator";
 import { ObservationStatusControl } from "@/components/observation/ObservationStatusControl";
+import { HealthStatusMenu } from "@/components/health/HealthStatusMenu";
 import { SettingsPage } from "@/components/layout/SettingsPage";
 import { StatusOrb } from "@/components/ui/primitives";
 import { bootstrapStore, teardownStore, useStore } from "@/lib/store";
@@ -321,7 +322,9 @@ export function Shell() {
             onRestart={updates.restartToApplyUpdate}
           />
           <div className={clsx("main-scroll", (tab === "chat" || tab === "memory") && "is-flush")}>
-            {tab === "home" && <HomeTab />}
+            <div className={tab === "home" ? "contents" : "hidden"} aria-hidden={tab !== "home"}>
+              <HomeTab />
+            </div>
             {tab === "chat" && <ChatTab />}
             {tab === "voice" && <VoiceTab />}
             {tab === "context" && <ContextTab />}
@@ -387,6 +390,7 @@ function TitleBar({ onCommand }: { onCommand: () => void }) {
           />
         </span>
         Continuum
+        <HealthStatusMenu />
         <span className="tb-status no-drag">
           <StatusOrb mode={mode} size="sm" />
           <span className="capitalize">{mode}</span>

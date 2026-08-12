@@ -229,6 +229,8 @@ fn main() {
             commands::update_screen_interval,
             commands::update_live_context_config,
             commands::update_triage_threshold,
+            commands::update_brain_config,
+            commands::list_agent_runtimes,
             commands::get_logs,
             commands::get_memory_summary,
             commands::wipe_memory,

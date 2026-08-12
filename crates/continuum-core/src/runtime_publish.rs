@@ -38,6 +38,10 @@ pub struct RuntimeSnapshot {
     pub voice_mode: Option<String>,
     #[serde(default)]
     pub partial_transcript: Option<String>,
+    /// Normalized microphone energy from VAD (0 quiet, 1 loud). No samples
+    /// leave the audio watcher; this drives only the live voice meter.
+    #[serde(default)]
+    pub mic_input_level: Option<f32>,
     /// Master playback gain currently applied by the running voice process.
     /// `None` keeps older runtime snapshots backwards-compatible.
     #[serde(default)]

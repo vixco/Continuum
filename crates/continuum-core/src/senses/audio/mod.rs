@@ -9,7 +9,7 @@
 mod full;
 pub mod picker;
 
-pub use full::AudioWatcher;
+pub use full::{AudioLevelHandle, AudioWatcher};
 pub use picker::{
     clear_config as clear_audio_config, pick_interactive, save_config as save_audio_config,
     verify_saved, DevicePick,

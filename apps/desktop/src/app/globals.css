@@ -1,3 +1,5 @@
+/* Hallmark · pre-emit critique: P5 H4 E4 S5 R5 V4 */
+/* Hallmark · macrostructure: Workbench · theme: studied-DNA (Continuum appearance controls) · contrast: pass (40-41) · nav: N3 · footer: none · slop: pass (42-49) · mobile: pass (34, 49-57) */
 /* Foundry · "the next step in AGI"
  * genre: modern-minimal · macrostructure: Workbench · nav: N3 side rail · footer: none
  * philosophy: flat-not-boxed · hairlines over borders · one restrained electric indigo accent · downward-weighted layered shadows
@@ -121,9 +123,17 @@ a:focus-visible {
   background: var(--color-paper);
 }
 
+/* Keep operational iconography as quiet as the appearance controls: thin,
+   technical outlines leave labels and state colors as the primary signal. */
+.app-window svg.lucide {
+  stroke-width: 1.5;
+}
+
 /* Titlebar - the only chrome bar. Frameless, drag region covers the empty
    middle; controls and interactive bits opt out with .no-drag. */
 .titlebar {
+  position: relative;
+  z-index: var(--z-sticky);
   display: flex;
   height: 48px;
   flex: 0 0 48px;
@@ -134,6 +144,7 @@ a:focus-visible {
   padding: 0 var(--space-md) 0 var(--space-xs);
   user-select: none;
   -webkit-app-region: drag;
+  overflow: visible;
 }
 .titlebar button,
 .titlebar .no-drag {

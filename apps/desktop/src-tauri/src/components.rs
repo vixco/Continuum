@@ -83,10 +83,12 @@ pub fn register_default(registry: &HealthRegistry, runtime: &ContinuumRuntime) {
     });
     registry.register(TriageCheck {
         state: state.clone(),
+        cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
     registry.register(OrchestratorCheck {
         state: state.clone(),
+        cfg: cfg.clone(),
         dev_dir: dev_dir.clone(),
     });
     registry.register(VoiceTtsCheck {
@@ -289,6 +291,7 @@ impl HealthCheck for VisionCheck {
 
 struct TriageCheck {
     state: Arc<RwLock<StateHandle>>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -304,11 +307,8 @@ impl HealthCheck for TriageCheck {
         Some("Re-download the triage GGUF via scripts/download-models.ps1.".into())
     }
     async fn probe(&self) -> HealthResult {
-        let model_path = self
-            .dev_dir
-            .join("models")
-            .join("triage")
-            .join("qwen3-8b-q4_k_m.gguf");
+        let cfg = (self.cfg)();
+        let model_path = PathBuf::from(&cfg.triage.model_path);
         if !model_path.exists() {
             return HealthResult::error("triage GGUF missing on disk", 1);
         }
@@ -326,6 +326,7 @@ impl HealthCheck for TriageCheck {
 
 struct OrchestratorCheck {
     state: Arc<RwLock<StateHandle>>,
+    cfg: ConfigProvider,
     dev_dir: PathBuf,
 }
 
@@ -335,11 +336,23 @@ impl HealthCheck for OrchestratorCheck {
         "orchestrator"
     }
     fn recovery_note(&self) -> Option<String> {
-        Some("Install the Claude Code CLI (`claude --version`) or re-run setup.".into())
+        let agent = (self.cfg)().orchestrator.agent;
+        Some(format!(
+            "Install the selected {agent} agent CLI, or choose an available runtime in Brain."
+        ))
     }
     async fn probe(&self) -> HealthResult {
         if !runtime_alive(&self.dev_dir) {
             return HealthResult::unknown("runtime offline", 1);
+        }
+        let agent = (self.cfg)().orchestrator.agent;
+        let available = tokio::process::Command::new(&agent)
+            .arg("--version")
+            .output()
+            .await
+            .is_ok_and(|output| output.status.success());
+        if !available {
+            return HealthResult::error(format!("selected {agent} agent CLI is unavailable"), 1);
         }
         let snap = snap(&self.state).await;
         if snap.system.orchestrator_ready {

@@ -187,6 +187,7 @@ async fn apply_snapshot(snap: &RuntimeSnapshot, state: &StateHandle) {
     state
         .apply_voice_runtime_snapshot(
             snap.voice_volume,
+            snap.mic_input_level,
             snap.wake_word_enabled,
             snap.tts_queue_len,
             snap.ambient_mute_active,
@@ -208,6 +209,7 @@ mod tests {
         let snapshot = RuntimeSnapshot {
             voice_mode: Some("speaking".into()),
             partial_transcript: Some("hello".into()),
+            mic_input_level: Some(0.64),
             voice_volume: Some(0.72),
             tts_queue_len: Some(2),
             ambient_mute_active: Some(true),
@@ -221,6 +223,7 @@ mod tests {
         let applied = state.snapshot().await;
         assert_eq!(applied.voice.mode, VoiceMode::Speaking);
         assert_eq!(applied.voice.partial_transcript, "hello");
+        assert_eq!(applied.voice.mic_input_level, 0.64);
         assert_eq!(applied.voice.volume, 0.72);
         assert_eq!(applied.voice.tts_queue_len, 2);
         assert!(applied.voice.ambient_mute_active);

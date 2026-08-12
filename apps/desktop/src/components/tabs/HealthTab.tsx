@@ -207,6 +207,7 @@ export function HealthTab() {
         open={!!preview}
         onClose={() => !repairBusy && setPreview(null)}
         title="Safe repair preview"
+        width="lg"
       >
         {preview && (
           <div className="space-y-4 text-sm">
@@ -221,17 +222,22 @@ export function HealthTab() {
             {preview.issues.length === 0 ? (
               <div className="text-ink-muted">Live probes found no supported repair issue.</div>
             ) : (
-              <div className="space-y-2">
+              <div className="divide-y divide-bg-border overflow-hidden rounded-md border border-bg-border">
                 {preview.issues.map((issue) => (
-                  <div key={issue.component} className="rounded-md border border-bg-border p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium capitalize">
-                        {issue.component.replaceAll("_", " ")}
-                      </span>
-                      <StatusBadge status={issue.status} />
+                  <div
+                    key={issue.component}
+                    className="grid gap-1.5 p-3 sm:grid-cols-[9rem_1fr_auto] sm:items-start"
+                  >
+                    <span className="font-medium capitalize">
+                      {issue.component.replaceAll("_", " ")}
+                    </span>
+                    <div className="min-w-0 text-xs leading-5 text-ink-muted">
+                      <div className="break-words">{issue.detail}</div>
+                      {issue.actionable && (
+                        <div className="mt-1 break-words text-ink">{issue.proposed_action}</div>
+                      )}
                     </div>
-                    <div className="mt-1 text-xs text-ink-muted">{issue.detail}</div>
-                    <div className="mt-2 text-xs text-ink">{issue.proposed_action}</div>
+                    <StatusBadge status={issue.status} />
                   </div>
                 ))}
               </div>
@@ -244,13 +250,13 @@ export function HealthTab() {
                 ))}
               </ul>
             </div>
-            <div className="flex justify-end gap-2">
+            <div className="sticky bottom-0 -mx-4 -mb-4 flex justify-end gap-2 border-t border-bg-border bg-bg-elevated px-4 py-3">
               <Button variant="ghost" onClick={() => setPreview(null)} disabled={repairBusy}>
                 Cancel
               </Button>
               <Button
                 variant="primary"
-                disabled={repairBusy || preview.issues.length === 0}
+                disabled={repairBusy || !preview.issues.some((issue) => issue.actionable)}
                 onClick={async () => {
                   setRepairBusy(true);
                   setActionError(null);

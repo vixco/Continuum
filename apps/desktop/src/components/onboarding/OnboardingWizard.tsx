@@ -221,8 +221,8 @@ function WelcomeStep({ onNext: _onNext }: { onNext: () => void }) {
     <StepContainer eyebrow="Welcome" title="Meet Continuum">
       <p className="text-[14px] leading-relaxed text-ink-muted">
         An ambient AI assistant for Windows. It watches your screen, listens when spoken to,
-        remembers what matters, and acts only when the moment is right. Local-first, powered by
-        Claude Code.
+        remembers what matters, and acts only when the moment is right. Local-first, powered by the
+        agent runtime you choose.
       </p>
       <p className="text-[13px] text-ink-dim">
         Takes about ten minutes. Most of it is a one-time model download running in the background.
@@ -355,12 +355,14 @@ function ConnectStep({
     setChecking(true);
     try {
       const list = await invoke<AiCli[]>("list_ai_clis");
-      setClis(list);
+      const supported = list.filter((c) => ["claude", "codex", "hermes"].includes(c.id));
+      setClis(supported);
       // Default the selection to claude when nothing usable is selected yet,
       // or to the first installed CLI if claude isn't present.
-      if (!list.some((c) => c.id === payload.orchestrator_cli && c.installed)) {
+      if (!supported.some((c) => c.id === payload.orchestrator_cli && c.installed)) {
         const fallback =
-          list.find((c) => c.id === "claude" && c.installed) ?? list.find((c) => c.installed);
+          supported.find((c) => c.id === "claude" && c.installed) ??
+          supported.find((c) => c.installed);
         setPayload({ ...payload, orchestrator_cli: fallback?.id ?? "claude" });
       }
     } catch (err) {
@@ -381,8 +383,8 @@ function ConnectStep({
     <StepContainer eyebrow="Step 1" title="Connect an AI CLI">
       <p className="text-[14px] text-ink-muted">
         Continuum detects the coding-AI CLIs installed on your machine. Pick the one you want
-        Continuum to drive. <span className="text-ink-dim">Claude Code is recommended</span> and is
-        the only one wired into the runtime today; others are recorded as your preference.
+        Continuum to drive. Claude Code, Codex, and Hermes use the same normalized runtime, and you
+        can change the selection later in Brain.
       </p>
 
       <div className="w-soft flex flex-col gap-1">
@@ -1119,7 +1121,7 @@ function RefreshIcon() {
 }
 
 const INITIAL_CHECKS: DiagnosticCheck[] = [
-  { name: "Claude Code CLI", status: "pending" },
+  { name: "Selected agent CLI", status: "pending" },
   { name: "Vision model (SmolVLM-256M)", status: "pending" },
   { name: "Triage model (Qwen 3 8B)", status: "pending" },
   { name: "Whisper STT", status: "pending" },

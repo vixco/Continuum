@@ -1015,6 +1015,12 @@ impl Default for ChatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrchestratorSection {
+    /// Agent CLI used for orchestration: `claude`, `codex`, or `hermes`.
+    /// The runtime resolves the executable from PATH at boot.
+    pub agent: String,
+    /// Optional provider override for agent runtimes that support one
+    /// (currently Hermes). Empty lets the selected agent use its own default.
+    pub provider: String,
     /// Model ID passed to `claude --model`. Must be a currently-supported
     /// Claude Code model (e.g. `claude-opus-4-6`, `claude-sonnet-4-6`).
     pub model_id: String,
@@ -1483,6 +1489,9 @@ impl Default for VoiceFrontendConfig {
 pub struct VoiceConfig {
     /// Whether voice input routing is enabled.
     pub enabled: bool,
+    /// Whether one-click live voice should arm automatically when the desktop
+    /// opens. This is the durable counterpart of the Home button's state.
+    pub live_voice_auto_start: bool,
     /// Whether a wake phrase is required before voice commands wake the orchestrator.
     pub wake_word_enabled: bool,
     /// Wake phrase to detect in local STT transcripts.
@@ -1656,6 +1665,10 @@ impl Default for KokorosConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkersConfig {
+    /// Agent CLI used for worker execution: `claude`, `codex`, or `hermes`.
+    pub agent: String,
+    /// Optional provider override for agent runtimes that support one.
+    pub provider: String,
     /// Global mode. `"auto"` lets the orchestrator's explicit choice win, and
     /// falls back to a keyword heuristic. `"budget"` forces Sonnet for every
     /// worker. `"power"` forces Opus.
@@ -1704,6 +1717,8 @@ pub struct SkillsConfig {
 impl Default for WorkersConfig {
     fn default() -> Self {
         Self {
+            agent: "claude".to_string(),
+            provider: String::new(),
             mode: "auto".to_string(),
             budget_model: "claude-sonnet-4-6".to_string(),
             power_model: "claude-opus-4-6".to_string(),
@@ -1780,6 +1795,8 @@ impl Default for ContinuumConfig {
 impl Default for OrchestratorSection {
     fn default() -> Self {
         Self {
+            agent: "claude".to_string(),
+            provider: String::new(),
             model_id: "claude-opus-4-6".to_string(),
             wake_timeout_secs: 60,
             bare_mode: false,
@@ -1973,6 +1990,7 @@ impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            live_voice_auto_start: true,
             wake_word_enabled: true,
             wake_keyword: "hey continuum".to_string(),
             wake_sensitivity: 0.5,

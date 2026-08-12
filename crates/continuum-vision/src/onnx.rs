@@ -82,11 +82,11 @@ const MAX_NEW_TOKENS: usize = 64;
 /// Repetition penalty for the decoder (>1.0 penalizes repeated tokens).
 const REP_PENALTY: f32 = 1.15;
 
-/// Decoder sampling temperature (low but non-zero to break ties).
-const VISION_TEMPERATURE: f32 = 0.3;
+/// Decoder sampling temperature.
+const VISION_TEMPERATURE: f32 = 0.2;
 
-/// Top-p (nucleus) sampling threshold for the decoder.
-const VISION_TOP_P: f32 = 0.9;
+/// Top-p sampling threshold.
+const VISION_TOP_P: f32 = 0.85;
 
 // ---------------------------------------------------------------------------
 // Internal session bundle
@@ -345,7 +345,7 @@ impl OnnxVisionModel {
         //   <fake_token_around_image><image>...<image><fake_token_around_image>
         //   \nDescribe what you see on this screen in one sentence.<|im_end|>\n
         //   <|im_start|>assistant\n
-        let user_text = "\nDescribe what you see on this screen in one sentence.";
+        let user_text = "\nDescribe the user's current computer task in one concise sentence. Name the visible application and the specific page, file, or action when legible. Mention only details you can actually see; do not guess.";
         let user_enc = tokenizer
             .encode(user_text, false)
             .map_err(|e| anyhow::anyhow!("tokenizer encode: {e}"))?;

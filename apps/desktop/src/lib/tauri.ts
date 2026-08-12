@@ -270,6 +270,9 @@ export const continuum = {
   }) => invoke<ContinuumConfig>("update_live_context_config", { update }, DEFAULT_CONFIG),
   updateTriageThreshold: (threshold: number) =>
     invoke<ContinuumConfig>("update_triage_threshold", { threshold }, DEFAULT_CONFIG),
+  updateBrainConfig: (update: BrainConfigUpdate) =>
+    invoke<ContinuumConfig>("update_brain_config", { update }, DEFAULT_CONFIG),
+  listAgentRuntimes: () => invoke<AgentRuntimeInfo[]>("list_agent_runtimes", undefined, []),
   getLogs: (query?: {
     level?: string;
     layer?: string;
@@ -449,6 +452,28 @@ export interface RuntimeStatus {
   binary_path: string | null;
 }
 
+export interface AgentRuntimeInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  version: string | null;
+}
+
+export interface BrainConfigUpdate {
+  vision_name?: string;
+  vision_model_path?: string;
+  triage_model_path?: string;
+  orchestrator_agent?: string;
+  orchestrator_provider?: string;
+  orchestrator_model?: string;
+  workers_agent?: string;
+  workers_provider?: string;
+  workers_mode?: string;
+  workers_budget_model?: string;
+  workers_power_model?: string;
+  workers_max_concurrent?: number;
+}
+
 export interface ModelsDirectoryInfo {
   path: string;
   whisper_model_path: string;
@@ -523,6 +548,7 @@ export const DEFAULT_STATE: ContinuumState = {
   voice: {
     mode: "idle",
     partial_transcript: "",
+    mic_input_level: 0,
     tts_queue_len: 0,
     volume: 0.8,
     muted: false,
@@ -678,9 +704,11 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     distillation_lookback_minutes: 20,
     distillation_min_salience: 0.35,
     distillation_batch_size: 100,
+    curator: { enabled: true, interval_minutes: 10 },
   },
   voice: {
     enabled: true,
+    live_voice_auto_start: true,
     wake_word_enabled: true,
     wake_keyword: "hey continuum",
     wake_sensitivity: 0.5,
@@ -727,6 +755,8 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     },
   },
   workers: {
+    agent: "claude",
+    provider: "",
     mode: "auto",
     budget_model: "claude-sonnet-4-6",
     power_model: "claude-opus-4-6",
@@ -736,6 +766,21 @@ export const DEFAULT_CONFIG: ContinuumConfig = {
     status_refresh_ms: 500,
     failure_streak_limit: 3,
     failure_window_secs: 600,
+  },
+  orchestrator: {
+    agent: "claude",
+    provider: "",
+    model_id: "claude-opus-4-6",
+    wake_timeout_secs: 60,
+    bare_mode: false,
+  },
+  triage: {
+    model_path: "",
+    context_size: 4096,
+    max_tokens: 256,
+    temperature: 0,
+    gpu_layers: 999,
+    latency_warn_ms: 2000,
   },
   skills: {
     enabled: true,

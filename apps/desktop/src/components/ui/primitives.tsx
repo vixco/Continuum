@@ -239,7 +239,7 @@ export function Select<T extends string>({
   ...props
 }: Omit<SelectHTMLAttributes<HTMLSelectElement>, "onChange" | "value"> & {
   value: T;
-  options: Array<{ value: T; label: string }>;
+  options: Array<{ value: T; label: string; disabled?: boolean }>;
   onChange: (v: T) => void;
   label?: ReactNode;
 }) {
@@ -259,7 +259,7 @@ export function Select<T extends string>({
         )}
       >
         {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
+          <option key={opt.value} value={opt.value} disabled={opt.disabled}>
             {opt.label}
           </option>
         ))}
@@ -364,7 +364,7 @@ export function Modal({
     >
       <div
         className={clsx(
-          "continuum-modal w-full rounded-[var(--radius-card)] border border-bg-border bg-bg-elevated",
+          "continuum-modal flex max-h-[min(82dvh,44rem)] w-full flex-col overflow-hidden rounded-[var(--radius-card)] border border-bg-border bg-bg-elevated",
           widthClass
         )}
         onClick={(e) => e.stopPropagation()}
@@ -372,7 +372,7 @@ export function Modal({
         {title && (
           <div className="border-b border-bg-border px-4 py-3 text-sm font-medium">{title}</div>
         )}
-        <div className="p-4">{children}</div>
+        <div className="min-h-0 overflow-y-auto p-4">{children}</div>
         {footer && (
           <div className="flex items-center justify-end gap-2 border-t border-bg-border px-4 py-3">
             {footer}

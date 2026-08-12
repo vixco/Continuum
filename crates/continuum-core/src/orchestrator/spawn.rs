@@ -32,6 +32,10 @@ use crate::config::{continuum_dev_dir, env_or_legacy};
 /// Configuration for the orchestrator subprocess.
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
+    /// Agent executable contract: `claude`, `codex`, or `hermes`.
+    pub agent: String,
+    /// Optional provider override (used by Hermes).
+    pub provider: String,
     /// Model to use (default: "claude-opus-4-6").
     pub model: String,
     /// Path to the system prompt file.
@@ -63,6 +67,8 @@ pub struct OrchestratorConfig {
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
+            agent: "claude".to_string(),
+            provider: String::new(),
             model: "claude-opus-4-6".to_string(),
             system_prompt_path: String::new(),
             timeout_secs: 60,
@@ -120,6 +126,9 @@ pub async fn wake_orchestrator(
     user_message: &str,
     mut on_event: impl FnMut(OrchestratorEvent),
 ) -> Result<WakeResult> {
+    if config.agent != "claude" {
+        return wake_generic_agent(config, user_message, on_event).await;
+    }
     info!(
         layer = "orchestrator",
         component = "spawn",
@@ -325,6 +334,124 @@ pub async fn wake_orchestrator(
     }
 
     Ok(wake_result)
+}
+
+/// Runs provider-neutral CLI agents that do not speak Claude's stream-json
+/// dialect. Their final answer is normalized into the same event/result
+/// contract. Codex still emits JSONL, but its schema is item-based rather
+/// than Anthropic event-based; Hermes oneshot emits final text only.
+async fn wake_generic_agent(
+    config: &OrchestratorConfig,
+    user_message: &str,
+    mut on_event: impl FnMut(OrchestratorEvent),
+) -> Result<WakeResult> {
+    let started = std::time::Instant::now();
+    let system = if config.system_prompt_path.is_empty() {
+        String::new()
+    } else {
+        std::fs::read_to_string(&config.system_prompt_path).unwrap_or_default()
+    };
+    let prompt = if system.trim().is_empty() {
+        user_message.to_string()
+    } else {
+        format!("{system}\n\n# Current wake\n{user_message}")
+    };
+    let session_id = uuid::Uuid::new_v4().to_string();
+    on_event(OrchestratorEvent::SessionReady {
+        session_id: session_id.clone(),
+    });
+
+    let mut cmd = match config.agent.as_str() {
+        "codex" => {
+            let mut command = tokio::process::Command::new("codex");
+            command.args(["exec", "--json", "--ephemeral", "--sandbox", "read-only"]);
+            if !config.model.trim().is_empty() {
+                command.arg("--model").arg(&config.model);
+            }
+            command.arg("-");
+            command.stdin(Stdio::piped());
+            command
+        }
+        "hermes" => {
+            let mut command = tokio::process::Command::new("hermes");
+            command.arg("--oneshot").arg(&prompt);
+            if !config.model.trim().is_empty() {
+                command.arg("--model").arg(&config.model);
+            }
+            if !config.provider.trim().is_empty() {
+                command.arg("--provider").arg(&config.provider);
+            }
+            command.stdin(Stdio::null());
+            command
+        }
+        other => anyhow::bail!("unsupported orchestrator agent `{other}`"),
+    };
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to start the selected {} agent CLI", config.agent))?;
+    if config.agent == "codex" {
+        let mut stdin = child.stdin.take().context("open Codex stdin")?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .context("write Codex prompt")?;
+        stdin.shutdown().await.context("close Codex stdin")?;
+    }
+    let output = timeout(
+        Duration::from_secs(config.timeout_secs.max(1)),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("{} orchestrator timed out", config.agent))??;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response = if config.agent == "codex" {
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| {
+                let item = value.get("item")?;
+                (item.get("type")?.as_str()? == "agent_message").then(|| {
+                    item.get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+            })
+            .next_back()
+            .unwrap_or_else(|| stdout.trim().to_string())
+    } else {
+        stdout.trim().to_string()
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let message = if stderr.is_empty() {
+            format!("{} exited with {}", config.agent, output.status)
+        } else {
+            stderr
+        };
+        on_event(OrchestratorEvent::Error(message.clone()));
+        anyhow::bail!(message);
+    }
+    if !response.is_empty() {
+        on_event(OrchestratorEvent::TextDelta(response.clone()));
+    }
+    let duration_ms = started.elapsed().as_millis() as u64;
+    on_event(OrchestratorEvent::ResponseComplete {
+        full_text: response.clone(),
+        cost_usd: None,
+        duration_ms: Some(duration_ms),
+        session_id: Some(session_id.clone()),
+    });
+    Ok(WakeResult {
+        response_text: response,
+        cost_usd: None,
+        duration_ms: Some(duration_ms),
+        session_id: Some(session_id),
+        success: true,
+    })
 }
 
 /// Locates the `continuum-mcp` binary by checking, in order:

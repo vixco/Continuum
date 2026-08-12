@@ -5,6 +5,7 @@
 //! via `whisper-rs`.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -406,6 +407,24 @@ pub struct AudioWatcher {
     /// stops the data path but leaves the OS microphone indicator lit
     /// until the runtime restarts.
     toggle_control: Option<ToggleControl>,
+    input_level: AudioLevelHandle,
+}
+
+/// Lock-free normalized microphone level shared with the lightweight runtime
+/// publisher. Values are f32 bits in [0, 1], so the audio callback path never
+/// waits on UI/state locks.
+#[derive(Clone, Default)]
+pub struct AudioLevelHandle(Arc<AtomicU32>);
+
+impl AudioLevelHandle {
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+    }
+
+    fn set(&self, value: f32) {
+        self.0
+            .store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
 }
 
 impl AudioWatcher {
@@ -437,6 +456,7 @@ impl AudioWatcher {
                 privacy,
                 toggles: ObservationToggles::default(),
                 toggle_control: None,
+                input_level: AudioLevelHandle::default(),
             };
         }
 
@@ -469,6 +489,7 @@ impl AudioWatcher {
             privacy,
             toggles: ObservationToggles::default(),
             toggle_control: None,
+            input_level: AudioLevelHandle::default(),
         }
     }
 
@@ -488,6 +509,12 @@ impl AudioWatcher {
     /// restart.
     pub fn with_toggle_control(mut self, control: ToggleControl) -> Self {
         self.toggle_control = Some(control);
+        self
+    }
+
+    /// Publishes live VAD energy to the dashboard without exposing samples.
+    pub fn with_input_level(mut self, level: AudioLevelHandle) -> Self {
+        self.input_level = level;
         self
     }
 
@@ -747,6 +774,12 @@ impl AudioWatcher {
 
                 // --- DIAGNOSTIC: compute chunk energy before feeding VAD ---
                 let chunk_energy = AdaptiveVad::rms_energy(chunk);
+                // Speech near the adaptive VAD threshold should already be
+                // visibly responsive; the square-root curve preserves quiet
+                // speech detail without making background noise look loud.
+                let normalized =
+                    (chunk_energy / vad.last_threshold.max(0.000_1)).clamp(0.0, 4.0) / 4.0;
+                self.input_level.set(normalized.sqrt());
                 let decision = vad.feed_chunk(chunk, &mut vad_state);
                 if chunk_energy > vad.last_threshold {
                     diag_speech_chunks += 1;

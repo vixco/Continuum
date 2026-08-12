@@ -6,6 +6,20 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Configurable four-layer Brain and persistent live voice**: Brain now shows
+  the actual model and usage for vision, local triage, orchestration, and
+  workers; Claude Code, Codex, and Hermes can be selected when their CLI is
+  installed. Live voice persists its startup preference and animates from the
+  native microphone level. A global health menu exposes degraded components
+  and starts only preview-approved repairs.
+
+- **Memory curation starvation and repair readability**: aged local-curator
+  work now receives a bounded fair turn behind interactive triage, allowing
+  captured context to become editable memory. The repair preview is wider,
+  height-bounded, scrollable, and distinguishes diagnosis-only issues from
+  actionable safe repairs. Vision prompts now request concrete visible tasks
+  and explicitly prohibit guessing.
+
 - **Evidence-backed Goal and adaptive app activity**: the local session model
   now distinguishes the user's goal, current task, concrete in-app activity,
   a concise interpretation, and a specific help opportunity. Context shows a

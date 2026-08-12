@@ -255,7 +255,8 @@ item was selected. It must exclude expired or superseded records by default.
 
 ## Agent adapter contract
 
-Codex and Claude Code are the first adapters. Each adapter must support:
+Claude Code, Codex, and Hermes Agent are the first selectable adapters. Each
+adapter must support:
 
 - availability and version check
 - bounded context injection

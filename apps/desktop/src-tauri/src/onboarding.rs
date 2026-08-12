@@ -83,9 +83,7 @@ pub struct OnboardingPayload {
     pub permissions: String,
     #[serde(default)]
     pub extra_paths: Vec<String>,
-    /// Which detected AI CLI Continuum should prefer (default "claude").
-    /// Recorded by the wizard; the runtime still drives claude per the
-    /// architecture until provider-agnostic support lands.
+    /// Which supported AI CLI Continuum should run (claude, codex, or hermes).
     #[serde(default)]
     pub orchestrator_cli: String,
     /// Optional override for the model download directory. Empty means the
@@ -171,6 +169,15 @@ const CLI_SPECS: &[CliSpec] = &[
         args: &["--version"],
         install_hint: "npm i -g @openai/codex",
         login_hint: Some("codex login"),
+        recommended: false,
+    },
+    CliSpec {
+        id: "hermes",
+        name: "Hermes Agent",
+        cmd: "hermes",
+        args: &["--version"],
+        install_hint: "Install Hermes Agent and add `hermes` to PATH",
+        login_hint: Some("hermes model"),
         recommended: false,
     },
     CliSpec {
@@ -614,20 +621,31 @@ pub async fn download_model(
 pub async fn run_diagnostics(app: State<'_, Arc<AppState>>) -> Result<DiagnosticsReport, String> {
     let mut checks: Vec<DiagnosticCheck> = Vec::new();
 
-    // 1. Claude Code CLI
-    let cli = check_claude_cli().await.unwrap_or(ClaudeCliCheck {
-        installed: false,
-        version: None,
-        error: Some("internal error".into()),
+    // 1. At least one supported agent CLI. The exact onboarding selection is
+    // persisted when the wizard completes; diagnostics must not require Claude.
+    let supported = list_ai_clis().await.unwrap_or_default();
+    let cli = supported.into_iter().find(|candidate| {
+        ["claude", "codex", "hermes"].contains(&candidate.id.as_str()) && candidate.installed
     });
     checks.push(DiagnosticCheck {
-        name: "Claude Code CLI".into(),
-        status: if cli.installed {
+        name: "Supported agent CLI".into(),
+        status: if cli.is_some() {
             DiagnosticStatus::Ok
         } else {
             DiagnosticStatus::Fail
         },
-        detail: cli.version.or(cli.error),
+        detail: cli
+            .map(|candidate| {
+                format!(
+                    "{}{}",
+                    candidate.name,
+                    candidate
+                        .version
+                        .map(|version| format!(" · {version}"))
+                        .unwrap_or_default()
+                )
+            })
+            .or_else(|| Some("Install Claude Code, Codex, or Hermes Agent.".into())),
     });
 
     // 2. Vision model file
@@ -970,10 +988,6 @@ fn qwen_filename(qwen_url: &str) -> String {
 fn apply_model_overrides(app: &State<'_, Arc<AppState>>, payload: &OnboardingPayload) {
     let models_dir = payload.models_dir.trim();
     let qwen_url = payload.qwen_url.trim();
-    if models_dir.is_empty() && qwen_url.is_empty() {
-        return;
-    }
-
     let dev_models = app.runtime.dev_dir().join("models");
     let base: PathBuf = if models_dir.is_empty() {
         dev_models
@@ -982,13 +996,18 @@ fn apply_model_overrides(app: &State<'_, Arc<AppState>>, payload: &OnboardingPay
     };
     let qwen_name = qwen_filename(qwen_url);
     let result = app.runtime.update_config(|config| {
-        if models_dir.is_empty() {
+        config.orchestrator.agent = match payload.orchestrator_cli.as_str() {
+            "codex" | "hermes" => payload.orchestrator_cli.clone(),
+            _ => "claude".to_string(),
+        };
+        config.workers.agent = config.orchestrator.agent.clone();
+        if models_dir.is_empty() && !qwen_url.is_empty() {
             config.triage.model_path = base
                 .join("triage")
                 .join(&qwen_name)
                 .to_string_lossy()
                 .into_owned();
-        } else {
+        } else if !models_dir.is_empty() {
             apply_models_directory(config, &base, Some(&qwen_name));
         }
     });

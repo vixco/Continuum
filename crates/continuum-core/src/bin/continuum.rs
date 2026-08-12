@@ -69,7 +69,7 @@ use continuum_core::runtime_publish::{
     ContextPageSnapshot, ContinuationCandidateView, ObservationTogglesView, OverrideRuleView,
     ProjectSummaryView, SessionPinView,
 };
-use continuum_core::senses::audio::AudioWatcher;
+use continuum_core::senses::audio::{AudioLevelHandle, AudioWatcher};
 use continuum_core::senses::cadence::{CadenceControl, IdleController, IdleTransition};
 use continuum_core::senses::context::{ContextWatcher, SharedContextWatchHealth};
 use continuum_core::senses::file_watch::{
@@ -325,6 +325,8 @@ async fn main() -> Result<()> {
     // --- Orchestrator config ---
     let prompt_path = find_system_prompt(&dev_dir);
     let orch_config = OrchestratorConfig {
+        agent: config.orchestrator.agent.clone(),
+        provider: config.orchestrator.provider.clone(),
         model: config.orchestrator.model_id.clone(),
         system_prompt_path: prompt_path,
         timeout_secs: config.orchestrator.wake_timeout_secs,
@@ -347,6 +349,7 @@ async fn main() -> Result<()> {
 
     // --- Shutdown signal ---
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let audio_input_level = AudioLevelHandle::default();
     let ctrl_c_shutdown = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
@@ -771,6 +774,7 @@ async fn main() -> Result<()> {
         // --- Audio --- (repair target "audio")
         {
             let config = config.clone();
+            let input_level = audio_input_level.clone();
             let privacy = privacy_filter.clone();
             let toggles = observation_toggles.clone();
             let toggle_control = toggle_control.clone();
@@ -780,6 +784,7 @@ async fn main() -> Result<()> {
             let restarter: Box<dyn Fn() -> tokio::task::JoinHandle<()> + Send + Sync> =
                 Box::new(move || {
                     let config = config.clone();
+                    let input_level = input_level.clone();
                     let privacy = privacy.clone();
                     let toggles = toggles.clone();
                     let toggle_control = toggle_control.clone();
@@ -789,7 +794,8 @@ async fn main() -> Result<()> {
                     tokio::spawn(async move {
                         let audio_watcher = AudioWatcher::new(config.audio.clone())
                             .with_privacy(privacy, toggles)
-                            .with_toggle_control(toggle_control);
+                            .with_toggle_control(toggle_control)
+                            .with_input_level(input_level);
                         audio_watcher.run(audio_tx, shutdown, moshi_tap).await;
                     })
                 });
@@ -1238,7 +1244,7 @@ async fn main() -> Result<()> {
 
     // --- Runtime state publisher ---
     //
-    // Writes `~/.continuum-dev/state.json` every 2 s so the dashboard (a
+    // Writes `~/.continuum-dev/state.json` every second so the dashboard (a
     // separate Tauri process) can render component statuses without
     // needing IPC into this process. Flags are updated inline as each
     // subsystem initialises below and as the main loop mutates voice /
@@ -1253,6 +1259,7 @@ async fn main() -> Result<()> {
                 orchestrator_ready: !orch_config.system_prompt_path.is_empty(),
                 voice_mode: Some("idle".to_string()),
                 partial_transcript: None,
+                mic_input_level: Some(0.0),
                 voice_volume: Some(config.voice.volume),
                 tts_queue_len: Some(0),
                 ambient_mute_active: Some(false),
@@ -1325,6 +1332,7 @@ async fn main() -> Result<()> {
         let curator_status_for_publisher = curator_status.clone();
         let curator_enabled = config.memory.curator.enabled;
         let speech_clone = speech.clone();
+        let audio_input_level_for_publisher = audio_input_level.clone();
         // Task A8 (spec §7): the runtime has no HealthRegistry — this
         // publish closure IS the context-engine health registration.
         // Every tick it reads the shared health handles and folds them
@@ -1393,7 +1401,7 @@ async fn main() -> Result<()> {
         let context_page_for_publisher = context_page.clone();
         continuum_core::runtime_publish::spawn_publisher(
             dev_dir.join("state.json"),
-            2,
+            1,
             shutdown_rx.clone(),
             move || {
                 let guard = state_clone.lock().unwrap_or_else(|p| p.into_inner());
@@ -1408,6 +1416,7 @@ async fn main() -> Result<()> {
                 drop(guard);
                 snap.vision_model_loaded =
                     vision_model_loaded_for_publisher.load(Ordering::Acquire);
+                snap.mic_input_level = Some(audio_input_level_for_publisher.get());
                 if let Some(controller) = speech_clone.as_ref() {
                     snap.tts_queue_len = Some(controller.pending_count());
                     if controller.is_speaking() {

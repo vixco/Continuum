@@ -131,6 +131,7 @@ pub struct WorkerInfo {
 pub struct VoiceState {
     pub mode: VoiceMode,
     pub partial_transcript: String,
+    pub mic_input_level: f32,
     pub tts_queue_len: usize,
     pub volume: f32,
     pub muted: bool,
@@ -506,6 +507,7 @@ impl StateHandle {
     pub async fn apply_voice_runtime_snapshot(
         &self,
         volume: Option<f32>,
+        mic_input_level: Option<f32>,
         wake_word_enabled: Option<bool>,
         tts_queue_len: Option<usize>,
         ambient_mute_active: Option<bool>,
@@ -515,6 +517,9 @@ impl StateHandle {
             let mut s = self.inner.write().await;
             if let Some(volume) = volume {
                 s.voice.volume = volume.clamp(0.0, 1.0);
+            }
+            if let Some(level) = mic_input_level {
+                s.voice.mic_input_level = level.clamp(0.0, 1.0);
             }
             if let Some(enabled) = wake_word_enabled {
                 s.voice.wake_word_enabled = enabled;
@@ -914,6 +919,7 @@ mod tests {
         handle
             .apply_voice_runtime_snapshot(
                 Some(0.65),
+                Some(0.4),
                 Some(false),
                 Some(3),
                 Some(true),
@@ -924,6 +930,7 @@ mod tests {
         let snap = handle.snapshot().await;
         assert_eq!(snap.voice.mode, VoiceMode::Listening);
         assert_eq!(snap.voice.volume, 0.65);
+        assert_eq!(snap.voice.mic_input_level, 0.4);
         assert_eq!(snap.voice.tts_queue_len, 3);
         assert!(snap.voice.ambient_mute_active);
         assert_eq!(snap.voice.detected_call_app.as_deref(), Some("Discord.exe"));
@@ -934,10 +941,17 @@ mod tests {
     async fn inactive_ambient_mute_clears_stale_call_app() {
         let handle = StateHandle::new();
         handle
-            .apply_voice_runtime_snapshot(None, None, None, Some(true), Some("Zoom.exe".into()))
+            .apply_voice_runtime_snapshot(
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+                Some("Zoom.exe".into()),
+            )
             .await;
         handle
-            .apply_voice_runtime_snapshot(None, None, None, Some(false), None)
+            .apply_voice_runtime_snapshot(None, None, None, None, Some(false), None)
             .await;
 
         let snap = handle.snapshot().await;

@@ -5,6 +5,7 @@ import { clsx } from "clsx";
 import { Mic, MicOff } from "lucide-react";
 
 import { continuum } from "@/lib/tauri";
+import { useStore } from "@/lib/store";
 import type { ContinuumState, VoiceMode } from "@/lib/types";
 
 const RUNTIME_READY_TIMEOUT_MS = 20_000;
@@ -13,6 +14,7 @@ const CONTROL_APPLY_TIMEOUT_MS = 10_000;
 const FIRST_SPEECH_TIMEOUT_MS = 25_000;
 const RUNTIME_POLL_MS = 250;
 const REARM_DELAY_MS = 300;
+let autoStartAttemptedThisLaunch = false;
 
 /**
  * One-click conversational voice.
@@ -24,6 +26,8 @@ const REARM_DELAY_MS = 300;
  * without clicking again or repeating the wake word.
  */
 export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
+  const setConfig = useStore((state) => state.setConfig);
+  const micInputLevel = useStore((state) => state.state.voice.mic_input_level);
   const [liveActive, setLiveActive] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isArming, setIsArming] = useState(false);
@@ -156,6 +160,32 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     }
   }, [clearSpeechWatchdog, failLive]);
 
+  const persistAutoStart = useCallback(
+    async (enabled: boolean) => {
+      try {
+        setConfig(await continuum.updateVoiceFlag("live_voice_auto_start", enabled));
+      } catch (reason) {
+        setError(`Could not save live voice preference: ${toErrorMessage(reason)}`);
+      }
+    },
+    [setConfig]
+  );
+
+  useEffect(() => {
+    if (autoStartAttemptedThisLaunch) return;
+    autoStartAttemptedThisLaunch = true;
+    let cancelled = false;
+    void continuum.getConfig().then((config) => {
+      if (cancelled || !config.voice.live_voice_auto_start) return;
+      liveRef.current = true;
+      setLiveActive(true);
+      void armNextTurn();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [armNextTurn]);
+
   useEffect(() => {
     return () => {
       liveRef.current = false;
@@ -216,12 +246,14 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
     if (liveRef.current) {
       stopLive();
       setError(null);
+      await persistAutoStart(false);
       return;
     }
 
     liveRef.current = true;
     setLiveActive(true);
     setError(null);
+    await persistAutoStart(true);
     await armNextTurn();
   }
 
@@ -263,7 +295,7 @@ export function PushToTalkButton({ mode }: { mode: VoiceMode }) {
       >
         {liveActive ? (
           visuallyListening ? (
-            <ListeningBars />
+            <ListeningBars level={micInputLevel} />
           ) : (
             <MicOff size={27} strokeWidth={1.6} />
           )
@@ -393,12 +425,19 @@ function toErrorMessage(error: unknown): string {
   return message || "Live voice could not be started.";
 }
 
-function ListeningBars() {
+function ListeningBars({ level }: { level: number }) {
+  const responsive = Math.max(0.12, Math.min(1, level));
   return (
     <div className="flex items-end gap-1">
-      <span className="h-3 w-1 animate-pulse-slow rounded-sm bg-accent-blue [animation-delay:0ms]" />
-      <span className="h-5 w-1 animate-pulse-slow rounded-sm bg-accent-blue [animation-delay:150ms]" />
-      <span className="h-4 w-1 animate-pulse-slow rounded-sm bg-accent-blue [animation-delay:300ms]" />
+      {[0.65, 1, 0.8].map((weight, index) => (
+        <span
+          key={weight}
+          className="h-6 w-1 origin-bottom rounded-sm bg-accent-blue transition-transform duration-75 motion-reduce:transition-none"
+          style={{ transform: `scaleY(${Math.max(0.16, responsive * weight)})` }}
+          aria-hidden="true"
+          data-bar={index}
+        />
+      ))}
     </div>
   );
 }

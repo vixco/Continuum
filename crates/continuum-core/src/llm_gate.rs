@@ -55,6 +55,11 @@ pub const BACKGROUND_MAX_TOKENS: u32 = 256;
 /// often than a generation takes.
 pub const BACKGROUND_RETRY_MS: u64 = 250;
 
+/// How long interactive traffic receives strict priority before a waiting
+/// background task joins the FIFO semaphore queue. This prevents continuous
+/// perception traffic from starving memory maintenance forever.
+pub const BACKGROUND_PRIORITY_GRACE_MS: u64 = 5_000;
+
 /// Maximum total time a background caller waits for the gate before giving
 /// up with [`GateTimeout`]. 30 s comfortably covers an interactive triage
 /// burst (a triage evaluation is 1–3 s; even a pathological 3-retry
@@ -164,7 +169,9 @@ impl LlmGate {
             max_tokens
         };
 
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(BACKGROUND_MAX_WAIT_MS);
+        let started = tokio::time::Instant::now();
+        let priority_deadline = started + Duration::from_millis(BACKGROUND_PRIORITY_GRACE_MS);
+        let deadline = started + Duration::from_millis(BACKGROUND_MAX_WAIT_MS);
         loop {
             // Defer while an interactive caller is waiting: even if the
             // permit is momentarily free, it belongs to the interactive
@@ -177,8 +184,17 @@ impl LlmGate {
                     return Ok((LlmPermit { _permit: permit }, budget));
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 return Err(GateTimeout);
+            }
+            if now >= priority_deadline {
+                let remaining = deadline.saturating_duration_since(now);
+                let permit = tokio::time::timeout(remaining, self.permit.clone().acquire_owned())
+                    .await
+                    .map_err(|_| GateTimeout)?
+                    .expect("LlmGate semaphore is never closed");
+                return Ok((LlmPermit { _permit: permit }, budget));
             }
             tokio::time::sleep(Duration::from_millis(BACKGROUND_RETRY_MS)).await;
         }
@@ -314,6 +330,30 @@ mod tests {
             .await
             .expect_err("background must time out while the gate is held forever");
         assert!(err.to_string().contains("background call skipped"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aged_background_work_is_not_starved_by_new_interactive_work() {
+        let gate = LlmGate::new();
+        let held = gate.acquire_interactive().await;
+
+        let bg_gate = gate.clone();
+        let background = tokio::spawn(async move { bg_gate.acquire_background(64).await });
+        tokio::time::sleep(Duration::from_millis(BACKGROUND_PRIORITY_GRACE_MS + 1)).await;
+
+        let next_gate = gate.clone();
+        let next_interactive = tokio::spawn(async move {
+            let _permit = next_gate.acquire_interactive().await;
+        });
+        drop(held);
+
+        let (background_permit, _) = background
+            .await
+            .expect("background task panicked")
+            .expect("background must make bounded progress");
+        assert!(!next_interactive.is_finished());
+        drop(background_permit);
+        next_interactive.await.expect("interactive task panicked");
     }
 
     /// A cancelled interactive waiter must not leave `interactive_waiting`

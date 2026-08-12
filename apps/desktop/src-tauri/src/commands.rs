@@ -196,6 +196,7 @@ pub async fn update_voice_flag(
         .runtime
         .update_config(|c| match flag.as_str() {
             "enabled" => c.voice.enabled = value,
+            "live_voice_auto_start" => c.voice.live_voice_auto_start = value,
             "wake_word_enabled" => c.voice.wake_word_enabled = value,
             "barge_in_enabled" => c.voice.barge_in_enabled = value,
             "ambient_mute_enabled" => c.voice.ambient_mute_enabled = value,
@@ -259,6 +260,144 @@ pub async fn update_triage_threshold(
     app.runtime
         .update_config(|c| c.frame.salience_threshold = threshold.clamp(0.0, 1.0))
         .map_err(|e| e.to_string())
+}
+
+/// Persisted Brain-layer configuration. Model/runtime changes are applied by
+/// the headless process on its next start; capture threshold remains live via
+/// its dedicated command above.
+#[derive(Debug, Deserialize, Default)]
+pub struct BrainConfigUpdate {
+    pub vision_name: Option<String>,
+    pub vision_model_path: Option<String>,
+    pub triage_model_path: Option<String>,
+    pub orchestrator_agent: Option<String>,
+    pub orchestrator_provider: Option<String>,
+    pub orchestrator_model: Option<String>,
+    pub workers_agent: Option<String>,
+    pub workers_provider: Option<String>,
+    pub workers_mode: Option<String>,
+    pub workers_budget_model: Option<String>,
+    pub workers_power_model: Option<String>,
+    pub workers_max_concurrent: Option<usize>,
+}
+
+fn valid_agent(value: &str) -> bool {
+    matches!(value, "claude" | "codex" | "hermes")
+}
+
+#[tauri::command]
+pub async fn update_brain_config(
+    app: State<'_, Arc<AppState>>,
+    update: BrainConfigUpdate,
+) -> Result<ContinuumConfig, String> {
+    for agent in [
+        update.orchestrator_agent.as_deref(),
+        update.workers_agent.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !valid_agent(agent) {
+            return Err(format!("Unsupported agent runtime: {agent}"));
+        }
+    }
+    if let Some(mode) = update.workers_mode.as_deref() {
+        if !matches!(mode, "auto" | "budget" | "power") {
+            return Err(format!("Unsupported worker mode: {mode}"));
+        }
+    }
+
+    app.runtime
+        .update_config(|config| {
+            if let Some(value) = update.vision_name {
+                config.vision.name = value;
+            }
+            if let Some(value) = update.vision_model_path {
+                config.vision.model_path = value;
+            }
+            if let Some(value) = update.triage_model_path {
+                config.triage.model_path = value;
+            }
+            if let Some(value) = update.orchestrator_agent {
+                config.orchestrator.agent = value;
+            }
+            if let Some(value) = update.orchestrator_provider {
+                config.orchestrator.provider = value;
+            }
+            if let Some(value) = update.orchestrator_model {
+                config.orchestrator.model_id = value;
+            }
+            if let Some(value) = update.workers_agent {
+                config.workers.agent = value;
+            }
+            if let Some(value) = update.workers_provider {
+                config.workers.provider = value;
+            }
+            if let Some(value) = update.workers_mode {
+                config.workers.mode = value;
+            }
+            if let Some(value) = update.workers_budget_model {
+                config.workers.budget_model = value;
+            }
+            if let Some(value) = update.workers_power_model {
+                config.workers.power_model = value;
+            }
+            if let Some(value) = update.workers_max_concurrent {
+                config.workers.max_concurrent = value.clamp(1, 10);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentRuntimeInfo {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
+    pub version: Option<String>,
+}
+
+fn probe_agent(id: &str, label: &str, args: &[&str]) -> AgentRuntimeInfo {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+
+    let mut command = std::process::Command::new(id);
+    command.args(args);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = command.output().ok();
+    let available = output
+        .as_ref()
+        .is_some_and(|result| result.status.success());
+    let version = output.and_then(|result| {
+        let text = if result.stdout.is_empty() {
+            result.stderr
+        } else {
+            result.stdout
+        };
+        String::from_utf8(text)
+            .ok()
+            .and_then(|value| value.lines().next().map(str::to_string))
+    });
+    AgentRuntimeInfo {
+        id: id.to_string(),
+        label: label.to_string(),
+        available,
+        version,
+    }
+}
+
+#[tauri::command]
+pub async fn list_agent_runtimes() -> Vec<AgentRuntimeInfo> {
+    tokio::task::spawn_blocking(|| {
+        vec![
+            probe_agent("claude", "Claude Code", &["--version"]),
+            probe_agent("codex", "Codex", &["--version"]),
+            probe_agent("hermes", "Hermes Agent", &["--version"]),
+        ]
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]

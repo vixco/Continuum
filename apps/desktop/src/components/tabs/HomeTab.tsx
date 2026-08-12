@@ -153,7 +153,7 @@ export function HomeTab() {
                 : "listening in the background"
           }
         >
-          <Waveform listening={voiceMode === "listening"} />
+          <Waveform listening={voiceMode === "listening"} level={state.voice.mic_input_level} />
           <div className="mt-2 min-h-[2rem] text-sm text-ink">
             {state.voice.partial_transcript ? (
               <span>"{state.voice.partial_transcript}"</span>
@@ -360,7 +360,7 @@ function Stats({
   onMemoriesClick: () => void;
 }) {
   const items = [
-    { label: "Opus wakes", value: wakesToday.toLocaleString(), icon: Sparkles },
+    { label: "AI wakes", value: wakesToday.toLocaleString(), icon: Sparkles },
     { label: "Cost today", value: `$${costToday.toFixed(3)}`, icon: Wallet },
     {
       label: "Memories",
@@ -455,22 +455,29 @@ function ScreenshotThumb({ path }: { path: string | null }) {
   );
 }
 
-function Waveform({ listening }: { listening: boolean }) {
+function Waveform({ listening, level }: { listening: boolean; level: number }) {
   const bars = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
+  const energy = listening ? Math.max(0.08, Math.min(1, level)) : 0;
   return (
-    <div className="flex h-10 items-center gap-0.5">
+    <div
+      className="flex h-10 items-center gap-0.5"
+      role="meter"
+      aria-label="Microphone input level"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(energy * 100)}
+    >
       {bars.map((i) => {
-        const h = listening
-          ? 20 + Math.round(Math.abs(Math.sin(i * 0.6 + Date.now() / 400)) * 60)
-          : 10 + (i % 3) * 4;
+        const shape = 0.35 + Math.abs(Math.sin(i * 0.73)) * 0.65;
+        const scale = listening ? 0.16 + energy * shape * 0.84 : 0.12;
         return (
           <span
             key={i}
             className={clsx(
-              "w-1 rounded-sm transition-[height] duration-300",
+              "h-full w-1 origin-center rounded-sm transition-[transform,background-color] duration-100 ease-[var(--ease-out)]",
               listening ? "bg-accent-blue" : "bg-bg-elevated"
             )}
-            style={{ height: `${h}%` }}
+            style={{ transform: `scaleY(${scale})` }}
           />
         );
       })}

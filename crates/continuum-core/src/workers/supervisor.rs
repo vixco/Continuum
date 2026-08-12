@@ -40,6 +40,8 @@ pub struct SupervisorInput {
     pub id: String,
     pub spec: WorkerSpec,
     pub model: String,
+    pub agent: String,
+    pub provider: String,
     pub claude_bin: String,
     pub system_prompt_path: Option<PathBuf>,
     pub mcp_config_path: Option<PathBuf>,
@@ -76,6 +78,12 @@ pub async fn run_worker(
         return run_dry(input, &mut on_event).await;
     }
 
+    if input.agent != "claude" {
+        let outcome = run_generic_worker(&input, &mut on_event, &mut cancel).await;
+        on_event(WorkerEvent::Finished(outcome.clone()));
+        return outcome;
+    }
+
     let outcome = match spawn_and_stream(&input, &mut on_event, &mut cancel).await {
         Ok(o) => o,
         Err(e) => {
@@ -86,6 +94,152 @@ pub async fn run_worker(
 
     on_event(WorkerEvent::Finished(outcome.clone()));
     outcome
+}
+
+async fn run_generic_worker(
+    input: &SupervisorInput,
+    on_event: &mut impl FnMut(WorkerEvent),
+    cancel: &mut oneshot::Receiver<()>,
+) -> WorkerOutcome {
+    let started = Instant::now();
+    let system = input
+        .system_prompt_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let prompt = if system.trim().is_empty() {
+        input.spec.task.clone()
+    } else {
+        format!("{system}\n\n# Worker task\n{}", input.spec.task)
+    };
+    let session_id = uuid::Uuid::new_v4().to_string();
+    on_event(WorkerEvent::SessionReady {
+        session_id: session_id.clone(),
+    });
+
+    let mut command = match input.agent.as_str() {
+        "codex" => {
+            let mut cmd = tokio::process::Command::new("codex");
+            cmd.args([
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--sandbox",
+                "workspace-write",
+            ])
+            .arg("--model")
+            .arg(&input.model)
+            .arg("--cd")
+            .arg(&input.spec.cwd)
+            .arg("-");
+            cmd.stdin(Stdio::piped());
+            cmd
+        }
+        "hermes" => {
+            let mut cmd = tokio::process::Command::new("hermes");
+            cmd.arg("--oneshot")
+                .arg(&prompt)
+                .arg("--model")
+                .arg(&input.model);
+            if !input.provider.trim().is_empty() {
+                cmd.arg("--provider").arg(&input.provider);
+            }
+            cmd.stdin(Stdio::null());
+            cmd
+        }
+        other => return WorkerOutcome::failed(format!("unsupported worker agent `{other}`")),
+    };
+    command
+        .current_dir(&input.spec.cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return WorkerOutcome::failed(format!("failed to start {}: {error}", input.agent))
+        }
+    };
+    if input.agent == "codex" {
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(prompt.as_bytes()).await.is_err() || stdin.shutdown().await.is_err()
+            {
+                let _ = child.kill().await;
+                return WorkerOutcome::failed("failed to send task to Codex");
+            }
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(input.timeout_secs.max(1));
+    let output = tokio::select! {
+        _ = &mut *cancel => {
+            // `wait_with_output` owns the child in the other select branch.
+            // Dropping that future triggers `kill_on_drop(true)` configured
+            // above, so cancellation still terminates the subprocess.
+            return WorkerOutcome {
+                status: WorkerStatus::Cancelled,
+                result_text: String::new(), session_id: Some(session_id), cost_usd: None,
+                duration_ms: Some(started.elapsed().as_millis() as u64), tool_calls: 0,
+                error: Some("cancelled".into()),
+            };
+        }
+        result = timeout_at(deadline, child.wait_with_output()) => result,
+    };
+    let output = match output {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return WorkerOutcome::failed(format!("{} worker failed: {error}", input.agent))
+        }
+        Err(_) => {
+            return WorkerOutcome {
+                status: WorkerStatus::TimedOut,
+                result_text: String::new(),
+                session_id: Some(session_id),
+                cost_usd: None,
+                duration_ms: Some(started.elapsed().as_millis() as u64),
+                tool_calls: 0,
+                error: Some(format!("timed out after {} s", input.timeout_secs)),
+            }
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = if input.agent == "codex" {
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|value| {
+                let item = value.get("item")?;
+                (item.get("type")?.as_str()? == "agent_message").then(|| {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+            })
+            .next_back()
+            .unwrap_or_else(|| stdout.trim().to_string())
+    } else {
+        stdout.trim().to_string()
+    };
+    if !text.is_empty() {
+        on_event(WorkerEvent::TextDelta(text.clone()));
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return WorkerOutcome::failed(if stderr.is_empty() {
+            format!("{} exited with {}", input.agent, output.status)
+        } else {
+            stderr
+        });
+    }
+    WorkerOutcome {
+        status: WorkerStatus::Completed,
+        result_text: text,
+        session_id: Some(session_id),
+        cost_usd: None,
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        tool_calls: 0,
+        error: None,
+    }
 }
 
 async fn spawn_and_stream(
@@ -448,6 +602,8 @@ mod tests {
         SupervisorInput {
             id: "w1".into(),
             spec: WorkerSpec::new("Summarize docs/workers.md", PathBuf::from(".")),
+            agent: "claude".into(),
+            provider: String::new(),
             model: "claude-sonnet-4-6".into(),
             claude_bin: "claude".into(),
             system_prompt_path: None,
