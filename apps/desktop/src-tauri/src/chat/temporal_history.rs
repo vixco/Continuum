@@ -18,6 +18,9 @@ const LOOKBACK_HOURS: i64 = 6;
 const EVENT_LIMIT: usize = 80;
 const FRAME_LIMIT: usize = 240;
 const RENDERED_EVIDENCE_LIMIT: usize = 8;
+// Enough to preserve a few minutes of quick app switching without returning
+// the full six-hour evidence window to the model.
+const IMMEDIATE_EVIDENCE_LIMIT: usize = 12;
 
 pub(super) fn historical_activity_intent(message: &str) -> bool {
     let message = message.to_lowercase();
@@ -35,19 +38,53 @@ pub(super) fn historical_activity_intent(message: &str) -> bool {
         "before this",
         "wat deed ik",
         "wat heb ik net gedaan",
+        "wat heb k net gedaan",
         "wat had ik net gedaan",
         "wat deed ik net",
+        "wat zat ik net",
         "wat heb ik zojuist gedaan",
         "wat deed ik zojuist",
         "wat was ik net aan het doen",
         "waar was ik mee bezig",
         "waar ben ik mee bezig geweest",
+        "afgelopen minuten",
+        "afgelopen paar minuten",
+        "in de tussentijd",
+        "nog meer gedaan",
+        "meer heb gedaan",
         "wat is er veranderd",
         "wat veranderde",
         "sinds ik het laatst vroeg",
         "waarom ging dit kapot",
         "wat faalde",
         "eerder",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// Immediate-recall questions need only the latest pre-chat activity, while
+/// broader "earlier/what changed" questions retain the wider two-session view.
+pub(super) fn immediate_activity_intent(message: &str) -> bool {
+    let message = message.to_lowercase();
+    [
+        "what did i just do",
+        "what have i just done",
+        "what did i do just now",
+        "what was i just doing",
+        "wat heb ik net gedaan",
+        "wat heb k net gedaan",
+        "wat had ik net gedaan",
+        "wat deed ik net",
+        "wat zat ik net",
+        "wat heb ik zojuist gedaan",
+        "wat deed ik zojuist",
+        "wat was ik net aan het doen",
+        "waar was ik mee bezig",
+        "afgelopen minuten",
+        "afgelopen paar minuten",
+        "in de tussentijd",
+        "nog meer gedaan",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -180,19 +217,14 @@ pub(super) async fn temporal_context_section(
         }
     });
 
-    // Vision captions are written to perception_frames before Layer 2. Read
-    // them directly so recent-action recall still has visual evidence when the
-    // triage model is disabled. Consecutive identical captions are collapsed;
-    // placeholders and privacy-restricted frames never become evidence.
-    let mut previous_vision_summary = None;
-    let vision_observations = frames.into_iter().filter_map(|frame| {
-        let description = frame.screen.description.trim();
-        if description.is_empty()
-            || description == "(no vision model loaded)"
-            || description == "[redacted by local privacy policy]"
-        {
-            return None;
-        }
+    // Frames carry deterministic foreground app/window fields independently
+    // of local vision. Always retain those facts, even while the vision worker
+    // says "awaiting local vision"; otherwise the exact activity trace exists
+    // on disk but disappears from chat recall. Consecutive equal windows are
+    // collapsed into one segment. A usable vision caption is attached only as
+    // explicitly supporting inference.
+    let mut previous_window = None;
+    let frame_observations = frames.into_iter().filter_map(|frame| {
         let live_zone = filter.resolve_zone(
             &frame.context.foreground_process_name,
             &frame.context.foreground_window_title,
@@ -213,29 +245,40 @@ pub(super) async fn temporal_context_section(
             &filter.scrub_text(&frame.context.foreground_window_title),
             160,
         );
-        let caption = bounded_evidence_text(&filter.scrub_text(description), 280);
-        let summary = format!(
-            "local vision inference (supporting evidence): {caption}; deterministic app: {app}; deterministic window: {title}"
-        );
-        if previous_vision_summary.as_deref() == Some(summary.as_str()) {
+        let window_key = format!("{app}\0{title}");
+        if previous_window.as_deref() == Some(window_key.as_str()) {
             return None;
         }
-        previous_vision_summary = Some(summary.clone());
+        previous_window = Some(window_key);
+
+        let description = frame.screen.description.trim();
+        let usable_caption = !description.is_empty()
+            && description != "awaiting local vision"
+            && description != "(no vision model loaded)"
+            && description != "[redacted by local privacy policy]";
+        let summary = if usable_caption {
+            let caption = bounded_evidence_text(&filter.scrub_text(description), 280);
+            format!(
+                "deterministic foreground observation: app {app}; window {title}; local vision inference (supporting evidence): {caption}"
+            )
+        } else {
+            format!("deterministic foreground observation: app {app}; window {title}")
+        };
         Some(TemporalObservation {
             source_reference: format!("perception_frame:{}", frame.id),
-            source: "vision_encoder_inference".to_string(),
+            source: "foreground_observation".to_string(),
             started_at: frame.ts,
             ended_at: frame.ts,
             project: None,
             application: Some(app),
-            event_type: Some("screen_caption".to_string()),
+            event_type: Some("focus_snapshot".to_string()),
             summary,
-            confidence: frame.screen.confidence.clamp(0.0, 1.0),
+            confidence: 1.0,
             sensitivity: EventSensitivity::CloudAllowed,
         })
     });
 
-    let observations = event_observations.chain(vision_observations);
+    let observations = event_observations.chain(frame_observations);
 
     let context = match TemporalSynthesizer::default().synthesize(
         observations,
@@ -271,18 +314,17 @@ pub(super) async fn temporal_context_section(
             ContextCompleteness::Partial => "partial; confidence has been reduced",
         }
     ));
-    if let Some(high_water) = &context.provenance.source_high_water {
-        output.push_str(&format!("- Query high-water: {high_water}.\n"));
-    }
-    output.push_str(&format!(
-        "- Privacy generation: {}.\n",
-        context.provenance.privacy_policy_generation
-    ));
-
     if context.sessions.is_empty() {
         output.push_str("- No relevant cloud-eligible observations matched this bounded query.\n");
     } else {
-        for session in context.sessions.iter().rev().take(2).rev() {
+        let immediate = immediate_activity_intent(message);
+        let session_limit = if immediate { 1 } else { 2 };
+        let evidence_limit = if immediate {
+            IMMEDIATE_EVIDENCE_LIMIT
+        } else {
+            RENDERED_EVIDENCE_LIMIT
+        };
+        for session in context.sessions.iter().rev().take(session_limit).rev() {
             output.push_str(&format!(
                 "- {}–{} [{:?}, {:.0}%, {:?}]: {}\n",
                 session.started_at.format("%H:%M"),
@@ -309,13 +351,7 @@ pub(super) async fn temporal_context_section(
                 ));
             }
             output.push_str("  Recent evidence (chronological):\n");
-            for observation in session
-                .evidence
-                .iter()
-                .rev()
-                .take(RENDERED_EVIDENCE_LIMIT)
-                .rev()
-            {
+            for observation in session.evidence.iter().rev().take(evidence_limit).rev() {
                 output.push_str(&format!(
                     "  - {} [{} / {}] {}\n",
                     observation.ended_at.format("%H:%M:%S"),
@@ -333,7 +369,7 @@ pub(super) async fn temporal_context_section(
         ));
     }
     output.push_str(
-        "\nFor questions equivalent to 'what did I just do?', treat opening or returning to Continuum Chat as the boundary and reconstruct the immediately preceding meaningful activity from the latest evidence. Answer in one or two direct sentences. State the concrete action first, then its reason or goal only when supported by the session state, conversation, window title, or evidence. Deterministic application/window facts override a conflicting local vision inference; vision captions are supporting evidence and may be imprecise. Do not narrate tool calls, monitors, retrieval status, or generic limitations, and do not ask a follow-up question. Synthesized activity descriptions are inferences; do not present them as directly observed facts. Partial or unavailable history must not be treated as evidence of absence.\n",
+        "\nFor questions equivalent to 'what did I just do?', treat opening or returning to Continuum Chat as the boundary and reconstruct the immediately preceding meaningful activity from the latest evidence. Answer in one or two direct sentences. Calibrate certainty per claim: state deterministic application, window-title, timestamp, duration, and focus-order facts directly, without words such as probably, likely, seems, appears, or waarschijnlijk. State the concrete action first, then its reason or goal only when supported by the session state, conversation, window title, or evidence. Use uncertainty language only for genuinely inferred purpose, intent, or activity. An app being open, visible, or focused does not by itself prove the user worked on it or used it alongside another app. Deterministic application/window facts override a conflicting local vision inference; vision captions are supporting evidence and may be imprecise. Do not narrate tool calls, monitors, retrieval status, or generic limitations, and do not ask a follow-up question. Synthesized activity descriptions are inferences, but the deterministic facts they contain remain facts; distinguish the inferred portion instead of hedging the whole answer. Partial or unavailable history must not be treated as evidence of absence.\n",
     );
     output
 }
@@ -355,7 +391,17 @@ mod tests {
         assert!(historical_activity_intent("Wat heb ik net gedaan?"));
         assert!(historical_activity_intent("Nee, wat had ik net gedaan?"));
         assert!(historical_activity_intent("Wat was ik net aan het doen?"));
+        assert!(historical_activity_intent(
+            "wat zat ik net op me pc te doen?"
+        ));
+        assert!(historical_activity_intent(
+            "goeie man wat heb k afgelopen minuten gedaan? ooaklweer"
+        ));
+        assert!(historical_activity_intent("nee ik heb nog meer gedaan"));
         assert!(!historical_activity_intent("Write a Rust function for me"));
+        assert!(immediate_activity_intent("Wat heb ik net gedaan?"));
+        assert!(immediate_activity_intent("Waar was ik mee bezig?"));
+        assert!(!immediate_activity_intent("What changed earlier today?"));
     }
 
     #[test]
@@ -409,9 +455,55 @@ mod tests {
         let section =
             temporal_context_section(dir.path(), &cfg, &filter, "Wat heb ik net gedaan?").await;
 
+        assert!(section.contains("deterministic foreground observation"));
         assert!(section.contains("local vision inference (supporting evidence)"));
         assert!(section.contains("Editing the payment retry flow with tests visible"));
-        assert!(section.contains("deterministic window: Payment retry tests - Brave"));
+        assert!(section.contains("window Payment retry tests - Brave"));
         assert!(section.contains("one or two direct sentences"));
+        assert!(section.contains("Calibrate certainty per claim"));
+        assert!(section.contains("without words such as probably"));
+        assert!(section.contains("does not by itself prove the user worked on it"));
+    }
+
+    #[tokio::test]
+    async fn recall_keeps_deterministic_windows_while_vision_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("raw_log.sqlite");
+        let log = RawLog::open(&db.to_string_lossy()).await.unwrap();
+        let ts = Utc::now() - Duration::minutes(1);
+        let frame = PerceptionFrame {
+            id: uuid::Uuid::new_v4(),
+            ts,
+            screen: ScreenObservation {
+                description: "awaiting local vision".into(),
+                world_compact: None,
+                foreground_app: "explorer.exe".into(),
+                has_error_visible: false,
+                confidence: 0.8,
+                screenshot_path: None,
+                ts,
+            },
+            audio: None,
+            context: ContextObservation {
+                foreground_window_title: "Downloads - File Explorer".into(),
+                foreground_process_name: "explorer.exe".into(),
+                privacy: Some(PrivacyDisposition::Visible),
+                ts,
+                ..Default::default()
+            },
+            salience_hint: 0.1,
+        };
+        log.write_frame(&frame).await.unwrap();
+        log.close().await;
+
+        let cfg = continuum_core::config::ContinuumConfig::default();
+        let filter = PrivacyFilter::from_config(&cfg.context, &cfg.privacy);
+        let section =
+            temporal_context_section(dir.path(), &cfg, &filter, "nee ik heb nog meer gedaan").await;
+
+        assert!(section.contains("deterministic foreground observation"));
+        assert!(section.contains("app explorer.exe"));
+        assert!(section.contains("window Downloads - File Explorer"));
+        assert!(!section.contains("awaiting local vision"));
     }
 }

@@ -201,6 +201,15 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Fixed
 
+- **Faster, reliable recent-activity recall**: desktop Chat now recognizes
+  informal and follow-up Dutch history questions, preserves deterministic
+  app/window observations while local vision is pending, and calibrates
+  certainty per claim. Historical turns skip unrelated tool schemas, memory
+  retrieval, duplicate session context, and extra model rounds while retaining
+  up to twelve relevant observations. Compact local Rust dev/test profiles
+  prevent native build artifacts from growing past the workspace size budget
+  without changing release builds.
+
 - **Short, evidence-backed recent-activity recall**: Chat now recognizes Dutch
   and English variants of "what did I just do?", reconstructs the meaningful
   activity immediately before returning to Continuum, and answers directly

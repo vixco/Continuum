@@ -176,6 +176,67 @@ fn memory_tools_section(kind: ProviderKind) -> String {
     )
 }
 
+/// Select only the tool families that can improve this turn. Memory remains
+/// available on ordinary turns so durable facts can still be saved
+/// automatically. Historical recall gets its authoritative evidence injected
+/// directly and intentionally has no tools: a live-window call after entering
+/// Chat describes Chat itself and otherwise forces a wasteful second model
+/// round.
+fn tool_selection(message: &str, memory_available: bool) -> chat_tools::ChatToolSelection {
+    if temporal_history::historical_activity_intent(message) {
+        return chat_tools::ChatToolSelection::default();
+    }
+
+    let normalized = message.to_lowercase();
+    let context = [
+        "screen",
+        "scherm",
+        "monitor",
+        "display",
+        "active window",
+        "active app",
+        "actieve venster",
+        "actieve app",
+        "wat zie je",
+        "what can you see",
+        "wat doe ik nu",
+        "what am i doing now",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    let settings = [
+        "setting",
+        "settings",
+        "instelling",
+        "instellingen",
+        "configur",
+        "privacy toggle",
+        "zet continuum",
+        "continuum aan",
+        "continuum uit",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+
+    chat_tools::ChatToolSelection {
+        memory: memory_available,
+        context,
+        settings,
+    }
+}
+
+/// Historical recall is intentionally a one- or two-sentence answer. A small
+/// output ceiling prevents local/free models from spending hundreds of tokens
+/// restating the evidence while leaving the configurable general-chat ceiling
+/// untouched for coding and other substantial answers.
+fn response_max_tokens(message: &str, configured: u32) -> u32 {
+    if temporal_history::historical_activity_intent(message) {
+        configured.min(512)
+    } else {
+        configured
+    }
+}
+
 /// How old the runtime's published session state may be before the chat
 /// prompt stops rendering it (Task B8, context engine spec §4.9 chat
 /// profile).
@@ -549,7 +610,8 @@ pub async fn chat_send_message(
     // Memory is optional. A disabled or unavailable vault removes only the
     // memory tools; typed settings and privacy-filtered live-context tools stay
     // attached so self-configuration never depends on the memory subsystem.
-    let vault = if chat_cfg.memory_tools_enabled {
+    let historical_query = temporal_history::historical_activity_intent(text.trim());
+    let vault = if chat_cfg.memory_tools_enabled && !historical_query {
         match memory.vault().await {
             Ok(v) => Some(v),
             Err(e) => {
@@ -571,33 +633,33 @@ pub async fn chat_send_message(
     let mut mcp = None;
     let mut tools_section = None;
     let include_memory = vault.is_some();
+    let selection = tool_selection(text.trim(), include_memory);
 
     match conn.kind {
         ProviderKind::ClaudeCli => {
             // Settings and live context are independent from the memory
             // vault. Memory tools are added to the MCP allowlist only when
             // the vault was explicitly enabled and opened successfully.
-            if let Some(spec) = chat_tools::mcp_spec(
-                memory.vault_dir(),
-                &dev_dir,
-                &conversation_id,
-                include_memory,
-            ) {
+            if let Some(spec) =
+                chat_tools::mcp_spec(memory.vault_dir(), &dev_dir, &conversation_id, selection)
+            {
                 mcp = Some(spec);
-                if include_memory {
+                if selection.memory {
                     tools_section = Some(memory_tools_section(conn.kind));
                 }
             }
         }
         ProviderKind::OpenAiCompat | ProviderKind::Anthropic => {
-            tools = chat_tools::chat_tool_defs(include_memory);
-            executor = Some(match &vault {
-                Some(vault) => Arc::new(chat_tools::VaultToolExecutor {
-                    vault: vault.clone(),
-                }) as Arc<dyn ToolExecutor>,
-                None => Arc::new(chat_tools::SettingsToolExecutor) as Arc<dyn ToolExecutor>,
-            });
-            if include_memory {
+            tools = chat_tools::chat_tool_defs(selection);
+            if !tools.is_empty() {
+                executor = Some(match &vault {
+                    Some(vault) => Arc::new(chat_tools::VaultToolExecutor {
+                        vault: vault.clone(),
+                    }) as Arc<dyn ToolExecutor>,
+                    None => Arc::new(chat_tools::SettingsToolExecutor) as Arc<dyn ToolExecutor>,
+                });
+            }
+            if selection.memory {
                 tools_section = Some(memory_tools_section(conn.kind));
             }
         }
@@ -607,7 +669,7 @@ pub async fn chat_send_message(
     // and inject them as a "## Memory context" section. Best-effort — a
     // search failure (or zero hits) just means no section this turn.
     let mut memory_context = String::new();
-    if chat_cfg.memory_context_notes_max > 0 {
+    if !historical_query && chat_cfg.memory_context_notes_max > 0 {
         if let Some(vault) = &vault {
             let query: String = text.trim().chars().take(200).collect();
             match vault
@@ -645,15 +707,19 @@ pub async fn chat_send_message(
     // I8: the §5.1 egress filter, built from the same config the runtime
     // uses. Chat is a cloud egress point like any other.
     let privacy_filter = PrivacyFilter::from_config(&full_cfg.context, &full_cfg.privacy);
-    let session_context = session_context_section(
-        &chat_cfg,
-        &full_cfg.context_package,
-        &privacy_filter,
-        read_session_state(&dev_dir).as_ref(),
-        runtime_running,
-        full_cfg.session_state.confidence_floor,
-        chrono::Utc::now(),
-    );
+    let session_context = if historical_query {
+        String::new()
+    } else {
+        session_context_section(
+            &chat_cfg,
+            &full_cfg.context_package,
+            &privacy_filter,
+            read_session_state(&dev_dir).as_ref(),
+            runtime_running,
+            full_cfg.session_state.confidence_floor,
+            chrono::Utc::now(),
+        )
+    };
 
     let temporal_context = temporal_history::temporal_context_section(
         &dev_dir,
@@ -697,14 +763,21 @@ pub async fn chat_send_message(
         // Ship only the recent tail of the conversation, not the whole
         // history — see `window_messages`. The full transcript stays on
         // disk; this bounds per-turn input tokens as the chat grows.
-        messages: window_messages(&conv.messages, chat_cfg.history_message_window)
-            .iter()
-            .map(|m| ChatMessage {
-                role: m.role,
-                content: m.content.clone(),
-            })
-            .collect(),
-        max_tokens: chat_cfg.max_tokens,
+        messages: window_messages(
+            &conv.messages,
+            if historical_query {
+                chat_cfg.history_message_window.min(6)
+            } else {
+                chat_cfg.history_message_window
+            },
+        )
+        .iter()
+        .map(|m| ChatMessage {
+            role: m.role,
+            content: m.content.clone(),
+        })
+        .collect(),
+        max_tokens: response_max_tokens(text.trim(), chat_cfg.max_tokens),
         temperature: chat_cfg.temperature,
         tools,
         executor,
@@ -938,6 +1011,25 @@ mod tests {
     }
 
     #[test]
+    fn base_system_prompt_calibrates_certainty_per_claim() {
+        let prompt = system_prompt(
+            &continuum_core::config::ChatConfig::default(),
+            true,
+            "0.1.0",
+            "Local provider",
+            "test-model",
+            "nl",
+        );
+
+        assert!(prompt.contains("Calibrate certainty per claim"));
+        assert!(prompt.contains("deterministic context"));
+        assert!(prompt.contains("facts such as the observed application"));
+        assert!(prompt.contains("\"probably\", \"likely\", \"waarschijnlijk\""));
+        assert!(prompt.contains("\"open\", \"visible\", or \"focused\""));
+        assert!(prompt.contains("for uncertain claims, not a default conversational style"));
+    }
+
+    #[test]
     fn memory_tools_section_names_http_tools() {
         let s = memory_tools_section(ProviderKind::OpenAiCompat);
         assert!(s.starts_with("## Memory tools"));
@@ -967,6 +1059,40 @@ mod tests {
         ] {
             assert!(s.contains(tool), "missing {tool}");
         }
+    }
+
+    #[test]
+    fn historical_recall_uses_injected_evidence_without_extra_tools() {
+        let selection = tool_selection("Wat heb ik net gedaan?", true);
+        assert_eq!(selection, chat_tools::ChatToolSelection::default());
+        assert!(chat_tools::chat_tool_defs(selection).is_empty());
+    }
+
+    #[test]
+    fn ordinary_and_targeted_turns_keep_the_tools_that_improve_quality() {
+        let ordinary = tool_selection("Mijn naam is Toshan", true);
+        assert!(ordinary.memory);
+        assert!(!ordinary.context);
+        assert!(!ordinary.settings);
+
+        let screen = tool_selection("Wat zie je op scherm 2?", true);
+        assert!(screen.memory);
+        assert!(screen.context);
+        assert!(!screen.settings);
+
+        let settings = tool_selection("Zet de Continuum privacy instelling uit", true);
+        assert!(settings.memory);
+        assert!(settings.settings);
+    }
+
+    #[test]
+    fn historical_recall_has_a_concise_output_budget_without_capping_normal_chat() {
+        assert_eq!(response_max_tokens("Wat zat ik net te doen?", 8192), 512);
+        assert_eq!(
+            response_max_tokens("Schrijf deze module opnieuw", 8192),
+            8192
+        );
+        assert_eq!(response_max_tokens("Wat deed ik net?", 256), 256);
     }
 
     /// Regression test for the whole-branch review's Finding I1: a turn
@@ -1102,6 +1228,9 @@ mod tests {
             active_project: Some("continuum".into()),
             current_goal: Some("ship the context engine".into()),
             current_task: Some("wire the chat profile".into()),
+            activity_summary: None,
+            interpretation: None,
+            suggested_help: None,
             active_app: Some("Code.exe".into()),
             window_title: Some("chat.rs - continuum".into()),
             open_files: vec!["apps/desktop/src-tauri/src/chat.rs".into()],

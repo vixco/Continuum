@@ -55,3 +55,16 @@ arrow-schema = "57"
 # TL;DR: `cargo run --release --bin continuum`, sccache makes clean
 # rebuilds fast, debug mode is used for tests / examples / other
 # binaries (which don't drag in llama-cpp-sys-2).
+
+# Keep local Rust artifacts bounded. Full debug information plus incremental
+# copies across this native-heavy workspace can grow `target/` past 100 GiB on
+# Windows. Line tables retain useful Rust backtraces while disabling the
+# duplicate incremental object cache keeps normal development well below the
+# local workspace size budget. Release artifacts remain unchanged.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false

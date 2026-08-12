@@ -23,6 +23,17 @@ const SEARCH_LIMIT_DEFAULT: u64 = 10;
 const CONTEXT_SNIPPET_MAX_CHARS: usize = 300;
 const LIVE_CONTEXT_STALE_SECS: i64 = 10;
 
+/// Tool families exposed to one chat turn. Keeping this turn-scoped avoids
+/// paying prompt tokens for unrelated schemas and prevents needless tool
+/// rounds (for example `context_window` after historical evidence was already
+/// injected).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChatToolSelection {
+    pub memory: bool,
+    pub context: bool,
+    pub settings: bool,
+}
+
 const MCP_BIN_NAME: &str = if cfg!(windows) {
     "continuum-mcp.exe"
 } else {
@@ -486,10 +497,16 @@ pub fn memory_tool_defs() -> Vec<ToolDef> {
 ///
 /// Live context and settings are always available. Memory tools are added only
 /// when the vault is enabled and opened successfully.
-pub fn chat_tool_defs(include_memory: bool) -> Vec<ToolDef> {
+pub fn chat_tool_defs(selection: ChatToolSelection) -> Vec<ToolDef> {
     let mut tools = memory_tool_defs();
-    if !include_memory {
+    if !selection.memory {
         tools.retain(|tool| !tool.name.starts_with("memory_"));
+    }
+    if !selection.context {
+        tools.retain(|tool| !tool.name.starts_with("context_"));
+    }
+    if !selection.settings {
+        tools.retain(|tool| !tool.name.starts_with("settings_"));
     }
     tools
 }
@@ -501,8 +518,11 @@ pub fn mcp_spec(
     vault_dir: &Path,
     dev_dir: &Path,
     session_id: &str,
-    include_memory: bool,
+    selection: ChatToolSelection,
 ) -> Option<McpSpec> {
+    if selection == ChatToolSelection::default() {
+        return None;
+    }
     let server_command = resolve_mcp_binary()?;
     Some(McpSpec {
         server_command,
@@ -517,27 +537,34 @@ pub fn mcp_spec(
             ),
             ("CONTINUUM_SESSION_ID".into(), format!("chat-{session_id}")),
         ],
-        allowed_tools: mcp_allowed_tools(include_memory),
+        allowed_tools: mcp_allowed_tools(selection),
     })
 }
 
-fn mcp_allowed_tools(include_memory: bool) -> Vec<String> {
-    let mut tools = vec![
-        "mcp__continuum__context_session",
-        "mcp__continuum__context_window",
-        "mcp__continuum__context_screen",
-        "mcp__continuum__context_audio",
-        "mcp__continuum__context_projects",
-        "mcp__continuum__context_timeline",
-        "mcp__continuum__context_search",
-        "mcp__continuum__context_files",
-        "mcp__continuum__context_git",
-        "mcp__continuum__context_package",
-        "mcp__continuum__settings_list",
-        "mcp__continuum__settings_get",
-        "mcp__continuum__settings_set",
-    ];
-    if include_memory {
+fn mcp_allowed_tools(selection: ChatToolSelection) -> Vec<String> {
+    let mut tools = Vec::new();
+    if selection.context {
+        tools.extend([
+            "mcp__continuum__context_session",
+            "mcp__continuum__context_window",
+            "mcp__continuum__context_screen",
+            "mcp__continuum__context_audio",
+            "mcp__continuum__context_projects",
+            "mcp__continuum__context_timeline",
+            "mcp__continuum__context_search",
+            "mcp__continuum__context_files",
+            "mcp__continuum__context_git",
+            "mcp__continuum__context_package",
+        ]);
+    }
+    if selection.settings {
+        tools.extend([
+            "mcp__continuum__settings_list",
+            "mcp__continuum__settings_get",
+            "mcp__continuum__settings_set",
+        ]);
+    }
+    if selection.memory {
         tools.extend([
             "mcp__continuum__memory_vault_search",
             "mcp__continuum__memory_vault_get",
@@ -859,10 +886,14 @@ mod tests {
     }
     #[test]
     fn base_chat_tools_remain_available_without_memory() {
-        let names = chat_tool_defs(false)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
+        let names = chat_tool_defs(ChatToolSelection {
+            memory: false,
+            context: true,
+            settings: true,
+        })
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
         assert_eq!(
             names,
             vec![
@@ -877,14 +908,22 @@ mod tests {
 
     #[test]
     fn claude_base_allowlist_uses_typed_settings_without_generic_fs_writes() {
-        let tools = mcp_allowed_tools(false);
+        let tools = mcp_allowed_tools(ChatToolSelection {
+            memory: false,
+            context: true,
+            settings: true,
+        });
         assert!(tools.contains(&"mcp__continuum__settings_list".to_string()));
         assert!(tools.contains(&"mcp__continuum__settings_get".to_string()));
         assert!(tools.contains(&"mcp__continuum__settings_set".to_string()));
         assert!(!tools.iter().any(|tool| tool.contains("memory_")));
         assert!(!tools.contains(&"mcp__continuum__fs_apply_patch".to_string()));
 
-        let with_memory = mcp_allowed_tools(true);
+        let with_memory = mcp_allowed_tools(ChatToolSelection {
+            memory: true,
+            context: false,
+            settings: false,
+        });
         assert!(with_memory
             .iter()
             .any(|tool| tool == "mcp__continuum__memory_vault_search"));
