@@ -145,6 +145,7 @@ if ($Check) {
 if ($FrontendOnly) {
   $port = Find-FreePort
   $env:PORT = $port
+  $env:CONTINUUM_DEV_PORT = $port
   Write-Step "Frontend-only mode -> http://localhost:$port"
   if (-not (Test-Preqs)) { exit 1 }
   Push-Location $desktop
@@ -201,15 +202,25 @@ if ($WithRuntime) {
 
 try {
   # Pick a free port and point both Next.js (via $env:PORT) and Tauri's devUrl
-  # (via $env:TAURI_CONFIG) at it, so a stale dev server or any other app on
+  # (via an explicit CLI config override) at it, so a stale dev server or any other app on
   # 3000 can never wedge the dashboard — it just uses the next free port.
   $port = Find-FreePort
   $env:PORT = $port
-  $env:TAURI_CONFIG = '{"build":{"devUrl":"http://localhost:' + $port + '"}}'
+  $env:CONTINUUM_DEV_PORT = $port
+  $tauriDevConfig = '{"build":{"devUrl":"http://localhost:' + $port + '"}}'
+  $tauriDevConfigPath = Join-Path ([System.IO.Path]::GetTempPath()) "continuum-tauri-dev-$PID.json"
+  [System.IO.File]::WriteAllText(
+    $tauriDevConfigPath,
+    $tauriDevConfig,
+    [System.Text.UTF8Encoding]::new($false)
+  )
   Write-Step "Launching Tauri dev on http://localhost:$port (compiles the Rust backend, then opens the window)"
   Write-Host "  Ctrl+C to stop." -ForegroundColor DarkGray
   Push-Location $desktop
-  try { pnpm tauri dev } finally { Pop-Location }
+  try { pnpm tauri dev --config $tauriDevConfigPath } finally {
+    Remove-Item -LiteralPath $tauriDevConfigPath -Force -ErrorAction SilentlyContinue
+    Pop-Location
+  }
 }
 finally {
   if ($runtimeProc -and -not $runtimeProc.HasExited) {

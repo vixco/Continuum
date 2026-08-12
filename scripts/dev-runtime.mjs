@@ -19,6 +19,14 @@ export function runtimePaths({ repoRoot = defaultRepoRoot, platform = process.pl
   };
 }
 
+export function devPort(value = process.env.CONTINUUM_DEV_PORT ?? process.env.PORT ?? "3000") {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`CONTINUUM_DEV_PORT must be a valid TCP port; received ${JSON.stringify(value)}`);
+  }
+  return port;
+}
+
 export function stageRuntime({
   repoRoot = defaultRepoRoot,
   platform = process.platform,
@@ -53,12 +61,18 @@ export function stageRuntime({
 }
 
 export function runDesktopDev({ repoRoot = defaultRepoRoot, platform = process.platform } = {}) {
-  const paths = stageRuntime({ repoRoot, platform });
-  const child = spawn("pnpm", ["dev"], {
+  const paths = runtimePaths({ repoRoot, platform });
+  const port = devPort();
+  // Start Next directly and pin its port. `next dev` otherwise silently moves
+  // from a busy port (for example 3000 to 3001), while Tauri keeps polling the
+  // devUrl selected by scripts/dev.ps1. Running Node directly also avoids the
+  // Windows shell argument warning from spawning pnpm through `cmd.exe`.
+  const nextCli = path.join(paths.desktop, "node_modules", "next", "dist", "bin", "next");
+  const child = spawn(process.execPath, [nextCli, "dev", "--port", String(port)], {
     cwd: paths.desktop,
     env: process.env,
     stdio: "inherit",
-    shell: platform === "win32",
+    shell: false,
   });
 
   const stop = () => {
@@ -75,6 +89,16 @@ export function runDesktopDev({ repoRoot = defaultRepoRoot, platform = process.p
     if (signal && platform !== "win32") process.kill(process.pid, signal);
     else process.exitCode = code ?? (signal ? 1 : 0);
   });
+
+  // Tauri waits only 180 seconds for build.devUrl. A cold release-runtime
+  // build can take longer than that, so stage it after Next is already
+  // listening. The desktop dashboard can open immediately; the staged binary
+  // is then ready for the next development launch.
+  try {
+    stageRuntime({ repoRoot, platform });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {

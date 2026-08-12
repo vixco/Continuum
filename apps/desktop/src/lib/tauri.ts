@@ -161,8 +161,14 @@ interface PendingUpdate {
 
 let pendingUpdate: PendingUpdate | null = null;
 
+// A Tauri development build runs directly from the source checkout. Letting
+// its updater install an NSIS release can terminate the dev process and leave
+// the developer without a running dashboard. Next replaces NODE_ENV at build
+// time, so only the packaged production frontend may touch the updater plugin.
+const UPDATER_ENABLED = process.env.NODE_ENV === "production";
+
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
-  if (!(await isTauri())) {
+  if (!UPDATER_ENABLED || !(await isTauri())) {
     pendingUpdate = null;
     return null;
   }
@@ -186,6 +192,10 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
 export async function downloadAndInstallPendingUpdate(
   onProgress?: (downloaded: number, total: number | null) => void
 ): Promise<void> {
+  if (!UPDATER_ENABLED) {
+    pendingUpdate = null;
+    return;
+  }
   if (!pendingUpdate) {
     throw new Error("No update is waiting to be installed");
   }
@@ -206,7 +216,7 @@ export async function downloadAndInstallPendingUpdate(
 
 /** Restarts Continuum only after the user explicitly chooses to apply a staged update. */
 export async function restartToApplyUpdate(): Promise<void> {
-  if (!(await isTauri())) return;
+  if (!UPDATER_ENABLED || !(await isTauri())) return;
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }

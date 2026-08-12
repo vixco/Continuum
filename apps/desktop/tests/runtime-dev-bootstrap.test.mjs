@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  devPort,
   runtimeBinaryName,
   runtimePaths,
   stageRuntime,
@@ -32,6 +33,12 @@ test("runtime bootstrap resolves the Unix release binary into Tauri resources", 
     paths.staged,
     path.join(repoRoot, "apps", "desktop", "src-tauri", "resources", "bin", "continuum")
   );
+});
+
+test("runtime bootstrap validates the frontend port before starting Next.js", () => {
+  assert.equal(devPort("3001"), 3001);
+  assert.throws(() => devPort("not-a-port"), /valid TCP port/i);
+  assert.throws(() => devPort("70000"), /valid TCP port/i);
 });
 
 test("runtime bootstrap stages the built runtime binary for desktop discovery", async () => {
@@ -76,9 +83,20 @@ test("runtime bootstrap fails closed when the runtime build fails", () => {
   );
 });
 
-test("Tauri dev always runs the live runtime bootstrap before Next.js", async () => {
+test("Tauri dev starts Next.js on its selected port before staging the runtime", async () => {
   const configPath = path.join(repoRoot, "apps", "desktop", "src-tauri", "tauri.conf.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
   assert.equal(config.build.beforeDevCommand, "node ../../scripts/dev-runtime.mjs");
   assert.equal(config.bundle.resources["resources/bin"], "bin");
+  const runtimeScript = await readFile(path.join(repoRoot, "scripts", "dev-runtime.mjs"), "utf8");
+  assert.match(runtimeScript, /process\.execPath, \[nextCli, "dev", "--port", String\(port\)\]/);
+  assert.match(runtimeScript, /shell: false/);
+  assert.ok(
+    runtimeScript.indexOf("const child = spawn") < runtimeScript.lastIndexOf("stageRuntime({ repoRoot, platform })"),
+    "Next.js must start before the potentially slow runtime staging build"
+  );
+  const devScript = await readFile(path.join(repoRoot, "scripts", "dev.ps1"), "utf8");
+  assert.match(devScript, /WriteAllText\(/);
+  assert.match(devScript, /pnpm tauri dev --config \$tauriDevConfigPath/);
+  assert.match(devScript, /CONTINUUM_DEV_PORT = \$port/);
 });

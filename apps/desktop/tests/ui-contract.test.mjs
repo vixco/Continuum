@@ -53,6 +53,9 @@ test("automatic updates stage in the background and require an explicit restart"
   const shell = await read("src/components/layout/Shell.tsx");
   const tauri = await read("src/lib/tauri.ts");
 
+  assert.match(tauri, /UPDATER_ENABLED = process\.env\.NODE_ENV === "production"/);
+  assert.match(tauri, /if \(!UPDATER_ENABLED \|\| !\(await isTauri\(\)\)\)/);
+  assert.match(tauri, /if \(!UPDATER_ENABLED\) \{\s*pendingUpdate = null;\s*return;/);
   assert.match(shell, /automatic && autoUpdateEnabled[\s\S]*await downloadUpdate\(\)/);
   assert.match(shell, /Restart to update/);
   assert.match(tauri, /downloadAndInstallPendingUpdate/);

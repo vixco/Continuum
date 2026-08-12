@@ -1621,6 +1621,18 @@ pub(crate) fn bundled_binary_candidates(name: &str) -> Vec<std::path::PathBuf> {
     if let Some(contents_dir) = exe_dir.parent() {
         candidates.push(contents_dir.join("Resources").join("bin").join(name));
     }
+    // `tauri dev` runs `target/debug/continuum-desktop.exe`, while the
+    // development launcher stages the release runtime in this crate's
+    // resources directory. Keep this fallback debug-only so packaged builds
+    // resolve only their bundled assets.
+    if cfg!(debug_assertions) {
+        candidates.push(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("bin")
+                .join(name),
+        );
+    }
     candidates
 }
 
@@ -1648,6 +1660,26 @@ fn runtime_working_dir(binary: &std::path::Path) -> std::path::PathBuf {
         }
     }
     binary_dir.to_path_buf()
+}
+
+#[cfg(test)]
+mod runtime_binary_tests {
+    use super::*;
+
+    #[test]
+    fn debug_build_considers_the_staged_development_runtime() {
+        let expected = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("bin")
+            .join("continuum.exe");
+        let candidates = bundled_binary_candidates("continuum.exe");
+
+        if cfg!(debug_assertions) {
+            assert!(candidates.contains(&expected));
+        } else {
+            assert!(!candidates.contains(&expected));
+        }
+    }
 }
 
 // --- MCP tool registry (static manifest) ---
