@@ -131,8 +131,8 @@ error = 30
 note = 90
 
 # Context engine §4.8: session state — Continuum's live "what is the user
-# doing" picture. Everything except goal/task inference is mechanical and
-# free; these knobs govern the ONE background LLM call it ever makes.
+# doing" picture. Everything except goal/activity interpretation is mechanical
+# and free; these knobs govern the ONE background LLM call it ever makes.
 # Inference is skipped entirely while you are idle (§4.11) and always
 # queues behind interactive triage (§4.7 LocalLlm discipline).
 [session_state]
@@ -146,9 +146,12 @@ infer_max_age_minutes = 10
 # Re-infer once this many *significant* events piled up since the last
 # attempt.
 infer_min_new_events = 8
+# A short editor -> browser -> chat loop is already meaningful, even when
+# individual focus events are below significant_importance.
+infer_min_focus_switches = 2
 # Importance an event must reach to count toward infer_min_new_events.
 significant_importance = 0.5
-# Below this confidence, the inferred goal/task are discarded and every
+# Below this confidence, all inferred claims are discarded and every
 # consumer renders "unknown" — the honest answer when Continuum does not
 # know. Also caps the confidence of a very stale rehydrated snapshot.
 confidence_floor = 0.4
@@ -367,6 +370,12 @@ api_timeout_secs = 30
 max_response_bytes = 524288
 max_mutation_body_bytes = 65536
 max_title_chars = 256
+
+# Visible distinction between the user's pointer and Agent OS actions.
+[agent_os]
+show_action_cursor = true
+action_cursor_duration_ms = 420
+action_cursor_size_px = 30
 
 # Adaptive resource policy. Probed once at boot (CPU cores, RAM, GPU/VRAM,
 # laptop-vs-desktop, AC-vs-battery) and resolved into concrete knobs applied

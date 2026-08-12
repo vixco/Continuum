@@ -7,6 +7,9 @@ triggers:
   - take over my computer
   - click this
   - open this app
+  - go back to the app I was using
+  - return to where I was
+  - ga terug naar de app waar ik was
   - fill this in
   - send an email
   - update linear
@@ -107,6 +110,14 @@ Agent OS has its own capability policy:
 
 ## Computer use
 
+- When the user refers to a previous app or place, resolve it from
+  `context_window`, `context_timeline`, or `context_search` before planning.
+  Then call `computer_list_windows`, choose the closest exact live
+  process/title match, focus it, and verify the resulting foreground window.
+  Never interpret "the app I was in" as merely the most popular installed app.
+- A focus switch is only location evidence. Use screen-caption, error, file,
+  and Git events to recover what the user was doing there and continue the
+  requested task from observed state.
 - Prefer accessibility names, automation IDs, control types and class names.
 - Targets must be visible and enabled.
 - Re-observe when a target moved, is duplicated or is offscreen.
@@ -114,6 +125,9 @@ Agent OS has its own capability policy:
 - Use `computer_wait_for_element` instead of blind long sleeps.
 - A raw coordinate is not proof of the intended target; pair it with a typed
   postcondition.
+- Computer clicks show the configured amber `AI` pointer marker so the user can
+  distinguish Agent OS actions from their own pointer. Do not disable or hide
+  this indicator inside a plan.
 
 ## Composio
 

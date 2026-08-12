@@ -16,9 +16,11 @@ import {
   FileText,
   FolderPlus,
   GitBranch,
+  Lightbulb,
   Lock,
   Mic,
   Monitor,
+  MousePointer2,
   Pin,
   PinOff,
   Plus,
@@ -39,6 +41,7 @@ import {
   Toggle,
 } from "@/components/ui/primitives";
 import type {
+  ActivityTraceView,
   ComponentHealthSummary,
   ComponentStatus,
   ContextEngineSnapshot,
@@ -237,6 +240,12 @@ function activityLine(session: SessionState): string {
   return app || title || "unknown";
 }
 
+function inferredInsight(session: SessionState, raw: string | null, fallback: string): string {
+  if (session.local_only) return "Working in a private context";
+  if (!raw || session.confidence <= 0) return fallback;
+  return raw;
+}
+
 /** Plain-English statement of where the current belief actually comes from. */
 function beliefLine(session: SessionState): string {
   const parts: string[] = [];
@@ -280,7 +289,7 @@ function fieldLabel(label: string, session: SessionState, field: string): string
 function SessionPanel({ session }: { session: SessionState | null }) {
   if (!session) {
     return (
-      <Card title="Session state" subtitle="What Continuum believes you are working on">
+      <Card title="Goal & intent" subtitle="What Continuum understands from your recent work">
         <EmptyState
           title="Nothing published yet"
           description="The background runtime publishes session state roughly every two seconds. Once it is running, the active project, goal, task and current activity appear here."
@@ -291,8 +300,8 @@ function SessionPanel({ session }: { session: SessionState | null }) {
 
   return (
     <Card
-      title="Session state"
-      subtitle={`Tracking since ${formatTs(session.since)} · last updated ${formatTs(session.updated)}`}
+      title="Goal & intent"
+      subtitle={`Continuum last reconsidered this ${formatTs(session.inferred_at ?? session.updated)}`}
       actions={session.local_only ? <PrivateBadge /> : undefined}
     >
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -309,7 +318,7 @@ function SessionPanel({ session }: { session: SessionState | null }) {
             label={fieldLabel("Current task", session, "task")}
             value={inferredValue(session, session.current_task)}
           />
-          <Field label="Activity" value={activityLine(session)} />
+          <Field label="Current app evidence" value={activityLine(session)} />
         </div>
         <div className="space-y-4">
           <ConfidenceMeter label="Goal confidence" value={session.confidence} />
@@ -318,6 +327,43 @@ function SessionPanel({ session }: { session: SessionState | null }) {
             <div className="continuum-label">Source of belief</div>
             <p className="mt-1 text-[13px] leading-5 text-ink-muted">{beliefLine(session)}</p>
           </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="rounded-md border border-accent-blue/30 bg-accent-blue/[.07] p-3">
+          <div className="continuum-label flex items-center gap-1.5">
+            <MousePointer2 size={12} /> What you did
+          </div>
+          <p className="mt-1 text-[13px] leading-5 text-ink">
+            {inferredInsight(
+              session,
+              session.activity_summary,
+              "Not enough concrete activity has been observed yet."
+            )}
+          </p>
+        </div>
+        <div className="rounded-md border border-accent-amber/30 bg-accent-amber/[.06] p-3">
+          <div className="continuum-label flex items-center gap-1.5">Continuum's read</div>
+          <p className="mt-1 text-[13px] leading-5 text-ink">
+            {inferredInsight(
+              session,
+              session.interpretation,
+              "No evidence-backed interpretation yet."
+            )}
+          </p>
+        </div>
+        <div className="rounded-md border border-state-healthy/25 bg-state-healthy/[.05] p-3">
+          <div className="continuum-label flex items-center gap-1.5">
+            <Lightbulb size={12} /> Possible help
+          </div>
+          <p className="mt-1 text-[13px] leading-5 text-ink">
+            {inferredInsight(
+              session,
+              session.suggested_help,
+              "Nothing useful to interrupt you with right now."
+            )}
+          </p>
         </div>
       </div>
 
@@ -361,7 +407,73 @@ function SessionPanel({ session }: { session: SessionState | null }) {
   );
 }
 
-// --- 2. Per-source health + privacy toggles -------------------------------
+// --- 2. Concrete activity trace ------------------------------------------
+
+function formatRange(start: string, end: string): string {
+  const first = new Date(start);
+  const last = new Date(end);
+  if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) return formatTs(end);
+  const startText = first.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const endText = last.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return startText === endText ? startText : `${startText}–${endText}`;
+}
+
+function ActivityTracePanel({ items }: { items: ActivityTraceView[] }) {
+  return (
+    <Card
+      title="What happened in your apps"
+      subtitle="Recent concrete local observations — returns to an app stay separate"
+    >
+      {items.length === 0 ? (
+        <EmptyState
+          title="No detailed activity yet"
+          description="Once local screen captions arrive, this shows what happened inside each app instead of only listing app names."
+        />
+      ) : (
+        <ol className="space-y-2">
+          {items.map((item, index) => {
+            const confidence = Math.round(Math.max(0, Math.min(1, item.confidence)) * 100);
+            return (
+              <li
+                key={`${item.started_at}-${item.application}-${index}`}
+                className={clsx(
+                  "grid grid-cols-[4.5rem_1fr] gap-3 rounded-md border bg-bg-elevated p-3",
+                  item.has_error_visible ? "border-state-error/40" : "border-bg-border"
+                )}
+              >
+                <div className="font-mono text-[11px] tabular-nums text-ink-dim">
+                  {formatRange(item.started_at, item.last_seen_at)}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-semibold text-ink">{item.application}</span>
+                    {item.window_title && (
+                      <span className="truncate text-[11px] text-ink-dim" title={item.window_title}>
+                        · {item.window_title}
+                      </span>
+                    )}
+                    {item.has_error_visible && (
+                      <span className="rounded border border-state-error/40 bg-state-error/10 px-1.5 py-px text-[10px] text-state-error">
+                        Error visible
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[13px] leading-5 text-ink-muted">{item.activity}</p>
+                  <div className="mt-1 text-[10px] text-ink-dim">
+                    {confidence > 0 ? `Vision evidence · ${confidence}%` : "Window evidence"}
+                    {item.active_since_secs > 0 ? ` · focused ${item.active_since_secs}s` : ""}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </Card>
+  );
+}
+
+// --- 3. Per-source health + privacy toggles -------------------------------
 
 type SourceKey = keyof Omit<ContextEngineSnapshot, "idle">;
 
@@ -1511,6 +1623,8 @@ export function ContextTab() {
       )}
 
       <SessionPanel session={context.session} />
+
+      <ActivityTracePanel items={page?.activity_trace ?? []} />
 
       <SourcesPanel
         engine={context.engine}

@@ -1,10 +1,11 @@
 # Agent OS provenance note
 
-Date: 2026-08-08
+Date: 2026-08-12
 
 The Agent OS implementation added in this change is original Continuum code.
 No source code, assets, prompts, tests, or generated files were copied or adapted
-from OpenClaw, Hermes Agent, OpenHuman, Browser Use, or their forks.
+from OpenClaw, Hermes Agent, OpenAI Codex, OpenHuman, Browser Use, or their
+forks.
 
 Those repositories were used for architecture research only. Their high-level
 patterns and repository-level licenses are recorded in

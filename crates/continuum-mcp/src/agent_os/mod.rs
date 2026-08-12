@@ -50,6 +50,8 @@ Use an observe -> plan -> act -> verify loop:
 6. Use Composio search before executing unfamiliar app tools; connection-management tools may return an OAuth link for the user.
 7. Destructive SaaS actions are denied by default. Do not attempt to bypass policy.
 8. Never claim an action succeeded without a successful tool result and evidence id.
+9. For requests such as "go back to the app I was in", use Continuum's context_window/context_timeline/context_search tools to resolve the prior app and title, then list windows, focus the closest exact live match, observe, act, and verify. Never guess a destination from app popularity.
+10. The distinct amber AI pointer is the user's visible action boundary. Prefer semantic element targeting and keep actions fast, but never skip required approval or post-action verification.
 "#;
 
 struct AgentState {
@@ -115,7 +117,19 @@ impl AgentOsServer {
             .with_context(|| format!("Failed to create {}", root.display()))?;
         let policy = PolicyEngine::load(&root)?;
         let evidence = EvidenceStore::new(&root.join("evidence"))?;
-        let computer = ComputerBackend::new(&root.join("computer"))?;
+        let config_path = data_dir.join("config.toml");
+        let ux = continuum_core::config::load_config(&config_path)
+            .map(|config| config.agent_os)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    layer = "agent_os",
+                    component = "computer_use",
+                    error = %error,
+                    "Agent OS UX config could not be loaded; using safe defaults"
+                );
+                continuum_core::config::AgentOsConfig::default()
+            });
+        let computer = ComputerBackend::new(&root.join("computer"), ux)?;
         let composio = ComposioClient::new(&root)?;
         let runs = RunStore::new(&root)?;
         Ok(Self {

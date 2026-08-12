@@ -83,6 +83,15 @@ pub const MAX_OPEN_FILES: usize = 8;
 /// Maximum characters of a single inferred goal/task line.
 pub const MAX_INFERRED_LEN: usize = 120;
 
+/// Maximum characters in the concrete recent-activity sentence.
+pub const MAX_ACTIVITY_SUMMARY_LEN: usize = 180;
+
+/// Maximum characters in the evidence-backed interpretation shown locally.
+pub const MAX_INTERPRETATION_LEN: usize = 280;
+
+/// Maximum characters in one proactive but optional help suggestion.
+pub const MAX_SUGGESTED_HELP_LEN: usize = 180;
+
 /// Events retained in the hub's rolling window. Must be ≥
 /// [`INFERENCE_EVENT_WINDOW`] so a full prompt window is always available.
 pub const EVENT_RING_CAP: usize = 64;
@@ -207,6 +216,18 @@ pub struct SessionState {
     /// Inferred concrete task. Same `None` semantics as `current_goal`.
     #[serde(default)]
     pub current_task: Option<String>,
+    /// Concrete recent activity inferred from the event sequence. This says
+    /// what happened inside apps, not merely which app had focus.
+    #[serde(default)]
+    pub activity_summary: Option<String>,
+    /// Short evidence-backed conclusion about what the observed sequence
+    /// probably means. This is a conclusion, never hidden chain-of-thought.
+    #[serde(default)]
+    pub interpretation: Option<String>,
+    /// A specific timely offer Continuum could make, or `None` when silence
+    /// is more useful.
+    #[serde(default)]
+    pub suggested_help: Option<String>,
     /// Foreground process name, or [`PRIVATE_PLACEHOLDER`] for a
     /// `never_observe` sentinel frame.
     #[serde(default)]
@@ -282,6 +303,9 @@ impl Default for SessionState {
             active_project: None,
             current_goal: None,
             current_task: None,
+            activity_summary: None,
+            interpretation: None,
+            suggested_help: None,
             active_app: None,
             window_title: None,
             open_files: Vec::new(),
@@ -338,6 +362,9 @@ impl SessionState {
             self.local_only = false;
             self.inferred_at = None;
         }
+        self.activity_summary = None;
+        self.interpretation = None;
+        self.suggested_help = None;
     }
 
     pub fn task_if_confident(&self, confidence_floor: f32) -> Option<&str> {
@@ -380,6 +407,15 @@ impl SessionState {
         }
         if out.current_task.is_some() {
             out.current_task = Some(PRIVATE_CONTEXT_PHRASE.to_string());
+        }
+        if out.activity_summary.is_some() {
+            out.activity_summary = Some(PRIVATE_CONTEXT_PHRASE.to_string());
+        }
+        if out.interpretation.is_some() {
+            out.interpretation = Some(PRIVATE_CONTEXT_PHRASE.to_string());
+        }
+        if out.suggested_help.is_some() {
+            out.suggested_help = Some(PRIVATE_CONTEXT_PHRASE.to_string());
         }
         out
     }
@@ -539,6 +575,9 @@ pub enum InferenceTrigger {
     ProjectSwitch,
     /// At least `infer_min_new_events` significant events accumulated.
     EventVolume,
+    /// A short sequence of app focus changes suggests that the user's task
+    /// or obstacle may have changed.
+    ActivitySequence,
     /// The inferred fields are older than `infer_max_age_minutes` (or were
     /// never produced).
     Stale,
@@ -550,6 +589,7 @@ impl InferenceTrigger {
         match self {
             Self::ProjectSwitch => "project_switch",
             Self::EventVolume => "event_volume",
+            Self::ActivitySequence => "activity_sequence",
             Self::Stale => "stale",
         }
     }
@@ -573,6 +613,8 @@ pub struct TriggerInputs {
     /// Significant events (importance ≥ `significant_importance`) since
     /// the last attempt.
     pub significant_events: usize,
+    /// Focus switches since the last attempt, independent of importance.
+    pub focus_switches: usize,
 }
 
 /// The spec §4.8 trigger predicate.
@@ -583,8 +625,8 @@ pub struct TriggerInputs {
 /// 3. **Minimum interval** — `infer_min_interval_secs` since the last
 ///    *attempt* (not the last success: a failed call must not retrigger
 ///    immediately).
-/// 4. Then, in precedence order: project switch → event volume →
-///    staleness (including "never inferred").
+/// 4. Then, in precedence order: project switch → event volume → short app
+///    activity sequence → staleness (including "never inferred").
 pub fn evaluate_trigger(
     inputs: &TriggerInputs,
     cfg: &SessionStateConfig,
@@ -604,6 +646,9 @@ pub fn evaluate_trigger(
     if inputs.significant_events >= cfg.infer_min_new_events {
         return Some(InferenceTrigger::EventVolume);
     }
+    if inputs.focus_switches >= cfg.infer_min_focus_switches {
+        return Some(InferenceTrigger::ActivitySequence);
+    }
     match inputs.last_inference_at {
         None => Some(InferenceTrigger::Stale),
         Some(last) => (inputs.now - last >= Duration::minutes(cfg.infer_max_age_minutes as i64))
@@ -616,12 +661,18 @@ pub fn evaluate_trigger(
 // ---------------------------------------------------------------------------
 
 /// One parsed inference reply.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InferenceResult {
     /// Inferred goal, `None` when empty or below the confidence floor.
     pub goal: Option<String>,
     /// Inferred task, same semantics.
     pub task: Option<String>,
+    /// Concrete activity visible in the evidence sequence.
+    pub activity: Option<String>,
+    /// Concise interpretation of that sequence.
+    pub interpretation: Option<String>,
+    /// Specific useful intervention, when warranted.
+    pub suggested_help: Option<String>,
     /// Clamped confidence in \[0.0, 1.0\].
     pub confidence: f32,
 }
@@ -717,10 +768,9 @@ pub fn parse_inference(raw: &str, cfg: &SessionStateConfig) -> Option<InferenceR
     let value: serde_json::Value = serde_json::from_str(cleaned).ok()?;
     let obj = value.as_object()?;
 
-    let field = |key: &str| -> Option<String> {
+    let field = |key: &str, max: usize| -> Option<String> {
         let s = obj.get(key)?.as_str()?.trim();
-        (!s.is_empty() && s.to_ascii_lowercase() != UNKNOWN)
-            .then(|| truncate_chars(s, MAX_INFERRED_LEN))
+        (!s.is_empty() && s.to_ascii_lowercase() != UNKNOWN).then(|| truncate_chars(s, max))
     };
 
     let raw_conf = obj
@@ -733,15 +783,25 @@ pub fn parse_inference(raw: &str, cfg: &SessionStateConfig) -> Option<InferenceR
         raw_conf.clamp(0.0, 1.0)
     };
 
-    let (goal, task) = if confidence < cfg.confidence_floor {
-        (None, None)
-    } else {
-        (field("goal"), field("task"))
-    };
+    let (goal, task, activity, interpretation, suggested_help) =
+        if confidence < cfg.confidence_floor {
+            (None, None, None, None, None)
+        } else {
+            (
+                field("goal", MAX_INFERRED_LEN),
+                field("task", MAX_INFERRED_LEN),
+                field("activity", MAX_ACTIVITY_SUMMARY_LEN),
+                field("interpretation", MAX_INTERPRETATION_LEN),
+                field("suggested_help", MAX_SUGGESTED_HELP_LEN),
+            )
+        };
 
     Some(InferenceResult {
         goal,
         task,
+        activity,
+        interpretation,
+        suggested_help,
         confidence,
     })
 }
@@ -808,6 +868,7 @@ fn push_open_file(files: &mut Vec<String>, path: &str) -> bool {
 struct EventWindow {
     events: VecDeque<EventDigest>,
     significant_since_infer: usize,
+    focus_switches_since_infer: usize,
     project_switched_since_infer: bool,
     last_inference_at: Option<DateTime<Utc>>,
 }
@@ -1007,6 +1068,9 @@ impl SessionStateHub {
         if digest.importance >= cfg.significant_importance {
             window.significant_since_infer = window.significant_since_infer.saturating_add(1);
         }
+        if digest.event_type == "focus_switch" {
+            window.focus_switches_since_infer = window.focus_switches_since_infer.saturating_add(1);
+        }
         if window.events.len() >= EVENT_RING_CAP {
             window.events.pop_front();
         }
@@ -1060,6 +1124,7 @@ impl SessionStateHub {
                 last_inference_at: window.last_inference_at,
                 project_switched: window.project_switched_since_infer,
                 significant_events: window.significant_since_infer,
+                focus_switches: window.focus_switches_since_infer,
             },
             cfg,
         )
@@ -1072,6 +1137,7 @@ impl SessionStateHub {
         let mut window = self.inner.window.write();
         window.last_inference_at = Some(now);
         window.significant_since_infer = 0;
+        window.focus_switches_since_infer = 0;
         window.project_switched_since_infer = false;
     }
 
@@ -1100,6 +1166,9 @@ impl SessionStateHub {
             if !task_pinned {
                 s.current_task = result.task.clone();
             }
+            s.activity_summary = result.activity.clone();
+            s.interpretation = result.interpretation.clone();
+            s.suggested_help = result.suggested_help.clone();
             if goal_pinned && task_pinned {
                 return;
             }
@@ -1342,6 +1411,9 @@ pub fn rehydrate(
         state.active_project = prev.active_project;
         state.current_goal = prev.current_goal;
         state.current_task = prev.current_task;
+        state.activity_summary = prev.activity_summary;
+        state.interpretation = prev.interpretation;
+        state.suggested_help = prev.suggested_help;
         state.open_files = prev.open_files;
         state.last_error = prev.last_error;
         state.last_success = prev.last_success;
@@ -1558,7 +1630,11 @@ pub fn spawn_inference_task(
                                     trigger = trigger.label(),
                                     confidence = result.confidence,
                                     local_only = local_only,
-                                    inferred = result.task.is_some(),
+                                    inferred = result.goal.is_some()
+                                        || result.task.is_some()
+                                        || result.activity.is_some()
+                                        || result.interpretation.is_some()
+                                        || result.suggested_help.is_some(),
                                     "Session-state inference applied"
                                 );
                                 hub.apply_inference(&result, local_only, Utc::now());
@@ -1733,6 +1809,7 @@ mod tests {
                 goal: Some("ship B5".to_string()),
                 task: Some("write tests".to_string()),
                 confidence: 0.8,
+                ..InferenceResult::default()
             },
             false,
             t0(),
@@ -1870,6 +1947,7 @@ mod tests {
             last_inference_at: None,
             project_switched: false,
             significant_events: 0,
+            focus_switches: 0,
         }
     }
 
@@ -1934,6 +2012,20 @@ mod tests {
     }
 
     #[test]
+    fn trigger_activity_sequence_after_short_app_loop() {
+        let c = cfg();
+        let mut i = inputs(t0() + Duration::seconds(c.infer_min_interval_secs as i64 + 1));
+        i.last_inference_at = Some(t0());
+        i.focus_switches = c.infer_min_focus_switches - 1;
+        assert_eq!(evaluate_trigger(&i, &c), None);
+        i.focus_switches = c.infer_min_focus_switches;
+        assert_eq!(
+            evaluate_trigger(&i, &c),
+            Some(InferenceTrigger::ActivitySequence)
+        );
+    }
+
+    #[test]
     fn trigger_staleness_at_max_age() {
         let c = cfg();
         let mut i = inputs(t0() + Duration::minutes(c.infer_max_age_minutes as i64));
@@ -1964,6 +2056,27 @@ mod tests {
     }
 
     #[test]
+    fn hub_counts_low_importance_focus_switches_as_an_activity_sequence() {
+        let c = cfg();
+        let hub = SessionStateHub::new();
+        hub.apply_frame(
+            &frame("Code.exe", "main.rs", t0()),
+            Some(&project("continuum")),
+        );
+        hub.mark_inference_attempt(t0());
+        for app in ["Brave", "ChatGPT"] {
+            let mut switch = digest("focus_switch", app, t0());
+            switch.importance = 0.0;
+            hub.apply_event(switch, &c);
+        }
+        let later = t0() + Duration::seconds(c.infer_min_interval_secs as i64 + 1);
+        assert_eq!(
+            hub.trigger(&c, later, false),
+            Some(InferenceTrigger::ActivitySequence)
+        );
+    }
+
+    #[test]
     fn mark_inference_attempt_clears_counters() {
         let c = cfg();
         let hub = SessionStateHub::new();
@@ -1981,12 +2094,24 @@ mod tests {
     #[test]
     fn parse_inference_happy_path() {
         let r = parse_inference(
-            r#"{"goal":"ship the context engine","task":"write B5 tests","confidence":0.8}"#,
+            r#"{"goal":"ship the context engine","task":"write B5 tests","activity":"Edited session_state.rs, then searched the compiler error in Brave","interpretation":"The user is debugging the new trigger","suggested_help":"Inspect and fix the failing test","confidence":0.8}"#,
             &cfg(),
         )
         .unwrap();
         assert_eq!(r.goal.as_deref(), Some("ship the context engine"));
         assert_eq!(r.task.as_deref(), Some("write B5 tests"));
+        assert_eq!(
+            r.activity.as_deref(),
+            Some("Edited session_state.rs, then searched the compiler error in Brave")
+        );
+        assert_eq!(
+            r.interpretation.as_deref(),
+            Some("The user is debugging the new trigger")
+        );
+        assert_eq!(
+            r.suggested_help.as_deref(),
+            Some("Inspect and fix the failing test")
+        );
         assert!((r.confidence - 0.8).abs() < 1e-6);
     }
 
@@ -1998,15 +2123,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_inference_below_floor_drops_goal_and_task() {
+    fn parse_inference_below_floor_drops_all_inferred_claims() {
         let c = cfg();
         let r = parse_inference(
-            r#"{"goal":"guessing","task":"guessing","confidence":0.1}"#,
+            r#"{"goal":"guessing","task":"guessing","activity":"maybe editing","interpretation":"maybe stuck","suggested_help":"maybe click","confidence":0.1}"#,
             &c,
         )
         .unwrap();
         assert_eq!(r.goal, None);
         assert_eq!(r.task, None);
+        assert_eq!(r.activity, None);
+        assert_eq!(r.interpretation, None);
+        assert_eq!(r.suggested_help, None);
         assert!((r.confidence - 0.1).abs() < 1e-6);
     }
 
@@ -2060,6 +2188,9 @@ mod tests {
             &InferenceResult {
                 goal: Some("g".to_string()),
                 task: Some("t".to_string()),
+                activity: Some("edited a private customer record".to_string()),
+                interpretation: Some("preparing a private release".to_string()),
+                suggested_help: Some("fix the private deployment".to_string()),
                 confidence: 0.9,
             },
             window_is_local_only(&events),
@@ -2070,6 +2201,18 @@ mod tests {
         let cloud = s.cloud_view();
         assert_eq!(cloud.current_goal.as_deref(), Some(PRIVATE_CONTEXT_PHRASE));
         assert_eq!(cloud.current_task.as_deref(), Some(PRIVATE_CONTEXT_PHRASE));
+        assert_eq!(
+            cloud.activity_summary.as_deref(),
+            Some(PRIVATE_CONTEXT_PHRASE)
+        );
+        assert_eq!(
+            cloud.interpretation.as_deref(),
+            Some(PRIVATE_CONTEXT_PHRASE)
+        );
+        assert_eq!(
+            cloud.suggested_help.as_deref(),
+            Some(PRIVATE_CONTEXT_PHRASE)
+        );
         // The local view is untouched — local models may see it (§4.1).
         assert_eq!(s.current_task.as_deref(), Some("t"));
     }
@@ -2217,6 +2360,9 @@ mod tests {
             active_project: Some("continuum".to_string()),
             current_goal: Some("ship the context engine".to_string()),
             current_task: Some("finish B5".to_string()),
+            activity_summary: Some("Editing session state tests".to_string()),
+            interpretation: Some("Finishing the context engine".to_string()),
+            suggested_help: Some("Run the focused test suite".to_string()),
             active_app: Some("Code.exe".to_string()),
             window_title: Some("main.rs".to_string()),
             open_files: vec!["main.rs".to_string()],
@@ -2603,6 +2749,7 @@ mod tests {
                 goal: Some("inferred goal".into()),
                 task: Some("inferred task".into()),
                 confidence: 0.9,
+                ..InferenceResult::default()
             },
             false,
             now,
@@ -2650,6 +2797,7 @@ mod tests {
                 goal: Some("old goal".into()),
                 task: Some("old task".into()),
                 confidence: 0.8,
+                ..InferenceResult::default()
             },
             true,
             now,
@@ -2727,6 +2875,7 @@ mod tests {
                 goal: Some("old goal".into()),
                 task: Some("old task".into()),
                 confidence: 0.8,
+                ..InferenceResult::default()
             },
             false,
             now,
@@ -2754,6 +2903,7 @@ mod tests {
                 goal: Some("something else".into()),
                 task: Some("something else".into()),
                 confidence: 0.2,
+                ..InferenceResult::default()
             },
             true,
             now,
@@ -2778,6 +2928,7 @@ mod tests {
                 goal: None,
                 task: Some("fix the flaky test".into()),
                 confidence: 0.8,
+                ..InferenceResult::default()
             },
             false,
             inferred,
@@ -2809,6 +2960,7 @@ mod tests {
                 goal: None,
                 task: Some("old".into()),
                 confidence: 0.8,
+                ..InferenceResult::default()
             },
             false,
             old,

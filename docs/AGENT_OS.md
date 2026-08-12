@@ -123,6 +123,31 @@ Semantic targeting is preferred. Targets must be visible and enabled.
 Coordinate input is a fallback for custom-rendered or legacy surfaces and must
 still be paired with a typed postcondition.
 
+When the user refers to a previous app or place, the orchestrator first resolves
+that location from `context_window`, `context_timeline`, or `context_search`.
+It then lists currently live windows, selects the closest exact process/title
+match, focuses it, observes the resulting state, and only then continues the
+task. The current foreground app alone is not proof of the requested target.
+
+After a Windows click, the backend displays a short amber `AI` marker offset
+from the physical pointer. This gives the user a visible action boundary while
+keeping policy and verification unchanged. Configure it in `config.toml`:
+
+```toml
+[agent_os]
+show_action_cursor = true
+action_cursor_duration_ms = 420
+action_cursor_size_px = 30
+```
+
+The marker is painted before Continuum sends the click and remains visible for
+the configured duration. The Agent OS process loads these values at startup.
+Restart the desktop/runtime after changing them. If marker rendering fails, the result reports
+`agent_cursor_shown: false` and an `agent_cursor_error`. The click itself is not
+misreported as failed; the normal observe-and-verify loop still establishes its
+outcome. Inspect the Agent OS evidence/log and restart the bundled
+`continuum-agent-os` process before relying on the visual boundary again.
+
 ## Composio
 
 Continuum uses Composio Tool Router for discovery, OAuth connection management

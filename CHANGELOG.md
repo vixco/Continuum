@@ -6,6 +6,17 @@ All notable changes to Continuum are documented here. Format based on [Keep a Ch
 
 ### Added
 
+- **Evidence-backed Goal and adaptive app activity**: the local session model
+  now distinguishes the user's goal, current task, concrete in-app activity,
+  a concise interpretation, and a specific help opportunity. Context shows a
+  bounded privacy-filtered trace from local vision captions, retaining app-return
+  transitions instead of reducing work to process names. Two focus changes can
+  trigger a fresh interpretation (still rate-limited and paused while idle).
+  Agent OS resolves
+  "go back to the app I was in" from historical process/title evidence before
+  focusing and verifying a live window, while Windows clicks show a
+  configurable amber `AI` action marker.
+
 - **One-command local CI and Windows release rehearsal**: `pnpm ci:local`
   runs the deterministic CI graph before push, while
   `pnpm ci:release:windows` adds a clean unsigned NSIS packaging dry-run. Native

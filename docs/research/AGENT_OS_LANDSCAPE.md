@@ -1,6 +1,6 @@
 # Agent OS landscape research
 
-Research date: 2026-08-08
+Research date: 2026-08-12
 
 This note records the design research behind Continuum Agent OS. It separates
 patterns learned from other projects from source code incorporated into this
@@ -25,6 +25,7 @@ Continuum's existing dependencies and the documented Composio HTTP API.
 | --- | --- | --- | --- |
 | [OpenClaw](https://github.com/openclaw/openclaw) | A local Gateway as the control plane for models, sessions, tools, channels, companion nodes, skills, and plugins; single-operator security and pairing defaults | Keep one local action plane exposed to all orchestrators through MCP; make policy and evidence first-class instead of agent-specific | None |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Provider-neutral core, persistent memory, reusable skills, scheduled/gateway surfaces, terminal and browser tools, learning across sessions | Add one bundled Agent OS skill and resumable plans while keeping Continuum model-agnostic | None |
+| [OpenAI Codex](https://github.com/openai/codex) | Central approval/sandbox orchestration, structured tool-call lifecycle, persisted goals, and local memory stages | Keep approval → execution → verification centralized; expose conclusions and evidence without exposing hidden model reasoning | None |
 | [OpenHuman](https://github.com/tinyhumansai/openhuman) | UI-first personal assistant, local memory tree/vault, proactive integrations and Composio-backed OAuth | Use Composio as a broad integration plane but keep identity, policy, evidence, and local memory under Continuum | None; GPL-3.0 source was explicitly not copied |
 | [Browser Use](https://github.com/browser-use/browser-use) | Repeated observation, bounded actions, custom tools, domain-aware safety, retries and recovery rather than one-shot scripts | Make observe → plan → act → verify → recover the server instruction and return post-action state on every mutation | None |
 | [Composio](https://docs.composio.dev/docs/composio-connect) | Session-based discovery and execution across 1000+ apps through seven meta-tools and managed OAuth | Implement the official Tool Router REST surface with secret isolation and Continuum-side risk classification | API integration only |
@@ -56,6 +57,23 @@ Continuum adopts two patterns at the product level:
 
 The bundled `agent-os` skill teaches the control loop, while `RunStore` persists
 immutable plans and per-step outcomes for resume.
+
+The 2026-08-12 review also highlighted Hermes' closed learning loop and its
+accessibility-first computer-use companion. Continuum keeps its own Rust and
+Windows UI Automation implementation, but follows the product lesson that raw
+activity should feed a compact interpretation and a reusable action path.
+
+## OpenAI Codex
+
+Codex keeps approvals, sandbox selection, execution, retry semantics, and
+tool-call lifecycle state in explicit orchestration boundaries. Its app-server
+protocol gives clients enough structured state to render proposed and completed
+actions instead of asking users to trust an invisible autonomous loop.
+
+Continuum applies that pattern to ambient context: Goal shows a concise
+conclusion plus visible activity evidence, and an app-return request crosses the
+existing Context and Agent OS boundaries in order. The implementation does not
+copy Codex source; it preserves Continuum's existing policy and evidence model.
 
 ## OpenHuman
 
@@ -122,6 +140,8 @@ The next highest-leverage additions are:
 5. multi-agent delegation where a planner can spawn scoped workers but only the
    action broker holds host/SaaS authority;
 6. evaluators for outcome quality, not only whether a tool returned success.
+7. semantic UI invocation that leaves the user's physical pointer stationary
+   while the visible AI marker follows the agent action path.
 
 ## License references
 

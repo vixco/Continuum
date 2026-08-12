@@ -364,11 +364,13 @@ mod tests {
                         source: "screen".into(),
                         event_type: "error".into(),
                         application: "Code.exe".into(),
+                        window_title: "main.rs — continuum".into(),
                         summary: "build failed".into(),
                         count: 14,
                         project_id: Some("continuum".into()),
                         raw_reference: Some("frame-1".into()),
                     }],
+                    activity_trace: Vec::new(),
                     toggles: ObservationTogglesView {
                         mic: false,
                         ..ObservationTogglesView::default()

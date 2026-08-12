@@ -286,6 +286,9 @@ pub struct ContextEventView {
     /// Application the event is about.
     #[serde(default)]
     pub application: String,
+    /// Window title at the event occurrence, already privacy-filtered.
+    #[serde(default)]
+    pub window_title: String,
     /// Display summary (the first occurrence's text).
     #[serde(default)]
     pub summary: String,
@@ -298,6 +301,31 @@ pub struct ContextEventView {
     /// Pointer into the raw log — the Forget cascade key.
     #[serde(default)]
     pub raw_reference: Option<String>,
+}
+
+/// One consecutive, privacy-filtered stretch of visible user activity.
+///
+/// Unlike `ContextEventView`, this comes from perception frames and retains
+/// the local vision caption. It is the dashboard's evidence for what happened
+/// *inside* an app rather than merely which process had focus.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActivityTraceView {
+    /// First frame in this consecutive stretch.
+    pub started_at: String,
+    /// Most recent matching frame in this stretch.
+    pub last_seen_at: String,
+    /// Foreground application.
+    pub application: String,
+    /// Foreground window title, scrubbed at publication.
+    pub window_title: String,
+    /// Concrete local-vision caption, or a title-derived fallback.
+    pub activity: String,
+    /// Vision confidence. Zero means the activity is a mechanical fallback.
+    pub confidence: f32,
+    /// Whether the local observer marked an error as visible.
+    pub has_error_visible: bool,
+    /// Latest foreground dwell counter observed for this stretch.
+    pub active_since_secs: u64,
 }
 
 /// Live values of the honest observation toggles (spec §4.1).
@@ -373,6 +401,10 @@ pub struct ContextPageSnapshot {
     /// Recent deduped context events, newest first, privacy-gated.
     #[serde(default)]
     pub recent_events: Vec<ContextEventView>,
+    /// Consecutive app activity with concrete local-vision captions, newest
+    /// first. This is intentionally separate from the deduped event log.
+    #[serde(default)]
+    pub activity_trace: Vec<ActivityTraceView>,
     /// Live toggle values (what the switches must show).
     #[serde(default)]
     pub toggles: ObservationTogglesView,
@@ -677,10 +709,21 @@ mod tests {
                 source: "git".into(),
                 event_type: "commit".into(),
                 application: "git".into(),
+                window_title: "continuum".into(),
                 summary: "feat(core): ship it".into(),
                 count: 1,
                 project_id: Some("continuum".into()),
                 raw_reference: Some("deadbeef".into()),
+            }],
+            activity_trace: vec![ActivityTraceView {
+                started_at: "2026-08-05T09:59:00+00:00".into(),
+                last_seen_at: "2026-08-05T10:00:00+00:00".into(),
+                application: "Code.exe".into(),
+                window_title: "runtime_publish.rs — continuum".into(),
+                activity: "Editing the runtime publisher".into(),
+                confidence: 0.9,
+                has_error_visible: false,
+                active_since_secs: 60,
             }],
             toggles: ObservationTogglesView {
                 files: false,
@@ -720,6 +763,9 @@ mod tests {
             active_project: Some("continuum".into()),
             current_goal: Some("ship the context engine".into()),
             current_task: Some("publish session state".into()),
+            activity_summary: Some("Edited runtime_publish.rs and ran tests".into()),
+            interpretation: Some("Validating richer context publication".into()),
+            suggested_help: Some("Inspect any failing roundtrip".into()),
             active_app: Some("Code.exe".into()),
             window_title: Some("runtime_publish.rs — continuum".into()),
             open_files: vec!["runtime_publish.rs".into(), "state.rs".into()],

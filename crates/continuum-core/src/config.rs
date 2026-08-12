@@ -97,9 +97,36 @@ pub struct ContinuumConfig {
     /// kill-switch plus the clipboard-tool kill-switch.
     #[serde(default)]
     pub context_tools: ContextToolsConfig,
+    /// Agent OS interaction UX. Execution policy remains in Agent OS's
+    /// independently protected policy store; these values only control the
+    /// visible action indicator.
+    #[serde(default)]
+    pub agent_os: AgentOsConfig,
     /// Optional GitHub CLI integration settings.
     #[serde(default)]
     pub github: GitHubConfig,
+}
+
+/// Visible Agent OS interaction settings (`[agent_os]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentOsConfig {
+    /// Show a distinct amber AI pointer marker after computer clicks.
+    pub show_action_cursor: bool,
+    /// How long the marker remains visible after each click.
+    pub action_cursor_duration_ms: u64,
+    /// Marker diameter in physical pixels.
+    pub action_cursor_size_px: u32,
+}
+
+impl Default for AgentOsConfig {
+    fn default() -> Self {
+        Self {
+            show_action_cursor: true,
+            action_cursor_duration_ms: 420,
+            action_cursor_size_px: 30,
+        }
+    }
 }
 
 /// Official GitHub CLI bridge settings (`[github]`).
@@ -310,7 +337,7 @@ impl ContextPackageConfig {
 
 /// Session-state inference knobs (`[session_state]`, context engine spec
 /// §4.8/§6). These govern the ONLY background LLM call session state ever
-/// makes: goal/task inference. Everything else in
+/// makes: goal/activity interpretation. Everything else in
 /// [`crate::context::session_state`] is mechanical and free.
 ///
 /// The defaults are deliberately conservative — at most one call every
@@ -329,10 +356,14 @@ pub struct SessionStateConfig {
     /// Re-infer once this many *significant* events accumulated since the
     /// last attempt.
     pub infer_min_new_events: usize,
+    /// Re-infer after this many focus switches. This catches short app
+    /// sequences such as editor -> browser -> chat even when each switch is
+    /// mechanically low-importance.
+    pub infer_min_focus_switches: usize,
     /// Importance threshold an event must reach to count toward
     /// `infer_min_new_events`.
     pub significant_importance: f32,
-    /// Below this confidence, inferred goal/task are discarded and
+    /// Below this confidence, all inferred claims are discarded and
     /// consumers render `"unknown"` (spec §4.8). Also the cap applied to a
     /// very stale rehydrated snapshot.
     pub confidence_floor: f32,
@@ -347,6 +378,7 @@ impl Default for SessionStateConfig {
             infer_min_interval_secs: 120,
             infer_max_age_minutes: 10,
             infer_min_new_events: 8,
+            infer_min_focus_switches: 2,
             significant_importance: 0.5,
             confidence_floor: 0.4,
             infer_max_tokens: 256,
@@ -1739,6 +1771,7 @@ impl Default for ContinuumConfig {
             context_package: ContextPackageConfig::default(),
             continuation: ContinuationConfig::default(),
             context_tools: ContextToolsConfig::default(),
+            agent_os: AgentOsConfig::default(),
             github: GitHubConfig::default(),
         }
     }

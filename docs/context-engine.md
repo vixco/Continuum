@@ -196,13 +196,25 @@ two halves with very different costs:
   small context intent that the runtime drains, so typed requests also survive
   process boundaries and restarts. The chat prompt runs the resulting session
   state through the same privacy egress filter as wake and MCP packages.
-- The **inferred** half — current goal and current task with a confidence —
-  costs a local-LLM call and therefore runs in its own background task. It fires
-  on a project switch, after enough significant events, or on staleness; never
-  more than once per `[session_state] infer_min_interval_secs`; never while the
-  machine is idle; always behind interactive triage in the LLM priority gate and
-  capped at 256 tokens. A reply below `confidence_floor` is discarded rather
-  than stored — consumers render "unknown", which is the honest answer.
+- The **inferred** half — current goal, current task, concrete recent activity,
+  a concise evidence-backed interpretation, an optional timely help suggestion,
+  and confidence — costs a local-LLM call and therefore runs in its own
+  background task. `activity` says what visibly happened inside apps;
+  `interpretation` is a conclusion, never hidden chain-of-thought; and
+  `suggested_help` stays empty when silence is more useful. It fires on a
+  project switch, after enough significant events, after a short configurable
+  focus-switch sequence, or on staleness; never more than once per
+  `[session_state] infer_min_interval_secs`; never while the machine is idle;
+  always behind interactive triage in the LLM priority gate and capped at 256
+  tokens. Every inferred claim in a reply below `confidence_floor` is discarded
+  rather than stored — consumers render "unknown", which is the honest answer.
+
+The Context page also publishes an independent, bounded `activity_trace` from
+recent privacy-filtered perception frames. Consecutive identical
+app/title/caption observations collapse, but leaving and later returning stays
+as a distinct step. Each row carries the app, title, concrete caption or
+mechanical fallback, confidence, visible-error flag, and current dwell counter;
+screenshot paths never enter the published view.
 
 On boot, session state rehydrates from the last published snapshot plus the most
 recent events with confidence discounted by age, so saying **"ga door"** after a

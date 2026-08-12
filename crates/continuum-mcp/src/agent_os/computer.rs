@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use continuum_core::config::AgentOsConfig;
 use serde_json::Value;
 
 use super::types::{
@@ -14,10 +15,11 @@ use super::types::{
 pub struct ComputerBackend {
     screenshots_dir: PathBuf,
     temp_dir: PathBuf,
+    ux: AgentOsConfig,
 }
 
 impl ComputerBackend {
-    pub fn new(root: &Path) -> Result<Self> {
+    pub fn new(root: &Path, ux: AgentOsConfig) -> Result<Self> {
         let screenshots_dir = root.join("screenshots");
         let temp_dir = root.join("tmp");
         std::fs::create_dir_all(&screenshots_dir).with_context(|| {
@@ -35,6 +37,7 @@ impl ComputerBackend {
         Ok(Self {
             screenshots_dir,
             temp_dir,
+            ux,
         })
     }
 
@@ -52,6 +55,11 @@ impl ComputerBackend {
                 "state_verification": true,
                 "virtual_screen_click_guard": cfg!(windows),
                 "verified_window_focus": cfg!(windows)
+            },
+            "action_cursor": {
+                "enabled": self.ux.show_action_cursor,
+                "duration_ms": self.ux.action_cursor_duration_ms.clamp(80, 3_000),
+                "size_px": self.ux.action_cursor_size_px.clamp(18, 72)
             },
             "screenshots_dir": self.screenshots_dir,
             "implementation": "Windows UI Automation + Win32 input through isolated PowerShell child processes"
@@ -216,6 +224,21 @@ impl ComputerBackend {
         env.insert(
             "CONTINUUM_CLICK_COUNT".to_string(),
             request.count.to_string(),
+        );
+        env.insert(
+            "CONTINUUM_SHOW_AGENT_CURSOR".to_string(),
+            self.ux.show_action_cursor.to_string(),
+        );
+        env.insert(
+            "CONTINUUM_AGENT_CURSOR_MS".to_string(),
+            self.ux
+                .action_cursor_duration_ms
+                .clamp(80, 3_000)
+                .to_string(),
+        );
+        env.insert(
+            "CONTINUUM_AGENT_CURSOR_SIZE".to_string(),
+            self.ux.action_cursor_size_px.clamp(18, 72).to_string(),
         );
         let result = run_powershell_json(CLICK_PS, env, Duration::from_secs(10)).await?;
         delay(request.post_action_delay_ms).await;
@@ -828,17 +851,72 @@ switch ($button) {
   'middle' { $down=[uint32]0x0020; $up=[uint32]0x0040 }
   default { $down=[uint32]0x0002; $up=[uint32]0x0004 }
 }
+$cursorShown = $false
+$cursorError = $null
+$marker = $null
+if ($env:CONTINUUM_SHOW_AGENT_CURSOR -eq 'true') {
+  try {
+    $null = Add-Type -AssemblyName PresentationFramework
+    $size = [Math]::Max(18, [Math]::Min(72, [int]$env:CONTINUUM_AGENT_CURSOR_SIZE))
+    $duration = [Math]::Max(80, [Math]::Min(3000, [int]$env:CONTINUUM_AGENT_CURSOR_MS))
+    $marker = New-Object System.Windows.Window
+    $marker.WindowStyle = [System.Windows.WindowStyle]::None
+    $marker.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $marker.AllowsTransparency = $true
+    $marker.Background = [System.Windows.Media.Brushes]::Transparent
+    $marker.Topmost = $true
+    $marker.ShowInTaskbar = $false
+    $marker.ShowActivated = $false
+    $marker.Width = $size
+    $marker.Height = $size
+    # Offset keeps the AI marker distinct from the user's physical pointer.
+    $marker.Left = $x + 12
+    $marker.Top = $y + 12
+    $badge = New-Object System.Windows.Controls.Border
+    $badge.CornerRadius = New-Object System.Windows.CornerRadius ($size / 2)
+    $badge.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(225, 245, 158, 11))
+    $badge.BorderBrush = [System.Windows.Media.Brushes]::White
+    $badge.BorderThickness = New-Object System.Windows.Thickness 2
+    $label = New-Object System.Windows.Controls.TextBlock
+    $label.Text = 'AI'
+    $label.Foreground = [System.Windows.Media.Brushes]::Black
+    $label.FontWeight = [System.Windows.FontWeights]::Bold
+    $label.FontSize = [Math]::Max(9, [Math]::Round($size * 0.34))
+    $label.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+    $label.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+    $badge.Child = $label
+    $marker.Content = $badge
+    $marker.Show()
+    # Paint before input so the AI pointer is visible during the action.
+    $marker.Dispatcher.Invoke(
+      [System.Action]{},
+      [System.Windows.Threading.DispatcherPriority]::Render
+    )
+    $cursorShown = $true
+  } catch {
+    $cursorError = $_.Exception.Message
+    try { if ($null -ne $marker) { $marker.Close() } } catch {}
+  }
+}
 if (-not [ContinuumMouseApi]::SetCursorPos($x, $y)) { throw 'SetCursorPos failed' }
 for ($i=0; $i -lt $count; $i++) {
   [ContinuumMouseApi]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
   [ContinuumMouseApi]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
   if ($i + 1 -lt $count) { Start-Sleep -Milliseconds 90 }
 }
+if ($cursorShown) {
+  Start-Sleep -Milliseconds $duration
+  try { $marker.Close() } catch {
+    if ($null -eq $cursorError) { $cursorError = $_.Exception.Message }
+  }
+}
 [ordered]@{
   x=$x
   y=$y
   button=$button
   count=$count
+  agent_cursor_shown=$cursorShown
+  agent_cursor_error=$cursorError
   virtual_screen=[ordered]@{ x=$virtual.X; y=$virtual.Y; width=$virtual.Width; height=$virtual.Height }
 } | ConvertTo-Json -Compress -Depth 3
 "#;
@@ -1014,5 +1092,18 @@ mod tests {
             max_depth: 4,
         };
         assert!(validate_selector(&request).is_err());
+    }
+
+    #[test]
+    fn click_script_reports_visual_agent_cursor_without_masking_click_result() {
+        assert!(CLICK_PS.contains("CONTINUUM_SHOW_AGENT_CURSOR"));
+        assert!(CLICK_PS.contains("$cursorError = $_.Exception.Message"));
+        assert!(CLICK_PS.contains("agent_cursor_shown=$cursorShown"));
+        assert!(CLICK_PS.contains("agent_cursor_error=$cursorError"));
+        assert!(
+            CLICK_PS.find("$marker.Show()").expect("marker")
+                < CLICK_PS.find("mouse_event($down").expect("click")
+        );
+        assert!(CLICK_PS.contains("DispatcherPriority]::Render"));
     }
 }

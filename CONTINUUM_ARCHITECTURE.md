@@ -89,6 +89,15 @@ source-attributed projection is the shared current world-state consumed by
 triage and exposed read-only to planner/executor/verifier/safety agents through
 `system_live_context`; agents do not independently process raw screenshots.
 
+The desktop's Goal surface is an interpretation over evidence, not a renamed
+active-window field. The local session inference publishes a goal, task,
+concrete activity sentence, concise interpretation, optional timely help, and
+confidence. Beside it, Context publishes a separate recent activity trace from
+privacy-filtered perception frames. Consecutive identical captions collapse,
+but leaving and returning to an app creates a new segment so the sequence stays
+legible. Cloud-bound projections generalize all local-only inferred text and
+never publish screenshots.
+
 Capture and vision remain local by default. Screen observation is explicitly
 configurable in the Brain tab, screenshot persistence is opt-in, configured
 sensitive applications/titles are redacted before vision or publication, and
@@ -215,6 +224,14 @@ may inspect bounded accessibility metadata and, after fresh confirmation,
 invoke or set the value of only the element focused at execution. Password
 elements and non-cloud privacy zones are blocked. There is no coordinate input,
 global input injection, or arbitrary accessibility-tree search in this slice.
+
+Agent OS extends that boundary with policy-gated, verified computer plans. A
+request to return to a previous app resolves process/title and concrete
+activity from Context evidence before selecting a currently live window; app
+popularity or the current foreground app is never sufficient evidence. Each
+Windows click shows a short, configurable amber `AI` action marker so the user
+can distinguish agent actions from their own pointer without weakening native
+approval, plan journaling, or post-action verification.
 
 Task plans and normalized agent evidence are durable JSON records under the
 Continuum data directory, written atomically and bounded on input/read. Plans

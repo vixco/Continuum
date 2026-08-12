@@ -173,6 +173,9 @@ export interface SessionState {
   active_project: string | null;
   current_goal: string | null;
   current_task: string | null;
+  activity_summary: string | null;
+  interpretation: string | null;
+  suggested_help: string | null;
   active_app: string | null;
   window_title: string | null;
   open_files: string[];
@@ -268,12 +271,25 @@ export interface ContextEventView {
   source: string;
   event_type: string;
   application: string;
+  window_title: string;
   summary: string;
   count: number;
   project_id: string | null;
   /// Pointer into the raw log (a perception-frame id for screen/audio
   /// events). Required for the Forget cascade.
   raw_reference: string | null;
+}
+
+/** One consecutive privacy-filtered stretch of observed app activity. */
+export interface ActivityTraceView {
+  started_at: string;
+  last_seen_at: string;
+  application: string;
+  window_title: string;
+  activity: string;
+  confidence: number;
+  has_error_visible: boolean;
+  active_since_secs: number;
 }
 
 /// Live values of the honest per-source observation toggles (spec §4.1).
@@ -298,6 +314,7 @@ export interface ContextPageSnapshot {
   rules: OverrideRuleView[];
   pins: SessionPinView[];
   recent_events: ContextEventView[];
+  activity_trace: ActivityTraceView[];
   toggles: ObservationTogglesView;
   continuation: ContinuationCandidateView[];
 }

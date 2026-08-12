@@ -65,9 +65,9 @@ use continuum_core::orchestrator::wake_context::{
     self as wake_context, build_wake_package, FrameRing, WakeContextInputs,
 };
 use continuum_core::runtime_publish::{
-    ComponentHealthSummary, ContextEngineSnapshot, ContextEventView, ContextPageSnapshot,
-    ContinuationCandidateView, ObservationTogglesView, OverrideRuleView, ProjectSummaryView,
-    SessionPinView,
+    ActivityTraceView, ComponentHealthSummary, ContextEngineSnapshot, ContextEventView,
+    ContextPageSnapshot, ContinuationCandidateView, ObservationTogglesView, OverrideRuleView,
+    ProjectSummaryView, SessionPinView,
 };
 use continuum_core::senses::audio::AudioWatcher;
 use continuum_core::senses::cadence::{CadenceControl, IdleController, IdleTransition};
@@ -3036,6 +3036,17 @@ const CONTEXT_PAGE_EVENT_LIMIT: usize = 40;
 /// How far back the recent-events strip looks.
 const CONTEXT_PAGE_EVENT_WINDOW_MINUTES: i64 = 180;
 
+/// Raw frames read for the concrete activity trace. The trace builder then
+/// collapses consecutive identical activity and keeps the newest rows.
+const CONTEXT_PAGE_ACTIVITY_FRAME_LIMIT: usize = 240;
+
+/// Maximum visible activity stretches published to the desktop.
+const CONTEXT_PAGE_ACTIVITY_LIMIT: usize = 48;
+
+/// The detailed trace is intentionally recent; older work remains in events
+/// and memory instead of turning the Context tab into an exhaustive log.
+const CONTEXT_PAGE_ACTIVITY_WINDOW_MINUTES: i64 = 60;
+
 /// How often the Context page's list data is refreshed from the database
 /// (Task C5). Deliberately slower than the 2 s publish tick: these are
 /// four SQLite reads plus a vault-free continuation rank, and the page is
@@ -3051,6 +3062,78 @@ struct ContextPageSources {
     toggles: ToggleControl,
     privacy: Arc<PrivacyFilter>,
     continuation: ContinuationConfig,
+}
+
+/// Turns privacy-filtered perception frames into consecutive activity
+/// stretches. Exact repeated captions collapse only while consecutive; if the
+/// user leaves an app and later returns, that return remains a separate row.
+fn build_activity_trace(
+    frames: Vec<PerceptionFrame>,
+    privacy: &PrivacyFilter,
+) -> Vec<ActivityTraceView> {
+    let mut trace: Vec<ActivityTraceView> = Vec::new();
+
+    for frame in frames {
+        if frame.context.is_privacy_restricted() {
+            continue;
+        }
+        let application = privacy.scrub_path(&frame.context.foreground_process_name);
+        let window_title = privacy.scrub_text(&frame.context.foreground_window_title);
+        let raw_activity = frame.screen.description.trim();
+        let has_vision = !raw_activity.is_empty()
+            && !raw_activity.eq_ignore_ascii_case("(no vision model loaded)");
+        let activity = if has_vision {
+            privacy.scrub_text(raw_activity)
+        } else if !window_title.is_empty() {
+            format!("Focused {window_title}")
+        } else if !application.is_empty() {
+            format!("Focused {application}")
+        } else {
+            continue;
+        };
+
+        let zone = strictest([
+            privacy.resolve_zone(&application, &window_title),
+            privacy.resolve_zone(&application, &activity),
+        ]);
+        if zone != Zone::CloudAllowed {
+            continue;
+        }
+
+        let stamp = frame.ts.to_rfc3339();
+        if let Some(previous) = trace.last_mut() {
+            if previous.application == application
+                && previous.window_title == window_title
+                && previous.activity == activity
+            {
+                previous.last_seen_at = stamp;
+                previous.active_since_secs = frame.context.active_since_secs;
+                previous.confidence = previous.confidence.max(frame.screen.confidence);
+                previous.has_error_visible |= frame.screen.has_error_visible;
+                continue;
+            }
+        }
+
+        trace.push(ActivityTraceView {
+            started_at: stamp.clone(),
+            last_seen_at: stamp,
+            application,
+            window_title,
+            activity,
+            confidence: if has_vision {
+                frame.screen.confidence.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            has_error_visible: frame.screen.has_error_visible,
+            active_since_secs: frame.context.active_since_secs,
+        });
+    }
+
+    let keep_from = trace.len().saturating_sub(CONTEXT_PAGE_ACTIVITY_LIMIT);
+    let mut trace = trace.split_off(keep_from);
+    trace.reverse();
+    trace
 }
 
 /// Builds one [`ContextPageSnapshot`] (Task C5, spec §4.13).
@@ -3148,6 +3231,7 @@ async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPag
             source: event_enum_token(&row.source),
             event_type: event_enum_token(&row.event_type),
             application: sources.privacy.scrub_path(&row.application),
+            window_title: sources.privacy.scrub_text(&row.window_title),
             summary: sources.privacy.scrub_text(&row.summary),
             count: row.count,
             project_id: row.project_id,
@@ -3157,6 +3241,29 @@ async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPag
     // `recent_context_events` returns oldest-first; the strip reads newest
     // first.
     recent_events.reverse();
+
+    let activity_since =
+        chrono::Utc::now() - chrono::Duration::minutes(CONTEXT_PAGE_ACTIVITY_WINDOW_MINUTES);
+    let activity_trace = match sources
+        .raw_log
+        .query_recent_frames(
+            activity_since,
+            chrono::Utc::now(),
+            CONTEXT_PAGE_ACTIVITY_FRAME_LIMIT,
+        )
+        .await
+    {
+        Ok(frames) => build_activity_trace(frames, &sources.privacy),
+        Err(e) => {
+            tracing::warn!(
+                layer = "context",
+                component = "page",
+                error = %e,
+                "Activity trace read failed; Context page shows no detailed activity this tick"
+            );
+            Vec::new()
+        }
+    };
 
     let state = sources.session.snapshot();
     // The page ranks the same candidates `resolve_continuation` does, minus
@@ -3186,6 +3293,7 @@ async fn build_context_page_snapshot(sources: &ContextPageSources) -> ContextPag
         rules,
         pins,
         recent_events,
+        activity_trace,
         toggles: ObservationTogglesView::from(&sources.toggles.snapshot()),
         continuation,
     }
@@ -4987,5 +5095,72 @@ fn report_file(label: &str, path: &std::path::Path, all_ok: &mut bool) {
         println!("  [FAIL] {label} MISSING");
         println!("       -> scripts/download-models.ps1");
         *all_ok = false;
+    }
+}
+
+#[cfg(test)]
+mod activity_trace_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use continuum_core::config::{ContextConfig, PrivacyConfig};
+    use continuum_core::senses::live_context::PrivacyDisposition;
+    use continuum_core::senses::types::{ContextObservation, ScreenObservation};
+    use uuid::Uuid;
+
+    fn frame(second: u32, app: &str, title: &str, activity: &str) -> PerceptionFrame {
+        let ts = Utc.with_ymd_and_hms(2026, 8, 12, 9, 0, second).unwrap();
+        PerceptionFrame {
+            id: Uuid::new_v4(),
+            ts,
+            screen: ScreenObservation {
+                description: activity.to_string(),
+                world_compact: None,
+                foreground_app: app.to_string(),
+                has_error_visible: false,
+                confidence: 0.84,
+                screenshot_path: None,
+                ts,
+            },
+            audio: None,
+            context: ContextObservation {
+                foreground_window_title: title.to_string(),
+                foreground_process_name: app.to_string(),
+                active_since_secs: second as u64,
+                privacy: Some(PrivacyDisposition::Visible),
+                ts,
+                ..ContextObservation::default()
+            },
+            salience_hint: 0.2,
+        }
+    }
+
+    fn privacy() -> PrivacyFilter {
+        PrivacyFilter::from_config(&ContextConfig::default(), &PrivacyConfig::default())
+    }
+
+    #[test]
+    fn activity_trace_collapses_only_consecutive_repeats() {
+        let rows = build_activity_trace(
+            vec![
+                frame(1, "Code.exe", "main.rs", "Editing main.rs"),
+                frame(2, "Code.exe", "main.rs", "Editing main.rs"),
+                frame(3, "brave.exe", "Rust error", "Searching a compiler error"),
+                frame(4, "Code.exe", "main.rs", "Editing main.rs"),
+            ],
+            &privacy(),
+        );
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].application, "Code.exe");
+        assert_eq!(rows[1].application, "brave.exe");
+        assert_eq!(rows[2].application, "Code.exe");
+        assert_ne!(rows[0].started_at, rows[2].started_at);
+    }
+
+    #[test]
+    fn activity_trace_excludes_privacy_restricted_frames() {
+        let mut private = frame(1, "KeePass.exe", "Vault", "Viewing a password");
+        private.context.privacy = Some(PrivacyDisposition::Excluded);
+        assert!(build_activity_trace(vec![private], &privacy()).is_empty());
     }
 }

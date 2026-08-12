@@ -38,6 +38,20 @@ test("shell keeps navigation and window controls accessible", async () => {
   assert.match(shell, /aria-label="Close"/);
 });
 
+test("context explains concrete app activity and adaptive intent", async () => {
+  const context = await read("src/components/tabs/ContextTab.tsx");
+  const types = await read("src/lib/types.ts");
+
+  assert.match(context, /Goal & intent/);
+  assert.match(context, /What you did/);
+  assert.match(context, /Continuum.s read/);
+  assert.match(context, /Possible help/);
+  assert.match(context, /What happened in your apps/);
+  assert.match(context, /Vision evidence/);
+  assert.match(types, /activity_summary: string \| null/);
+  assert.match(types, /activity_trace: ActivityTraceView\[\]/);
+});
+
 test("runtime startup is automatic and Settings owns the model directory", async () => {
   const main = await read("src-tauri/src/main.rs");
   const settings = await read("src/components/layout/SettingsPage.tsx");
